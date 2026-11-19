@@ -328,7 +328,29 @@ func TestWebhookForkPRIsIgnored(t *testing.T) {
 	f := newWebhookFixture(t)
 	f.seedRepoWithTeam()
 
-	assertStatus(t, f.deliver("pull_request", "pr-fork-opened.json"), http.StatusAccepted)
+	const forkPRPayload = `{
+		"action": "opened",
+		"number": 142,
+		"repository": {"id": 501, "name": "backend-api", "full_name": "acme/backend-api"},
+		"pull_request": {
+			"number": 142,
+			"title": "Add QA endpoint from a fork",
+			"user": {"login": "alice"},
+			"author_association": "CONTRIBUTOR",
+			"head": {
+				"sha": "aaa111",
+				"ref": "feature/qa",
+				"repo": {"id": 777, "full_name": "ext/backend-api", "fork": true}
+			},
+			"base": {"ref": "main"},
+			"html_url": "https://github.com/acme/backend-api/pull/142",
+			"draft": false,
+			"state": "open",
+			"updated_at": "2026-01-01T00:00:00Z"
+		}
+	}`
+	body := []byte(forkPRPayload)
+	assertStatus(t, f.deliverBody("pull_request", body, signWebhook(body)), http.StatusAccepted)
 
 	pr := f.pullRequest()
 	if !pr.IsFork || pr.HeadRepoFullName != "ext/backend-api" {
