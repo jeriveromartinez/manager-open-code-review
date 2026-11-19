@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/github"
@@ -77,6 +79,11 @@ func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ig
 	if t.Store == nil {
 		return false, errors.New("review: trigger has no store")
 	}
+	unlock, err := t.Store.LockPR(ctx, prID)
+	if err != nil {
+		return false, fmt.Errorf("lock pull request %d: %w", prID, err)
+	}
+	defer unlock()
 
 	cfg, err := t.Store.ReviewConfigForPR(ctx, prID)
 	if errors.Is(err, store.ErrNoReviewConfig) {
@@ -91,10 +98,28 @@ func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ig
 		return false, fmt.Errorf("list review runs of pull request %d: %w", prID, err)
 	}
 	if !ignoreSameSHA {
-		for _, run := range runs {
-			if run.HeadSHA == cfg.PR.HeadSHA && blocksSameSHA(run.Status) {
-				return false, nil
+		blocked := false
+		var stranded *store.ReviewRun
+		for i := range runs {
+			run := &runs[i]
+			if run.HeadSHA != cfg.PR.HeadSHA || !blocksSameSHA(run.Status) {
+				continue
 			}
+			blocked = true
+			if run.Status == store.RunQueued && (stranded == nil || run.ID > stranded.ID) {
+				stranded = run
+			}
+		}
+		if blocked {
+			// A queued run whose StartCheck or EnqueueReview failed on an
+			// earlier delivery is stranded: heal it instead of skipping the
+			// SHA forever. Terminal runs are simply left alone.
+			if stranded != nil {
+				if err := t.repair(ctx, *stranded); err != nil {
+					return false, err
+				}
+			}
+			return false, nil
 		}
 	}
 
@@ -111,17 +136,18 @@ func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ig
 		return false, errors.New("review: trigger has no enqueuer")
 	}
 
-	// Cancel every in-flight check before superseding its run. Only queued and
-	// running rows can be active; terminal runs are kept for the audit trail.
+	// Cancel in-flight checks of OTHER heads before superseding their runs.
+	// The current SHA is never superseded by a trigger, so its check stays.
 	for _, run := range runs {
-		if run.Status != store.RunQueued && run.Status != store.RunRunning {
+		if run.HeadSHA == cfg.PR.HeadSHA ||
+			(run.Status != store.RunQueued && run.Status != store.RunRunning) {
 			continue
 		}
 		if err := t.Checks.CancelCheck(ctx, run.ID); err != nil {
 			return false, fmt.Errorf("cancel check of review run %d: %w", run.ID, err)
 		}
 	}
-	if err := t.Store.SupersedeActiveRuns(ctx, prID); err != nil {
+	if err := t.Store.SupersedeOtherActiveRuns(ctx, prID, cfg.PR.HeadSHA); err != nil {
 		return false, fmt.Errorf("supersede review runs of pull request %d: %w", prID, err)
 	}
 
@@ -147,15 +173,45 @@ func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ig
 		CloneTokenEnc: sealed,
 	})
 	if err != nil {
+		// The partial unique index allows only one active run per PR. If a
+		// concurrent (or retried) delivery won the race, heal its run instead
+		// of reporting a failure that would be retried indefinitely.
+		if isActiveRunUniqueViolation(err) {
+			existing, readErr := t.Store.RunForSHA(ctx, prID, cfg.PR.HeadSHA)
+			if readErr != nil {
+				return false, fmt.Errorf("re-read review run for pull request %d at %q: %w", prID, cfg.PR.HeadSHA, readErr)
+			}
+			if repairErr := t.repair(ctx, existing); repairErr != nil {
+				return false, repairErr
+			}
+			return false, nil
+		}
 		return false, fmt.Errorf("create review run for pull request %d: %w", prID, err)
 	}
-	if err := t.Checks.StartCheck(ctx, run.ID); err != nil {
-		return false, fmt.Errorf("start check of review run %d: %w", run.ID, err)
-	}
-	if err := t.Jobs.EnqueueReview(ctx, run.ID); err != nil {
-		return false, fmt.Errorf("enqueue review run %d: %w", run.ID, err)
+	if err := t.repair(ctx, run); err != nil {
+		return false, err
 	}
 	return true, nil
+}
+
+// repair restarts the check and (re)enqueues an existing run. Both operations
+// are idempotent on the consumer side: StartCheck reopens the check run and a
+// duplicate River job finds an already claimed or terminal run.
+func (t *Trigger) repair(ctx context.Context, run store.ReviewRun) error {
+	if err := t.Checks.StartCheck(ctx, run.ID); err != nil {
+		return fmt.Errorf("start check of review run %d: %w", run.ID, err)
+	}
+	if err := t.Jobs.EnqueueReview(ctx, run.ID); err != nil {
+		return fmt.Errorf("enqueue review run %d: %w", run.ID, err)
+	}
+	return nil
+}
+
+func isActiveRunUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == "23505" &&
+		pgErr.ConstraintName == "idx_review_runs_active"
 }
 
 // blocksSameSHA is the redelivery/scheduler guard: superseded runs are the only

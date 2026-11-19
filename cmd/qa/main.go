@@ -119,6 +119,12 @@ func runServe() error {
 	if err != nil {
 		return fmt.Errorf("create control client: %w", err)
 	}
+	// Attach the enqueuer before Start: the reconcile job runs on start and
+	// must never observe a trigger or runner with a nil Jobs field.
+	enqueuer := jobs.NewEnqueuer(client)
+	trigger.Jobs = enqueuer
+	runner.Jobs = enqueuer
+
 	if err := client.Start(ctx); err != nil {
 		return fmt.Errorf("start control client: %w", err)
 	}
@@ -129,11 +135,6 @@ func runServe() error {
 			slog.Error("stop control client", "error", err)
 		}
 	}()
-	enqueuer := jobs.NewEnqueuer(client)
-	// The enqueuer is bound to the client, so it can only be attached after the
-	// client (and its workers, which hold these same pointers) is created.
-	trigger.Jobs = enqueuer
-	runner.Jobs = enqueuer
 
 	// A fresh instance has no App credentials. Generate a one-time setup token
 	// so only an operator with access to the logs can create the App.

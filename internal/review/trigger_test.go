@@ -7,10 +7,12 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,37 +23,59 @@ import (
 )
 
 type triggerTestJobs struct {
-	reviews   []uint
-	publishes []uint
-	health    []uint
+	mu          sync.Mutex
+	reviews     []uint
+	publishes   []uint
+	health      []uint
+	failReviews int
 }
 
 func (j *triggerTestJobs) EnqueueReview(_ context.Context, runID uint) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	j.reviews = append(j.reviews, runID)
+	if j.failReviews > 0 {
+		j.failReviews--
+		return errors.New("fake enqueue failure")
+	}
 	return nil
 }
 
 func (j *triggerTestJobs) EnqueuePublish(_ context.Context, runID uint) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	j.publishes = append(j.publishes, runID)
 	return nil
 }
 
 func (j *triggerTestJobs) EnqueueLLMHealth(_ context.Context, profileID uint) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	j.health = append(j.health, profileID)
 	return nil
 }
 
 type triggerTestChecks struct {
-	started   []uint
-	cancelled []uint
+	mu         sync.Mutex
+	started    []uint
+	cancelled  []uint
+	failStarts int
 }
 
 func (c *triggerTestChecks) StartCheck(_ context.Context, runID uint) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.started = append(c.started, runID)
+	if c.failStarts > 0 {
+		c.failStarts--
+		return errors.New("fake start check failure")
+	}
 	return nil
 }
 
 func (c *triggerTestChecks) CancelCheck(_ context.Context, runID uint) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.cancelled = append(c.cancelled, runID)
 	return nil
 }
@@ -263,8 +287,20 @@ func TestTriggerSameSHADeduplicates(t *testing.T) {
 	if len(runs) != 1 {
 		t.Fatalf("runs = %d, want 1", len(runs))
 	}
-	if len(f.jobs.reviews) != 1 || len(f.checks.started) != 1 {
-		t.Errorf("enqueues = %v, checks = %v; want one each", f.jobs.reviews, f.checks.started)
+	// The second delivery repairs the queued run: check/enqueue may be called
+	// again, but always for the same single run.
+	if len(f.jobs.reviews) == 0 || len(f.checks.started) == 0 {
+		t.Fatalf("enqueues = %v, checks = %v; want at least one each", f.jobs.reviews, f.checks.started)
+	}
+	for _, id := range f.jobs.reviews {
+		if id != runs[0].ID {
+			t.Errorf("EnqueueReview call for %d, want %d", id, runs[0].ID)
+		}
+	}
+	for _, id := range f.checks.started {
+		if id != runs[0].ID {
+			t.Errorf("StartCheck call for %d, want %d", id, runs[0].ID)
+		}
 	}
 }
 
@@ -404,5 +440,170 @@ func TestTriggerRetryEnqueuesAfterFailedSHA(t *testing.T) {
 	}
 	if len(f.jobs.reviews) != 1 || f.jobs.reviews[0] != runs[1].ID {
 		t.Errorf("EnqueueReview calls = %v, want [%d]", f.jobs.reviews, runs[1].ID)
+	}
+}
+
+// Retry skips the SHA guard, so it hits the partial unique index when an active
+// run already exists. That must heal the existing run, not fail the job.
+func TestTriggerRetryRepairsActiveSameSHARun(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+
+	existing, err := f.st.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: pr.ID, HeadSHA: pr.HeadSHA, Trigger: "webhook",
+		Status: store.RunQueued, Attempt: 1,
+	})
+	if err != nil {
+		t.Fatalf("seed queued run: %v", err)
+	}
+
+	if err := f.trigger.Retry(f.ctx, pr.ID); err != nil {
+		t.Fatalf("Retry() error = %v", err)
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != existing.ID || runs[0].Status != store.RunQueued {
+		t.Fatalf("runs = %+v, want the original queued run", runs)
+	}
+	if len(f.jobs.reviews) != 1 || f.jobs.reviews[0] != existing.ID {
+		t.Errorf("EnqueueReview calls = %v, want [%d]", f.jobs.reviews, existing.ID)
+	}
+	if len(f.checks.started) != 1 || f.checks.started[0] != existing.ID {
+		t.Errorf("StartCheck calls = %v, want [%d]", f.checks.started, existing.ID)
+	}
+	if len(f.checks.cancelled) != 0 {
+		t.Errorf("CancelCheck calls = %v, want none for the same SHA", f.checks.cancelled)
+	}
+}
+
+// A failed StartCheck leaves a queued run behind. Redelivery must heal it
+// instead of silently skipping the SHA forever.
+func TestTriggerRepairsStrandedQueuedRunAfterStartCheckFailure(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	f.checks.failStarts = 1
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err == nil {
+		t.Fatal("first OnPullRequest() error = nil, want the StartCheck failure")
+	}
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Status != store.RunQueued {
+		t.Fatalf("runs = %+v, want one queued run", runs)
+	}
+	if len(f.jobs.reviews) != 0 {
+		t.Fatalf("EnqueueReview calls = %v, want none after StartCheck failure", f.jobs.reviews)
+	}
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("second OnPullRequest() error = %v", err)
+	}
+	runs, err = f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Status != store.RunQueued {
+		t.Fatalf("runs = %+v, want the same single queued run", runs)
+	}
+	if len(f.checks.started) != 2 || f.checks.started[1] != runs[0].ID {
+		t.Errorf("StartCheck calls = %v, want two calls for run %d", f.checks.started, runs[0].ID)
+	}
+	if len(f.jobs.reviews) != 1 || f.jobs.reviews[0] != runs[0].ID {
+		t.Errorf("EnqueueReview calls = %v, want [%d]", f.jobs.reviews, runs[0].ID)
+	}
+}
+
+// A failed EnqueueReview also leaves a queued run behind; the next delivery
+// must re-enqueue that run without creating a second one.
+func TestTriggerRepairsStrandedQueuedRunAfterEnqueueFailure(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	f.jobs.failReviews = 1
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err == nil {
+		t.Fatal("first OnPullRequest() error = nil, want the enqueue failure")
+	}
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("second OnPullRequest() error = %v", err)
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Status != store.RunQueued {
+		t.Fatalf("runs = %+v, want one queued run", runs)
+	}
+	if len(f.jobs.reviews) != 2 {
+		t.Fatalf("EnqueueReview calls = %v, want two attempts", f.jobs.reviews)
+	}
+	for _, id := range f.jobs.reviews {
+		if id != runs[0].ID {
+			t.Errorf("EnqueueReview call for %d, want %d", id, runs[0].ID)
+		}
+	}
+	if len(f.checks.started) != 2 {
+		t.Errorf("StartCheck calls = %v, want two (restart is idempotent)", f.checks.started)
+	}
+}
+
+// Concurrent deliveries for one PR must be serialized by the advisory lock:
+// one active run, no superseded run of the same SHA and no orphan check.
+func TestTriggerConcurrentSamePRSha(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+
+	const n = 4
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- f.trigger.OnPullRequest(f.ctx, pr.ID)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent OnPullRequest() error = %v", err)
+		}
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	active := 0
+	for _, run := range runs {
+		if run.HeadSHA != pr.HeadSHA {
+			t.Errorf("run %d has SHA %q, want %q", run.ID, run.HeadSHA, pr.HeadSHA)
+		}
+		if run.Status == store.RunQueued || run.Status == store.RunRunning {
+			active++
+		}
+	}
+	if active != 1 || len(runs) != 1 {
+		t.Fatalf("runs = %+v, want exactly one active run", runs)
+	}
+
+	if len(f.jobs.reviews) == 0 || len(f.checks.started) == 0 {
+		t.Fatalf("no enqueues/checks: jobs = %v, checks = %v", f.jobs.reviews, f.checks.started)
+	}
+	for _, id := range f.jobs.reviews {
+		if id != runs[0].ID {
+			t.Errorf("EnqueueReview call for %d, want %d", id, runs[0].ID)
+		}
+	}
+	for _, id := range f.checks.started {
+		if id != runs[0].ID {
+			t.Errorf("StartCheck call for %d, want %d", id, runs[0].ID)
+		}
 	}
 }
