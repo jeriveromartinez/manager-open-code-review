@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
+	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	appgithub "github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -27,9 +28,11 @@ const (
 
 // Worker publishes review artefacts for a run.
 type Worker struct {
-	Store *store.Store
-	Apps  appgithub.AppProvider
-	Box   *crypto.Box
+	Store     *store.Store
+	Apps      appgithub.AppProvider
+	Box       *crypto.Box
+	Events    events.Publisher
+	PublicURL string
 }
 
 // StartCheck opens (or reopens) the QA check run for a review run's head SHA and
