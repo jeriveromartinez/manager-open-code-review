@@ -1,0 +1,34 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+import type { PRView } from '../api'
+import { statusLabel } from '../status'
+
+const props = defineProps<{
+  pr: PRView
+}>()
+
+const status = computed(() => statusLabel(props.pr.qa_status))
+</script>
+
+<template>
+  <article class="pr-card">
+    <header class="pr-card__head">
+      <span class="pr-card__repo">{{ pr.repo }} #{{ pr.number }}</span>
+      <span class="badge pr-card__status" :class="`badge--${status.tone}`">{{ status.tag }}</span>
+    </header>
+
+    <a class="pr-card__link" :href="pr.html_url" target="_blank" rel="noreferrer">{{ pr.title }}</a>
+
+    <p class="pr-card__meta">
+      <span class="pr-card__author">por {{ pr.author_login }}</span>
+    </p>
+
+    <p v-if="pr.validations.total > 0" class="pr-card__validations">
+      {{ pr.validations.passed }}/{{ pr.validations.total }} validaciones correctas
+    </p>
+
+    <footer class="pr-card__footer">
+      <span class="pr-card__action">{{ status.action }}</span>
+    </footer>
+  </article>
+</template>
