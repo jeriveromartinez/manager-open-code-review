@@ -1,0 +1,17 @@
+{
+  "action": "ready_for_review",
+  "number": 142,
+  "repository": {"id": 501, "name": "backend-api", "full_name": "acme/backend-api"},
+  "pull_request": {
+    "number": 142,
+    "title": "Add QA endpoint",
+    "user": {"login": "alice"},
+    "author_association": "CONTRIBUTOR",
+    "head": {"sha": "aaa111", "ref": "feature/qa"},
+    "base": {"ref": "main"},
+    "html_url": "https://github.com/acme/backend-api/pull/142",
+    "draft": false,
+    "state": "open",
+    "updated_at": "2026-01-02T00:00:00Z"
+  }
+}

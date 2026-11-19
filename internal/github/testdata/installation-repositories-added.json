@@ -1,0 +1,13 @@
+{
+  "action": "added",
+  "installation": {"id": 991},
+  "repositories_added": [
+    {
+      "id": 501,
+      "name": "backend-api",
+      "full_name": "acme/backend-api",
+      "private": true,
+      "default_branch": "main"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "action": "created",
+  "installation": {
+    "id": 991,
+    "account": {"login": "acme", "type": "Organization"}
+  }
+}

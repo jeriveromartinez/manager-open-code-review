@@ -1,0 +1,8 @@
+{
+  "action": "suspend",
+  "installation": {
+    "id": 991,
+    "account": {"login": "acme", "type": "Organization"},
+    "suspended_at": "2026-01-02T03:04:05Z"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "action": "removed",
+  "installation": {"id": 991},
+  "repositories_removed": [
+    {
+      "id": 501,
+      "name": "backend-api",
+      "full_name": "acme/backend-api",
+      "private": true,
+      "default_branch": "main"
+    }
+  ]
+}
