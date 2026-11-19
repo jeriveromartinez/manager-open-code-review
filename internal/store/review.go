@@ -183,6 +183,40 @@ func (s *Store) LockProfile(ctx context.Context, profileID uint) (unlock func(),
 	return unlock, nil
 }
 
+// prLockNamespace is a two-int advisory-lock namespace distinct from the
+// single-int keys used by LockProfile, so PR and profile locks never collide.
+const prLockNamespace = 4242
+
+// LockPR takes a session-level PostgreSQL advisory lock keyed by pull request
+// ID on a dedicated pool connection. It serializes the whole enqueue sequence
+// of a PR (supersede, insert, check, job). Call unlock when done; it is safe to
+// call more than once.
+func (s *Store) LockPR(ctx context.Context, prID uint) (unlock func(), err error) {
+	conn, err := s.Pool.Acquire(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection for pull request %d lock: %w", prID, err)
+	}
+
+	key := int64(prID)
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1, $2)", prLockNamespace, key); err != nil {
+		conn.Release()
+		return nil, fmt.Errorf("lock pull request %d: %w", prID, err)
+	}
+
+	var once sync.Once
+	unlock = func() {
+		once.Do(func() {
+			unlockCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			// Closing the connection releases the session lock even when the
+			// explicit unlock fails, so no error can leak into the func() API.
+			_, _ = conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1, $2)", prLockNamespace, key)
+			conn.Release()
+		})
+	}
+	return unlock, nil
+}
+
 // QAPolicyForTeam loads the policy of a team. A missing policy is ErrNotFound.
 func (s *Store) QAPolicyForTeam(ctx context.Context, teamID uint) (QAPolicy, error) {
 	var policy QAPolicy
@@ -406,6 +440,22 @@ func (s *Store) SupersedeActiveRuns(ctx context.Context, prID uint) error {
 		})
 	if res.Error != nil {
 		return fmt.Errorf("supersede runs of pull request %d: %w", prID, res.Error)
+	}
+	return nil
+}
+
+// SupersedeOtherActiveRuns cancels queued and running runs of a pull request
+// whose head SHA differs from headSHA. The run currently being (re)enqueued is
+// left untouched, so a trigger can never discard its own freshly created run.
+func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, headSHA string) error {
+	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("pull_request_id = ? AND head_sha <> ? AND status IN ?", prID, headSHA, []string{RunQueued, RunRunning}).
+		Updates(map[string]any{
+			"status":     RunSuperseded,
+			"updated_at": time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return fmt.Errorf("supersede other runs of pull request %d: %w", prID, res.Error)
 	}
 	return nil
 }
