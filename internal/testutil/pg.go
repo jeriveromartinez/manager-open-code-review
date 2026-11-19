@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -24,6 +25,10 @@ const (
 	adminDatabase  = "qa_test"
 	adminUser      = "qa"
 	adminPassword  = "qa"
+
+	// allowSkipEnv opts a test run into skipping when Docker is unavailable.
+	// Without it, DB tests fail so schema verification cannot silently vanish.
+	allowSkipEnv = "TESTCONTAINERS_ALLOW_SKIP"
 )
 
 var (
@@ -35,12 +40,14 @@ var (
 
 // NewStore starts (once per package) a PostgreSQL container, creates a fresh
 // database for the test, applies the migrations and returns a Store. The Store
-// is closed and the database dropped when the test finishes. If Docker is not
-// available the test is skipped.
+// is closed and the database dropped when the test finishes.
+//
+// If Docker is unavailable the test fails, unless TESTCONTAINERS_ALLOW_SKIP=1
+// is set, in which case it is skipped.
 func NewStore(t *testing.T) *store.Store {
 	t.Helper()
 
-	testcontainers.SkipIfProviderIsNotHealthy(t)
+	ensureDocker(t)
 
 	containerOnce.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -98,6 +105,46 @@ func NewStore(t *testing.T) *store.Store {
 	})
 
 	return s
+}
+
+// ensureDocker verifies that a Docker daemon is reachable. It fails the test by
+// default so schema verification cannot silently disappear; setting
+// TESTCONTAINERS_ALLOW_SKIP=1 downgrades the failure to a skip.
+func ensureDocker(t *testing.T) {
+	t.Helper()
+
+	// GetProvider can panic when the environment is malformed.
+	defer func() {
+		if r := recover(); r != nil {
+			dockerUnavailable(t, fmt.Errorf("panic: %v", r))
+		}
+	}()
+
+	provider, err := testcontainers.ProviderDefault.GetProvider()
+	if err != nil {
+		dockerUnavailable(t, err)
+		return
+	}
+	t.Cleanup(func() { _ = provider.Close() })
+
+	if err := provider.Health(context.Background()); err != nil {
+		dockerUnavailable(t, err)
+	}
+}
+
+// dockerUnavailable fails the test, or skips it when TESTCONTAINERS_ALLOW_SKIP=1.
+func dockerUnavailable(t *testing.T, err error) {
+	t.Helper()
+
+	msg := fmt.Sprintf("docker is not available for testcontainers: %v\n"+
+		"database tests need a Docker daemon; set %s=1 to skip them instead of failing.\n"+
+		"hint: this machine's daemon uses a non-default socket, "+
+		"DOCKER_HOST=unix:///Users/julio/.kiri/run/docker.sock", err, allowSkipEnv)
+
+	if os.Getenv(allowSkipEnv) == "1" {
+		t.Skip(msg)
+	}
+	t.Fatal(msg)
 }
 
 // dropDatabase removes the per-test database, forcing connections closed.
