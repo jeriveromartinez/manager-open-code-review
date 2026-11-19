@@ -13,6 +13,10 @@ func testMasterKey() string {
 	return base64.StdEncoding.EncodeToString(make([]byte, 32))
 }
 
+func testWorkerKey() string {
+	return base64.StdEncoding.EncodeToString(make([]byte, 32))
+}
+
 func getenv(m map[string]string) func(string) string {
 	return func(key string) string { return m[key] }
 }
@@ -22,6 +26,7 @@ func requiredEnv() map[string]string {
 		"QA_DATABASE_URL": "postgres://localhost/qa",
 		"QA_PUBLIC_URL":   "https://qa.example.com",
 		"QA_MASTER_KEY":   testMasterKey(),
+		"QA_WORKER_KEY":   testWorkerKey(),
 	}
 }
 
@@ -85,7 +90,6 @@ func TestLoadBadMasterKey(t *testing.T) {
 		value  string
 		wantIn string
 	}{
-		{name: "missing", value: "", wantIn: "QA_MASTER_KEY"},
 		{name: "not base64", value: "not base64!!", wantIn: "QA_MASTER_KEY"},
 		{
 			name:   "16 bytes",
@@ -97,11 +101,7 @@ func TestLoadBadMasterKey(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			env := requiredEnv()
-			if tt.value == "" {
-				delete(env, "QA_MASTER_KEY")
-			} else {
-				env["QA_MASTER_KEY"] = tt.value
-			}
+			env["QA_MASTER_KEY"] = tt.value
 
 			_, err := config.Load(getenv(env))
 			if err == nil {
@@ -184,5 +184,224 @@ func TestLoadNonPositiveReconcileInterval(t *testing.T) {
 				t.Errorf("Load() error = %q, want it to mention QA_RECONCILE_INTERVAL", err.Error())
 			}
 		})
+	}
+}
+
+func TestLoadMissingWorkerKey(t *testing.T) {
+	env := requiredEnv()
+	delete(env, "QA_WORKER_KEY")
+
+	_, err := config.Load(getenv(env))
+	if err == nil {
+		t.Fatal("Load() error = nil, want error mentioning QA_WORKER_KEY")
+	}
+	if !strings.Contains(err.Error(), "QA_WORKER_KEY") {
+		t.Errorf("Load() error = %q, want it to mention QA_WORKER_KEY", err.Error())
+	}
+}
+
+func TestLoadBadWorkerKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  string
+		wantIn string
+	}{
+		{name: "not base64", value: "not base64!!", wantIn: "QA_WORKER_KEY"},
+		{
+			name:   "16 bytes",
+			value:  base64.StdEncoding.EncodeToString(make([]byte, 16)),
+			wantIn: "32 bytes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env := requiredEnv()
+			env["QA_WORKER_KEY"] = tt.value
+
+			_, err := config.Load(getenv(env))
+			if err == nil {
+				t.Fatalf("Load() error = nil, want error mentioning %s", tt.wantIn)
+			}
+			if !strings.Contains(err.Error(), tt.wantIn) {
+				t.Errorf("Load() error = %q, want it to mention %s", err.Error(), tt.wantIn)
+			}
+		})
+	}
+}
+
+func TestLoadWorkerWithoutMaster(t *testing.T) {
+	env := requiredEnv()
+	delete(env, "QA_MASTER_KEY")
+
+	cfg, err := config.Load(getenv(env))
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil", err)
+	}
+	if len(cfg.MasterKey) != 0 {
+		t.Errorf("len(MasterKey) = %d, want 0", len(cfg.MasterKey))
+	}
+	if err := cfg.RequireMasterKey(); err == nil {
+		t.Fatal("RequireMasterKey() error = nil, want error")
+	} else if !strings.Contains(err.Error(), "QA_MASTER_KEY") {
+		t.Errorf("RequireMasterKey() error = %q, want it to mention QA_MASTER_KEY", err.Error())
+	}
+}
+
+func TestRequireMasterKey(t *testing.T) {
+	cfg, err := config.Load(getenv(requiredEnv()))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if err := cfg.RequireMasterKey(); err != nil {
+		t.Errorf("RequireMasterKey() error = %v, want nil", err)
+	}
+}
+
+func TestLoadReviewDefaults(t *testing.T) {
+	cfg, err := config.Load(getenv(requiredEnv()))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.ReviewConcurrency != 2 {
+		t.Errorf("ReviewConcurrency = %d, want 2", cfg.ReviewConcurrency)
+	}
+	if cfg.ReviewTimeout != 20*time.Minute {
+		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 20*time.Minute)
+	}
+	if cfg.WorkspaceDir != "/tmp/qa" {
+		t.Errorf("WorkspaceDir = %q, want %q", cfg.WorkspaceDir, "/tmp/qa")
+	}
+	if cfg.OCRBin != "ocr" {
+		t.Errorf("OCRBin = %q, want %q", cfg.OCRBin, "ocr")
+	}
+	if cfg.OpencodeBin != "opencode" {
+		t.Errorf("OpencodeBin = %q, want %q", cfg.OpencodeBin, "opencode")
+	}
+	if cfg.FetchDepthMax != 500 {
+		t.Errorf("FetchDepthMax = %d, want 500", cfg.FetchDepthMax)
+	}
+	if cfg.GitBaseURL != "https://github.com" {
+		t.Errorf("GitBaseURL = %q, want %q", cfg.GitBaseURL, "https://github.com")
+	}
+}
+
+func TestLoadReviewOverrides(t *testing.T) {
+	env := requiredEnv()
+	env["QA_REVIEW_CONCURRENCY"] = "8"
+	env["QA_REVIEW_TIMEOUT"] = "45s"
+	env["QA_WORKSPACE_DIR"] = "/var/qa"
+	env["QA_OCR_BIN"] = "/usr/bin/ocr"
+	env["QA_OPENCODE_BIN"] = "/usr/bin/opencode"
+	env["QA_FETCH_DEPTH_MAX"] = "1000"
+	env["QA_GIT_BASE_URL"] = "https://ghe.example.com/"
+
+	cfg, err := config.Load(getenv(env))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.ReviewConcurrency != 8 {
+		t.Errorf("ReviewConcurrency = %d, want 8", cfg.ReviewConcurrency)
+	}
+	if cfg.ReviewTimeout != 45*time.Second {
+		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 45*time.Second)
+	}
+	if cfg.WorkspaceDir != "/var/qa" {
+		t.Errorf("WorkspaceDir = %q, want %q", cfg.WorkspaceDir, "/var/qa")
+	}
+	if cfg.OCRBin != "/usr/bin/ocr" {
+		t.Errorf("OCRBin = %q, want %q", cfg.OCRBin, "/usr/bin/ocr")
+	}
+	if cfg.OpencodeBin != "/usr/bin/opencode" {
+		t.Errorf("OpencodeBin = %q, want %q", cfg.OpencodeBin, "/usr/bin/opencode")
+	}
+	if cfg.FetchDepthMax != 1000 {
+		t.Errorf("FetchDepthMax = %d, want %d", cfg.FetchDepthMax, 1000)
+	}
+	if cfg.GitBaseURL != "https://ghe.example.com" {
+		t.Errorf("GitBaseURL = %q, want %q (no trailing slash)", cfg.GitBaseURL, "https://ghe.example.com")
+	}
+}
+
+func TestLoadBadReviewConcurrency(t *testing.T) {
+	for _, value := range []string{"0", "-1", "x"} {
+		t.Run(value, func(t *testing.T) {
+			env := requiredEnv()
+			env["QA_REVIEW_CONCURRENCY"] = value
+
+			_, err := config.Load(getenv(env))
+			if err == nil {
+				t.Fatalf("Load() error = nil for %q, want error mentioning QA_REVIEW_CONCURRENCY", value)
+			}
+			if !strings.Contains(err.Error(), "QA_REVIEW_CONCURRENCY") {
+				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_CONCURRENCY", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoadBadReviewTimeout(t *testing.T) {
+	for _, value := range []string{"0s", "-1m", "10 minutos"} {
+		t.Run(value, func(t *testing.T) {
+			env := requiredEnv()
+			env["QA_REVIEW_TIMEOUT"] = value
+
+			_, err := config.Load(getenv(env))
+			if err == nil {
+				t.Fatalf("Load() error = nil for %q, want error mentioning QA_REVIEW_TIMEOUT", value)
+			}
+			if !strings.Contains(err.Error(), "QA_REVIEW_TIMEOUT") {
+				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_TIMEOUT", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoadBadFetchDepthMax(t *testing.T) {
+	for _, value := range []string{"0", "-1", "x"} {
+		t.Run(value, func(t *testing.T) {
+			env := requiredEnv()
+			env["QA_FETCH_DEPTH_MAX"] = value
+
+			_, err := config.Load(getenv(env))
+			if err == nil {
+				t.Fatalf("Load() error = nil for %q, want error mentioning QA_FETCH_DEPTH_MAX", value)
+			}
+			if !strings.Contains(err.Error(), "QA_FETCH_DEPTH_MAX") {
+				t.Errorf("Load() error = %q, want it to mention QA_FETCH_DEPTH_MAX", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoadEmptyReviewPaths(t *testing.T) {
+	for _, key := range []string{"QA_WORKSPACE_DIR", "QA_OCR_BIN", "QA_OPENCODE_BIN"} {
+		t.Run(key, func(t *testing.T) {
+			env := requiredEnv()
+			env[key] = "   "
+
+			_, err := config.Load(getenv(env))
+			if err == nil {
+				t.Fatalf("Load() error = nil for %q, want error mentioning %s", key, key)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("Load() error = %q, want it to mention %s", err.Error(), key)
+			}
+		})
+	}
+}
+
+func TestLoadEmptyGitBaseURL(t *testing.T) {
+	env := requiredEnv()
+	env["QA_GIT_BASE_URL"] = "/"
+
+	_, err := config.Load(getenv(env))
+	if err == nil {
+		t.Fatal("Load() error = nil, want error mentioning QA_GIT_BASE_URL")
+	}
+	if !strings.Contains(err.Error(), "QA_GIT_BASE_URL") {
+		t.Errorf("Load() error = %q, want it to mention QA_GIT_BASE_URL", err.Error())
 	}
 }
