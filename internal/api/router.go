@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -15,17 +16,33 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
+// HealthEnqueuer schedules an asynchronous health check for an LLM profile.
+// The review worker's control client implements it; the HTTP layer only needs
+// this narrow contract.
+type HealthEnqueuer interface {
+	EnqueueLLMHealth(ctx context.Context, profileID uint) error
+}
+
+// ReviewRetrier schedules a fresh review run for a pull request. Keeping this
+// interface here avoids coupling the API package to the review package.
+type ReviewRetrier interface {
+	Retry(ctx context.Context, prID uint) error
+}
+
 // Deps groups every dependency the HTTP layer needs.
 type Deps struct {
 	Cfg        config.Config
 	Store      *store.Store
 	Box        *crypto.Box
+	WorkerBox  *crypto.Box
 	Apps       github.AppProvider
 	Auth       *auth.Auth
 	Webhooks   http.Handler
 	Broker     *events.Broker
 	Events     events.Publisher
 	Jobs       jobs.Enqueuer
+	Health     HealthEnqueuer
+	Reviews    ReviewRetrier
 	SetupToken string
 	Static     http.Handler
 }
@@ -68,6 +85,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/me", s.me)
 			r.Get("/stats", s.stats)
 			r.Get("/prs", s.prs)
+			r.Get("/prs/{id}", s.prDetail)
 			r.Get("/repos", s.repos)
 			r.Get("/teams", s.teams)
 			// /api/users returns minimal public profile fields (id, login,
@@ -80,12 +98,25 @@ func NewRouter(d Deps) http.Handler {
 			r.Put("/teams/{id}/members/{userId}", s.setTeamMember)
 			r.Delete("/teams/{id}/members/{userId}", s.removeTeamMember)
 
+			// Policies allow admins and the lead of that particular team.
+			r.Get("/teams/{id}/policy", s.getPolicy)
+			r.Put("/teams/{id}/policy", s.putPolicy)
+
+			// Retry is limited to admins and the lead of the repo's team.
+			r.Post("/prs/{id}/retry", s.retryPR)
+
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireAdmin)
 
 				r.Get("/installations", s.installations)
 				r.Patch("/repos/{id}", s.patchRepo)
 				r.Post("/teams", s.createTeam)
+
+				r.Get("/llm-profiles", s.llmProfiles)
+				r.Post("/llm-profiles", s.createLLMProfile)
+				r.Patch("/llm-profiles/{id}", s.patchLLMProfile)
+				r.Delete("/llm-profiles/{id}", s.deleteLLMProfile)
+				r.Post("/llm-profiles/{id}/health", s.enqueueLLMHealth)
 			})
 		})
 	})
