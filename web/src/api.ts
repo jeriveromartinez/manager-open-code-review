@@ -26,6 +26,54 @@ export type PRView = {
   updated_at: string
 }
 
+/** Ejecución de revisión. CloneTokenEnc nunca se expone en la API. */
+export type ReviewRun = {
+  id: number
+  profile_id: number
+  head_sha: string
+  base_sha: string
+  trigger: string
+  status: string
+  attempt: number
+  summary: string
+  coverage: Record<string, unknown>
+  usage: Record<string, unknown>
+  error_code: string
+  error_message: string
+  started_at: string | null
+  finished_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type Finding = {
+  id: string
+  fingerprint: string
+  path: string
+  start_line: number
+  end_line: number
+  severity: string
+  category: string
+  title: string
+  body: string
+  suggestion: string
+  confidence: string
+  status: string
+  first_seen_run_id: number
+  last_seen_run_id: number
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * El detalle reparte los campos del PR en la raíz de la respuesta (el DTO de
+ * Go está incrustado), junto a `runs` y `findings`.
+ */
+export type PRDetail = PRView & {
+  runs: ReviewRun[]
+  findings: Finding[]
+}
+
 export type Stats = {
   open: number
   awaiting_human: number
@@ -102,6 +150,66 @@ export type RepoPatch = {
   team_id?: number | null
 }
 
+/**
+ * Perfil LLM. `api_key_enc` nunca viaja al navegador: el backend expone solo
+ * `api_key_set`, y `api_key` es un campo de escritura en los formularios.
+ */
+export type LLMProfile = {
+  id: number
+  name: string
+  provider: string
+  model: string
+  variant: string | null
+  mode: string
+  base_url: string | null
+  concurrency: number
+  enabled: boolean
+  api_key_set: boolean
+  health_status: string
+  health_checked_at: string | null
+  health_error: string
+  created_at: string
+  updated_at: string
+}
+
+export type LLMProfileInput = {
+  name?: string
+  provider: string
+  model: string
+  variant?: string | null
+  mode?: string
+  base_url?: string | null
+  concurrency?: number
+  enabled?: boolean
+  api_key: string
+}
+
+export type LLMProfilePatch = Partial<LLMProfileInput>
+
+export type QAPolicy = {
+  id: number
+  team_id: number
+  llm_profile_id: number
+  blocking_threshold: string
+  extra_instructions: string
+  exclude_globs: string[]
+  max_files: number
+  max_diff_lines: number
+  max_passes: number
+  updated_at: string
+}
+
+export type QAPolicyInput = Pick<
+  QAPolicy,
+  | 'llm_profile_id'
+  | 'blocking_threshold'
+  | 'extra_instructions'
+  | 'exclude_globs'
+  | 'max_files'
+  | 'max_diff_lines'
+  | 'max_passes'
+>
+
 export type ReviewEvent = {
   type: string
   id: string
@@ -164,6 +272,19 @@ export const api = {
   stats: () => request<Stats>('/api/stats'),
   prs: (group?: PRGroup) =>
     request<PRView[]>(group ? `/api/prs?group=${encodeURIComponent(group)}` : '/api/prs'),
+  prDetail: (id: number) => request<PRDetail>(`/api/prs/${id}`),
+  retryPR: (id: number) =>
+    request<{ status: string }>(`/api/prs/${id}/retry`, { method: 'POST' }),
+  llmProfiles: () => request<LLMProfile[]>('/api/llm-profiles'),
+  createLLMProfile: (body: LLMProfileInput) =>
+    request<LLMProfile>('/api/llm-profiles', { method: 'POST', body }),
+  updateLLMProfile: (id: number, patch: LLMProfilePatch) =>
+    request<LLMProfile>(`/api/llm-profiles/${id}`, { method: 'PATCH', body: patch }),
+  checkLLMHealth: (id: number) =>
+    request<{ status: string }>(`/api/llm-profiles/${id}/health`, { method: 'POST' }),
+  getPolicy: (teamId: number) => request<QAPolicy>(`/api/teams/${teamId}/policy`),
+  savePolicy: (teamId: number, body: QAPolicyInput) =>
+    request<QAPolicy>(`/api/teams/${teamId}/policy`, { method: 'PUT', body }),
   repos: () => request<Repository[]>('/api/repos'),
   patchRepo: (id: number, patch: RepoPatch) =>
     request<void>(`/api/repos/${id}`, { method: 'PATCH', body: patch }),

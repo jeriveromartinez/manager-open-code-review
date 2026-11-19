@@ -1,6 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import DashboardView from './DashboardView.vue'
 import type { PRView, Stats } from '../api'
 
@@ -67,7 +68,15 @@ const prs: PRView[] = [
 ]
 
 function mountDashboard(): VueWrapper {
-  return mount(DashboardView, { global: { plugins: [createPinia()] } })
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', component: { template: '<div />' } },
+      { path: '/prs/:id', component: { template: '<div />' } },
+      { path: '/:pathMatch(.*)*', component: { template: '<div />' } },
+    ],
+  })
+  return mount(DashboardView, { global: { plugins: [createPinia(), router] } })
 }
 
 function kpi(wrapper: VueWrapper, key: string): string {
