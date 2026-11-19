@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import type { PRView } from '../api'
 import { statusLabel } from '../status'
 
@@ -17,7 +18,7 @@ const status = computed(() => statusLabel(props.pr.qa_status))
       <span class="badge pr-card__status" :class="`badge--${status.tone}`">{{ status.tag }}</span>
     </header>
 
-    <a class="pr-card__link" :href="pr.html_url" target="_blank" rel="noreferrer">{{ pr.title }}</a>
+    <RouterLink class="pr-card__link" :to="`/prs/${pr.id}`">{{ pr.title }}</RouterLink>
 
     <p class="pr-card__meta">
       <span class="pr-card__author">por {{ pr.author_login }}</span>
@@ -29,6 +30,9 @@ const status = computed(() => statusLabel(props.pr.qa_status))
 
     <footer class="pr-card__footer">
       <span class="pr-card__action">{{ status.action }}</span>
+      <a class="pr-card__github" :href="pr.html_url" target="_blank" rel="noreferrer">
+        Ver en GitHub
+      </a>
     </footer>
   </article>
 </template>
