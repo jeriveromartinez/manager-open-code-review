@@ -169,3 +169,20 @@ func TestLoadBadReconcileInterval(t *testing.T) {
 		t.Errorf("Load() error = %q, want it to mention QA_RECONCILE_INTERVAL", err.Error())
 	}
 }
+
+func TestLoadNonPositiveReconcileInterval(t *testing.T) {
+	for _, value := range []string{"0s", "-1m"} {
+		t.Run(value, func(t *testing.T) {
+			env := requiredEnv()
+			env["QA_RECONCILE_INTERVAL"] = value
+
+			_, err := config.Load(getenv(env))
+			if err == nil {
+				t.Fatalf("Load() error = nil for %q, want error mentioning QA_RECONCILE_INTERVAL", value)
+			}
+			if !strings.Contains(err.Error(), "QA_RECONCILE_INTERVAL") {
+				t.Errorf("Load() error = %q, want it to mention QA_RECONCILE_INTERVAL", err.Error())
+			}
+		})
+	}
+}

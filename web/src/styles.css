@@ -16,6 +16,7 @@
   --accent: #1f7a4d;
   --accent-strong: #145c39;
   --accent-soft: #e2f3ea;
+  --accent-ink: #fff;
 
   --ok: #1f7a4d;
   --ok-soft: #e2f3ea;
@@ -53,6 +54,8 @@
     --accent: #4ac486;
     --accent-strong: #6fd79f;
     --accent-soft: #163526;
+    /* Dark text on the light green accent keeps CTAs above 4.5:1. */
+    --accent-ink: #0b1c13;
 
     --ok: #6fd79f;
     --ok-soft: #163526;
@@ -148,7 +151,7 @@ img {
   height: 28px;
   border-radius: 8px;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -506,7 +509,7 @@ img {
 .button--primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--accent-ink);
 }
 
 .button--primary:hover:not(:disabled) {

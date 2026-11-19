@@ -73,6 +73,9 @@ func Load(getenv func(string) string) (Config, error) {
 		if err != nil {
 			return Config{}, fmt.Errorf("QA_RECONCILE_INTERVAL must be a duration: %w", err)
 		}
+		if interval <= 0 {
+			return Config{}, fmt.Errorf("QA_RECONCILE_INTERVAL must be greater than zero, got %q", v)
+		}
 		cfg.ReconcileInterval = interval
 	}
 

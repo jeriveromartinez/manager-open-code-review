@@ -70,6 +70,9 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/prs", s.prs)
 			r.Get("/repos", s.repos)
 			r.Get("/teams", s.teams)
+			// /api/users returns minimal public profile fields (id, login,
+			// avatar_url, is_admin). Leads need it to manage their team members.
+			r.Get("/users", s.users)
 			r.Get("/events", s.events)
 
 			// Team membership allows admins and the team's lead; the handler
@@ -82,7 +85,6 @@ func NewRouter(d Deps) http.Handler {
 
 				r.Patch("/repos/{id}", s.patchRepo)
 				r.Post("/teams", s.createTeam)
-				r.Get("/users", s.users)
 			})
 		})
 	})

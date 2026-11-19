@@ -108,6 +108,37 @@ describe('TeamsView', () => {
     wrapper.unmount()
   })
 
+  it('si falla api.users, el lead sigue viendo equipos y controles', async () => {
+    mocks.session.me = leadT1
+    mocks.api.users.mockRejectedValue(new Error('403'))
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    expect(mocks.api.users).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-team-id="1"]').exists()).toBe(true)
+    expect(wrapper.find('[data-team-id="2"]').exists()).toBe(true)
+    expect(card(wrapper, 1).find('[data-add-member]').exists()).toBe(true)
+    expect(card(wrapper, 1).findAll('[data-change-role]').length).toBe(2)
+    expect(card(wrapper, 1).findAll('[data-remove-member]').length).toBe(2)
+    expect(wrapper.text()).toContain('No se pudo cargar la lista de usuarios')
+    expect(wrapper.text()).not.toContain('No se pudieron cargar los equipos')
+
+    wrapper.unmount()
+  })
+
+  it('un desarrollador sin equipo liderado no consulta api.users', async () => {
+    mocks.session.me = { ...leadT1, id: 12, login: 'dev1', teams: [{ id: 1, name: 'T1', role: 'developer' }] }
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    expect(wrapper.find('[data-team-id="1"]').exists()).toBe(true)
+    expect(mocks.api.users).not.toHaveBeenCalled()
+
+    wrapper.unmount()
+  })
+
   it('el control de crear equipo aparece solo para admin', async () => {
     mocks.session.me = admin
     const adminWrapper = mountTeams()

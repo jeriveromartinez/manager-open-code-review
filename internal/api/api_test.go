@@ -597,6 +597,31 @@ func TestMeIncludesTeams(t *testing.T) {
 	}
 }
 
+func TestUsersAllowsNonAdminLead(t *testing.T) {
+	f := newAPIFixture(t)
+	lead := f.user("lead", false)
+	team := f.team("team-one")
+	f.member(team.ID, lead.ID, "lead")
+	f.user("dev", false)
+
+	rec := f.request(http.MethodGet, "/api/users", nil, f.session(lead))
+	assertStatus(t, rec, http.StatusOK)
+
+	var body []map[string]any
+	decodeJSON(t, rec, &body)
+	if len(body) != 2 {
+		t.Fatalf("users = %v, want two", body)
+	}
+	// Any signed-in user may list users, but only minimal profile fields.
+	if _, ok := body[0]["github_id"]; ok {
+		t.Errorf("users response leaks github_id: %v", body[0])
+	}
+	if len(body[0]) != 4 {
+		t.Errorf("users response has %d keys, want 4: %v", len(body[0]), body[0])
+	}
+	assertKeys(t, body[0], "id", "login", "avatar_url", "is_admin")
+}
+
 func TestReadOnlyEndpointsReturnSnakeCase(t *testing.T) {
 	f := newAPIFixture(t)
 	admin := f.user("admin", true)

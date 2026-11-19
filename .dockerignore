@@ -1,0 +1,16 @@
+# Secrets and local environment (the compose file injects them at runtime).
+deploy/.env
+deploy/.env.*
+
+# Repository and agent metadata; not needed by the image build.
+.git
+.git/
+.claude/
+.superpowers/
+*.diff
+
+# Local build output and dependencies; rebuilt inside the image.
+web/node_modules/
+web/dist/
+internal/web/dist/
+bin/

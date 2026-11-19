@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api, type Team, type TeamMember, type TeamRole, type User } from '../api'
 import { useSessionStore } from '../stores/session'
 
@@ -9,6 +9,9 @@ const teams = ref<Team[]>([])
 const users = ref<User[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
+const usersError = ref<string | null>(null)
+const usersLoaded = ref(false)
+const usersLoading = ref(false)
 const formError = ref<string | null>(null)
 const newTeamName = ref('')
 const drafts = ref<Record<number, { userId: number | null; role: TeamRole }>>({})
@@ -20,6 +23,11 @@ const roleLabels: Record<TeamRole, string> = {
 }
 
 const isAdmin = computed(() => session.me?.is_admin === true)
+
+/** Solo quien gestiona miembros necesita el listado de usuarios. */
+const needsUsers = computed(
+  () => isAdmin.value || (session.me?.teams.some((team) => team.role === 'lead') ?? false),
+)
 
 /** Un administrador gestiona todos los equipos; un lead solo el suyo. */
 function canManage(team: Team): boolean {
@@ -36,20 +44,43 @@ function ensureDraft(teamId: number): void {
   }
 }
 
+async function loadUsers(): Promise<void> {
+  if (!needsUsers.value || usersLoaded.value || usersLoading.value) return
+  usersLoading.value = true
+  usersError.value = null
+  try {
+    users.value = await api.users()
+    usersLoaded.value = true
+  } catch {
+    // No es fatal: los equipos y sus controles siguen disponibles.
+    usersError.value = 'No se pudo cargar la lista de usuarios; el selector puede estar vacío'
+  } finally {
+    usersLoading.value = false
+  }
+}
+
 async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [teamList, userList] = await Promise.all([api.teams(), api.users()])
-    teams.value = teamList
-    users.value = userList
-    teamList.forEach((team) => ensureDraft(team.id))
+    teams.value = await api.teams()
+    teams.value.forEach((team) => ensureDraft(team.id))
   } catch {
     error.value = 'No se pudieron cargar los equipos'
   } finally {
     loading.value = false
   }
+  await loadUsers()
 }
+
+// La sesión se carga en paralelo; cuando llega, habilitamos el listado si el
+// usuario es admin o lead de algún equipo.
+watch(
+  () => session.me,
+  () => {
+    void loadUsers()
+  },
+)
 
 async function createTeam(): Promise<void> {
   const name = newTeamName.value.trim()
@@ -193,6 +224,7 @@ onMounted(() => {
         <p v-else class="member-list__empty">Este equipo no tiene miembros todavía</p>
 
         <div v-if="canManage(team)" class="team-card__add" data-add-member>
+          <p v-if="usersError" class="form-error" data-users-error>{{ usersError }}</p>
           <select
             v-model.number="drafts[team.id].userId"
             class="field__input"
@@ -320,5 +352,9 @@ onMounted(() => {
 .team-card__add .field__input {
   padding: 5px 8px;
   font-size: 13px;
+}
+
+.team-card__add [data-users-error] {
+  flex-basis: 100%;
 }
 </style>
