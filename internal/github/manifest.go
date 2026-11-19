@@ -7,7 +7,7 @@ package github
 type Manifest struct {
 	Name               string            `json:"name"`
 	URL                string            `json:"url"`
-	HookAttributes     HookAttributes    `json:"hook_attributes"`
+	HookAttributes     *HookAttributes   `json:"hook_attributes,omitempty"`
 	RedirectURL        string            `json:"redirect_url"`
 	CallbackURLs       []string          `json:"callback_urls"`
 	SetupURL           string            `json:"setup_url"`
@@ -22,18 +22,18 @@ type HookAttributes struct {
 	Active bool   `json:"active"`
 }
 
-// BuildManifest builds the manifest for an App hosted at publicURL. Webhook
-// events are requested only when webhooksEnabled is true; installation events
-// are always delivered by GitHub and are not listed explicitly.
+// BuildManifest builds the manifest for an App hosted at publicURL. The
+// optional hook_attributes are present only when webhooksEnabled is true;
+// installation events are always delivered by GitHub and are not listed
+// explicitly.
 func BuildManifest(publicURL string, webhooksEnabled bool, name string) Manifest {
-	return Manifest{
-		Name:           name,
-		URL:            publicURL,
-		HookAttributes: HookAttributes{URL: publicURL + "/webhooks/github", Active: webhooksEnabled},
-		RedirectURL:    publicURL + "/setup/callback",
-		CallbackURLs:   []string{publicURL + "/auth/callback"},
-		SetupURL:       publicURL + "/setup/installed",
-		Public:         false,
+	m := Manifest{
+		Name:         name,
+		URL:          publicURL,
+		RedirectURL:  publicURL + "/setup/callback",
+		CallbackURLs: []string{publicURL + "/auth/callback"},
+		SetupURL:     publicURL + "/setup/installed",
+		Public:       false,
 		DefaultPermissions: map[string]string{
 			"pull_requests": "write",
 			"checks":        "write",
@@ -52,4 +52,8 @@ func BuildManifest(publicURL string, webhooksEnabled bool, name string) Manifest
 			"status",
 		},
 	}
+	if webhooksEnabled {
+		m.HookAttributes = &HookAttributes{URL: publicURL + "/webhooks/github", Active: true}
+	}
+	return m
 }

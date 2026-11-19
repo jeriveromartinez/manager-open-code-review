@@ -1,7 +1,9 @@
 package github_test
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	ghapp "github.com/jeriveromartinez/qa-control-center/internal/github"
@@ -36,6 +38,9 @@ func TestBuildManifest(t *testing.T) {
 	if m.URL != publicURL {
 		t.Errorf("URL = %q, want %q", m.URL, publicURL)
 	}
+	if m.HookAttributes == nil {
+		t.Fatal("HookAttributes = nil with webhooks enabled, want non-nil")
+	}
 	if m.HookAttributes.URL != publicURL+"/webhooks/github" {
 		t.Errorf("HookAttributes.URL = %q, want %q", m.HookAttributes.URL, publicURL+"/webhooks/github")
 	}
@@ -62,10 +67,14 @@ func TestBuildManifest(t *testing.T) {
 	}
 
 	disabled := ghapp.BuildManifest(publicURL, false, "qa-control-center")
-	if disabled.HookAttributes.Active {
-		t.Error("HookAttributes.Active = true with webhooks disabled, want false")
+	if disabled.HookAttributes != nil {
+		t.Errorf("HookAttributes = %+v with webhooks disabled, want nil", disabled.HookAttributes)
 	}
-	if disabled.HookAttributes.URL != m.HookAttributes.URL {
-		t.Errorf("HookAttributes.URL changed with webhooks disabled: %q, want %q", disabled.HookAttributes.URL, m.HookAttributes.URL)
+	data, err := json.Marshal(disabled)
+	if err != nil {
+		t.Fatalf("json.Marshal(disabled): %v", err)
+	}
+	if strings.Contains(string(data), `"hook_attributes"`) {
+		t.Errorf("marshaled manifest contains hook_attributes with webhooks disabled: %s", data)
 	}
 }
