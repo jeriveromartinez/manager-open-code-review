@@ -411,6 +411,40 @@ func TestLLMProfileCRUD(t *testing.T) {
 	}
 }
 
+func TestUpdateLLMProfilePreservesKeyWhenOmitted(t *testing.T) {
+	f := newFixture(t)
+
+	created, err := f.s.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "keyed", Provider: "anthropic", Model: "claude-sonnet",
+		APIKeyEnc: "sealed-do-not-wipe", Concurrency: 2, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+
+	got, err := f.s.LLMProfile(f.ctx, created.ID)
+	if err != nil {
+		t.Fatalf("LLMProfile(%d): %v", created.ID, err)
+	}
+	got.Name = "keyed-renamed"
+	got.Concurrency = 7
+	got.APIKeyEnc = ""
+	if err := f.s.UpdateLLMProfile(f.ctx, got); err != nil {
+		t.Fatalf("UpdateLLMProfile: %v", err)
+	}
+
+	updated, err := f.s.LLMProfile(f.ctx, created.ID)
+	if err != nil {
+		t.Fatalf("LLMProfile(%d) after update: %v", created.ID, err)
+	}
+	if updated.APIKeyEnc != "sealed-do-not-wipe" {
+		t.Errorf("APIKeyEnc = %q, want the stored ciphertext preserved", updated.APIKeyEnc)
+	}
+	if updated.Name != "keyed-renamed" || updated.Concurrency != 7 {
+		t.Errorf("after update name/concurrency = %q/%d, want keyed-renamed/7", updated.Name, updated.Concurrency)
+	}
+}
+
 func TestDeleteProfileInUse(t *testing.T) {
 	f := newFixture(t)
 

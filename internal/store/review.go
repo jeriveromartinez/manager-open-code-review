@@ -32,20 +32,25 @@ func (s *Store) CreateLLMProfile(ctx context.Context, p LLMProfile) (LLMProfile,
 }
 
 // UpdateLLMProfile replaces the editable fields of a profile, leaving its
-// health state and timestamps alone. APIKeyEnc is the worker-sealed value.
+// health state and timestamps alone. APIKeyEnc is the worker-sealed value; an
+// empty value keeps the stored ciphertext instead of wiping it.
 func (s *Store) UpdateLLMProfile(ctx context.Context, p LLMProfile) error {
-	res := s.DB.WithContext(ctx).Model(&LLMProfile{}).Where("id = ?", p.ID).Updates(map[string]any{
+	updates := map[string]any{
 		"name":        p.Name,
 		"provider":    p.Provider,
 		"model":       p.Model,
 		"variant":     p.Variant,
 		"mode":        p.Mode,
-		"api_key_enc": p.APIKeyEnc,
 		"base_url":    p.BaseURL,
 		"concurrency": p.Concurrency,
 		"enabled":     p.Enabled,
 		"updated_at":  time.Now().UTC(),
-	})
+	}
+	if p.APIKeyEnc != "" {
+		updates["api_key_enc"] = p.APIKeyEnc
+	}
+
+	res := s.DB.WithContext(ctx).Model(&LLMProfile{}).Where("id = ?", p.ID).Updates(updates)
 	if res.Error != nil {
 		return fmt.Errorf("update llm profile %d: %w", p.ID, res.Error)
 	}
