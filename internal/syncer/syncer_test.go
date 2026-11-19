@@ -69,7 +69,7 @@ func (p *recordingPublisher) snapshot() []events.Event {
 	return append([]events.Event(nil), p.events...)
 }
 
-// fakeGitHub serves the installation token endpoint plus the two REST endpoints
+// fakeGitHub serves the installation token endpoint plus the REST endpoints
 // exercised by the syncer. The latter are supplied per test so that pagination
 // and call counts are observable.
 type fakeGitHub struct {
@@ -80,19 +80,28 @@ type fakeGitHub struct {
 	installations  []int64
 	failTokenForID int64
 
-	repos func(http.ResponseWriter, *http.Request)
-	pulls func(http.ResponseWriter, *http.Request)
+	repos            func(http.ResponseWriter, *http.Request)
+	pulls            func(http.ResponseWriter, *http.Request)
+	appInstallations func(http.ResponseWriter, *http.Request)
 }
 
-func newFakeGitHub(t *testing.T, repos, pulls func(http.ResponseWriter, *http.Request)) *fakeGitHub {
+func newFakeGitHub(t *testing.T, repos, pulls, appInstallations func(http.ResponseWriter, *http.Request)) *fakeGitHub {
 	t.Helper()
-	f := &fakeGitHub{repos: repos, pulls: pulls}
+	f := &fakeGitHub{repos: repos, pulls: pulls, appInstallations: appInstallations}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
 }
 
 func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/app/installations" {
+		if f.appInstallations != nil {
+			f.appInstallations(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/app/installations/") && strings.HasSuffix(r.URL.Path, "/access_tokens") {
 		raw := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/app/installations/"), "/access_tokens")
 		id, err := strconv.ParseInt(raw, 10, 64)
@@ -109,7 +118,7 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"token":"ghs_test","expires_at":%q}`, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+		_, _ = fmt.Fprintf(w, `{"token":"ghs_test_%d","expires_at":%q}`, id, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 		return
 	}
 
@@ -326,7 +335,7 @@ func TestSyncPaginates(t *testing.T) {
 				t.Errorf("unexpected pulls page %q", r.URL.Query().Get("page"))
 				http.NotFound(w, r)
 			}
-		})
+		}, nil)
 
 	if err := newSyncer(s, f.srv.URL, pub).SyncInstallation(ctx, testInstallationID); err != nil {
 		t.Fatalf("SyncInstallation() error = %v", err)
@@ -386,7 +395,7 @@ func TestSyncRemovesRepo(t *testing.T) {
 				numbers = []int{5}
 			}
 			writePulls(t, w, r, numbers, updated, "")
-		})
+		}, nil)
 	sy := newSyncer(s, f.srv.URL, pub)
 
 	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
@@ -435,7 +444,7 @@ func TestSyncSkipsDisabledRepos(t *testing.T) {
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			writePulls(t, w, r, numberedPulls(1, 3), time.Now(), "")
-		})
+		}, nil)
 
 	if err := newSyncer(s, f.srv.URL, noopPublisher{}).SyncInstallation(ctx, testInstallationID); err != nil {
 		t.Fatalf("SyncInstallation() error = %v", err)
@@ -461,7 +470,7 @@ func TestSyncClosesMissing(t *testing.T) {
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			writePulls(t, w, r, []int{6}, time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), "")
-		})
+		}, nil)
 
 	if err := newSyncer(s, f.srv.URL, noopPublisher{}).SyncInstallation(ctx, testInstallationID); err != nil {
 		t.Fatalf("SyncInstallation() error = %v", err)
@@ -496,7 +505,7 @@ func TestSyncPublishesEvents(t *testing.T) {
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			writePulls(t, w, r, []int{7}, updated, "")
-		})
+		}, nil)
 	sy := newSyncer(s, f.srv.URL, pub)
 
 	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
@@ -539,7 +548,7 @@ func TestReconcileContinuesOnError(t *testing.T) {
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			writePulls(t, w, r, nil, time.Time{}, "")
-		})
+		}, nil)
 	f.failTokenFor(1)
 
 	if err := newSyncer(s, f.srv.URL, noopPublisher{}).ReconcileAll(ctx); err != nil {
@@ -555,5 +564,201 @@ func TestReconcileContinuesOnError(t *testing.T) {
 	}
 	if !found[1] || !found[2] {
 		t.Errorf("installations attempted = %v, want both 1 and 2", seen)
+	}
+}
+
+func writeAppInstallations(t *testing.T, w http.ResponseWriter, r *http.Request, installs []*gh.Installation, nextPage string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if nextPage != "" {
+		q := r.URL.Query()
+		q.Set("page", nextPage)
+		w.Header().Set("Link", fmt.Sprintf(`<http://%s%s?%s>; rel="next"`, r.Host, r.URL.Path, q.Encode()))
+	}
+	if err := json.NewEncoder(w).Encode(installs); err != nil {
+		t.Errorf("encode installations: %v", err)
+	}
+}
+
+func ghInstallation(id int64, login, accountType string) *gh.Installation {
+	return &gh.Installation{
+		ID: gh.Int64(id),
+		Account: &gh.User{
+			Login: gh.String(login),
+			Type:  gh.String(accountType),
+		},
+	}
+}
+
+func TestReconcileDiscoversInstallations(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			token := r.Header.Get("Authorization")
+			var repos []*gh.Repository
+			switch token {
+			case "token ghs_test_1":
+				repos = []*gh.Repository{repo(101, "acme/repo-1")}
+			case "token ghs_test_2":
+				repos = []*gh.Repository{repo(102, "personal/repo-2")}
+			default:
+				t.Errorf("unexpected installation token %q for %s", token, r.URL.Path)
+			}
+			writeRepos(t, w, r, repos, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writePulls(t, w, r, nil, time.Time{}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writeAppInstallations(t, w, r, []*gh.Installation{
+				ghInstallation(1, "acme", "Organization"),
+				ghInstallation(2, "personal", "User"),
+			}, "")
+		},
+	)
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).ReconcileAll(ctx); err != nil {
+		t.Fatalf("ReconcileAll() error = %v", err)
+	}
+
+	installations, err := s.ListInstallations(ctx)
+	if err != nil {
+		t.Fatalf("ListInstallations() error = %v", err)
+	}
+	if len(installations) != 2 {
+		t.Fatalf("installations = %d, want 2", len(installations))
+	}
+	byID := map[int64]store.Installation{}
+	for _, in := range installations {
+		byID[in.ID] = in
+	}
+	if byID[1].AccountLogin != "acme" || byID[1].AccountType != "Organization" {
+		t.Errorf("installation 1 = %+v, want acme/Organization", byID[1])
+	}
+	if byID[2].AccountLogin != "personal" || byID[2].AccountType != "User" {
+		t.Errorf("installation 2 = %+v, want personal/User", byID[2])
+	}
+	if got := countRows(t, s, &store.Repository{}, "id = ?", 101); got != 1 {
+		t.Errorf("repo 101 rows = %d, want 1", got)
+	}
+	if got := countRows(t, s, &store.Repository{}, "id = ?", 102); got != 1 {
+		t.Errorf("repo 102 rows = %d, want 1", got)
+	}
+	var r101 store.Repository
+	if err := s.DB.WithContext(ctx).Where("id = ?", 101).Take(&r101).Error; err != nil {
+		t.Fatalf("load repo 101: %v", err)
+	}
+	if r101.Enabled {
+		t.Error("repo 101 Enabled = true, want false")
+	}
+}
+
+func TestReconcilePrunesMissingInstallations(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, 1)
+	seedInstallation(t, s, 2)
+	seedRepo(t, s, 201, 2, "acme/old", false)
+	seedPR(t, s, 201, 9, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			token := r.Header.Get("Authorization")
+			if token != "token ghs_test_1" {
+				t.Errorf("unexpected installation token %q", token)
+			}
+			writeRepos(t, w, r, []*gh.Repository{repo(101, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writePulls(t, w, r, nil, time.Time{}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writeAppInstallations(t, w, r, []*gh.Installation{
+				ghInstallation(1, "acme", "Organization"),
+			}, "")
+		},
+	)
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).ReconcileAll(ctx); err != nil {
+		t.Fatalf("ReconcileAll() error = %v", err)
+	}
+
+	if got := countRows(t, s, &store.Installation{}, "id = ?", 2); got != 0 {
+		t.Errorf("installation 2 rows = %d, want 0", got)
+	}
+	if got := countRows(t, s, &store.Repository{}, "installation_id = ?", 2); got != 0 {
+		t.Errorf("repos of installation 2 = %d, want 0", got)
+	}
+	if got := countRows(t, s, &store.PullRequest{}, "repository_id = ?", 201); got != 0 {
+		t.Errorf("PRs of repo 201 = %d, want 0", got)
+	}
+	if got := countRows(t, s, &store.Installation{}, "id = ?", 1); got != 1 {
+		t.Errorf("installation 1 rows = %d, want 1", got)
+	}
+}
+
+func TestReconcileFallsBackOnDiscoveryError(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, 1)
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(101, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writePulls(t, w, r, nil, time.Time{}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		},
+	)
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).ReconcileAll(ctx); err != nil {
+		t.Fatalf("ReconcileAll() error = %v, want nil (fallback)", err)
+	}
+	if got := countRows(t, s, &store.Installation{}, "id = ?", 1); got != 1 {
+		t.Errorf("installation 1 rows = %d, want 1", got)
+	}
+	if got := countRows(t, s, &store.Repository{}, "id = ?", 101); got != 1 {
+		t.Errorf("repo 101 rows = %d, want 1 (synced via fallback)", got)
+	}
+}
+
+func TestSyncInstallationSkipsSuspended(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	now := time.Now()
+	if err := s.UpsertInstallation(ctx, store.Installation{
+		ID:           1,
+		AccountLogin: "acme",
+		AccountType:  "Organization",
+		SuspendedAt:  &now,
+	}); err != nil {
+		t.Fatalf("seed suspended installation: %v", err)
+	}
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			t.Error("installation repositories endpoint should not be called for suspended installation")
+			writeRepos(t, w, r, nil, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			t.Error("pulls endpoint should not be called for suspended installation")
+			writePulls(t, w, r, nil, time.Time{}, "")
+		},
+		nil,
+	)
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).SyncInstallation(ctx, 1); err != nil {
+		t.Fatalf("SyncInstallation() error = %v, want nil", err)
+	}
+	if got := len(f.seenInstallations()); got != 0 {
+		t.Errorf("installation token requests = %d, want 0", got)
+	}
+	if got := countRows(t, s, &store.Repository{}, ""); got != 0 {
+		t.Errorf("repositories rows = %d, want 0", got)
 	}
 }

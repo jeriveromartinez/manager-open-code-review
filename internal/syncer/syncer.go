@@ -5,12 +5,14 @@ package syncer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 
 	gh "github.com/google/go-github/v93/github"
+	"gorm.io/gorm"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/github"
@@ -28,8 +30,21 @@ type Syncer struct {
 }
 
 // SyncInstallation reconciles the repositories visible to an installation and,
-// for every enabled repository, its open pull requests.
+// for every enabled repository, its open pull requests. It is a no-op when the
+// installation row is missing or suspended.
 func (s *Syncer) SyncInstallation(ctx context.Context, installationID int64) error {
+	var inst store.Installation
+	err := s.Store.DB.WithContext(ctx).Where("id = ?", installationID).Take(&inst).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load installation %d: %w", installationID, err)
+	}
+	if inst.SuspendedAt != nil {
+		return nil
+	}
+
 	app, err := s.Apps.App(ctx)
 	if err != nil {
 		return fmt.Errorf("load GitHub App: %w", err)
@@ -49,12 +64,15 @@ func (s *Syncer) SyncInstallation(ctx context.Context, installationID int64) err
 	return s.syncPullRequests(ctx, client, installationID)
 }
 
-// ReconcileAll syncs every known installation. A failure in one installation is
-// logged and does not prevent the remaining ones from being attempted.
+// ReconcileAll discovers installations from the GitHub App, prunes rows for
+// installations no longer present after a complete discovery, and syncs every
+// known installation. On discovery failure it falls back to the DB list without
+// deleting anything. A failure in one installation sync is logged and does not
+// prevent the remaining ones from being attempted.
 func (s *Syncer) ReconcileAll(ctx context.Context) error {
-	installations, err := s.Store.ListInstallations(ctx)
+	installations, err := s.reconcileInstallations(ctx)
 	if err != nil {
-		return fmt.Errorf("list installations: %w", err)
+		return err
 	}
 	for _, installation := range installations {
 		if err := s.SyncInstallation(ctx, installation.ID); err != nil {
@@ -63,6 +81,81 @@ func (s *Syncer) ReconcileAll(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Syncer) reconcileInstallations(ctx context.Context) ([]store.Installation, error) {
+	app, err := s.Apps.App(ctx)
+	if err != nil {
+		slog.Error("discover installations failed", "error", err)
+		installations, listErr := s.Store.ListInstallations(ctx)
+		if listErr != nil {
+			return nil, fmt.Errorf("list installations: %w", listErr)
+		}
+		return installations, nil
+	}
+
+	remote, err := s.listAppInstallations(ctx, app)
+	if err != nil {
+		slog.Error("discover installations failed", "error", err)
+		installations, listErr := s.Store.ListInstallations(ctx)
+		if listErr != nil {
+			return nil, fmt.Errorf("list installations: %w", listErr)
+		}
+		return installations, nil
+	}
+
+	remoteIDs := make(map[int64]struct{}, len(remote))
+	for _, inst := range remote {
+		remoteIDs[inst.ID] = struct{}{}
+		if err := s.Store.UpsertInstallation(ctx, inst); err != nil {
+			return nil, fmt.Errorf("upsert installation %d: %w", inst.ID, err)
+		}
+	}
+
+	current, err := s.Store.ListInstallations(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list installations: %w", err)
+	}
+	for _, inst := range current {
+		if _, ok := remoteIDs[inst.ID]; ok {
+			continue
+		}
+		if err := s.Store.DeleteInstallation(ctx, inst.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("delete installation %d: %w", inst.ID, err)
+		}
+	}
+
+	installations, err := s.Store.ListInstallations(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list installations: %w", err)
+	}
+	return installations, nil
+}
+
+func (s *Syncer) listAppInstallations(ctx context.Context, app *github.App) ([]store.Installation, error) {
+	client, err := app.AppClient()
+	if err != nil {
+		return nil, err
+	}
+
+	var all []store.Installation
+	opts := &gh.ListOptions{PerPage: perPage}
+	for {
+		installs, resp, err := client.Apps.ListInstallations(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		for _, inst := range installs {
+			all = append(all, github.InstallationFromGitHub(inst))
+		}
+		if resp == nil || resp.NextPage == 0 || resp.NextPage <= opts.Page {
+			return all, nil
+		}
+		opts.Page = resp.NextPage
+	}
 }
 
 // listInstallationRepos follows the Link header until GitHub stops reporting a

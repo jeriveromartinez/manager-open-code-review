@@ -154,6 +154,65 @@ func TestInstallURL(t *testing.T) {
 	}
 }
 
+func TestAppClientUsesAPIURL(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	privateKey := string(pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	}))
+
+	var (
+		mu      sync.Mutex
+		gotAuth string
+		gotPath string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/app/installations" {
+			mu.Lock()
+			gotAuth = r.Header.Get("Authorization")
+			gotPath = r.URL.Path
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	a := &ghapp.App{
+		Creds:  ghapp.AppCredentials{AppID: 1, PEM: privateKey},
+		APIURL: srv.URL,
+	}
+	client, err := a.AppClient()
+	if err != nil {
+		t.Fatalf("AppClient() error = %v", err)
+	}
+	if client == nil {
+		t.Fatal("AppClient() = nil, want a go-github client")
+	}
+	if got := client.BaseURL(); got != srv.URL+"/" {
+		t.Errorf("client.BaseURL() = %q, want %q", got, srv.URL+"/")
+	}
+
+	_, _, err = client.Apps.ListInstallations(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListInstallations() error = %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotPath != "/app/installations" {
+		t.Errorf("request path = %q, want /app/installations", gotPath)
+	}
+	if !strings.HasPrefix(gotAuth, "Bearer ") || strings.TrimSpace(strings.TrimPrefix(gotAuth, "Bearer ")) == "" {
+		t.Errorf("Authorization = %q, want Bearer <JWT>", gotAuth)
+	}
+}
+
 func TestInstallationClientUsesAPIURL(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

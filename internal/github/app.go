@@ -48,6 +48,41 @@ type App struct {
 	APIURL string
 }
 
+// InstallationFromGitHub converts a go-github installation into a store row.
+func InstallationFromGitHub(inst *gh.Installation) store.Installation {
+	row := store.Installation{
+		ID:           inst.GetID(),
+		AccountLogin: inst.GetAccount().GetLogin(),
+		AccountType:  inst.GetAccount().GetType(),
+	}
+	if inst.SuspendedAt != nil {
+		suspendedAt := inst.SuspendedAt.Time
+		row.SuspendedAt = &suspendedAt
+	}
+	return row
+}
+
+// AppClient returns a go-github client authenticated as the App itself (JWT).
+// APIURL is honored both by ghinstallation (App endpoints) and by the REST
+// client, which is required for GitHub Enterprise and test servers.
+func (a *App) AppClient() (*gh.Client, error) {
+	appTR, err := ghinstallation.NewAppsTransport(http.DefaultTransport, a.Creds.AppID, []byte(a.Creds.PEM))
+	if err != nil {
+		return nil, fmt.Errorf("create GitHub App transport: %w", err)
+	}
+	appTR.BaseURL = a.APIURL
+
+	base := strings.TrimRight(a.APIURL, "/") + "/"
+	client, err := gh.NewClient(
+		gh.WithHTTPClient(&http.Client{Transport: appTR}),
+		gh.WithURLs(&base, &base),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create GitHub App client: %w", err)
+	}
+	return client, nil
+}
+
 // InstallationClient returns a go-github client authenticated as the given
 // installation. APIURL is honored both by ghinstallation (token endpoint) and
 // by the REST client, which is required for GitHub Enterprise and test servers.
