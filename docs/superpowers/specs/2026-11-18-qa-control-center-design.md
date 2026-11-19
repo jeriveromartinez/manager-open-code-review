@@ -16,7 +16,7 @@ Motor de análisis: [alibaba/open-code-review](https://github.com/alibaba/open-c
 | QA / Team lead (por equipo) | Políticas de QA de sus repos, confirmar/descartar hallazgos bloqueantes, reintentar revisiones, recibir solicitudes de revisión final |
 | Desarrollador | Ver PRs y hallazgos de los repos de sus equipos; disputar hallazgos respondiendo en el PR |
 
-Una instancia sirve a varios equipos de una organización. Cualquier otra organización instala su propia instancia.
+Una instancia sirve a varios equipos y puede gestionar repositorios de varias cuentas personales y organizaciones de GitHub desde la misma GitHub App; véase el [diseño multi-cuenta de GitHub](2026-11-19-multi-cuenta-github-design.md).
 
 ## 3. Objetivos, no-objetivos, anti-objetivos
 

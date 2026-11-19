@@ -1,6 +1,6 @@
 # QA Control Center
 
-Revisor automático de pull requests, auto-hospedado. Crea su propia GitHub App desde un manifiesto, recibe webhooks (o funciona solo con polling), encola la sincronización de PRs en PostgreSQL y muestra el resultado en un panel Vue en vivo.
+Revisor automático de pull requests, auto-hospedado. Crea su propia GitHub App desde un manifiesto, recibe webhooks (o funciona solo con polling), encola la sincronización de PRs en PostgreSQL y muestra el resultado en un panel Vue en vivo. Una misma instancia puede gestionar repositorios de varias cuentas personales u organizaciones de GitHub.
 
 ## Arquitectura (Fase 1 — núcleo)
 

@@ -63,6 +63,17 @@ Entra con el login de GitHub y, desde la interfaz:
 
 Los pull requests abiertos aparecen en el Dashboard. La reconciliación periódica incorpora los que llegaron sin webhook.
 
+## Añadir otra cuenta u organización
+
+La GitHub App es pública, por lo que cualquier cuenta personal u organización puede instalarla. Desde una misma instancia puedes gestionar repositorios de varias cuentas:
+
+1. Entra como admin → Repositorios → “Añadir cuenta”.
+2. Instala la App en la otra cuenta u organización.
+3. Vuelve al panel; los repositorios aparecen deshabilitados. Habilita los que quieras revisar y asígnalos a un equipo.
+4. Con webhooks, la instalación entra al instante; en modo solo polling se descubre en la próxima reconciliación (≤5 min).
+
+Los repositorios de una cuenta recién instalada quedan deshabilitados hasta que un admin los active.
+
 ## Modo solo polling (sin URL pública)
 
 Cuando el servicio no se expone a Internet:
