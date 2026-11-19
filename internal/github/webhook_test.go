@@ -351,6 +351,9 @@ func TestWebhookInstallationSuspendUnsuspend(t *testing.T) {
 	if in.SuspendedAt == nil || !in.SuspendedAt.Equal(wantSuspended) {
 		t.Fatalf("SuspendedAt = %v, want %v", in.SuspendedAt, wantSuspended)
 	}
+	if got := f.jobs.snapshot(); len(got) != 0 {
+		t.Fatalf("EnqueueSync calls after suspend = %v, want none", got)
+	}
 
 	assertStatus(t, f.deliver("installation", "installation-unsuspended.json"), http.StatusAccepted)
 	var unsuspended store.Installation
@@ -359,6 +362,26 @@ func TestWebhookInstallationSuspendUnsuspend(t *testing.T) {
 	}
 	if unsuspended.SuspendedAt != nil {
 		t.Fatalf("SuspendedAt = %v, want nil after unsuspend", unsuspended.SuspendedAt)
+	}
+	if got := f.jobs.snapshot(); len(got) != 1 || got[0] != 991 {
+		t.Fatalf("EnqueueSync calls after unsuspend = %v, want [991]", got)
+	}
+}
+
+func TestWebhookUnsuspendEnqueuesSync(t *testing.T) {
+	f := newWebhookFixture(t)
+
+	assertStatus(t, f.deliver("installation", "installation-unsuspended.json"), http.StatusAccepted)
+
+	var in store.Installation
+	if err := f.st.DB.WithContext(f.ctx).Where("id = ?", 991).Take(&in).Error; err != nil {
+		t.Fatalf("read installation: %v", err)
+	}
+	if in.SuspendedAt != nil {
+		t.Fatalf("SuspendedAt = %v, want nil", in.SuspendedAt)
+	}
+	if got := f.jobs.snapshot(); len(got) != 1 || got[0] != 991 {
+		t.Fatalf("EnqueueSync calls = %v, want [991]", got)
 	}
 }
 

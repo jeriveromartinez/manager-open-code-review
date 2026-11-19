@@ -107,7 +107,7 @@ func (h *WebhookHandler) handleInstallation(ctx context.Context, w http.Response
 	id := inst.GetID()
 	switch e.GetAction() {
 	case "created":
-		if err := h.Store.UpsertInstallation(ctx, installationRow(inst)); err != nil {
+		if err := h.Store.UpsertInstallation(ctx, InstallationFromGitHub(inst)); err != nil {
 			h.serverError(w)
 			return
 		}
@@ -121,7 +121,7 @@ func (h *WebhookHandler) handleInstallation(ctx context.Context, w http.Response
 			return
 		}
 	case "suspend", "unsuspend":
-		row := installationRow(inst)
+		row := InstallationFromGitHub(inst)
 		if e.GetAction() == "unsuspend" {
 			row.SuspendedAt = nil
 		}
@@ -129,24 +129,17 @@ func (h *WebhookHandler) handleInstallation(ctx context.Context, w http.Response
 			h.serverError(w)
 			return
 		}
+		if e.GetAction() == "unsuspend" {
+			if err := h.Jobs.EnqueueSync(ctx, id); err != nil {
+				h.serverError(w)
+				return
+			}
+		}
 	default:
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
-}
-
-func installationRow(inst *gh.Installation) store.Installation {
-	row := store.Installation{
-		ID:           inst.GetID(),
-		AccountLogin: inst.GetAccount().GetLogin(),
-		AccountType:  inst.GetAccount().GetType(),
-	}
-	if inst.SuspendedAt != nil {
-		suspendedAt := inst.SuspendedAt.Time
-		row.SuspendedAt = &suspendedAt
-	}
-	return row
 }
 
 func (h *WebhookHandler) handleInstallationRepositories(ctx context.Context, w http.ResponseWriter, e *gh.InstallationRepositoriesEvent) {
