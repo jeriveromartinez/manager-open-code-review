@@ -20,6 +20,8 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/jobs"
+	"github.com/jeriveromartinez/qa-control-center/internal/publish"
+	"github.com/jeriveromartinez/qa-control-center/internal/review"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/syncer"
 	"github.com/jeriveromartinez/qa-control-center/internal/web"
@@ -77,6 +79,10 @@ func runServe() error {
 	if err != nil {
 		return fmt.Errorf("create crypto box: %w", err)
 	}
+	workerBox, err := crypto.NewBox(cfg.WorkerKey)
+	if err != nil {
+		return fmt.Errorf("create worker key box: %w", err)
+	}
 	apps := github.NewStoreAppProvider(st, box, cfg.GitHubAPIURL)
 
 	publisher := events.NewPGPublisher(st.Pool)
@@ -88,7 +94,28 @@ func runServe() error {
 	}()
 
 	s := &syncer.Syncer{Store: st, Apps: apps, Events: publisher}
-	client, err := jobs.NewControlClient(st.Pool, s, cfg.ReconcileInterval)
+	checks := &publish.Worker{Store: st, Apps: apps, Box: workerBox}
+	checker := &review.ProfileChecker{
+		Store: st, Box: workerBox, Bin: cfg.OpencodeBin, Timeout: cfg.ReviewTimeout,
+	}
+	runner := &review.Runner{
+		Store: st, Apps: apps, Box: workerBox, Events: publisher,
+		Cfg: review.RunnerConfig{
+			WorkspaceDir:  cfg.WorkspaceDir,
+			OCRBin:        cfg.OCRBin,
+			OpencodeBin:   cfg.OpencodeBin,
+			GitBaseURL:    cfg.GitBaseURL,
+			FetchDepthMax: cfg.FetchDepthMax,
+			Timeout:       cfg.ReviewTimeout,
+		},
+	}
+	trigger := &review.Trigger{
+		Store: st, Apps: apps, Box: workerBox, Events: publisher, Checks: checks,
+	}
+	client, err := jobs.NewControlClient(st.Pool, s, cfg.ReconcileInterval, jobs.ControlDeps{
+		Trigger: trigger, Runner: runner, Checker: checker,
+		ReviewConcurrency: cfg.ReviewConcurrency,
+	})
 	if err != nil {
 		return fmt.Errorf("create control client: %w", err)
 	}
@@ -103,6 +130,10 @@ func runServe() error {
 		}
 	}()
 	enqueuer := jobs.NewEnqueuer(client)
+	// The enqueuer is bound to the client, so it can only be attached after the
+	// client (and its workers, which hold these same pointers) is created.
+	trigger.Jobs = enqueuer
+	runner.Jobs = enqueuer
 
 	// A fresh instance has no App credentials. Generate a one-time setup token
 	// so only an operator with access to the logs can create the App.
@@ -124,17 +155,22 @@ func runServe() error {
 		PublicURL: cfg.PublicURL,
 		HTTP:      &http.Client{Timeout: 15 * time.Second},
 	}
-	webhooks := &github.WebhookHandler{Store: st, Apps: apps, Events: publisher, Jobs: enqueuer}
+	webhooks := &github.WebhookHandler{
+		Store: st, Apps: apps, Events: publisher, Jobs: enqueuer, Reviews: trigger,
+	}
 	router := api.NewRouter(api.Deps{
 		Cfg:        cfg,
 		Store:      st,
 		Box:        box,
+		WorkerBox:  workerBox,
 		Apps:       apps,
 		Auth:       authn,
 		Webhooks:   webhooks,
 		Broker:     broker,
 		Events:     publisher,
 		Jobs:       enqueuer,
+		Health:     enqueuer,
+		Reviews:    trigger,
 		SetupToken: setupToken,
 		Static:     web.Handler(),
 	})
