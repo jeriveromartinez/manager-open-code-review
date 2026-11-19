@@ -1,0 +1,559 @@
+package syncer_test
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/json"
+	"encoding/pem"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	gh "github.com/google/go-github/v93/github"
+	"github.com/jeriveromartinez/qa-control-center/internal/events"
+	ghapp "github.com/jeriveromartinez/qa-control-center/internal/github"
+	"github.com/jeriveromartinez/qa-control-center/internal/store"
+	"github.com/jeriveromartinez/qa-control-center/internal/syncer"
+	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
+)
+
+const testInstallationID int64 = 7
+
+var testPEM = func() string {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	}))
+}()
+
+type stubAppProvider struct {
+	app *ghapp.App
+	err error
+}
+
+func (p stubAppProvider) App(context.Context) (*ghapp.App, error) {
+	return p.app, p.err
+}
+
+type noopPublisher struct{}
+
+func (noopPublisher) Publish(context.Context, events.Event) error { return nil }
+
+type recordingPublisher struct {
+	mu     sync.Mutex
+	events []events.Event
+}
+
+func (p *recordingPublisher) Publish(_ context.Context, ev events.Event) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.events = append(p.events, ev)
+	return nil
+}
+
+func (p *recordingPublisher) snapshot() []events.Event {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]events.Event(nil), p.events...)
+}
+
+// fakeGitHub serves the installation token endpoint plus the two REST endpoints
+// exercised by the syncer. The latter are supplied per test so that pagination
+// and call counts are observable.
+type fakeGitHub struct {
+	srv *httptest.Server
+
+	mu             sync.Mutex
+	pullsCalls     int
+	installations  []int64
+	failTokenForID int64
+
+	repos func(http.ResponseWriter, *http.Request)
+	pulls func(http.ResponseWriter, *http.Request)
+}
+
+func newFakeGitHub(t *testing.T, repos, pulls func(http.ResponseWriter, *http.Request)) *fakeGitHub {
+	t.Helper()
+	f := &fakeGitHub{repos: repos, pulls: pulls}
+	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/app/installations/") && strings.HasSuffix(r.URL.Path, "/access_tokens") {
+		raw := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/app/installations/"), "/access_tokens")
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			http.Error(w, "bad installation id", http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		f.installations = append(f.installations, id)
+		fail := f.failTokenForID == id
+		f.mu.Unlock()
+		if fail {
+			http.Error(w, "token service unavailable", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"token":"ghs_test","expires_at":%q}`, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+		return
+	}
+
+	switch {
+	case r.URL.Path == "/installation/repositories":
+		f.repos(w, r)
+	case strings.HasPrefix(r.URL.Path, "/repos/") && strings.HasSuffix(r.URL.Path, "/pulls"):
+		f.mu.Lock()
+		f.pullsCalls++
+		f.mu.Unlock()
+		f.pulls(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (f *fakeGitHub) failTokenFor(id int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failTokenForID = id
+}
+
+func (f *fakeGitHub) pullCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pullsCalls
+}
+
+func (f *fakeGitHub) seenInstallations() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64(nil), f.installations...)
+}
+
+func writeRepos(t *testing.T, w http.ResponseWriter, r *http.Request, repos []*gh.Repository, nextPage string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if nextPage != "" {
+		q := r.URL.Query()
+		q.Set("page", nextPage)
+		w.Header().Set("Link", fmt.Sprintf(`<http://%s%s?%s>; rel="next"`, r.Host, r.URL.Path, q.Encode()))
+	}
+	if err := json.NewEncoder(w).Encode(gh.ListRepositories{
+		TotalCount:   gh.Int(len(repos)),
+		Repositories: repos,
+	}); err != nil {
+		t.Errorf("encode repositories: %v", err)
+	}
+}
+
+func writePulls(t *testing.T, w http.ResponseWriter, r *http.Request, numbers []int, updated time.Time, nextPage string) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if nextPage != "" {
+		q := r.URL.Query()
+		q.Set("page", nextPage)
+		w.Header().Set("Link", fmt.Sprintf(`<http://%s%s?%s>; rel="next"`, r.Host, r.URL.Path, q.Encode()))
+	}
+	pulls := make([]*gh.PullRequest, 0, len(numbers))
+	for _, number := range numbers {
+		pulls = append(pulls, &gh.PullRequest{
+			Number:    gh.Int(number),
+			Title:     gh.String(fmt.Sprintf("PR %d", number)),
+			User:      &gh.User{Login: gh.String("alice")},
+			Head:      &gh.PullRequestBranch{Ref: gh.String("feature"), SHA: gh.String(fmt.Sprintf("sha-%d", number))},
+			Base:      &gh.PullRequestBranch{Ref: gh.String("main")},
+			HTMLURL:   gh.String(fmt.Sprintf("https://github.com/acme/repo/pull/%d", number)),
+			State:     gh.String("open"),
+			UpdatedAt: &gh.Timestamp{Time: updated},
+		})
+	}
+	if err := json.NewEncoder(w).Encode(pulls); err != nil {
+		t.Errorf("encode pull requests: %v", err)
+	}
+}
+
+func repo(id int64, fullName string) *gh.Repository {
+	return &gh.Repository{
+		ID:            gh.Int64(id),
+		Name:          gh.String(strings.TrimPrefix(fullName, "acme/")),
+		FullName:      gh.String(fullName),
+		Private:       gh.Bool(false),
+		DefaultBranch: gh.String("main"),
+	}
+}
+
+func numberedRepos(first, last int) []*gh.Repository {
+	repos := make([]*gh.Repository, 0, last-first+1)
+	for id := first; id <= last; id++ {
+		repos = append(repos, repo(int64(id), fmt.Sprintf("acme/repo-%d", id)))
+	}
+	return repos
+}
+
+func numberedPulls(first, last int) []int {
+	numbers := make([]int, 0, last-first+1)
+	for n := first; n <= last; n++ {
+		numbers = append(numbers, n)
+	}
+	return numbers
+}
+
+func newSyncer(s *store.Store, apiURL string, pub events.Publisher) *syncer.Syncer {
+	return &syncer.Syncer{
+		Store: s,
+		Apps: stubAppProvider{app: &ghapp.App{
+			Creds:  ghapp.AppCredentials{AppID: 12345, PEM: testPEM},
+			APIURL: apiURL,
+		}},
+		Events: pub,
+	}
+}
+
+func seedInstallation(t *testing.T, s *store.Store, id int64) {
+	t.Helper()
+	if err := s.UpsertInstallation(context.Background(), store.Installation{
+		ID: id, AccountLogin: "acme", AccountType: "Organization",
+	}); err != nil {
+		t.Fatalf("seed installation %d: %v", id, err)
+	}
+}
+
+func seedRepo(t *testing.T, s *store.Store, id int64, installationID int64, fullName string, enabled bool) {
+	t.Helper()
+	// UpsertRepository deliberately preserves Enabled, so seed local settings
+	// directly to emulate an administrator enabling the repository.
+	err := s.DB.WithContext(context.Background()).Create(&store.Repository{
+		ID: id, InstallationID: installationID, FullName: fullName,
+		DefaultBranch: "main", Enabled: enabled,
+	}).Error
+	if err != nil {
+		t.Fatalf("seed repository %d: %v", id, err)
+	}
+}
+
+func seedPR(t *testing.T, s *store.Store, repoID int64, number int, updated time.Time) store.PullRequest {
+	t.Helper()
+	pr, changed, err := s.SyncPullRequest(context.Background(), store.PullRequest{
+		RepositoryID: repoID, Number: number, Title: fmt.Sprintf("PR %d", number),
+		AuthorLogin: "alice", HeadSHA: fmt.Sprintf("sha-%d", number),
+		BaseRef: "main", HeadRef: "feature", HTMLURL: fmt.Sprintf("https://github.com/acme/repo/pull/%d", number),
+		State: "open", GitHubUpdatedAt: updated,
+	})
+	if err != nil {
+		t.Fatalf("seed pull request #%d: %v", number, err)
+	}
+	if !changed {
+		t.Fatalf("seed pull request #%d: unexpectedly unchanged", number)
+	}
+	return pr
+}
+
+func seedAdmin(t *testing.T, s *store.Store) store.User {
+	t.Helper()
+	u := store.User{GitHubID: 999, Login: "admin", IsAdmin: true}
+	if err := s.DB.WithContext(context.Background()).Create(&u).Error; err != nil {
+		t.Fatalf("seed admin user: %v", err)
+	}
+	return u
+}
+
+func countRows(t *testing.T, s *store.Store, model any, query string, args ...any) int64 {
+	t.Helper()
+	var n int64
+	q := s.DB.WithContext(context.Background()).Model(model)
+	if query != "" {
+		q = q.Where(query, args...)
+	}
+	if err := q.Count(&n).Error; err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	return n
+}
+
+func TestSyncPaginates(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 1, testInstallationID, "acme/repo-1", true)
+	updated := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	pub := &recordingPublisher{}
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("per_page"); got != "100" {
+				t.Errorf("repos per_page = %q, want 100", got)
+			}
+			switch r.URL.Query().Get("page") {
+			case "", "1":
+				writeRepos(t, w, r, numberedRepos(1, 100), "2")
+			case "2":
+				writeRepos(t, w, r, numberedRepos(101, 150), "")
+			default:
+				t.Errorf("unexpected repos page %q", r.URL.Query().Get("page"))
+				http.NotFound(w, r)
+			}
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			if got := r.URL.Query().Get("per_page"); got != "100" {
+				t.Errorf("pulls per_page = %q, want 100", got)
+			}
+			if got := r.URL.Query().Get("state"); got != "open" {
+				t.Errorf("pulls state = %q, want open", got)
+			}
+			if got := r.URL.Path; got != "/repos/acme/repo-1/pulls" {
+				t.Errorf("pulls path = %q, want /repos/acme/repo-1/pulls", got)
+			}
+			switch r.URL.Query().Get("page") {
+			case "", "1":
+				writePulls(t, w, r, numberedPulls(1, 60), updated, "2")
+			case "2":
+				writePulls(t, w, r, numberedPulls(61, 120), updated, "")
+			default:
+				t.Errorf("unexpected pulls page %q", r.URL.Query().Get("page"))
+				http.NotFound(w, r)
+			}
+		})
+
+	if err := newSyncer(s, f.srv.URL, pub).SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v", err)
+	}
+	if got := countRows(t, s, &store.Repository{}, ""); got != 150 {
+		t.Errorf("repositories in DB = %d, want 150", got)
+	}
+	if got := countRows(t, s, &store.PullRequest{}, "repository_id = ?", 1); got != 120 {
+		t.Errorf("pull requests in repo 1 = %d, want 120", got)
+	}
+	if got := f.pullCalls(); got != 2 {
+		t.Errorf("/pulls calls = %d, want 2 (one enabled repo, two pages)", got)
+	}
+	// Repository 1 was preseeded; the other 149 are new and must announce themselves.
+	repoEvents := 0
+	seenLast := false
+	for _, ev := range pub.snapshot() {
+		if ev.Type != "repo.updated" {
+			continue
+		}
+		repoEvents++
+		if ev.ID == "150" {
+			seenLast = true
+		}
+		if ev.ID == "1" {
+			t.Error("repo.updated published for an already-known repository")
+		}
+	}
+	if repoEvents != 149 || !seenLast {
+		t.Errorf("repo.updated events = %d (contains 150: %t), want 149 including repository 150", repoEvents, seenLast)
+	}
+}
+
+func TestSyncRemovesRepo(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 100, testInstallationID, "acme/a", true)
+	seedRepo(t, s, 200, testInstallationID, "acme/b", true)
+	updated := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	seedPR(t, s, 200, 5, updated)
+	admin := seedAdmin(t, s)
+
+	var onlyA atomic.Bool
+	pub := &recordingPublisher{}
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			repos := []*gh.Repository{repo(100, "acme/a"), repo(200, "acme/b")}
+			if onlyA.Load() {
+				repos = repos[:1]
+			}
+			writeRepos(t, w, r, repos, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			numbers := []int{}
+			if r.URL.Path == "/repos/acme/b/pulls" {
+				numbers = []int{5}
+			}
+			writePulls(t, w, r, numbers, updated, "")
+		})
+	sy := newSyncer(s, f.srv.URL, pub)
+
+	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("first SyncInstallation() error = %v", err)
+	}
+	views, err := s.ListVisiblePullRequests(ctx, admin, store.PRFilter{})
+	if err != nil {
+		t.Fatalf("ListVisiblePullRequests() error = %v", err)
+	}
+	if len(views) != 1 || views[0].Repo != "acme/b" || views[0].Number != 5 {
+		t.Fatalf("visible PRs before removal = %+v, want acme/b #5", views)
+	}
+
+	onlyA.Store(true)
+	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("second SyncInstallation() error = %v", err)
+	}
+	if got := countRows(t, s, &store.Repository{}, "id = ?", 200); got != 0 {
+		t.Errorf("repository B rows = %d, want 0", got)
+	}
+	views, err = s.ListVisiblePullRequests(ctx, admin, store.PRFilter{})
+	if err != nil {
+		t.Fatalf("ListVisiblePullRequests() after removal error = %v", err)
+	}
+	for _, v := range views {
+		if v.Repo == "acme/b" || v.Number == 5 {
+			t.Errorf("PR of removed repository still visible: %+v", v)
+		}
+	}
+	wantEvent := events.Event{Type: "repo.updated", ID: "200"}
+	got := pub.snapshot()
+	if len(got) != 1 || got[0] != wantEvent {
+		t.Errorf("events after second sync = %+v, want [%+v]", got, wantEvent)
+	}
+}
+
+func TestSyncSkipsDisabledRepos(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 1, testInstallationID, "acme/repo-1", false)
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(1, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writePulls(t, w, r, numberedPulls(1, 3), time.Now(), "")
+		})
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v", err)
+	}
+	if got := f.pullCalls(); got != 0 {
+		t.Errorf("/pulls calls for disabled repository = %d, want 0", got)
+	}
+	if got := countRows(t, s, &store.PullRequest{}, ""); got != 0 {
+		t.Errorf("pull requests for disabled repository = %d, want 0", got)
+	}
+}
+
+func TestSyncClosesMissing(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 1, testInstallationID, "acme/repo-1", true)
+	seedPR(t, s, 1, 5, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(1, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writePulls(t, w, r, []int{6}, time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), "")
+		})
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v", err)
+	}
+	var missing store.PullRequest
+	if err := s.DB.WithContext(ctx).Where("repository_id = ? AND number = ?", 1, 5).Take(&missing).Error; err != nil {
+		t.Fatalf("load PR #5: %v", err)
+	}
+	if missing.State != store.StatusClosed || missing.QAStatus != store.StatusClosed {
+		t.Errorf("PR #5 state/qa_status = %q/%q, want %q/%q", missing.State, missing.QAStatus, store.StatusClosed, store.StatusClosed)
+	}
+	var present store.PullRequest
+	if err := s.DB.WithContext(ctx).Where("repository_id = ? AND number = ?", 1, 6).Take(&present).Error; err != nil {
+		t.Fatalf("load PR #6: %v", err)
+	}
+	if present.State != "open" {
+		t.Errorf("PR #6 state = %q, want open", present.State)
+	}
+}
+
+func TestSyncPublishesEvents(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 1, testInstallationID, "acme/repo-1", true)
+	pub := &recordingPublisher{}
+	updated := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(1, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writePulls(t, w, r, []int{7}, updated, "")
+		})
+	sy := newSyncer(s, f.srv.URL, pub)
+
+	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("first SyncInstallation() error = %v", err)
+	}
+	var pr store.PullRequest
+	if err := s.DB.WithContext(ctx).Where("repository_id = ? AND number = ?", 1, 7).Take(&pr).Error; err != nil {
+		t.Fatalf("load PR #7: %v", err)
+	}
+	want := []events.Event{
+		{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)},
+	}
+	got := pub.snapshot()
+	if len(got) != len(want) {
+		t.Fatalf("events after first sync = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("event[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("second SyncInstallation() error = %v", err)
+	}
+	if got := pub.snapshot(); len(got) != len(want) {
+		t.Fatalf("events after identical second sync = %+v, want no new events", got)
+	}
+}
+
+func TestReconcileContinuesOnError(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, 1)
+	seedInstallation(t, s, 2)
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(200, "acme/two")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writePulls(t, w, r, nil, time.Time{}, "")
+		})
+	f.failTokenFor(1)
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).ReconcileAll(ctx); err != nil {
+		t.Fatalf("ReconcileAll() error = %v, want nil after logging the failed installation", err)
+	}
+	if got := countRows(t, s, &store.Repository{}, "id = ?", 200); got != 1 {
+		t.Errorf("repository of installation 2 = %d rows, want 1", got)
+	}
+	seen := f.seenInstallations()
+	found := map[int64]bool{}
+	for _, id := range seen {
+		found[id] = true
+	}
+	if !found[1] || !found[2] {
+		t.Errorf("installations attempted = %v, want both 1 and 2", seen)
+	}
+}
