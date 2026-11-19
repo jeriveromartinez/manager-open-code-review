@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+
+	"github.com/jeriveromartinez/qa-control-center/internal/config"
+	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
 func usage() string {
@@ -47,5 +51,18 @@ func runWorker() error {
 }
 
 func runMigrate() error {
-	return errors.New("not implemented")
+	ctx := context.Background()
+
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	s, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+
+	return s.Migrate(ctx)
 }
