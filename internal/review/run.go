@@ -56,6 +56,13 @@ type runOutcome struct {
 	usage    []byte
 	findings []store.Finding
 	resolved []string
+
+	// Context needed to reconcile findings from passes that already completed
+	// when the run ends inconclusively.
+	merged AgentOutput
+	open   []store.Finding
+	runID  uint
+	prID   uint
 }
 
 // CheckProfile verifies an LLM profile with the same OpenCode binary and
@@ -137,12 +144,18 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 // execute runs the pipeline and returns the state to persist. Every early exit
 // returns a terminal outcome so the caller can always complete the run.
 func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig) runOutcome {
-	out := runOutcome{coverage: coverageJSON(0, 0), usage: []byte(`{}`)}
+	out := runOutcome{
+		coverage: coverageJSON(0, 0),
+		usage:    []byte(`{}`),
+		runID:    run.ID,
+		prID:     run.PullRequestID,
+	}
 
 	open, err := r.Store.OpenFindingsForPR(ctx, run.PullRequestID)
 	if err != nil {
 		return out.failed(fmt.Errorf("listar hallazgos abiertos: %w", err), "config")
 	}
+	out.open = open
 
 	token, err := r.boxOpen(run.CloneTokenEnc)
 	if err != nil || len(strings.TrimSpace(string(token))) == 0 {
@@ -206,9 +219,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			"coverage_incomplete")
 	}
 
-	merged := AgentOutput{}
-	order := make([]string, 0)
-	byFingerprint := make(map[string]AgentFinding)
+	findingIndex := make(map[string]int)
 	for _, pass := range passes {
 		diffPath, err := writePassDiff(ctx, workDir, baseSHA, headSHA, pass.Files)
 		if err != nil {
@@ -253,18 +264,16 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		}
 		for _, finding := range parsed.Findings {
 			fp := Fingerprint(finding, nil)
-			if _, seen := byFingerprint[fp]; !seen {
-				order = append(order, fp)
+			if i, seen := findingIndex[fp]; seen {
+				out.merged.Findings[i] = finding // última pasada gana, posición estable
+			} else {
+				findingIndex[fp] = len(out.merged.Findings)
+				out.merged.Findings = append(out.merged.Findings, finding)
 			}
-			byFingerprint[fp] = finding // last wins across passes
 		}
 	}
 
-	merged.Findings = make([]AgentFinding, 0, len(order))
-	for _, fp := range order {
-		merged.Findings = append(merged.Findings, byFingerprint[fp])
-	}
-	upserts, resolved := Reconcile(open, merged, run.ID, true)
+	upserts, resolved := Reconcile(open, out.merged, run.ID, true)
 	for i := range upserts {
 		upserts[i].PullRequestID = run.PullRequestID
 	}
@@ -374,8 +383,8 @@ func severityRank(severity string) int {
 	}
 }
 
-// failed and inconclusive preserve the coverage, usage and findings already
-// gathered by earlier passes when a later step fails.
+// failed preserves coverage and usage from earlier passes, but never findings:
+// design §8 requires failed runs not to touch them.
 func (out runOutcome) failed(err error, code string) runOutcome {
 	out.status = store.RunFailed
 	out.code = code
@@ -383,10 +392,22 @@ func (out runOutcome) failed(err error, code string) runOutcome {
 	return out
 }
 
+// inconclusive also preserves findings from passes that already completed
+// (design §8): publish new comments but resolve nothing. Reconcile with
+// complete=false builds the upserts without producing resolutions. Failed runs
+// go through failed() and therefore persist no findings.
 func (out runOutcome) inconclusive(err error, code string) runOutcome {
 	out.status = store.RunInconclusive
 	out.code = code
 	out.message = err.Error()
+	if len(out.merged.Findings) > 0 {
+		upserts, _ := Reconcile(out.open, out.merged, out.runID, false)
+		for i := range upserts {
+			upserts[i].PullRequestID = out.prID
+		}
+		out.findings = upserts
+		out.resolved = nil
+	}
 	return out
 }
 

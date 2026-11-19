@@ -4,9 +4,10 @@
 # Emite un evento JSONL de texto con la salida estructurada esperada por
 # ValidateOutput. Variables de entorno opcionales:
 #
-#   RUN_FAKE_AGENT_CALLS   archivo donde se registra una línea por invocación
-#   RUN_FAKE_AGENT_FAIL    si está definida, escribe en stderr y falla
-#   RUN_FAKE_AGENT_OUTPUT  archivo JSON alternativo (por defecto output.json)
+#   RUN_FAKE_AGENT_CALLS          archivo donde se registra una línea por invocación
+#   RUN_FAKE_AGENT_FAIL           si está definida, escribe en stderr y falla
+#   RUN_FAKE_AGENT_FAIL_ON_CALL   número de invocación que debe fallar (1-based)
+#   RUN_FAKE_AGENT_OUTPUT         archivo JSON alternativo (por defecto output.json)
 #
 # Si junto al script hay un invalid.json, la primera invocación emite ese
 # contenido (para probar el reintento por esquema inválido).
@@ -24,6 +25,15 @@ fi
 if [ -n "${RUN_FAKE_AGENT_FAIL:-}" ]; then
     printf 'fake opencode review: provider unavailable\n' >&2
     exit 1
+fi
+
+fail_on="${RUN_FAKE_AGENT_FAIL_ON_CALL:-}"
+if [ -n "$fail_on" ] && [ -n "$calls" ] && [ -f "$calls" ]; then
+    n=$(wc -l <"$calls" | tr -d ' ')
+    if [ "$n" -eq "$fail_on" ]; then
+        printf 'fake opencode review: falló la invocación %s\n' "$n" >&2
+        exit 1
+    fi
 fi
 
 out="${RUN_FAKE_AGENT_OUTPUT:-$script_dir/output.json}"

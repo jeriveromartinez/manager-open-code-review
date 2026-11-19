@@ -499,6 +499,79 @@ func TestRunInconclusiveLeavesFindingsOpen(t *testing.T) {
 	}
 }
 
+func TestRunInconclusivePreservesFindingsFromCompletedPasses(t *testing.T) {
+	f := newRunTestFixture(t)
+	// Dos archivos con MaxFilesPerPass=1 producen dos pasadas: la primera
+	// termina con un hallazgo válido y la segunda falla en el agente.
+	f.setOCR(t, runTestPreview(f.baseSHA, []string{"auth.go", "main.go"}),
+		runTestRules([]string{"auth.go", "main.go"}), false)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).Updates(map[string]any{
+		"max_files_per_pass": 1, "max_passes": 2,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	f.setAgent(t, runTestOutput("auth.go"), false)
+	t.Setenv("RUN_FAKE_AGENT_FAIL_ON_CALL", "2")
+
+	// Un hallazgo abierto preexistente no debe resolverse (complete=false).
+	seed := store.Finding{
+		ID: "seed-finding", PullRequestID: f.pr.ID, Fingerprint: "seed-fp",
+		Path: "main.go", Severity: "minor", Status: store.FindingOpen,
+		FirstSeenRunID: 1, LastSeenRunID: 1,
+	}
+	mustCreateRunTest(t, f.s, f.ctx, &seed)
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunInconclusive, "llm_error")
+	if got := f.agentCalls(t); got != 2 {
+		t.Errorf("agent calls = %d, want 2", got)
+	}
+
+	findings, err := f.s.FindingsForPR(f.ctx, f.pr.ID)
+	if err != nil {
+		t.Fatalf("findings: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("findings = %d, want 2 (uno de la pasada 1 + el sembrado): %+v", len(findings), findings)
+	}
+
+	var fromPass, seeded store.Finding
+	for _, finding := range findings {
+		switch finding.ID {
+		case seed.ID:
+			seeded = finding
+		default:
+			fromPass = finding
+		}
+	}
+	wantFP := Fingerprint(AgentFinding{
+		Path: "auth.go", Category: "security", Title: "Comparación insegura",
+		StartLine: 3, EndLine: 3,
+	}, nil)
+	if fromPass.Fingerprint != wantFP {
+		t.Errorf("nuevo hallazgo fingerprint = %q, want %q", fromPass.Fingerprint, wantFP)
+	}
+	if fromPass.Status != store.FindingOpen || fromPass.Severity != "major" {
+		t.Errorf("nuevo hallazgo = %+v, want open major", fromPass)
+	}
+	if fromPass.PullRequestID != f.pr.ID {
+		t.Errorf("nuevo hallazgo pull_request_id = %d, want %d", fromPass.PullRequestID, f.pr.ID)
+	}
+	if fromPass.LastSeenRunID != f.runID {
+		t.Errorf("nuevo hallazgo last_seen_run_id = %d, want %d", fromPass.LastSeenRunID, f.runID)
+	}
+	if seeded.Status != store.FindingOpen {
+		t.Errorf("hallazgo sembrado status = %q, want %q", seeded.Status, store.FindingOpen)
+	}
+	if seeded.LastSeenRunID != seed.LastSeenRunID {
+		t.Errorf("hallazgo sembrado last_seen_run_id = %d, want %d", seeded.LastSeenRunID, seed.LastSeenRunID)
+	}
+	assertPublishedAndQueued(t, f, f.runID)
+}
+
 func TestRunSupersededDoesNotPublish(t *testing.T) {
 	f := newRunTestFixture(t)
 	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
