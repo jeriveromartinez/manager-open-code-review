@@ -33,7 +33,7 @@ func BuildManifest(publicURL string, webhooksEnabled bool, name string) Manifest
 		RedirectURL:  publicURL + "/setup/callback",
 		CallbackURLs: []string{publicURL + "/auth/callback"},
 		SetupURL:     publicURL + "/setup/installed",
-		Public:       false,
+		Public:       true,
 		DefaultPermissions: map[string]string{
 			"pull_requests": "write",
 			"checks":        "write",

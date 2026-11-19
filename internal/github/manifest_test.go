@@ -56,8 +56,12 @@ func TestBuildManifest(t *testing.T) {
 	if m.SetupURL != publicURL+"/setup/installed" {
 		t.Errorf("SetupURL = %q, want %q", m.SetupURL, publicURL+"/setup/installed")
 	}
-	if m.Public {
-		t.Error("Public = true, want false")
+	if !m.Public {
+		t.Fatalf("Public = false, want true (multi-cuenta requiere App pública)")
+	}
+	raw, _ := json.Marshal(m)
+	if !strings.Contains(string(raw), `"public":true`) {
+		t.Fatalf("manifest JSON no declara public=true: %s", raw)
 	}
 	if !reflect.DeepEqual(m.DefaultPermissions, wantPermissions) {
 		t.Errorf("DefaultPermissions = %v, want %v", m.DefaultPermissions, wantPermissions)
