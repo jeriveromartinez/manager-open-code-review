@@ -405,6 +405,48 @@ func TestSetupInstalledEnqueuesSync(t *testing.T) {
 	}
 }
 
+func TestSetupInstalledRequestPendingApproval(t *testing.T) {
+	f := newAPIFixture(t)
+	rec := f.request(http.MethodGet, "/setup/installed?setup_action=request", nil, nil)
+	assertStatus(t, rec, http.StatusOK)
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "pendiente de aprobación") ||
+		!strings.Contains(body, "administrador de la organización") ||
+		!strings.Contains(body, "aprobada") {
+		t.Errorf("body = %q, want pending approval explanation in Spanish", body)
+	}
+	if !strings.Contains(body, `href="/"`) || !strings.Contains(body, "Volver al panel") {
+		t.Errorf("body = %q, want a link back to the panel", body)
+	}
+	if ids := f.jobs.snapshot(); len(ids) != 0 {
+		t.Errorf("EnqueueSync calls = %v, want none", ids)
+	}
+}
+
+func TestSetupInstalledUpdateEnqueuesSync(t *testing.T) {
+	f := newAPIFixture(t)
+	rec := f.request(http.MethodGet, "/setup/installed?setup_action=update&installation_id=4242", nil, nil)
+	assertStatus(t, rec, http.StatusFound)
+	if got := rec.Header().Get("Location"); got != "/" {
+		t.Errorf("Location = %q, want /", got)
+	}
+	if ids := f.jobs.snapshot(); len(ids) != 1 || ids[0] != 4242 {
+		t.Errorf("EnqueueSync calls = %v, want [4242]", ids)
+	}
+}
+
+func TestSetupInstalledWithoutInstallationID(t *testing.T) {
+	f := newAPIFixture(t)
+	rec := f.request(http.MethodGet, "/setup/installed", nil, nil)
+	assertStatus(t, rec, http.StatusBadRequest)
+	if ids := f.jobs.snapshot(); len(ids) != 0 {
+		t.Errorf("EnqueueSync calls = %v, want none", ids)
+	}
+}
+
 func TestPRsEndpointFiltersByTeam(t *testing.T) {
 	f := newAPIFixture(t)
 	inst := f.installation(1009)

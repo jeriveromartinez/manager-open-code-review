@@ -106,6 +106,21 @@ func (s *server) setupCallback(w http.ResponseWriter, r *http.Request) {
 // setupInstalled schedules the initial sync after the administrator installs
 // the App and GitHub redirects back to the setup URL.
 func (s *server) setupInstalled(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("setup_action") == "request" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<!doctype html>
+<html lang="es">
+<head><meta charset="utf-8"><title>Instalación pendiente</title></head>
+<body>
+<h1>Solicitud de instalación pendiente</h1>
+<p>Tu solicitud de instalación está pendiente de aprobación por un administrador de la organización. La cuenta aparecerá en el panel cuando la solicitud sea aprobada.</p>
+<p><a href="/">Volver al panel</a></p>
+</body>
+</html>`))
+		return
+	}
+
 	id, err := strconv.ParseInt(r.URL.Query().Get("installation_id"), 10, 64)
 	if err != nil || id <= 0 {
 		writeAPIError(w, http.StatusBadRequest, "invalid installation_id")
