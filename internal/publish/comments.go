@@ -75,8 +75,6 @@ func parsePatch(lines map[int]bool, patch string) {
 			continue
 		}
 		switch {
-		case strings.HasPrefix(line, "+++"):
-			// File header, not a diff line.
 		case strings.HasPrefix(line, "+"):
 			if current <= last {
 				lines[current] = true
@@ -185,7 +183,7 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 		}
 	}
 
-	for i, f := range candidates {
+	for _, f := range candidates {
 		end := f.EndLine
 		if end < f.StartLine {
 			end = f.StartLine
@@ -194,14 +192,11 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 		if match == nil {
 			match = findComment(posted, f.Path, f.StartLine)
 		}
+		// Never invent a GitHub id: a fake value would silently suppress
+		// future publications. Coordinates stay unset when the API omits them.
 		commentID, nodeID := int64(0), ""
 		if match != nil {
 			commentID, nodeID = match.ID, match.NodeID
-		}
-		// Even when GitHub omits coordinates, a nonzero id keeps subsequent
-		// publishes from duplicating the comment.
-		if commentID == 0 {
-			commentID = int64(i + 1)
 		}
 		if err := p.w.Store.SetFindingPublished(ctx, f.ID, commentID, nodeID, ""); err != nil {
 			return err

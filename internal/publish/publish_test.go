@@ -71,19 +71,28 @@ type checkPatch struct {
 type fakeGitHub struct {
 	t *testing.T
 
-	mu             sync.Mutex
-	comments       []fakeComment
-	commentPatches map[int64]string
-	reviews        []fakeReview
-	replies        []string
-	checkPatches   []checkPatch
-	gqlQueries     []string
-	nextCommentID  int64
+	mu                 sync.Mutex
+	files              string
+	comments           []fakeComment
+	commentPatches     map[int64]string
+	reviews            []fakeReview
+	replies            []string
+	checkPatches       []checkPatch
+	gqlQueries         []string
+	nextCommentID      int64
+	omitReviewComments bool
+	failResolveOnce    bool
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	t.Helper()
-	return &fakeGitHub{t: t, nextCommentID: 1000}
+	return &fakeGitHub{t: t, files: defaultPRFiles, nextCommentID: 1000}
+}
+
+func (g *fakeGitHub) failNextResolve() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.failResolveOnce = true
 }
 
 func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +154,7 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/7/files":
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, defaultPRFiles)
+		_, _ = io.WriteString(w, g.files)
 
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/pulls/7/reviews":
 		var review fakeReview
@@ -161,6 +170,10 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 			NodeID string `json:"node_id"`
 			Path   string `json:"path"`
 			Line   int    `json:"line"`
+		}
+		if g.omitReviewComments {
+			writeJSON(posted, http.StatusOK)
+			return
 		}
 		if len(g.reviews) > 0 {
 			for i, c := range g.reviews[len(g.reviews)-1].Comments {
@@ -198,6 +211,11 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(body, &in)
 		g.gqlQueries = append(g.gqlQueries, in.Query)
 		if strings.Contains(in.Query, "resolveReviewThread") {
+			if g.failResolveOnce {
+				g.failResolveOnce = false
+				http.Error(w, "resolution temporarily unavailable", http.StatusInternalServerError)
+				return
+			}
 			writeJSON(map[string]any{"data": map[string]any{"resolveReviewThread": map[string]any{
 				"thread": map[string]any{"id": "THREAD_1", "isResolved": true},
 			}}}, http.StatusOK)
@@ -818,5 +836,112 @@ func TestPublishRedactsEveryPublishedText(t *testing.T) {
 	}
 	if !redactionAlert {
 		t.Errorf("no redaction alert emitted: %+v", pub.all())
+	}
+}
+
+func TestPublishKeepsAddedLinesStartingWithDoublePlus(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	gh := newFakeGitHub(t)
+	// A real added source line can start with "++". The file header is before
+	// the first hunk and must not consume the first diff line.
+	gh.files = `[{"filename":"src/a.go","status":"modified",` +
+		`"patch":"@@ -0,0 +1,2 @@\n+++i;\n+otra\n"}]`
+	f := seedFinding(t, st, pr.ID, run.ID, "plus", 2, "major", store.FindingOpen)
+	f.EndLine = 2
+	f.Suggestion = "arreglado"
+	if _, err := st.UpsertFinding(ctx, f); err != nil {
+		t.Fatalf("set suggestion: %v", err)
+	}
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	if len(gh.reviews) != 1 || len(gh.reviews[0].Comments) != 1 {
+		t.Fatalf("reviews = %+v, want one inline comment on added line 2", gh.reviews)
+	}
+	if !strings.Contains(gh.reviews[0].Comments[0].Body, "```suggestion\narreglado\n```") {
+		t.Errorf("inline comment = %q, want a suggestion for the whole added range",
+			gh.reviews[0].Comments[0].Body)
+	}
+}
+
+func TestPublishResolutionRetryPostsReplyOnce(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	f := seedFinding(t, st, pr.ID, run.ID, "resuelta", 2, "major", store.FindingResolved)
+	if err := st.DB.WithContext(ctx).Model(&store.Finding{}).Where("id = ?", f.ID).Updates(map[string]any{
+		"github_comment_id": 123, "github_comment_node_id": "NC_resolve",
+	}).Error; err != nil {
+		t.Fatalf("set finding coordinates: %v", err)
+	}
+	gh := newFakeGitHub(t)
+	gh.failNextResolve()
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err == nil {
+		t.Fatal("first Publish() error = nil, want the injected resolution failure")
+	}
+	gh.mu.Lock()
+	firstReplies := len(gh.replies)
+	gh.mu.Unlock()
+	if firstReplies != 0 {
+		t.Errorf("replies after failed resolution = %d, want 0", firstReplies)
+	}
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("retry Publish() error = %v", err)
+	}
+	gh.mu.Lock()
+	replies := len(gh.replies)
+	gh.mu.Unlock()
+	if replies != 1 {
+		t.Errorf("replies after retry = %d, want exactly 1", replies)
+	}
+	saved, err := st.FindingsForPR(ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("FindingsForPR() error = %v", err)
+	}
+	for _, finding := range saved {
+		if finding.GithubThreadID != "THREAD_1" {
+			t.Errorf("thread id = %q, want THREAD_1", finding.GithubThreadID)
+		}
+	}
+}
+
+func TestPublishLeavesCommentIDUnsetWithoutCoordinates(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "sin-coordenadas", 2, "major", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	gh.omitReviewComments = true
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	reviews := len(gh.reviews)
+	gh.mu.Unlock()
+	if reviews != 1 {
+		t.Fatalf("reviews = %d, want 1", reviews)
+	}
+	saved, err := st.FindingsForPR(ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("FindingsForPR() error = %v", err)
+	}
+	for _, f := range saved {
+		if f.GithubCommentID != 0 || f.GithubCommentNodeID != "" {
+			t.Errorf("finding coordinates = %d/%q, want unset when GitHub returns none",
+				f.GithubCommentID, f.GithubCommentNodeID)
+		}
 	}
 }

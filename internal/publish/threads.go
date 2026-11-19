@@ -51,15 +51,8 @@ func (p *publishContext) publishResolutions(ctx context.Context, findings []stor
 			continue
 		}
 
-		body := p.sanitize(fmt.Sprintf(
-			"Este hallazgo se marca como resuelto tras la revisión #%d.", p.runNumber))
-		replyPath := p.repoPath(fmt.Sprintf("pulls/%d/comments/%d/replies",
-			p.pr.Number, f.GithubCommentID))
-		if err := p.request(ctx, http.MethodPost, replyPath,
-			map[string]string{"body": body}, nil); err != nil {
-			return fmt.Errorf("reply to finding %s: %w", f.ID, err)
-		}
-
+		// Resolve first: if lookup or mutation fails, no reply has been posted
+		// yet and a retry cannot duplicate it.
 		threadID, err := p.lookupThread(ctx, f.GithubCommentNodeID)
 		if err != nil {
 			return err
@@ -75,6 +68,15 @@ func (p *publishContext) publishResolutions(ctx context.Context, findings []stor
 		vars := map[string]any{"threadId": threadID}
 		if err := p.app.GraphQL(ctx, p.inst.ID, resolveThreadMutation, vars, &resolved); err != nil {
 			return fmt.Errorf("resolve review thread %s: %w", threadID, err)
+		}
+
+		body := p.sanitize(fmt.Sprintf(
+			"Este hallazgo se marca como resuelto tras la revisión #%d.", p.runNumber))
+		replyPath := p.repoPath(fmt.Sprintf("pulls/%d/comments/%d/replies",
+			p.pr.Number, f.GithubCommentID))
+		if err := p.request(ctx, http.MethodPost, replyPath,
+			map[string]string{"body": body}, nil); err != nil {
+			return fmt.Errorf("reply to finding %s: %w", f.ID, err)
 		}
 		if err := p.w.Store.SetFindingPublished(ctx, f.ID,
 			f.GithubCommentID, f.GithubCommentNodeID, threadID); err != nil {
