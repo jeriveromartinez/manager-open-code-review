@@ -150,3 +150,18 @@ func TestPRFromGitHub(t *testing.T) {
 		})
 	}
 }
+
+func TestPRFromGitHubFork(t *testing.T) {
+	pr := ghapp.PRFromGitHub(7, &gh.PullRequest{
+		Head: &gh.PullRequestBranch{
+			Repo: &gh.Repository{
+				ID:       gh.Ptr[int64](99),
+				Fork:     gh.Ptr(true),
+				FullName: gh.Ptr("ext/repo"),
+			},
+		},
+	})
+	if !pr.IsFork || pr.HeadRepoFullName != "ext/repo" {
+		t.Fatalf("PRFromGitHub() = %+v, want IsFork=true, HeadRepoFullName=%q", pr, "ext/repo")
+	}
+}

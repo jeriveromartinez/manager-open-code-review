@@ -110,3 +110,36 @@ func TestControlClientRunsSyncJob(t *testing.T) {
 		t.Fatal("sync job did not reach fake GitHub within 5 seconds")
 	}
 }
+
+func TestReviewJobArgs(t *testing.T) {
+	args := jobs.ReviewRunArgs{RunID: 17}
+	if args.Kind() != "review_run" {
+		t.Errorf("Kind() = %q, want review_run", args.Kind())
+	}
+	opts := args.InsertOpts()
+	if opts.Queue != "review" || opts.MaxAttempts != 3 {
+		t.Errorf("InsertOpts() = queue %q attempts %d, want review/3", opts.Queue, opts.MaxAttempts)
+	}
+}
+
+func TestPublishJobArgs(t *testing.T) {
+	args := jobs.PublishReviewArgs{RunID: 23}
+	if args.Kind() != "publish_review" {
+		t.Errorf("Kind() = %q, want publish_review", args.Kind())
+	}
+	opts := args.InsertOpts()
+	if opts.Queue != "publish" || opts.MaxAttempts != 5 {
+		t.Errorf("InsertOpts() = queue %q attempts %d, want publish/5", opts.Queue, opts.MaxAttempts)
+	}
+}
+
+func TestLLMHealthJobArgs(t *testing.T) {
+	args := jobs.LLMHealthArgs{ProfileID: 31}
+	if args.Kind() != "llm_health" {
+		t.Errorf("Kind() = %q, want llm_health", args.Kind())
+	}
+	opts := args.InsertOpts()
+	if opts.Queue != "llm_health" || opts.MaxAttempts != 1 {
+		t.Errorf("InsertOpts() = queue %q attempts %d, want llm_health/1", opts.Queue, opts.MaxAttempts)
+	}
+}

@@ -323,6 +323,51 @@ func TestSyncPullRequestEqualTimestampChangedPayload(t *testing.T) {
 	}
 }
 
+func TestSyncPullRequestPersistsForkFields(t *testing.T) {
+	f := newFixture(t)
+	inst := f.installation(1014)
+	repo := f.repo(6101, inst.ID, "acme/app", nil, true)
+
+	stamp := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	base := store.PullRequest{
+		RepositoryID:    repo.ID,
+		Number:          13,
+		Title:           "same title",
+		HeadSHA:         "same-sha",
+		State:           "open",
+		GitHubUpdatedAt: stamp,
+	}
+
+	first := base
+	first.IsFork = true
+	first.HeadRepoFullName = "ext/repo"
+	created, changed, err := f.s.SyncPullRequest(f.ctx, first)
+	if err != nil {
+		t.Fatalf("first SyncPullRequest() returned error: %v", err)
+	}
+	if !changed {
+		t.Fatal("first SyncPullRequest() changed = false, want true")
+	}
+	if !created.IsFork || created.HeadRepoFullName != "ext/repo" {
+		t.Fatalf("created PR = %+v, want IsFork=true, HeadRepoFullName=ext/repo", created)
+	}
+
+	// Only the fork fields change. The timestamp and every other payload field
+	// stay put, so changed=true here also proves the equality check sees them.
+	second := base
+	_, changed, err = f.s.SyncPullRequest(f.ctx, second)
+	if err != nil {
+		t.Fatalf("second SyncPullRequest() returned error: %v", err)
+	}
+	if !changed {
+		t.Fatal("fork-only change: changed = false, want true")
+	}
+	stored := f.pullRequest(t, created.ID)
+	if stored.IsFork || stored.HeadRepoFullName != "" {
+		t.Fatalf("stored PR = %+v, want IsFork=false, HeadRepoFullName empty", stored)
+	}
+}
+
 func TestDeleteInstallationRemovesPRs(t *testing.T) {
 	f := newFixture(t)
 	inst := f.installation(1004)

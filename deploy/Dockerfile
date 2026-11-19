@@ -16,8 +16,22 @@ RUN rm -rf internal/web/dist
 COPY --from=web /app/web/dist ./internal/web/dist
 RUN CGO_ENABLED=0 go build -trimpath -o /out/qa ./cmd/qa
 
-# 3) Runtime: imagen mínima, sin root. Node, ocr y opencode se añaden en Fase 2.
-FROM debian:bookworm-slim
+# 3) Worker: Node 24 aporta ocr y opencode; git se usa para los checkouts.
+FROM node:24-bookworm-slim AS worker
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm i -g @alibaba-group/open-code-review@1.13.13 opencode-ai@1.19.0 \
+    && useradd --create-home --uid 10001 qa
+COPY --from=build /out/qa /usr/local/bin/qa
+USER qa
+WORKDIR /home/qa
+ENTRYPOINT ["/usr/local/bin/qa"]
+CMD ["worker"]
+
+# 4) App (target por defecto): runtime mínimo sin Node; sólo la app recibe
+#    QA_MASTER_KEY. El worker usa otro target y nunca ve esa variable.
+FROM debian:bookworm-slim AS app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \

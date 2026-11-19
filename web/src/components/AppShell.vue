@@ -30,6 +30,9 @@ async function logout(): Promise<void> {
           <RouterLink to="/" class="nav-link">Panel</RouterLink>
           <RouterLink to="/repos" class="nav-link">Repositorios</RouterLink>
           <RouterLink to="/teams" class="nav-link">Equipos</RouterLink>
+          <RouterLink v-if="session.me?.is_admin" to="/agents" class="nav-link">
+            Agentes LLM
+          </RouterLink>
         </template>
         <slot name="nav" />
       </nav>

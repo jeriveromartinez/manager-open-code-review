@@ -21,6 +21,12 @@ func TestMigrateCreatesTables(t *testing.T) {
 		"repositories",
 		"pull_requests",
 		"audit_logs",
+		"llm_profiles",
+		"qa_policies",
+		"review_runs",
+		"findings",
+		"finding_events",
+		"github_artifacts",
 		"river_job",
 	}
 
