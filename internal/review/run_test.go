@@ -1,0 +1,775 @@
+package review
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
+	"github.com/jeriveromartinez/qa-control-center/internal/events"
+	"github.com/jeriveromartinez/qa-control-center/internal/store"
+	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
+	"gorm.io/datatypes"
+)
+
+// runTestEvents and runTestJobs record what the orchestrator publishes and
+// enqueues after the terminal transaction.
+type runTestEvents struct {
+	mu    sync.Mutex
+	items []events.Event
+}
+
+func (p *runTestEvents) Publish(_ context.Context, ev events.Event) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.items = append(p.items, ev)
+	return nil
+}
+
+func (p *runTestEvents) has(ev events.Event) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, got := range p.items {
+		if got == ev {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *runTestEvents) len() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.items)
+}
+
+type runTestJobs struct {
+	mu      sync.Mutex
+	review  []uint
+	publish []uint
+	health  []uint
+}
+
+func (j *runTestJobs) EnqueueReview(_ context.Context, id uint) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.review = append(j.review, id)
+	return nil
+}
+
+func (j *runTestJobs) EnqueuePublish(_ context.Context, id uint) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.publish = append(j.publish, id)
+	return nil
+}
+
+func (j *runTestJobs) EnqueueLLMHealth(_ context.Context, id uint) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.health = append(j.health, id)
+	return nil
+}
+
+func (j *runTestJobs) published() []uint {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]uint(nil), j.publish...)
+}
+
+type runTestFixture struct {
+	s        *store.Store
+	box      *crypto.Box
+	ctx      context.Context
+	root     string
+	baseSHA  string
+	headSHA  string
+	pr       store.PullRequest
+	runID    uint
+	ocrBin   string
+	agentBin string
+	calls    string
+	events   *runTestEvents
+	jobs     *runTestJobs
+	policy   store.QAPolicy
+}
+
+func writeRunTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// newRunTestFixture crea un repo bare con refs/pull/1/head, la configuración en
+// Postgres y los dobles de ocr/opencode. El nombre del repo es "origin" para que
+// GitBaseURL + "/" + FullName + ".git" apunte al bare local.
+func newRunTestFixture(t *testing.T) *runTestFixture {
+	t.Helper()
+
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	bare := filepath.Join(root, "origin.git")
+	runGit(t, root, "init", "-q", "-b", "main", work)
+	runGit(t, work, "config", "user.email", "test@example.com")
+	runGit(t, work, "config", "user.name", "Test")
+	writeRunTestFile(t, filepath.Join(work, "main.go"), "package main\n")
+	runGit(t, work, "add", "-A")
+	runGit(t, work, "commit", "-qm", "base")
+	baseSHA := runGit(t, work, "rev-parse", "HEAD")
+
+	runGit(t, work, "checkout", "-qb", "feature")
+	writeRunTestFile(t, filepath.Join(work, "auth.go"), "package main\n")
+	runGit(t, work, "add", "-A")
+	runGit(t, work, "commit", "-qm", "feature")
+	headSHA := runGit(t, work, "rev-parse", "HEAD")
+
+	runGit(t, root, "clone", "-q", "--bare", work, bare)
+	runGit(t, bare, "update-ref", "refs/pull/1/head", headSHA)
+
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	box, err := crypto.NewBox(bytes.Repeat([]byte{7}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+	sealedKey, err := box.Seal([]byte("sk-test"))
+	if err != nil {
+		t.Fatalf("seal key: %v", err)
+	}
+	sealedToken, err := box.Seal([]byte("clone-token"))
+	if err != nil {
+		t.Fatalf("seal token: %v", err)
+	}
+
+	team := store.Team{Name: "qa", Slug: "qa"}
+	mustCreateRunTest(t, s, ctx, &team)
+	profile := store.LLMProfile{
+		Name: "reviewer", Provider: "anthropic", Model: "claude-sonnet",
+		APIKeyEnc: sealedKey, Enabled: true, HealthStatus: store.HealthUnknown,
+	}
+	mustCreateRunTest(t, s, ctx, &profile)
+	installation := store.Installation{ID: 77, AccountLogin: "acme", AccountType: "Organization"}
+	mustCreateRunTest(t, s, ctx, &installation)
+	teamID := team.ID
+	repo := store.Repository{
+		ID: 88, InstallationID: 77, FullName: "origin", DefaultBranch: "main",
+		Enabled: true, TeamID: &teamID,
+	}
+	mustCreateRunTest(t, s, ctx, &repo)
+	policy := store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID, BlockingThreshold: "major",
+		ExcludeGlobs:    datatypes.JSON([]byte(`[]`)),
+		MaxFilesPerPass: 2, MaxDiffLinesPerPass: 1000, MaxPasses: 2,
+	}
+	mustCreateRunTest(t, s, ctx, &policy)
+	pr := store.PullRequest{
+		RepositoryID: 88, Number: 1, Title: "PR de prueba",
+		HeadSHA: headSHA, BaseRef: "main", State: "open",
+		QAStatus: store.StatusPending, GitHubUpdatedAt: time.Now(),
+	}
+	mustCreateRunTest(t, s, ctx, &pr)
+	run, err := s.CreateReviewRun(ctx, store.ReviewRun{
+		PullRequestID: pr.ID, ProfileID: profile.ID, HeadSHA: headSHA,
+		BaseSHA: baseSHA, CloneTokenEnc: sealedToken,
+	})
+	if err != nil {
+		t.Fatalf("create review run: %v", err)
+	}
+
+	f := &runTestFixture{
+		s: s, box: box, ctx: ctx, root: root, baseSHA: baseSHA, headSHA: headSHA,
+		pr: pr, runID: run.ID, events: &runTestEvents{}, jobs: &runTestJobs{},
+		policy: policy, calls: filepath.Join(root, "agent-calls.txt"),
+	}
+	f.setOCR(t, runTestPreview(baseSHA, []string{"auth.go", "main.go"}),
+		runTestRules([]string{"auth.go", "main.go"}), false)
+	f.setAgent(t, runTestOutput("auth.go"), false)
+	return f
+}
+
+func mustCreateRunTest(t *testing.T, s *store.Store, ctx context.Context, row any) {
+	t.Helper()
+	if err := s.DB.WithContext(ctx).Create(row).Error; err != nil {
+		t.Fatalf("create %T: %v", row, err)
+	}
+}
+
+func runTestPreview(baseSHA string, paths []string) string {
+	files := make([]string, 0, len(paths))
+	for _, p := range paths {
+		files = append(files, fmt.Sprintf(`{"path":%q,"status":"modified","insertions":3,"deletions":1}`, p))
+	}
+	return fmt.Sprintf(`{"mode":"delegate","merge_base":%q,"reviewable_files":[%s],"excluded_files":[]}`,
+		baseSHA, strings.Join(files, ","))
+}
+
+func runTestRules(paths []string) string {
+	quoted := make([]string, 0, len(paths))
+	for _, p := range paths {
+		quoted = append(quoted, strconv.Quote(p))
+	}
+	return fmt.Sprintf(`{"groups":[{"rule":"revisar cambios","files":[%s]}]}`, strings.Join(quoted, ","))
+}
+
+func runTestOutput(path string) string {
+	return fmt.Sprintf(`{"summary":"Revisión completada","coverage":{"reviewed_files":2,"skipped_files":0},"previous_findings":[],"findings":[{"path":%q,"severity":"major","category":"security","title":"Comparación insegura","body":"usar hash seguro","suggestion":"","confidence":"high","start_line":3,"end_line":3}]}`, path)
+}
+
+func (f *runTestFixture) setOCR(t *testing.T, preview, rules string, fail bool) {
+	t.Helper()
+	dir := filepath.Join(f.root, "ocr")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	failLine := ""
+	if fail {
+		failLine = "echo 'ocr no disponible' >&2\nexit 1\n"
+	}
+	script := "#!/bin/sh\nset -eu\n" + failLine + `
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "${2:-}" in
+    preview) cat "$dir/preview.json" ;;
+    rule) cat "$dir/rules.json" ;;
+    *) echo "subcomando desconocido" >&2; exit 2 ;;
+esac
+`
+	bin := filepath.Join(dir, "ocr.sh")
+	writeRunTestFile(t, bin, script)
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRunTestFile(t, filepath.Join(dir, "preview.json"), preview)
+	writeRunTestFile(t, filepath.Join(dir, "rules.json"), rules)
+	f.ocrBin = bin
+}
+
+func (f *runTestFixture) setAgent(t *testing.T, output string, fail bool) {
+	t.Helper()
+	dir := filepath.Join(f.root, "agent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src, err := os.ReadFile(filepath.Join("testdata", "fakeopencode-review.sh"))
+	if err != nil {
+		t.Fatalf("read fake agent script: %v", err)
+	}
+	bin := filepath.Join(dir, "opencode.sh")
+	writeRunTestFile(t, bin, string(src))
+	if err := os.Chmod(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRunTestFile(t, filepath.Join(dir, "output.json"), output)
+	t.Setenv("RUN_FAKE_AGENT_CALLS", f.calls)
+	f.agentBin = bin
+	if fail {
+		t.Setenv("RUN_FAKE_AGENT_FAIL", "1")
+	}
+}
+
+func (f *runTestFixture) runner() *Runner {
+	return &Runner{
+		Store:  f.s,
+		Box:    f.box,
+		Events: f.events,
+		Jobs:   f.jobs,
+		Cfg: RunnerConfig{
+			WorkspaceDir:  filepath.Join(f.root, "ws"),
+			OCRBin:        f.ocrBin,
+			OpencodeBin:   f.agentBin,
+			GitBaseURL:    "file://" + f.root,
+			FetchDepthMax: 10,
+			Timeout:       30 * time.Second,
+		},
+	}
+}
+
+func (f *runTestFixture) loadRun(t *testing.T) store.ReviewRun {
+	t.Helper()
+	run, err := f.s.ReviewRun(f.ctx, f.runID)
+	if err != nil {
+		t.Fatalf("reload run: %v", err)
+	}
+	return run
+}
+
+func (f *runTestFixture) loadPR(t *testing.T) store.PullRequest {
+	t.Helper()
+	var pr store.PullRequest
+	if err := f.s.DB.WithContext(f.ctx).First(&pr, f.pr.ID).Error; err != nil {
+		t.Fatalf("reload pull request: %v", err)
+	}
+	return pr
+}
+
+func (f *runTestFixture) agentCalls(t *testing.T) int {
+	t.Helper()
+	data, err := os.ReadFile(f.calls)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("read agent calls: %v", err)
+	}
+	return len(strings.Split(strings.TrimSpace(string(data)), "\n"))
+}
+
+func assertRunTerminal(t *testing.T, f *runTestFixture, status, code string) store.ReviewRun {
+	t.Helper()
+	run := f.loadRun(t)
+	if run.Status != status {
+		t.Errorf("run status = %q, want %q (error %q: %q)", run.Status, status, run.ErrorCode, run.ErrorMessage)
+	}
+	if run.ErrorCode != code {
+		t.Errorf("error_code = %q, want %q (message: %q)", run.ErrorCode, code, run.ErrorMessage)
+	}
+	if run.FinishedAt == nil {
+		t.Error("finished_at is nil")
+	}
+	return run
+}
+
+func assertPublishedAndQueued(t *testing.T, f *runTestFixture, wantRunID uint) {
+	t.Helper()
+	want := events.Event{Type: "run.updated", ID: strconv.FormatUint(uint64(wantRunID), 10)}
+	if !f.events.has(want) {
+		t.Errorf("missing event %+v; got %+v", want, f.events.items)
+	}
+	if got := f.jobs.published(); len(got) != 1 || got[0] != wantRunID {
+		t.Errorf("EnqueuePublish calls = %v, want [%d]", got, wantRunID)
+	}
+}
+
+func TestRunErrorClassification(t *testing.T) {
+	ctx := context.Background()
+	out := runOutcome{coverage: []byte(`{"reviewed_files":2,"skipped_files":0}`), usage: []byte(`{}`)}
+
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus string
+		wantCode   string
+	}{
+		{"401 del remote", errors.New("git fetch: exit status 128: fatal: 401 Unauthorized"), store.RunInconclusive, "token_expired"},
+		{"autenticación", errors.New("fatal: Authentication failed for remote"), store.RunInconclusive, "token_expired"},
+		{"red", errors.New("git fetch: EOF"), store.RunFailed, "git_error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyCloneError(ctx, out, tt.err)
+			if got.status != tt.wantStatus || got.code != tt.wantCode {
+				t.Errorf("status/code = %q/%q, want %q/%q", got.status, got.code, tt.wantStatus, tt.wantCode)
+			}
+			if string(got.coverage) != string(out.coverage) {
+				t.Errorf("coverage = %q, want %q", got.coverage, out.coverage)
+			}
+		})
+	}
+
+	deadline, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	defer cancel()
+	if got := classifyAgentError(deadline, out, context.DeadlineExceeded); got.status != store.RunInconclusive || got.code != "timeout" {
+		t.Errorf("deadline classification = %q/%q, want inconclusive/timeout", got.status, got.code)
+	}
+	if got := classifyOCR(ctx, out, errors.New("invalid JSON")); got.code != "ocr_error" {
+		t.Errorf("OCR classification code = %q, want ocr_error", got.code)
+	}
+	if got := classifyAgentError(ctx, out, errors.New("quota")); got.code != "llm_error" {
+		t.Errorf("agent classification code = %q, want llm_error", got.code)
+	}
+	if got := truncateRunMessage(strings.Repeat("x", 2000)); len(got) != maxRunErrorMessage {
+		t.Errorf("truncated message has %d chars, want %d", len(got), maxRunErrorMessage)
+	}
+}
+
+func TestRunBlockingThreshold(t *testing.T) {
+	findings := []store.Finding{
+		{Status: store.FindingOpen, Severity: "minor"},
+		{Status: store.FindingResolved, Severity: "blocker"},
+	}
+	if hasBlockingFinding(findings, "major") {
+		t.Error("minor open finding should not block at major threshold")
+	}
+	findings[0].Severity = "major"
+	if !hasBlockingFinding(findings, "major") {
+		t.Error("major open finding should block at major threshold")
+	}
+	if hasBlockingFinding(findings, "blocker") {
+		t.Error("resolved blocker should never block")
+	}
+}
+
+func TestRunPipelineSucceeds(t *testing.T) {
+	f := newRunTestFixture(t)
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+	if run.Summary == "" {
+		t.Error("summary is empty")
+	}
+	if pr := f.loadPR(t); pr.QAStatus != store.StatusChangesRequested {
+		t.Errorf("qa_status = %q, want %q", pr.QAStatus, store.StatusChangesRequested)
+	}
+
+	findings, err := f.s.FindingsForPR(f.ctx, f.pr.ID)
+	if err != nil {
+		t.Fatalf("findings: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1: %+v", len(findings), findings)
+	}
+	got := findings[0]
+	wantFP := Fingerprint(AgentFinding{
+		Path: "auth.go", Category: "security", Title: "Comparación insegura",
+		StartLine: 3, EndLine: 3,
+	}, nil)
+	if got.Fingerprint != wantFP {
+		t.Errorf("fingerprint = %q, want %q", got.Fingerprint, wantFP)
+	}
+	if got.PullRequestID != f.pr.ID {
+		t.Errorf("finding pull_request_id = %d, want %d", got.PullRequestID, f.pr.ID)
+	}
+	if got.Status != store.FindingOpen || got.Severity != "major" {
+		t.Errorf("finding = %+v, want open major", got)
+	}
+	if got.LastSeenRunID != f.runID {
+		t.Errorf("last_seen_run_id = %d, want %d", got.LastSeenRunID, f.runID)
+	}
+
+	assertPublishedAndQueued(t, f, f.runID)
+
+	workspace := filepath.Join(f.root, "ws", fmt.Sprintf("run-%d", f.runID))
+	if _, err := os.Stat(workspace); !os.IsNotExist(err) {
+		t.Errorf("workspace %q still exists (err=%v)", workspace, err)
+	}
+}
+
+func TestRunInconclusiveWhenOCRMissing(t *testing.T) {
+	f := newRunTestFixture(t)
+	f.ocrBin = "/bin/false"
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunInconclusive, "ocr_error")
+	if pr := f.loadPR(t); pr.QAStatus != store.StatusInconclusive {
+		t.Errorf("qa_status = %q, want %q", pr.QAStatus, store.StatusInconclusive)
+	}
+	assertPublishedAndQueued(t, f, f.runID)
+	if got := f.agentCalls(t); got != 0 {
+		t.Errorf("agent calls = %d, want 0 (OCR failed first)", got)
+	}
+}
+
+func TestRunInconclusiveLeavesFindingsOpen(t *testing.T) {
+	f := newRunTestFixture(t)
+	seed := store.Finding{
+		ID: "seed-finding", PullRequestID: f.pr.ID, Fingerprint: "seed-fp",
+		Path: "main.go", Severity: "minor", Status: store.FindingOpen,
+		FirstSeenRunID: f.runID, LastSeenRunID: f.runID,
+	}
+	mustCreateRunTest(t, f.s, f.ctx, &seed)
+	f.ocrBin = "/bin/false"
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunInconclusive, "ocr_error")
+
+	var got store.Finding
+	if err := f.s.DB.WithContext(f.ctx).Where("id = ?", "seed-finding").Take(&got).Error; err != nil {
+		t.Fatalf("reload seeded finding: %v", err)
+	}
+	if got.Status != store.FindingOpen {
+		t.Errorf("seeded finding status = %q, want %q", got.Status, store.FindingOpen)
+	}
+	if got.LastSeenRunID != seed.LastSeenRunID {
+		t.Errorf("seeded finding last_seen_run_id = %d, want %d", got.LastSeenRunID, seed.LastSeenRunID)
+	}
+}
+
+func TestRunSupersededDoesNotPublish(t *testing.T) {
+	f := newRunTestFixture(t)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", f.runID).Update("status", store.RunSuperseded).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := f.loadRun(t)
+	if run.Status != store.RunSuperseded {
+		t.Errorf("run status = %q, want %q", run.Status, store.RunSuperseded)
+	}
+	if run.FinishedAt != nil {
+		t.Error("superseded run was finished")
+	}
+	if got := f.jobs.published(); len(got) != 0 {
+		t.Errorf("EnqueuePublish calls = %v, want none", got)
+	}
+	if got := f.events.len(); got != 0 {
+		t.Errorf("published %d events, want none", got)
+	}
+	if got := f.agentCalls(t); got != 0 {
+		t.Errorf("agent calls = %d, want 0", got)
+	}
+}
+
+func TestRunRetriesSchemaOnceThenSucceeds(t *testing.T) {
+	f := newRunTestFixture(t)
+	dir := filepath.Dir(f.agentBin)
+	writeRunTestFile(t, filepath.Join(dir, "invalid.json"), `{"summary":""}`)
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+	if got := f.agentCalls(t); got != 2 {
+		t.Errorf("agent calls = %d, want 2 (one retry)", got)
+	}
+}
+
+func TestRunSchemaInvalidTwiceIsInconclusive(t *testing.T) {
+	f := newRunTestFixture(t)
+	dir := filepath.Dir(f.agentBin)
+	invalid := filepath.Join(dir, "always-invalid.json")
+	writeRunTestFile(t, invalid, `{"summary":""}`)
+	t.Setenv("RUN_FAKE_AGENT_OUTPUT", invalid)
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunInconclusive, "schema_invalid")
+	if got := f.agentCalls(t); got != 2 {
+		t.Errorf("agent calls = %d, want 2", got)
+	}
+	assertPublishedAndQueued(t, f, f.runID)
+}
+
+func TestRunAgentFailureIsLLMError(t *testing.T) {
+	f := newRunTestFixture(t)
+	f.setAgent(t, runTestOutput("auth.go"), true)
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunInconclusive, "llm_error")
+	assertPublishedAndQueued(t, f, f.runID)
+}
+
+func TestRunAgentTimeoutIsTimeout(t *testing.T) {
+	f := newRunTestFixture(t)
+	slow := filepath.Join(filepath.Dir(f.agentBin), "slow-opencode.sh")
+	writeRunTestFile(t, slow, "#!/bin/sh\nsleep 5\n")
+	if err := os.Chmod(slow, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.agentBin = slow
+	runner := f.runner()
+	runner.Cfg.Timeout = 100 * time.Millisecond
+
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunInconclusive, "timeout")
+}
+
+func TestRunMissingTokenIsTokenExpired(t *testing.T) {
+	f := newRunTestFixture(t)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", f.runID).Update("clone_token_enc", "").Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunInconclusive, "token_expired")
+	assertPublishedAndQueued(t, f, f.runID)
+}
+
+func TestRunGitFailureIsFailed(t *testing.T) {
+	f := newRunTestFixture(t)
+	runner := f.runner()
+	runner.Cfg.GitBaseURL = "file://" + filepath.Join(f.root, "missing")
+
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunFailed, "git_error")
+	assertPublishedAndQueued(t, f, f.runID)
+}
+
+func TestRunCoverageIncomplete(t *testing.T) {
+	f := newRunTestFixture(t)
+	paths := []string{"a.go", "b.go", "c.go", "d.go", "e.go"}
+	f.setOCR(t, runTestPreview(f.baseSHA, paths), runTestRules(paths), false)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).Updates(map[string]any{
+		"max_files_per_pass": 2, "max_passes": 1,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := assertRunTerminal(t, f, store.RunInconclusive, "coverage_incomplete")
+	var coverage struct {
+		ReviewedFiles int `json:"reviewed_files"`
+		SkippedFiles  int `json:"skipped_files"`
+	}
+	if err := json.Unmarshal(run.Coverage, &coverage); err != nil {
+		t.Fatalf("decode coverage: %v", err)
+	}
+	if coverage.ReviewedFiles != 2 || coverage.SkippedFiles != 3 {
+		t.Errorf("coverage = %+v, want 2 reviewed / 3 skipped", coverage)
+	}
+	if got := f.agentCalls(t); got != 0 {
+		t.Errorf("agent calls = %d, want 0", got)
+	}
+}
+
+func TestRunInvalidConfigIsFailed(t *testing.T) {
+	f := newRunTestFixture(t)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.LLMProfile{}).
+		Where("id = ?", f.policy.LLMProfileID).Update("enabled", false).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunFailed, "config")
+	if pr := f.loadPR(t); pr.QAStatus != store.StatusInconclusive {
+		t.Errorf("qa_status = %q, want %q", pr.QAStatus, store.StatusInconclusive)
+	}
+	assertPublishedAndQueued(t, f, f.runID)
+}
+
+func TestRunSucceededResolvesStaleFindings(t *testing.T) {
+	f := newRunTestFixture(t)
+	seed := store.Finding{
+		ID: "stale-finding", PullRequestID: f.pr.ID, Fingerprint: "stale-fp",
+		Path: "main.go", Severity: "major", Status: store.FindingOpen,
+		FirstSeenRunID: 1, LastSeenRunID: 1,
+	}
+	mustCreateRunTest(t, f.s, f.ctx, &seed)
+	f.setAgent(t, `{"summary":"Sin hallazgos","coverage":{"reviewed_files":2,"skipped_files":0},"previous_findings":[],"findings":[]}`, false)
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+	var got store.Finding
+	if err := f.s.DB.WithContext(f.ctx).Where("id = ?", seed.ID).Take(&got).Error; err != nil {
+		t.Fatalf("reload seeded finding: %v", err)
+	}
+	if got.Status != store.FindingResolved {
+		t.Errorf("seeded finding status = %q, want %q", got.Status, store.FindingResolved)
+	}
+	if got.LastSeenRunID != f.runID {
+		t.Errorf("seeded finding last_seen_run_id = %d, want %d", got.LastSeenRunID, f.runID)
+	}
+	if pr := f.loadPR(t); pr.QAStatus != store.StatusReadyForHuman {
+		t.Errorf("qa_status = %q, want %q", pr.QAStatus, store.StatusReadyForHuman)
+	}
+}
+
+func TestRunDuplicateDeliveryIsNoop(t *testing.T) {
+	f := newRunTestFixture(t)
+	r := f.runner()
+	if err := r.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	if err := r.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	if got := f.jobs.published(); len(got) != 1 {
+		t.Errorf("EnqueuePublish calls = %v, want one", got)
+	}
+	if got := f.events.len(); got != 1 {
+		t.Errorf("events = %d, want one", got)
+	}
+}
+
+func TestRunnerCheckProfileDelegates(t *testing.T) {
+	f := newRunTestFixture(t)
+	r := f.runner()
+	if err := r.CheckProfile(f.ctx, f.policy.LLMProfileID); err != nil {
+		t.Fatalf("CheckProfile() error = %v", err)
+	}
+	var profile store.LLMProfile
+	if err := f.s.DB.WithContext(f.ctx).First(&profile, f.policy.LLMProfileID).Error; err != nil {
+		t.Fatalf("reload profile: %v", err)
+	}
+	if profile.HealthStatus != store.HealthOK {
+		t.Errorf("health_status = %q, want %q", profile.HealthStatus, store.HealthOK)
+	}
+
+	r.Cfg.OpencodeBin = "/bin/false"
+	if err := r.CheckProfile(f.ctx, f.policy.LLMProfileID); err == nil {
+		t.Error("CheckProfile with failing binary returned nil error")
+	}
+	if err := f.s.DB.WithContext(f.ctx).First(&profile, f.policy.LLMProfileID).Error; err != nil {
+		t.Fatalf("reload profile after failure: %v", err)
+	}
+	if profile.HealthStatus != store.HealthError {
+		t.Errorf("health_status = %q, want %q", profile.HealthStatus, store.HealthError)
+	}
+}
+
+func TestRunCompleteCoversAllFiles(t *testing.T) {
+	f := newRunTestFixture(t)
+	paths := []string{"a.go", "b.go", "c.go", "d.go", "e.go"}
+	f.setOCR(t, runTestPreview(f.baseSHA, paths), runTestRules(paths), false)
+	f.setAgent(t, runTestOutput("a.go"), false)
+	f.policy.MaxFilesPerPass = 3
+	f.policy.MaxPasses = 2
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).Updates(map[string]any{
+		"max_files_per_pass": 3, "max_passes": 2,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+
+	var coverage struct {
+		ReviewedFiles int `json:"reviewed_files"`
+		SkippedFiles  int `json:"skipped_files"`
+	}
+	if err := json.Unmarshal(run.Coverage, &coverage); err != nil {
+		t.Fatalf("decode coverage %q: %v", run.Coverage, err)
+	}
+	if coverage.ReviewedFiles != 5 || coverage.SkippedFiles != 0 {
+		t.Errorf("coverage = %+v, want 5 reviewed / 0 skipped", coverage)
+	}
+	if got := f.agentCalls(t); got != 2 {
+		t.Errorf("agent calls = %d, want 2 passes", got)
+	}
+
+	findings, err := f.s.FindingsForPR(f.ctx, f.pr.ID)
+	if err != nil {
+		t.Fatalf("findings: %v", err)
+	}
+	if len(findings) != 1 {
+		t.Errorf("findings = %d, want 1 after merging duplicate passes: %+v", len(findings), findings)
+	}
+	assertPublishedAndQueued(t, f, f.runID)
+}
