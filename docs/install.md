@@ -65,7 +65,11 @@ Los pull requests abiertos aparecen en el Dashboard. La reconciliación periódi
 
 ## Añadir otra cuenta u organización
 
-La GitHub App es pública, por lo que cualquier cuenta personal u organización puede instalarla. Desde una misma instancia puedes gestionar repositorios de varias cuentas:
+La GitHub App es pública, por lo que cualquier cuenta personal u organización puede instalarla.
+
+> **Nota:** si la instancia se creó antes con una App **privada**, un operador debe hacer pública esa App en GitHub o recrearla desde `/setup` antes de que “Añadir cuenta” pueda instalarla en otra cuenta u organización. Recrear la App implica reinstalarla: los IDs de instalación cambian.
+
+Desde una misma instancia puedes gestionar repositorios de varias cuentas:
 
 1. Entra como admin → Repositorios → “Añadir cuenta”.
 2. Instala la App en la otra cuenta u organización.

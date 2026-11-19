@@ -37,13 +37,20 @@ func (p fakeAppProvider) App(context.Context) (*ghapp.App, error) { return p.app
 type recordingJobs struct {
 	mu  sync.Mutex
 	ids []int64
+	err error
 }
 
 func (j *recordingJobs) EnqueueSync(_ context.Context, id int64) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.ids = append(j.ids, id)
-	return nil
+	return j.err
+}
+
+func (j *recordingJobs) fail(err error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.err = err
 }
 
 func (j *recordingJobs) snapshot() []int64 {
@@ -382,6 +389,25 @@ func TestWebhookUnsuspendEnqueuesSync(t *testing.T) {
 	}
 	if got := f.jobs.snapshot(); len(got) != 1 || got[0] != 991 {
 		t.Fatalf("EnqueueSync calls = %v, want [991]", got)
+	}
+}
+
+func TestWebhookUnsuspendEnqueueFailure500(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.jobs.fail(errors.New("queue unavailable"))
+
+	rec := f.deliver("installation", "installation-unsuspended.json")
+	assertStatus(t, rec, http.StatusInternalServerError)
+
+	var in store.Installation
+	if err := f.st.DB.WithContext(f.ctx).Where("id = ?", 991).Take(&in).Error; err != nil {
+		t.Fatalf("read installation: %v", err)
+	}
+	if in.SuspendedAt != nil {
+		t.Fatalf("SuspendedAt = %v, want nil", in.SuspendedAt)
+	}
+	if got := f.jobs.snapshot(); len(got) != 1 || got[0] != 991 {
+		t.Fatalf("EnqueueSync calls = %v, want one attempt for 991", got)
 	}
 }
 

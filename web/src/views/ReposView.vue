@@ -105,6 +105,7 @@ onMounted(() => {
           {{ installation.account_login }}
         </li>
       </ul>
+      <p v-else class="accounts__empty">Todavía no hay cuentas conectadas</p>
     </section>
 
     <p v-if="error" class="empty-state">{{ error }}</p>
@@ -206,6 +207,12 @@ onMounted(() => {
   margin: 0;
   padding-left: var(--space-5);
   color: var(--text);
+}
+
+.accounts__empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 14px;
 }
 
 .table-wrap {

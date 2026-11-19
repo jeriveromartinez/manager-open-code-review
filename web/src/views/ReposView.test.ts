@@ -180,6 +180,22 @@ describe('ReposView', () => {
     wrapper.unmount()
   })
 
+  it('admin sin cuentas conectadas ve un mensaje en la tarjeta de cuentas', async () => {
+    mocks.session.me = admin
+    mocks.api.installations.mockResolvedValue([])
+    mocks.api.setupStatus.mockResolvedValue({
+      configured: true,
+      install_url: 'https://github.com/apps/x/installations/new',
+    })
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(wrapper.find('.accounts').text()).toContain('Todavía no hay cuentas conectadas')
+    expect(wrapper.text()).toContain('Añadir cuenta')
+    wrapper.unmount()
+  })
+
   it('developer no ve la sección de cuentas ni Añadir cuenta, pero ve la columna Cuenta', async () => {
     mocks.session.me = developer
 
