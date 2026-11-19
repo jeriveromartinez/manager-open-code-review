@@ -77,6 +77,25 @@ func (p *recordingPublisher) snapshot() []events.Event {
 	return append([]events.Event(nil), p.events...)
 }
 
+type recordingReviews struct {
+	mu  sync.Mutex
+	ids []uint
+	err error
+}
+
+func (r *recordingReviews) OnPullRequest(_ context.Context, prID uint) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ids = append(r.ids, prID)
+	return r.err
+}
+
+func (r *recordingReviews) snapshot() []uint {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint(nil), r.ids...)
+}
+
 type webhookFixture struct {
 	t       *testing.T
 	ctx     context.Context
@@ -84,6 +103,7 @@ type webhookFixture struct {
 	handler *ghapp.WebhookHandler
 	jobs    *recordingJobs
 	pub     *recordingPublisher
+	reviews *recordingReviews
 }
 
 func newWebhookFixture(t *testing.T) *webhookFixture {
@@ -92,15 +112,20 @@ func newWebhookFixture(t *testing.T) *webhookFixture {
 	st := testutil.NewStore(t)
 	jobs := &recordingJobs{}
 	pub := &recordingPublisher{}
+	reviews := &recordingReviews{}
 	h := &ghapp.WebhookHandler{
 		Store: st,
 		Apps: fakeAppProvider{app: &ghapp.App{
 			Creds: ghapp.AppCredentials{WebhookSecret: webhookTestSecret},
 		}},
-		Events: pub,
-		Jobs:   jobs,
+		Events:  pub,
+		Jobs:    jobs,
+		Reviews: reviews,
 	}
-	return &webhookFixture{t: t, ctx: context.Background(), st: st, handler: h, jobs: jobs, pub: pub}
+	return &webhookFixture{
+		t: t, ctx: context.Background(), st: st,
+		handler: h, jobs: jobs, pub: pub, reviews: reviews,
+	}
 }
 
 func signWebhook(body []byte) string {
@@ -157,6 +182,21 @@ func (f *webhookFixture) seedRepo(enabled bool) {
 	}
 	if err := f.st.UpsertRepository(f.ctx, r); err != nil {
 		f.t.Fatalf("seed repository: %v", err)
+	}
+}
+
+// seedRepoWithTeam mirrors an enabled, team-assigned repository: the normal
+// precondition for a review to be started.
+func (f *webhookFixture) seedRepoWithTeam() {
+	f.t.Helper()
+	f.seedRepo(true)
+	team := store.Team{Name: "QA", Slug: "qa"}
+	if err := f.st.DB.WithContext(f.ctx).Create(&team).Error; err != nil {
+		f.t.Fatalf("seed team: %v", err)
+	}
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.Repository{}).
+		Where("id = ?", 501).Update("team_id", team.ID).Error; err != nil {
+		f.t.Fatalf("assign repository team: %v", err)
 	}
 }
 
@@ -257,6 +297,99 @@ func TestWebhookPROpenedEnabledRepo(t *testing.T) {
 	want := []events.Event{{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)}}
 	if got := f.pub.snapshot(); len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("published events = %v, want %v", got, want)
+	}
+}
+
+func TestWebhookReviewTriggeredForNonForkPR(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+
+	assertStatus(t, f.deliver("pull_request", "pr-opened.json"), http.StatusAccepted)
+
+	pr := f.pullRequest()
+	if pr.IsFork || pr.HeadRepoFullName != "" {
+		t.Fatalf("pull request = %+v, want a non-fork PR", pr)
+	}
+	if got := f.reviews.snapshot(); len(got) != 1 || got[0] != pr.ID {
+		t.Fatalf("OnPullRequest calls = %v, want [%d]", got, pr.ID)
+	}
+	if got := f.pub.snapshot(); len(got) != 1 {
+		t.Fatalf("published events = %v, want the pr.updated event", got)
+	}
+
+	// A redelivery is a no-op sync, so it must not start a second review.
+	assertStatus(t, f.deliver("pull_request", "pr-opened.json"), http.StatusAccepted)
+	if got := f.reviews.snapshot(); len(got) != 1 {
+		t.Fatalf("OnPullRequest calls after redelivery = %v, want one", got)
+	}
+}
+
+func TestWebhookForkPRIsIgnored(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+
+	assertStatus(t, f.deliver("pull_request", "pr-fork-opened.json"), http.StatusAccepted)
+
+	pr := f.pullRequest()
+	if !pr.IsFork || pr.HeadRepoFullName != "ext/backend-api" {
+		t.Fatalf("pull request = %+v, want IsFork=true, HeadRepoFullName=ext/backend-api", pr)
+	}
+	if got := f.reviews.snapshot(); len(got) != 0 {
+		t.Fatalf("OnPullRequest calls for a fork PR = %v, want none", got)
+	}
+	if got := f.pub.snapshot(); len(got) != 0 {
+		t.Fatalf("published events for a fork PR = %v, want none", got)
+	}
+	if got := f.jobs.snapshot(); len(got) != 0 {
+		t.Fatalf("EnqueueSync calls for a fork PR = %v, want none", got)
+	}
+}
+
+func TestWebhookReviewTriggerGate(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+
+	// Drafts are synced but never trigger a review.
+	assertStatus(t, f.deliver("pull_request", "pr-draft.json"), http.StatusAccepted)
+	if got := f.reviews.snapshot(); len(got) != 0 {
+		t.Fatalf("OnPullRequest calls for a draft = %v, want none", got)
+	}
+
+	// Actions outside opened|synchronize|reopened|ready_for_review also sync
+	// without triggering a review.
+	body := []byte(`{"action":"edited","repository":{"id":501},"pull_request":{"number":142,"title":"Edited title","draft":false,"head":{"sha":"bbb222","repo":{"fork":false}},"updated_at":"2026-01-01T12:00:00Z"}}`)
+	assertStatus(t, f.deliverBody("pull_request", body, signWebhook(body)), http.StatusAccepted)
+	if got := f.reviews.snapshot(); len(got) != 0 {
+		t.Fatalf("OnPullRequest calls for edited = %v, want none", got)
+	}
+
+	// ready_for_review is a triggering action.
+	assertStatus(t, f.deliver("pull_request", "pr-ready-for-review.json"), http.StatusAccepted)
+	pr := f.pullRequest()
+	if got := f.reviews.snapshot(); len(got) != 1 || got[0] != pr.ID {
+		t.Fatalf("OnPullRequest calls after ready_for_review = %v, want [%d]", got, pr.ID)
+	}
+}
+
+func TestWebhookReviewStartFailure500(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+	f.reviews.err = errors.New("queue unavailable")
+
+	assertStatus(t, f.deliver("pull_request", "pr-opened.json"), http.StatusInternalServerError)
+	if got := f.reviews.snapshot(); len(got) != 1 {
+		t.Fatalf("OnPullRequest calls = %v, want one attempt", got)
+	}
+}
+
+func TestWebhookReviewsNilSafe(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+	f.handler.Reviews = nil
+
+	assertStatus(t, f.deliver("pull_request", "pr-opened.json"), http.StatusAccepted)
+	if got := f.pub.snapshot(); len(got) != 1 {
+		t.Fatalf("published events = %v, want the pr.updated event", got)
 	}
 }
 

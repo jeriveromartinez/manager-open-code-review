@@ -76,5 +76,7 @@ func PRFromGitHub(repoID int64, p *gh.PullRequest) store.PullRequest {
 		Draft:             p.GetDraft(),
 		State:             state,
 		GitHubUpdatedAt:   p.GetUpdatedAt().Time,
+		IsFork:            p.GetHead().GetRepo().GetFork(),
+		HeadRepoFullName:  p.GetHead().GetRepo().GetFullName(),
 	}
 }

@@ -37,14 +37,23 @@ func VerifySignature(secret, body []byte, header string) bool {
 	return hmac.Equal(got, mac.Sum(nil))
 }
 
+// ReviewStarter is notified when a non-draft, non-fork pull request should be
+// considered for an automated review. Implementations decide whether to enqueue
+// work; the webhook boundary only applies the exclusion rules.
+type ReviewStarter interface {
+	OnPullRequest(ctx context.Context, prID uint) error
+}
+
 // WebhookHandler receives GitHub App deliveries. Store persists the state they
-// describe, Apps supplies the webhook secret, Events notifies browsers and Jobs
-// schedules the initial synchronization of new installations.
+// describe, Apps supplies the webhook secret, Events notifies browsers, Jobs
+// schedules the initial synchronization of new installations and Reviews starts
+// automated reviews (optional).
 type WebhookHandler struct {
-	Store  *store.Store
-	Apps   AppProvider
-	Events events.Publisher
-	Jobs   SyncEnqueuer
+	Store   *store.Store
+	Apps    AppProvider
+	Events  events.Publisher
+	Jobs    SyncEnqueuer
+	Reviews ReviewStarter
 }
 
 // ServeHTTP verifies and dispatches a webhook delivery. Events this phase does
@@ -218,13 +227,35 @@ func (h *WebhookHandler) handlePullRequest(ctx context.Context, w http.ResponseW
 		return
 	}
 	if changed {
-		ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(row.ID), 10)}
-		if err := h.Events.Publish(ctx, ev); err != nil {
-			h.serverError(w)
-			return
+		// Fork pull requests are stored so the UI and later syncs know about
+		// them, but Fase 2 neither notifies browsers nor starts reviews for
+		// them.
+		if !row.IsFork {
+			ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(row.ID), 10)}
+			if err := h.Events.Publish(ctx, ev); err != nil {
+				h.serverError(w)
+				return
+			}
+		}
+		if isReviewTriggerAction(e.GetAction()) && !row.Draft && !row.IsFork && h.Reviews != nil {
+			if err := h.Reviews.OnPullRequest(ctx, row.ID); err != nil {
+				h.serverError(w)
+				return
+			}
 		}
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// isReviewTriggerAction reports which pull request deliveries may start a
+// review. Other actions still sync the PR but never trigger one.
+func isReviewTriggerAction(action string) bool {
+	switch action {
+	case "opened", "synchronize", "reopened", "ready_for_review":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *WebhookHandler) publishRepoUpdated(ctx context.Context, repoID int64) error {

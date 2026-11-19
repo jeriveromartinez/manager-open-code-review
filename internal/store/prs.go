@@ -178,18 +178,20 @@ func syncExisting(tx *gorm.DB, prev *PullRequest, in PullRequest, out *PullReque
 	}
 
 	updates := map[string]any{
-		"title":              in.Title,
-		"author_login":       in.AuthorLogin,
-		"author_association": in.AuthorAssociation,
-		"head_sha":           in.HeadSHA,
-		"base_ref":           in.BaseRef,
-		"head_ref":           in.HeadRef,
-		"html_url":           in.HTMLURL,
-		"draft":              in.Draft,
-		"state":              in.State,
-		"qa_status":          status,
-		"github_updated_at":  in.GitHubUpdatedAt,
-		"updated_at":         time.Now().UTC(),
+		"title":               in.Title,
+		"author_login":        in.AuthorLogin,
+		"author_association":  in.AuthorAssociation,
+		"head_sha":            in.HeadSHA,
+		"base_ref":            in.BaseRef,
+		"head_ref":            in.HeadRef,
+		"html_url":            in.HTMLURL,
+		"draft":               in.Draft,
+		"state":               in.State,
+		"qa_status":           status,
+		"github_updated_at":   in.GitHubUpdatedAt,
+		"is_fork":             in.IsFork,
+		"head_repo_full_name": in.HeadRepoFullName,
+		"updated_at":          time.Now().UTC(),
 	}
 	if err := tx.Model(&PullRequest{}).Where("id = ?", prev.ID).Updates(updates).Error; err != nil {
 		return fmt.Errorf("update pull request %d: %w", prev.ID, err)
@@ -217,7 +219,9 @@ func pullRequestPayloadEqual(prev, in PullRequest, status string) bool {
 		prev.Draft == in.Draft &&
 		prev.State == in.State &&
 		prev.QAStatus == status &&
-		prev.GitHubUpdatedAt.Equal(in.GitHubUpdatedAt)
+		prev.GitHubUpdatedAt.Equal(in.GitHubUpdatedAt) &&
+		prev.IsFork == in.IsFork &&
+		prev.HeadRepoFullName == in.HeadRepoFullName
 }
 
 // CloseMissingPullRequests closes open pull requests of a repository that are
