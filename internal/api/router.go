@@ -83,6 +83,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireAdmin)
 
+				r.Get("/installations", s.installations)
 				r.Patch("/repos/{id}", s.patchRepo)
 				r.Post("/teams", s.createTeam)
 			})

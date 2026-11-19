@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -89,9 +91,10 @@ type repoResponse struct {
 	DefaultBranch  string `json:"default_branch"`
 	Enabled        bool   `json:"enabled"`
 	TeamID         *uint  `json:"team_id"`
+	AccountLogin   string `json:"account_login"`
 }
 
-func repoDTO(r store.Repository) repoResponse {
+func repoDTO(r store.Repository, accountLogin string) repoResponse {
 	return repoResponse{
 		ID:             r.ID,
 		InstallationID: r.InstallationID,
@@ -100,7 +103,15 @@ func repoDTO(r store.Repository) repoResponse {
 		DefaultBranch:  r.DefaultBranch,
 		Enabled:        r.Enabled,
 		TeamID:         r.TeamID,
+		AccountLogin:   accountLogin,
 	}
+}
+
+type installationResponse struct {
+	ID           int64   `json:"id"`
+	AccountLogin string  `json:"account_login"`
+	AccountType  string  `json:"account_type"`
+	SuspendedAt  *string `json:"suspended_at"`
 }
 
 type teamMemberResponse struct {
@@ -216,9 +227,49 @@ func (s *server) repos(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "list repositories")
 		return
 	}
+	installations, err := s.Store.ListInstallations(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "list installations")
+		return
+	}
+	byInstallation := make(map[int64]string, len(installations))
+	for _, in := range installations {
+		byInstallation[in.ID] = in.AccountLogin
+	}
 	result := make([]repoResponse, 0, len(repos))
 	for _, repo := range repos {
-		result = append(result, repoDTO(repo))
+		result = append(result, repoDTO(repo, byInstallation[repo.InstallationID]))
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *server) installations(w http.ResponseWriter, r *http.Request) {
+	installations, err := s.Store.ListInstallations(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "list installations")
+		return
+	}
+	sort.Slice(installations, func(i, j int) bool {
+		li := strings.ToLower(installations[i].AccountLogin)
+		lj := strings.ToLower(installations[j].AccountLogin)
+		if li == lj {
+			return installations[i].AccountLogin < installations[j].AccountLogin
+		}
+		return li < lj
+	})
+	result := make([]installationResponse, 0, len(installations))
+	for _, in := range installations {
+		var suspendedAt *string
+		if in.SuspendedAt != nil {
+			formatted := in.SuspendedAt.UTC().Format(time.RFC3339)
+			suspendedAt = &formatted
+		}
+		result = append(result, installationResponse{
+			ID:           in.ID,
+			AccountLogin: in.AccountLogin,
+			AccountType:  in.AccountType,
+			SuspendedAt:  suspendedAt,
+		})
 	}
 	writeJSON(w, http.StatusOK, result)
 }

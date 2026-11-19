@@ -678,3 +678,104 @@ func TestReadOnlyEndpointsReturnSnakeCase(t *testing.T) {
 		assertKeys(t, body[0], "id", "login", "avatar_url", "is_admin")
 	})
 }
+
+func TestInstallationsAdminOnly(t *testing.T) {
+	f := newAPIFixture(t)
+	admin := f.user("admin", true)
+	dev := f.user("dev", false)
+
+	suspended := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	if err := f.st.UpsertInstallation(f.ctx, store.Installation{ID: 9001, AccountLogin: "Zulu", AccountType: "Organization"}); err != nil {
+		t.Fatalf("seed installation Zulu: %v", err)
+	}
+	if err := f.st.UpsertInstallation(f.ctx, store.Installation{ID: 9002, AccountLogin: "acme", AccountType: "User", SuspendedAt: &suspended}); err != nil {
+		t.Fatalf("seed installation acme: %v", err)
+	}
+
+	rec := f.request(http.MethodGet, "/api/installations", nil, f.session(admin))
+	assertStatus(t, rec, http.StatusOK)
+
+	var body []map[string]any
+	decodeJSON(t, rec, &body)
+	if len(body) != 2 {
+		t.Fatalf("installations = %v, want 2", body)
+	}
+	assertKeys(t, body[0], "id", "account_login", "account_type", "suspended_at")
+	if body[0]["account_login"] != "acme" || body[1]["account_login"] != "Zulu" {
+		t.Fatalf("installation order = %v, want acme, Zulu", []any{body[0]["account_login"], body[1]["account_login"]})
+	}
+	wantSuspended := suspended.Format(time.RFC3339)
+	if body[0]["suspended_at"] != wantSuspended {
+		t.Errorf("acme suspended_at = %v, want %q", body[0]["suspended_at"], wantSuspended)
+	}
+	if body[1]["suspended_at"] != nil {
+		t.Errorf("Zulu suspended_at = %v, want null", body[1]["suspended_at"])
+	}
+
+	rec = f.request(http.MethodGet, "/api/installations", nil, f.session(dev))
+	assertStatus(t, rec, http.StatusForbidden)
+}
+
+func TestReposIncludeAccountLogin(t *testing.T) {
+	f := newAPIFixture(t)
+	admin := f.user("admin", true)
+	if err := f.st.UpsertInstallation(f.ctx, store.Installation{ID: 9101, AccountLogin: "acme", AccountType: "Organization"}); err != nil {
+		t.Fatalf("seed installation acme: %v", err)
+	}
+	if err := f.st.UpsertInstallation(f.ctx, store.Installation{ID: 9102, AccountLogin: "personal", AccountType: "User"}); err != nil {
+		t.Fatalf("seed installation personal: %v", err)
+	}
+	f.repo(9201, 9101, "acme/app", nil, true)
+	f.repo(9202, 9102, "personal/tool", nil, true)
+
+	rec := f.request(http.MethodGet, "/api/repos", nil, f.session(admin))
+	assertStatus(t, rec, http.StatusOK)
+
+	var body []map[string]any
+	decodeJSON(t, rec, &body)
+	if len(body) != 2 {
+		t.Fatalf("repos = %v, want 2", body)
+	}
+	byName := map[string]string{}
+	for _, r := range body {
+		assertKeys(t, r, "account_login")
+		name, _ := r["full_name"].(string)
+		login, _ := r["account_login"].(string)
+		byName[name] = login
+	}
+	if byName["acme/app"] != "acme" {
+		t.Errorf("acme/app account_login = %q, want acme", byName["acme/app"])
+	}
+	if byName["personal/tool"] != "personal" {
+		t.Errorf("personal/tool account_login = %q, want personal", byName["personal/tool"])
+	}
+}
+
+func TestReposAccountLoginTeamScoped(t *testing.T) {
+	f := newAPIFixture(t)
+	dev := f.user("dev", false)
+	team1 := f.team("T1")
+	team2 := f.team("T2")
+	f.member(team1.ID, dev.ID, "developer")
+	if err := f.st.UpsertInstallation(f.ctx, store.Installation{ID: 9301, AccountLogin: "acme", AccountType: "Organization"}); err != nil {
+		t.Fatalf("seed installation acme: %v", err)
+	}
+	if err := f.st.UpsertInstallation(f.ctx, store.Installation{ID: 9302, AccountLogin: "other", AccountType: "Organization"}); err != nil {
+		t.Fatalf("seed installation other: %v", err)
+	}
+	f.repo(9401, 9301, "acme/visible", &team1.ID, true)
+	f.repo(9402, 9302, "other/hidden", &team2.ID, true)
+
+	rec := f.request(http.MethodGet, "/api/repos", nil, f.session(dev))
+	assertStatus(t, rec, http.StatusOK)
+
+	var body []map[string]any
+	decodeJSON(t, rec, &body)
+	if len(body) != 1 {
+		t.Fatalf("repos = %v, want 1", body)
+	}
+	assertKeys(t, body[0], "account_login")
+	if body[0]["full_name"] != "acme/visible" || body[0]["account_login"] != "acme" {
+		t.Errorf("visible repo = %v, want acme/visible with account_login acme", body[0])
+	}
+}
