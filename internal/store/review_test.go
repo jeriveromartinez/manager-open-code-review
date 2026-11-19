@@ -93,6 +93,63 @@ func TestArtifactPartialUniqueIndexes(t *testing.T) {
 	insert(store.ArtifactCheck, "sha-a", "4")
 }
 
+func TestCascadeDeletePullRequestRemovesReviewRows(t *testing.T) {
+	f := newFixture(t)
+	db := f.s.DB.WithContext(f.ctx)
+
+	installationID := f.nextID()
+	f.installation(installationID)
+	f.repo(installationID, installationID, "acme/app", nil, true)
+	pr := f.openPR(installationID, 17, store.StatusPending, false)
+
+	run := store.ReviewRun{
+		PullRequestID: pr.ID, HeadSHA: pr.HeadSHA, Status: store.RunQueued, Attempt: 1,
+	}
+	if err := db.Create(&run).Error; err != nil {
+		t.Fatalf("create review run: %v", err)
+	}
+	finding := store.Finding{
+		ID: "cascade-1", PullRequestID: pr.ID, Fingerprint: "fp",
+		Status: store.FindingOpen, FirstSeenRunID: run.ID, LastSeenRunID: run.ID,
+	}
+	if err := db.Create(&finding).Error; err != nil {
+		t.Fatalf("create finding: %v", err)
+	}
+	event := store.FindingEvent{FindingID: finding.ID, ReviewRunID: run.ID, Kind: "created"}
+	if err := db.Create(&event).Error; err != nil {
+		t.Fatalf("create finding event: %v", err)
+	}
+	artifact := store.GitHubArtifact{
+		PullRequestID: pr.ID, Kind: store.ArtifactSummary, HeadSHA: pr.HeadSHA,
+	}
+	if err := db.Create(&artifact).Error; err != nil {
+		t.Fatalf("create github artifact: %v", err)
+	}
+
+	for _, table := range []string{"review_runs", "findings", "finding_events", "github_artifacts"} {
+		requireCount(t, db, table, 1)
+	}
+
+	if err := db.Delete(&store.PullRequest{}, pr.ID).Error; err != nil {
+		t.Fatalf("delete pull request %d: %v", pr.ID, err)
+	}
+	for _, table := range []string{"review_runs", "findings", "finding_events", "github_artifacts"} {
+		requireCount(t, db, table, 0)
+	}
+}
+
+func requireCount(t *testing.T, db *gorm.DB, table string, want int64) {
+	t.Helper()
+
+	var got int64
+	if err := db.Table(table).Count(&got).Error; err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	if got != want {
+		t.Errorf("%s rows = %d, want %d", table, got, want)
+	}
+}
+
 // requireUniqueViolation runs a statement expected to fail on a named unique
 // index. A silent logger keeps the expected database error out of test output.
 func requireUniqueViolation(t *testing.T, db *gorm.DB, label, constraint, query string, args ...any) {

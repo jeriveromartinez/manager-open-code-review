@@ -60,7 +60,7 @@ CREATE UNIQUE INDEX idx_review_runs_active ON review_runs (pull_request_id)
 
 CREATE TABLE findings (
     id text PRIMARY KEY,
-    pull_request_id bigint NOT NULL,
+    pull_request_id bigint NOT NULL REFERENCES pull_requests (id) ON DELETE CASCADE,
     fingerprint text NOT NULL DEFAULT '',
     path text NOT NULL DEFAULT '',
     start_line integer NOT NULL DEFAULT 0,
@@ -85,7 +85,7 @@ CREATE INDEX idx_findings_pull_request_id ON findings (pull_request_id);
 
 CREATE TABLE finding_events (
     id bigserial PRIMARY KEY,
-    finding_id text NOT NULL,
+    finding_id text NOT NULL REFERENCES findings (id) ON DELETE CASCADE,
     review_run_id bigint NOT NULL DEFAULT 0,
     kind text NOT NULL DEFAULT '',
     actor text NOT NULL DEFAULT '',
@@ -97,7 +97,7 @@ CREATE INDEX idx_finding_events_review_run_id ON finding_events (review_run_id);
 
 CREATE TABLE github_artifacts (
     id bigserial PRIMARY KEY,
-    pull_request_id bigint NOT NULL,
+    pull_request_id bigint NOT NULL REFERENCES pull_requests (id) ON DELETE CASCADE,
     kind text NOT NULL DEFAULT '',
     head_sha text NOT NULL DEFAULT '',
     external_id text NOT NULL DEFAULT '',
