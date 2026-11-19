@@ -16,6 +16,7 @@ import (
 
 	ghapp "github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/jobs"
+	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/syncer"
 	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
 )
@@ -91,6 +92,10 @@ func TestControlClientRunsSyncJob(t *testing.T) {
 			t.Errorf("Stop() error = %v", err)
 		}
 	}()
+
+	if err := s.UpsertInstallation(ctx, store.Installation{ID: 7, AccountLogin: "acme", AccountType: "Organization"}); err != nil {
+		t.Fatalf("UpsertInstallation(7): %v", err)
+	}
 
 	if err := jobs.NewEnqueuer(c).EnqueueSync(ctx, 7); err != nil {
 		t.Fatalf("EnqueueSync(7) error = %v", err)
