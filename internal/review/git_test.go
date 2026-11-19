@@ -1,0 +1,182 @@
+package review
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// runGit ejecuta git en dir y devuelve stdout recortado; falla el test si git falla.
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// newBareRepo crea un repo bare local con main, feature (hija de main) y orphan
+// (historia no relacionada). Devuelve la ruta del bare y los SHA de las puntas.
+func newBareRepo(t *testing.T) (bare, mainSHA, featureSHA, orphanSHA string) {
+	t.Helper()
+
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	bare = filepath.Join(root, "bare.git")
+
+	runGit(t, root, "init", "-q", "-b", "main", work)
+	runGit(t, work, "config", "user.email", "test@example.com")
+	runGit(t, work, "config", "user.name", "Test")
+
+	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, work, "add", "file.txt")
+	runGit(t, work, "commit", "-qm", "base")
+	mainSHA = runGit(t, work, "rev-parse", "HEAD")
+
+	runGit(t, work, "checkout", "-qb", "feature")
+	if err := os.WriteFile(filepath.Join(work, "file.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, work, "add", "file.txt")
+	runGit(t, work, "commit", "-qm", "feature")
+	featureSHA = runGit(t, work, "rev-parse", "HEAD")
+
+	// orphan no comparte historia con main: el merge-base nunca existe.
+	runGit(t, work, "checkout", "-q", "--orphan", "orphan")
+	if err := os.Remove(filepath.Join(work, "file.txt")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "orphan.txt"), []byte("orphan\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, work, "add", "-A")
+	runGit(t, work, "commit", "-qm", "orphan")
+	orphanSHA = runGit(t, work, "rev-parse", "HEAD")
+
+	runGit(t, root, "clone", "-q", "--bare", work, bare)
+	return bare, mainSHA, featureSHA, orphanSHA
+}
+
+func TestCloneFindsMergeBase(t *testing.T) {
+	bare, mainSHA, featureSHA, _ := newBareRepo(t)
+	dir := filepath.Join(t.TempDir(), "checkout")
+
+	mergeBase, err := Clone(context.Background(), dir, "file://"+bare, "main", "refs/heads/feature", 20)
+	if err != nil {
+		t.Fatalf("Clone() error = %v", err)
+	}
+	if mergeBase != mainSHA {
+		t.Errorf("mergeBase = %q, want main SHA %q", mergeBase, mainSHA)
+	}
+
+	head := runGit(t, dir, "rev-parse", "HEAD")
+	if head != featureSHA {
+		t.Errorf("HEAD = %q, want feature SHA %q", head, featureSHA)
+	}
+
+	// el checkout debe quedar detachado y sin el remote efímero.
+	cmd := exec.Command("git", "symbolic-ref", "-q", "HEAD")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Errorf("HEAD should be detached, got branch %q", strings.TrimSpace(string(out)))
+	}
+	if remotes := runGit(t, dir, "remote"); remotes != "" {
+		t.Errorf("remotes = %q, want none", remotes)
+	}
+}
+
+func TestCloneURLInjectsTokenOnlyForHTTP(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		repo    string
+		token   string
+		want    string
+	}{
+		{
+			name:    "https",
+			baseURL: "https://github.com",
+			repo:    "o/r",
+			token:   "t",
+			want:    "https://x-access-token:t@github.com/o/r.git",
+		},
+		{
+			name:    "http",
+			baseURL: "http://git.example.com",
+			repo:    "o/r",
+			token:   "t",
+			want:    "http://x-access-token:t@git.example.com/o/r.git",
+		},
+		{
+			name:    "https con path base y barra final",
+			baseURL: "https://git.example.com/scm/",
+			repo:    "o/r.git",
+			token:   "t",
+			want:    "https://x-access-token:t@git.example.com/scm/o/r.git",
+		},
+		{
+			name:    "file sin token",
+			baseURL: "file:///tmp/x",
+			repo:    "o/r",
+			token:   "t",
+			want:    "file:///tmp/x",
+		},
+		{
+			name:    "ssh sin token",
+			baseURL: "ssh://git@github.com/o/r",
+			repo:    "o/r",
+			token:   "t",
+			want:    "ssh://git@github.com/o/r",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cloneURL(tt.baseURL, tt.repo, tt.token); got != tt.want {
+				t.Errorf("cloneURL(%q, %q, %q) = %q, want %q", tt.baseURL, tt.repo, tt.token, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCloneHonorsCanceledContext(t *testing.T) {
+	bare, _, _, _ := newBareRepo(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	dir := filepath.Join(t.TempDir(), "canceled")
+	if _, err := Clone(ctx, dir, "file://"+bare, "main", "refs/heads/feature", 20); err == nil {
+		t.Error("Clone() con contexto cancelado: esperaba error")
+	}
+}
+
+func TestCloneDepthCapFails(t *testing.T) {
+	bare, _, _, orphanSHA := newBareRepo(t)
+
+	t.Run("ref inexistente", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "missing")
+		if _, err := Clone(context.Background(), dir, "file://"+bare, "main", "refs/heads/nope", 4); err == nil {
+			t.Error("Clone() con head inexistente: esperaba error")
+		}
+	})
+
+	t.Run("sin merge-base agota la profundidad", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "orphan")
+		_, err := Clone(context.Background(), dir, "file://"+bare, "main", "refs/heads/orphan", 4)
+		if err == nil {
+			t.Fatalf("Clone() con head sin historia común (%s): esperaba error", orphanSHA)
+		}
+		if !strings.Contains(err.Error(), "merge-base") {
+			t.Errorf("error = %q, want que mencione merge-base", err)
+		}
+	})
+}
