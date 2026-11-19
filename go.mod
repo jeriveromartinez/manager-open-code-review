@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
+	github.com/go-chi/chi/v5 v5.5.0
 	github.com/google/go-github/v93 v93.0.0
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/pressly/goose/v3 v3.30.1
