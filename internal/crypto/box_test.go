@@ -129,6 +129,15 @@ func TestTampered(t *testing.T) {
 	}
 }
 
+func TestWorkerKeyCannotOpenAppConfig(t *testing.T) {
+	master, _ := crypto.NewBox(bytes.Repeat([]byte{1}, 32))
+	worker, _ := crypto.NewBox(bytes.Repeat([]byte{2}, 32))
+	sealed, _ := master.Seal([]byte("pem"))
+	if _, err := worker.Open(sealed); err == nil {
+		t.Fatal("worker key decrypted an app_config secret")
+	}
+}
+
 func TestKeyLength(t *testing.T) {
 	tests := []struct {
 		name string

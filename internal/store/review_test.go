@@ -3,8 +3,10 @@ package store_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/datatypes"
@@ -308,5 +310,245 @@ func TestPhase2Constants(t *testing.T) {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+func TestLLMProfileCRUD(t *testing.T) {
+	f := newFixture(t)
+
+	baseURL := "https://llm.example.com/v1"
+	variant := "latest"
+	zeta, err := f.s.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "zeta", Provider: "anthropic", Model: "claude-sonnet",
+		Variant: &variant, Mode: "api_key", APIKeyEnc: "sealed-worker-key",
+		BaseURL: &baseURL, Concurrency: 2, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile(zeta): %v", err)
+	}
+	if zeta.ID == 0 {
+		t.Fatal("CreateLLMProfile returned ID 0")
+	}
+	if zeta.HealthStatus != store.HealthUnknown {
+		t.Errorf("new profile health = %q, want %q", zeta.HealthStatus, store.HealthUnknown)
+	}
+
+	if _, err := f.s.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "alpha", Provider: "openai", Model: "gpt-test",
+		APIKeyEnc: "sealed-other-key", Concurrency: 1, Enabled: true,
+	}); err != nil {
+		t.Fatalf("CreateLLMProfile(alpha): %v", err)
+	}
+
+	got, err := f.s.LLMProfile(f.ctx, zeta.ID)
+	if err != nil {
+		t.Fatalf("LLMProfile(%d): %v", zeta.ID, err)
+	}
+	if got.Name != "zeta" || got.Provider != "anthropic" || got.Model != "claude-sonnet" {
+		t.Errorf("LLMProfile() identity mismatch: %+v", got)
+	}
+	if got.APIKeyEnc != "sealed-worker-key" {
+		t.Errorf("APIKeyEnc = %q, want the stored ciphertext unchanged", got.APIKeyEnc)
+	}
+	if got.BaseURL == nil || *got.BaseURL != baseURL {
+		t.Errorf("BaseURL = %v, want %q", got.BaseURL, baseURL)
+	}
+	if got.Variant == nil || *got.Variant != variant {
+		t.Errorf("Variant = %v, want %q", got.Variant, variant)
+	}
+	if got.Concurrency != 2 || !got.Enabled {
+		t.Errorf("Concurrency/Enabled = %d/%v, want 2/true", got.Concurrency, got.Enabled)
+	}
+
+	profiles, err := f.s.ListLLMProfiles(f.ctx)
+	if err != nil {
+		t.Fatalf("ListLLMProfiles: %v", err)
+	}
+	if len(profiles) != 2 {
+		t.Fatalf("ListLLMProfiles returned %d profiles, want 2", len(profiles))
+	}
+	// Created zeta first: sorted output proves ListLLMProfiles orders by name.
+	if profiles[0].Name != "alpha" || profiles[1].Name != "zeta" {
+		t.Errorf("ListLLMProfiles order = %q, %q; want alpha, zeta", profiles[0].Name, profiles[1].Name)
+	}
+
+	got.Name = "zeta-renamed"
+	got.Concurrency = 5
+	if err := f.s.UpdateLLMProfile(f.ctx, got); err != nil {
+		t.Fatalf("UpdateLLMProfile: %v", err)
+	}
+	updated, err := f.s.LLMProfile(f.ctx, zeta.ID)
+	if err != nil {
+		t.Fatalf("LLMProfile(%d) after update: %v", zeta.ID, err)
+	}
+	if updated.Name != "zeta-renamed" || updated.Concurrency != 5 {
+		t.Errorf("after update name/concurrency = %q/%d, want zeta-renamed/5", updated.Name, updated.Concurrency)
+	}
+	if updated.APIKeyEnc != "sealed-worker-key" {
+		t.Errorf("after update APIKeyEnc = %q, want ciphertext preserved", updated.APIKeyEnc)
+	}
+	if updated.HealthStatus != store.HealthUnknown {
+		t.Errorf("after update health = %q, want it left at %q", updated.HealthStatus, store.HealthUnknown)
+	}
+
+	if err := f.s.DeleteLLMProfile(f.ctx, zeta.ID); err != nil {
+		t.Fatalf("DeleteLLMProfile(%d): %v", zeta.ID, err)
+	}
+	// GORM logs a miss as an error; keep the expected miss out of test output.
+	quiet := &store.Store{
+		DB:   f.s.DB.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}),
+		Pool: f.s.Pool,
+	}
+	if _, err := quiet.LLMProfile(f.ctx, zeta.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("LLMProfile(deleted) error = %v, want ErrNotFound", err)
+	}
+	profiles, err = f.s.ListLLMProfiles(f.ctx)
+	if err != nil {
+		t.Fatalf("ListLLMProfiles after delete: %v", err)
+	}
+	if len(profiles) != 1 || profiles[0].Name != "alpha" {
+		t.Errorf("ListLLMProfiles after delete = %+v, want only alpha", profiles)
+	}
+}
+
+func TestDeleteProfileInUse(t *testing.T) {
+	f := newFixture(t)
+
+	profile, err := f.s.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "used", APIKeyEnc: "sealed", Concurrency: 1, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+	team := f.team("qa")
+	policy := store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID}
+	if err := f.s.DB.WithContext(f.ctx).Create(&policy).Error; err != nil {
+		t.Fatalf("create qa policy: %v", err)
+	}
+
+	if err := f.s.DeleteLLMProfile(f.ctx, profile.ID); !errors.Is(err, store.ErrProfileInUse) {
+		t.Fatalf("DeleteLLMProfile(in use) error = %v, want ErrProfileInUse", err)
+	}
+	if _, err := f.s.LLMProfile(f.ctx, profile.ID); err != nil {
+		t.Errorf("profile disappeared after refused delete: %v", err)
+	}
+}
+
+func TestSetLLMHealth(t *testing.T) {
+	f := newFixture(t)
+
+	profile, err := f.s.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "health", APIKeyEnc: "sealed", Concurrency: 1, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+
+	if err := f.s.SetLLMHealth(f.ctx, profile.ID, store.HealthError, "timeout contacting provider"); err != nil {
+		t.Fatalf("SetLLMHealth: %v", err)
+	}
+	got, err := f.s.LLMProfile(f.ctx, profile.ID)
+	if err != nil {
+		t.Fatalf("LLMProfile(%d): %v", profile.ID, err)
+	}
+	if got.HealthStatus != store.HealthError || got.HealthError != "timeout contacting provider" {
+		t.Errorf("health = %q/%q, want error/timeout contacting provider", got.HealthStatus, got.HealthError)
+	}
+	if got.HealthCheckedAt == nil || time.Since(*got.HealthCheckedAt) > time.Minute {
+		t.Errorf("HealthCheckedAt = %v, want a recent timestamp", got.HealthCheckedAt)
+	}
+
+	if err := f.s.SetLLMHealth(f.ctx, 999999, store.HealthOK, ""); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("SetLLMHealth(unknown) error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestLockProfileSerializes(t *testing.T) {
+	f := newFixture(t)
+
+	profile, err := f.s.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "locked", APIKeyEnc: "sealed", Concurrency: 1, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+
+	firstHeld := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstUnlocked := make(chan struct{})
+	secondAcquired := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	secondDone := make(chan struct{})
+	errCh := make(chan error, 2)
+
+	go func() {
+		unlock, err := f.s.LockProfile(f.ctx, profile.ID)
+		if err != nil {
+			errCh <- fmt.Errorf("first LockProfile: %w", err)
+			close(firstHeld)
+			return
+		}
+		close(firstHeld)
+		<-releaseFirst
+		unlock()
+		// unlock must be idempotent: a second call must not release the
+		// session lock now held by another caller.
+		unlock()
+		close(firstUnlocked)
+	}()
+
+	select {
+	case <-firstHeld:
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("first LockProfile did not acquire")
+	}
+
+	go func() {
+		defer close(secondDone)
+		unlock, err := f.s.LockProfile(f.ctx, profile.ID)
+		if err != nil {
+			errCh <- fmt.Errorf("second LockProfile: %w", err)
+			return
+		}
+		close(secondAcquired)
+		<-releaseSecond
+		unlock()
+	}()
+
+	select {
+	case <-secondAcquired:
+		t.Fatal("second LockProfile acquired while the first caller held the lock")
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(150 * time.Millisecond):
+		// Expected: the second caller is blocked on the advisory lock.
+	}
+
+	close(releaseFirst)
+	select {
+	case <-firstUnlocked:
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("first unlock did not finish")
+	}
+
+	select {
+	case <-secondAcquired:
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("second LockProfile did not acquire after unlock")
+	}
+
+	close(releaseSecond)
+	select {
+	case <-secondDone:
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("second lock did not finish")
 	}
 }
