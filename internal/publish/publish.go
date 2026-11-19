@@ -178,7 +178,9 @@ func (w *Worker) loadPublishContext(ctx context.Context, runID uint) (*publishCo
 	}
 
 	// API keys and clone tokens are only needed as redaction inputs. They are
-	// decrypted in memory and never stored in an error or an event.
+	// decrypted in memory and never stored in an error or an event. A finished
+	// run has already discarded its clone token by design, so this entry is
+	// empty for new runs and only covers runs completed before that cleanup.
 	secrets := make([]string, 0, 2)
 	profileID := run.ProfileID
 	if profileID == 0 && policy.LLMProfileID != 0 {

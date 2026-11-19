@@ -106,31 +106,49 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	if err := r.Store.CompleteReviewRun(ctx, runID, outcome.status, outcome.code,
 		truncateRunMessage(outcome.message), outcome.summary, outcome.coverage,
 		outcome.usage, outcome.findings, outcome.resolved); err != nil {
+		if errors.Is(err, store.ErrRunNotActive) {
+			// A new head superseded this run while it was executing. The
+			// trigger already cancelled its check; persisting or publishing
+			// stale results would overwrite the state of the current run.
+			return nil
+		}
 		return fmt.Errorf("complete review run %d: %w", runID, err)
 	}
 
-	prStatus := store.StatusInconclusive
-	if outcome.status == store.RunSucceeded {
-		prStatus = store.StatusReadyForHuman
-		open, err := r.Store.OpenFindingsForPR(ctx, run.PullRequestID)
-		if err != nil {
-			return fmt.Errorf("list open findings of pull request %d: %w", run.PullRequestID, err)
+	if outcome.status != store.RunSuperseded {
+		prStatus := store.StatusInconclusive
+		if outcome.status == store.RunSucceeded {
+			prStatus = store.StatusReadyForHuman
+			open, err := r.Store.OpenFindingsForPR(ctx, run.PullRequestID)
+			if err != nil {
+				return fmt.Errorf("list open findings of pull request %d: %w", run.PullRequestID, err)
+			}
+			if hasBlockingFinding(open, cfg.Policy.BlockingThreshold) {
+				prStatus = store.StatusChangesRequested
+			}
 		}
-		if hasBlockingFinding(open, cfg.Policy.BlockingThreshold) {
-			prStatus = store.StatusChangesRequested
+		if err := r.Store.SetPRStatus(ctx, run.PullRequestID, prStatus); err != nil {
+			return fmt.Errorf("set QA status of pull request %d: %w", run.PullRequestID, err)
 		}
-	}
-	if err := r.Store.SetPRStatus(ctx, run.PullRequestID, prStatus); err != nil {
-		return fmt.Errorf("set QA status of pull request %d: %w", run.PullRequestID, err)
 	}
 
 	// The terminal transaction is committed, so a notification failure must
 	// not prevent the publish job from being enqueued (or vice versa).
 	var notifyErr error
 	if r.Events != nil {
-		ev := events.Event{Type: "run.updated", ID: strconv.FormatUint(uint64(runID), 10)}
-		if err := r.Events.Publish(ctx, ev); err != nil && notifyErr == nil {
-			notifyErr = fmt.Errorf("publish run.updated for run %d: %w", runID, err)
+		notifications := []events.Event{
+			{Type: "run.updated", ID: strconv.FormatUint(uint64(runID), 10)},
+		}
+		if outcome.status != store.RunSuperseded {
+			notifications = append(notifications, events.Event{
+				Type: "pr.updated",
+				ID:   strconv.FormatUint(uint64(run.PullRequestID), 10),
+			})
+		}
+		for _, ev := range notifications {
+			if err := r.Events.Publish(ctx, ev); err != nil && notifyErr == nil {
+				notifyErr = fmt.Errorf("publish %s for run %d: %w", ev.Type, runID, err)
+			}
 		}
 	}
 	if r.Jobs != nil {
@@ -182,6 +200,12 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	headSHA, err := git(ctx, workDir, "rev-parse", "--no-pager", "rev-parse", "HEAD")
 	if err != nil {
 		return out.failed(fmt.Errorf("resolver HEAD del checkout: %w", err), "git_error")
+	}
+	if run.HeadSHA != "" && !strings.EqualFold(headSHA, run.HeadSHA) {
+		// refs/pull/<n>/head is a moving ref: a push can land between the
+		// trigger and the clone. Reviewing that code and publishing it under
+		// run.HeadSHA would approve a SHA that was never reviewed.
+		return out.superseded(fmt.Errorf("la ref del PR avanzó de %s a %s antes del checkout", run.HeadSHA, headSHA), "head_moved")
 	}
 
 	ocr := &OCR{Bin: r.Cfg.OCRBin, RepoDir: workDir}
@@ -389,6 +413,18 @@ func (out runOutcome) failed(err error, code string) runOutcome {
 	out.status = store.RunFailed
 	out.code = code
 	out.message = err.Error()
+	return out
+}
+
+// superseded discards the work when the PR ref moved away from the SHA the run
+// was created for. Nothing is published and no finding is resolved; the publish
+// worker only cancels the check run.
+func (out runOutcome) superseded(err error, code string) runOutcome {
+	out.status = store.RunSuperseded
+	out.code = code
+	out.message = err.Error()
+	out.findings = nil
+	out.resolved = nil
 	return out
 }
 

@@ -1011,6 +1011,78 @@ func TestRunLifecycle(t *testing.T) {
 	requireCount(t, db.Table("findings").Where("pull_request_id = ?", rollbackPR.ID), "findings", 0)
 }
 
+func TestCompleteReviewRunRequiresRunningAndClearsToken(t *testing.T) {
+	f := newFixture(t)
+
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 1, store.StatusPending, false)
+
+	run, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: pr.ID, HeadSHA: pr.HeadSHA, CloneTokenEnc: "sealed-token",
+	})
+	if err != nil {
+		t.Fatalf("CreateReviewRun: %v", err)
+	}
+	if _, ok, err := f.s.ClaimReviewRun(f.ctx, run.ID); err != nil || !ok {
+		t.Fatalf("ClaimReviewRun: ok = %v, err = %v", ok, err)
+	}
+	finding := store.Finding{
+		ID: "finding-clear", PullRequestID: pr.ID, Fingerprint: "fp-clear",
+		Path: "main.go", Severity: "major", Status: store.FindingOpen,
+		FirstSeenRunID: run.ID, LastSeenRunID: run.ID,
+	}
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunSucceeded, "", "",
+		"ok", nil, nil, []store.Finding{finding}, nil); err != nil {
+		t.Fatalf("CompleteReviewRun: %v", err)
+	}
+	stored, err := f.s.ReviewRun(f.ctx, run.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun: %v", err)
+	}
+	if stored.CloneTokenEnc != "" {
+		t.Errorf("clone token after completion = %q, want empty", stored.CloneTokenEnc)
+	}
+
+	// A run superseded while executing cannot be completed: no findings and no
+	// resolutions may be persisted for it.
+	supersededPR := f.openPR(repo.ID, 2, store.StatusPending, false)
+	supersededRun, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: supersededPR.ID, HeadSHA: supersededPR.HeadSHA, CloneTokenEnc: "sealed-token",
+	})
+	if err != nil {
+		t.Fatalf("CreateReviewRun(superseded): %v", err)
+	}
+	if _, ok, err := f.s.ClaimReviewRun(f.ctx, supersededRun.ID); err != nil || !ok {
+		t.Fatalf("ClaimReviewRun(superseded): ok = %v, err = %v", ok, err)
+	}
+	if err := f.s.SupersedeActiveRuns(f.ctx, supersededPR.ID); err != nil {
+		t.Fatalf("SupersedeActiveRuns: %v", err)
+	}
+	stale := store.Finding{
+		ID: "finding-stale", PullRequestID: supersededPR.ID, Fingerprint: "fp-stale",
+		Path: "main.go", Severity: "major", Status: store.FindingOpen,
+		FirstSeenRunID: supersededRun.ID, LastSeenRunID: supersededRun.ID,
+	}
+	err = f.s.CompleteReviewRun(f.ctx, supersededRun.ID, store.RunSucceeded, "", "",
+		"stale", nil, nil, []store.Finding{stale}, []string{"finding-stale"})
+	if !errors.Is(err, store.ErrRunNotActive) {
+		t.Fatalf("CompleteReviewRun(superseded) error = %v, want ErrRunNotActive", err)
+	}
+	stored, err = f.s.ReviewRun(f.ctx, supersededRun.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun(superseded): %v", err)
+	}
+	if stored.Status != store.RunSuperseded {
+		t.Errorf("superseded run status = %q, want superseded", stored.Status)
+	}
+	if stored.CloneTokenEnc != "" {
+		t.Errorf("superseded run kept clone token %q", stored.CloneTokenEnc)
+	}
+	requireCount(t, f.s.DB.Where("pull_request_id = ?", supersededPR.ID), "findings", 0)
+}
+
 func TestRunLifecycleLookups(t *testing.T) {
 	f := newFixture(t)
 

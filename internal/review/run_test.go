@@ -600,6 +600,28 @@ func TestRunSupersededDoesNotPublish(t *testing.T) {
 	}
 }
 
+func TestRunHeadMovedBeforeCheckoutIsSuperseded(t *testing.T) {
+	f := newRunTestFixture(t)
+
+	work := filepath.Join(f.root, "work")
+	writeRunTestFile(t, filepath.Join(work, "later.go"), "package main\n")
+	runGit(t, work, "add", "-A")
+	runGit(t, work, "commit", "-qm", "later")
+	runGit(t, work, "push", "-q", filepath.Join(f.root, "origin.git"), "HEAD:refs/pull/1/head")
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSuperseded, "head_moved")
+	if got := f.agentCalls(t); got != 0 {
+		t.Errorf("agent calls = %d, want 0", got)
+	}
+	assertPublishedAndQueued(t, f, f.runID)
+	if pr := f.loadPR(t); pr.QAStatus != store.StatusPending {
+		t.Errorf("qa_status = %q, want unchanged %q", pr.QAStatus, store.StatusPending)
+	}
+}
+
 func TestRunRetriesSchemaOnceThenSucceeds(t *testing.T) {
 	f := newRunTestFixture(t)
 	dir := filepath.Dir(f.agentBin)
@@ -773,8 +795,12 @@ func TestRunDuplicateDeliveryIsNoop(t *testing.T) {
 	if got := f.jobs.published(); len(got) != 1 {
 		t.Errorf("EnqueuePublish calls = %v, want one", got)
 	}
-	if got := f.events.len(); got != 1 {
-		t.Errorf("events = %d, want one", got)
+	if got := f.events.len(); got != 2 {
+		t.Errorf("events = %d, want run.updated and pr.updated", got)
+	}
+	wantPR := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
+	if !f.events.has(wantPR) {
+		t.Errorf("missing event %+v; got %+v", wantPR, f.events.items)
 	}
 }
 

@@ -21,6 +21,9 @@ var (
 	// ErrProfileInUse is returned when deleting an LLM profile still referenced
 	// by a team's QA policy.
 	ErrProfileInUse = errors.New("llm profile in use")
+	// ErrRunNotActive is returned when a run is completed after it stopped being
+	// the running run (for example because a new head superseded it).
+	ErrRunNotActive = errors.New("review run is no longer active")
 )
 
 // Defaults applied by SaveQAPolicy when an administrator leaves a field at its
@@ -431,12 +434,14 @@ func (s *Store) RunForSHA(ctx context.Context, prID uint, headSHA string) (Revie
 
 // SupersedeActiveRuns cancels queued and running runs of a pull request so a
 // new head can be queued. Terminal runs are left untouched for the audit trail.
+// The clone token is cleared because a superseded run never publishes.
 func (s *Store) SupersedeActiveRuns(ctx context.Context, prID uint) error {
 	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
 		Where("pull_request_id = ? AND status IN ?", prID, []string{RunQueued, RunRunning}).
 		Updates(map[string]any{
-			"status":     RunSuperseded,
-			"updated_at": time.Now().UTC(),
+			"status":          RunSuperseded,
+			"clone_token_enc": "",
+			"updated_at":      time.Now().UTC(),
 		})
 	if res.Error != nil {
 		return fmt.Errorf("supersede runs of pull request %d: %w", prID, res.Error)
@@ -447,12 +452,14 @@ func (s *Store) SupersedeActiveRuns(ctx context.Context, prID uint) error {
 // SupersedeOtherActiveRuns cancels queued and running runs of a pull request
 // whose head SHA differs from headSHA. The run currently being (re)enqueued is
 // left untouched, so a trigger can never discard its own freshly created run.
+// Superseded runs lose their clone token: they will never publish.
 func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, headSHA string) error {
 	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
 		Where("pull_request_id = ? AND head_sha <> ? AND status IN ?", prID, headSHA, []string{RunQueued, RunRunning}).
 		Updates(map[string]any{
-			"status":     RunSuperseded,
-			"updated_at": time.Now().UTC(),
+			"status":          RunSuperseded,
+			"clone_token_enc": "",
+			"updated_at":      time.Now().UTC(),
 		})
 	if res.Error != nil {
 		return fmt.Errorf("supersede other runs of pull request %d: %w", prID, res.Error)
@@ -460,11 +467,40 @@ func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, headSHA
 	return nil
 }
 
-// CompleteReviewRun stores a run's outcome in a single transaction: findings
-// are upserted, resolved findings are marked, and only then is the run row
-// finished. Any error rolls the whole set back.
+// CompleteReviewRun stores a run's outcome in a single transaction: the run is
+// finished only when it is still running, findings are upserted, resolved
+// findings are marked, and the clone token is discarded. Any error rolls the
+// whole set back. A run superseded while executing returns ErrRunNotActive and
+// persists nothing, so stale results can never be published.
 func (s *Store) CompleteReviewRun(ctx context.Context, id uint, status, errCode, errMsg, summary string, coverage, usage []byte, findings []Finding, resolved []string) error {
 	return s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if len(coverage) == 0 {
+			coverage = []byte(`{}`)
+		}
+		if len(usage) == 0 {
+			usage = []byte(`{}`)
+		}
+		now := time.Now().UTC()
+		res := tx.Model(&ReviewRun{}).
+			Where("id = ? AND status = ?", id, RunRunning).
+			Updates(map[string]any{
+				"status":          status,
+				"error_code":      errCode,
+				"error_message":   errMsg,
+				"summary":         summary,
+				"coverage":        datatypes.JSON(coverage),
+				"usage":           datatypes.JSON(usage),
+				"clone_token_enc": "",
+				"finished_at":     now,
+				"updated_at":      now,
+			})
+		if res.Error != nil {
+			return fmt.Errorf("complete review run %d: %w", id, res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("complete review run %d: %w", id, ErrRunNotActive)
+		}
+
 		for _, f := range findings {
 			if _, err := upsertFinding(tx, f); err != nil {
 				return err
@@ -474,30 +510,6 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, status, errCode,
 			if err := updateFindingStatus(tx, findingID, FindingResolved, id); err != nil {
 				return err
 			}
-		}
-
-		if len(coverage) == 0 {
-			coverage = []byte(`{}`)
-		}
-		if len(usage) == 0 {
-			usage = []byte(`{}`)
-		}
-		now := time.Now().UTC()
-		res := tx.Model(&ReviewRun{}).Where("id = ?", id).Updates(map[string]any{
-			"status":        status,
-			"error_code":    errCode,
-			"error_message": errMsg,
-			"summary":       summary,
-			"coverage":      datatypes.JSON(coverage),
-			"usage":         datatypes.JSON(usage),
-			"finished_at":   now,
-			"updated_at":    now,
-		})
-		if res.Error != nil {
-			return fmt.Errorf("complete review run %d: %w", id, res.Error)
-		}
-		if res.RowsAffected == 0 {
-			return fmt.Errorf("complete review run %d: %w", id, ErrNotFound)
 		}
 		return nil
 	})
