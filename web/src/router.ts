@@ -2,7 +2,9 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { api, setUnauthorizedHandler } from './api'
 import DashboardView from './views/DashboardView.vue'
 import LoginView from './views/LoginView.vue'
+import ReposView from './views/ReposView.vue'
 import SetupView from './views/SetupView.vue'
+import TeamsView from './views/TeamsView.vue'
 
 let configured: boolean | null = null
 
@@ -28,6 +30,8 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'dashboard', component: DashboardView },
+    { path: '/repos', name: 'repos', component: ReposView },
+    { path: '/teams', name: 'teams', component: TeamsView },
     { path: '/login', name: 'login', component: LoginView, meta: { layout: 'bare' } },
     { path: '/setup', name: 'setup', component: SetupView, meta: { layout: 'bare' } },
     { path: '/:pathMatch(.*)*', redirect: '/' },

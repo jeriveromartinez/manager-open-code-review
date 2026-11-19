@@ -26,6 +26,11 @@ async function logout(): Promise<void> {
       </RouterLink>
 
       <nav class="topbar__nav" aria-label="Principal">
+        <template v-if="session.me">
+          <RouterLink to="/" class="nav-link">Panel</RouterLink>
+          <RouterLink to="/repos" class="nav-link">Repositorios</RouterLink>
+          <RouterLink to="/teams" class="nav-link">Equipos</RouterLink>
+        </template>
         <slot name="nav" />
       </nav>
 
@@ -49,3 +54,25 @@ async function logout(): Promise<void> {
     </main>
   </div>
 </template>
+
+<style scoped>
+.nav-link {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 550;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.nav-link:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.nav-link.router-link-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+</style>
