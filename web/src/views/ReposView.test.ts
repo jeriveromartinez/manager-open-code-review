@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
     repos: vi.fn(),
     teams: vi.fn(),
     patchRepo: vi.fn(),
+    installations: vi.fn(),
+    setupStatus: vi.fn(),
   },
   session: {
     me: null as Me | null,
@@ -20,7 +22,7 @@ vi.mock('../stores/session', () => ({
   useSessionStore: () => mocks.session,
 }))
 
-const repos: Repository[] = [
+const repos = [
   {
     id: 10,
     installation_id: 1,
@@ -29,6 +31,7 @@ const repos: Repository[] = [
     default_branch: 'main',
     enabled: false,
     team_id: null,
+    account_login: 'acme',
   },
   {
     id: 20,
@@ -38,8 +41,9 @@ const repos: Repository[] = [
     default_branch: 'main',
     enabled: true,
     team_id: 1,
+    account_login: 'personal',
   },
-]
+] as Repository[]
 
 const teams: Team[] = [
   { id: 1, name: 'T1', slug: 't1', members: [] },
@@ -76,6 +80,8 @@ describe('ReposView', () => {
     mocks.api.repos.mockResolvedValue(repos.map((repo) => ({ ...repo })))
     mocks.api.teams.mockResolvedValue(teams.map((team) => ({ ...team })))
     mocks.api.patchRepo.mockResolvedValue(undefined)
+    mocks.api.installations.mockResolvedValue([])
+    mocks.api.setupStatus.mockResolvedValue({ configured: true, install_url: '' })
     mocks.session.load.mockResolvedValue(null)
   })
 
@@ -148,6 +154,44 @@ describe('ReposView', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('No se pudieron cargar los repositorios')
+    wrapper.unmount()
+  })
+
+  it('admin ve cuentas conectadas y el botón Añadir cuenta', async () => {
+    mocks.session.me = admin
+    mocks.api.installations.mockResolvedValue([
+      { id: 1, account_login: 'acme', account_type: 'Organization', suspended_at: null },
+      { id: 2, account_login: 'personal', account_type: 'User', suspended_at: null },
+    ])
+    mocks.api.setupStatus.mockResolvedValue({
+      configured: true,
+      install_url: 'https://github.com/apps/x/installations/new',
+    })
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Cuentas conectadas')
+    expect(wrapper.text()).toContain('acme')
+    expect(wrapper.text()).toContain('personal')
+    const link = wrapper.get('a[href="https://github.com/apps/x/installations/new"]')
+    expect(link.text()).toContain('Añadir cuenta')
+    expect(link.attributes('target')).toBe('_blank')
+    wrapper.unmount()
+  })
+
+  it('developer no ve la sección de cuentas ni Añadir cuenta, pero ve la columna Cuenta', async () => {
+    mocks.session.me = developer
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(mocks.api.installations).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('Cuentas conectadas')
+    expect(wrapper.text()).not.toContain('Añadir cuenta')
+    expect(wrapper.text()).toContain('Cuenta')
+    expect(wrapper.text()).toContain('acme')
+    expect(wrapper.text()).toContain('personal')
     wrapper.unmount()
   })
 })

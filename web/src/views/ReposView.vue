@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { api, type Repository, type Team } from '../api'
+import { api, type Installation, type Repository, type SetupStatus, type Team } from '../api'
 import { useSessionStore } from '../stores/session'
 
 const session = useSessionStore()
 
 const repos = ref<Repository[]>([])
 const teams = ref<Team[]>([])
+const installations = ref<Installation[]>([])
+const setupStatus = ref<SetupStatus | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 
@@ -22,9 +24,23 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
+    await session.load()
     const [repoList, teamList] = await Promise.all([api.repos(), api.teams()])
     repos.value = repoList
     teams.value = teamList
+
+    if (canEdit.value) {
+      const [installationsResult, setupResult] = await Promise.allSettled([
+        api.installations(),
+        api.setupStatus(),
+      ])
+      installations.value =
+        installationsResult.status === 'fulfilled' ? installationsResult.value : []
+      setupStatus.value = setupResult.status === 'fulfilled' ? setupResult.value : null
+    } else {
+      installations.value = []
+      setupStatus.value = null
+    }
   } catch {
     error.value = 'No se pudieron cargar los repositorios'
   } finally {
@@ -58,7 +74,6 @@ async function setTeam(repo: Repository, event: Event): Promise<void> {
 }
 
 onMounted(() => {
-  void session.load()
   void load()
 })
 </script>
@@ -72,6 +87,26 @@ onMounted(() => {
       </div>
     </header>
 
+    <section v-if="canEdit" class="accounts" aria-label="Cuentas conectadas">
+      <div class="accounts__header">
+        <h2 class="accounts__title">Cuentas conectadas</h2>
+        <a
+          v-if="setupStatus?.install_url"
+          class="accounts__add"
+          :href="setupStatus.install_url"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Añadir cuenta
+        </a>
+      </div>
+      <ul v-if="installations.length > 0" class="accounts__list">
+        <li v-for="installation in installations" :key="installation.id" class="accounts__item">
+          {{ installation.account_login }}
+        </li>
+      </ul>
+    </section>
+
     <p v-if="error" class="empty-state">{{ error }}</p>
     <p v-else-if="!loading && repos.length === 0" class="empty-state">
       No hay repositorios disponibles
@@ -81,6 +116,7 @@ onMounted(() => {
         <thead>
           <tr>
             <th scope="col">Repositorio</th>
+            <th scope="col">Cuenta</th>
             <th scope="col">Visibilidad</th>
             <th scope="col">Revisión automática</th>
             <th scope="col">Equipo</th>
@@ -89,6 +125,7 @@ onMounted(() => {
         <tbody>
           <tr v-for="repo in repos" :key="repo.id" :data-repo-row="repo.id">
             <td class="repo-table__name">{{ repo.full_name }}</td>
+            <td>{{ repo.account_login }}</td>
             <td>{{ repo.private ? 'Privado' : 'Público' }}</td>
             <td>
               <label class="switch">
@@ -130,6 +167,45 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
+}
+
+.accounts {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-4);
+}
+
+.accounts__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.accounts__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.accounts__add {
+  color: var(--accent, #0969da);
+  font-size: 14px;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.accounts__add:hover {
+  text-decoration: underline;
+}
+
+.accounts__list {
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--text);
 }
 
 .table-wrap {

@@ -51,6 +51,14 @@ export type Repository = {
   default_branch: string
   enabled: boolean
   team_id: number | null
+  account_login: string
+}
+
+export type Installation = {
+  id: number
+  account_login: string
+  account_type: string
+  suspended_at: string | null
 }
 
 export type TeamMember = {
@@ -166,6 +174,7 @@ export const api = {
   removeMember: (teamId: number, userId: number) =>
     request<void>(`/api/teams/${teamId}/members/${userId}`, { method: 'DELETE' }),
   users: () => request<User[]>('/api/users'),
+  installations: () => request<Installation[]>('/api/installations'),
   setupStatus: () => request<SetupStatus>('/api/setup/status'),
   setupManifest: (body: SetupManifestRequest) =>
     request<SetupManifest>('/api/setup/manifest', { method: 'POST', body }),
