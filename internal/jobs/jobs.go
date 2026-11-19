@@ -1,5 +1,6 @@
-// Package jobs wires the River queue used for synchronization and reviews:
-// one job per installation, a periodic reconciliation, and the review pipeline.
+// Package jobs wires the River queues. This file owns the control process:
+// one job per installation, periodic reconciliation and publication of
+// finished reviews. Review execution lives in review.go.
 package jobs
 
 import (
@@ -14,6 +15,7 @@ import (
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/github"
+	"github.com/jeriveromartinez/qa-control-center/internal/publish"
 	"github.com/jeriveromartinez/qa-control-center/internal/syncer"
 )
 
@@ -24,8 +26,7 @@ const (
 	llmHealthQueue = "llm_health"
 
 	pendingBatchSize = 50
-	reviewWorkers    = 2
-	healthWorkers    = 1
+	publishWorkers   = 2
 )
 
 // SyncInstallationArgs asks the syncer to reconcile a single installation.
@@ -68,8 +69,7 @@ func (ReviewRunArgs) InsertOpts() river.InsertOpts {
 }
 
 // PublishReviewArgs publishes the artefacts of a finished review run. Its
-// worker is registered in a later phase; the queue and args exist now so the
-// runner can already enqueue the job.
+// worker is registered by the control client, which owns publication.
 type PublishReviewArgs struct {
 	RunID uint `json:"run_id"`
 }
@@ -105,23 +105,12 @@ type ReviewTrigger interface {
 	EnqueuePending(ctx context.Context, limit int) (int, error)
 }
 
-// ReviewRunner executes one queued review run.
-type ReviewRunner interface {
-	Run(ctx context.Context, runID uint) error
-}
-
-// HealthChecker verifies an LLM profile for the llm_health queue.
-type HealthChecker interface {
-	Check(ctx context.Context, profileID uint) error
-}
-
-// ControlDeps are optional review dependencies of the control client. Leaving
-// them zero keeps the old sync-only client, which existing callers use.
+// ControlDeps are optional dependencies of the control client. The review and
+// health workers belong to the review process; the control process only
+// enqueues their jobs and runs publication itself.
 type ControlDeps struct {
-	Trigger           ReviewTrigger
-	Runner            ReviewRunner
-	Checker           HealthChecker
-	ReviewConcurrency int
+	Trigger   ReviewTrigger
+	Publisher *publish.Worker
 }
 
 type reconcileWorker struct {
@@ -150,22 +139,13 @@ func (w *reconcileWorker) Work(ctx context.Context, _ *river.Job[ReconcileArgs])
 	return nil
 }
 
-type reviewRunWorker struct {
-	river.WorkerDefaults[ReviewRunArgs]
-	runner ReviewRunner
+type publishReviewWorker struct {
+	river.WorkerDefaults[PublishReviewArgs]
+	publisher *publish.Worker
 }
 
-func (w *reviewRunWorker) Work(ctx context.Context, job *river.Job[ReviewRunArgs]) error {
-	return w.runner.Run(ctx, job.Args.RunID)
-}
-
-type llmHealthWorker struct {
-	river.WorkerDefaults[LLMHealthArgs]
-	checker HealthChecker
-}
-
-func (w *llmHealthWorker) Work(ctx context.Context, job *river.Job[LLMHealthArgs]) error {
-	return w.checker.Check(ctx, job.Args.ProfileID)
+func (w *publishReviewWorker) Work(ctx context.Context, job *river.Job[PublishReviewArgs]) error {
+	return w.publisher.Publish(ctx, job.Args.RunID)
 }
 
 // Enqueuer schedules installation syncs. It has the same method as
@@ -221,9 +201,8 @@ var (
 )
 
 // NewControlClient registers the sync workers, the periodic reconciliation and
-// (when supplied) the review and health workers. The caller is responsible for
-// starting and stopping the returned client. The publish queue is registered in
-// a later phase, when its worker is implemented.
+// (when supplied) the publish worker. The caller is responsible for starting
+// and stopping the returned client.
 func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, interval time.Duration, deps ...ControlDeps) (*river.Client[pgx.Tx], error) {
 	var d ControlDeps
 	if len(deps) > 0 {
@@ -236,17 +215,9 @@ func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, interval time.Durati
 	queues := map[string]river.QueueConfig{
 		controlQueue: {MaxWorkers: 4},
 	}
-	if d.Runner != nil {
-		river.AddWorker[ReviewRunArgs](workers, &reviewRunWorker{runner: d.Runner})
-		workersCount := reviewWorkers
-		if d.ReviewConcurrency > 0 {
-			workersCount = d.ReviewConcurrency
-		}
-		queues[reviewQueue] = river.QueueConfig{MaxWorkers: workersCount}
-	}
-	if d.Checker != nil {
-		river.AddWorker[LLMHealthArgs](workers, &llmHealthWorker{checker: d.Checker})
-		queues[llmHealthQueue] = river.QueueConfig{MaxWorkers: healthWorkers}
+	if d.Publisher != nil {
+		river.AddWorker[PublishReviewArgs](workers, &publishReviewWorker{publisher: d.Publisher})
+		queues[publishQueue] = river.QueueConfig{MaxWorkers: publishWorkers}
 	}
 
 	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
