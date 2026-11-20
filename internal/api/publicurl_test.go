@@ -36,3 +36,21 @@ func TestRequestPublicURL(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestPublicURLEdgeCases(t *testing.T) {
+	t.Run("empty host", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Host = ""
+		if got := (&server{}).requestPublicURL(r); got != "" {
+			t.Errorf("requestPublicURL = %q, want an empty string", got)
+		}
+	})
+	t.Run("comma separated forwarded host", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "http://app:8080/", nil)
+		r.Host = "app:8080"
+		r.Header.Set("X-Forwarded-Host", "qa.example.com, proxy.internal")
+		if got := (&server{}).requestPublicURL(r); got != "http://qa.example.com" {
+			t.Errorf("requestPublicURL = %q, want http://qa.example.com", got)
+		}
+	})
+}

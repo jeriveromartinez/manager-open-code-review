@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/config"
 )
@@ -79,5 +80,121 @@ func TestSettingsPutPersistsAndRejectsBadValues(t *testing.T) {
 	decodeJSON(t, rec, &apiErr)
 	if !strings.Contains(apiErr["error"], "review_timeout") {
 		t.Errorf("error = %q, want the offending key", apiErr["error"])
+	}
+
+	rec = f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{"review_timeout": "  30m  "},
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	stored, err = f.st.Settings(f.ctx)
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if stored["review_timeout"] != "30m0s" {
+		t.Errorf("stored review_timeout = %q, want the normalised 30m0s", stored["review_timeout"])
+	}
+}
+
+// A save must be validated against the configuration the next start will load,
+// not against s.Cfg, which stays at its startup value until the announced
+// restart. Validating against s.Cfg lets these two saves persist a pair that
+// aborts the next boot.
+func TestSettingsPutValidatesAgainstStoredConfig(t *testing.T) {
+	f := newSettingsFixture(t)
+	cookie := f.session(f.user("admin", true))
+
+	rec := f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{"review_timeout": "40m"},
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+
+	rec = f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{"review_stale_after": "30m"},
+	}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+	var apiErr map[string]string
+	decodeJSON(t, rec, &apiErr)
+	if !strings.Contains(apiErr["error"], "review_stale_after") {
+		t.Errorf("error = %q, want the offending key", apiErr["error"])
+	}
+
+	stored, err := f.st.Settings(f.ctx)
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if _, ok := stored["review_stale_after"]; ok {
+		t.Errorf("stored = %v, want no review_stale_after row after a rejected save", stored)
+	}
+}
+
+func TestSettingsPutRecordsUpdatedBy(t *testing.T) {
+	f := newSettingsFixture(t)
+	admin := f.user("admin", true)
+
+	rec := f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{"ocr_bin": "/usr/local/bin/ocr"},
+	}, f.session(admin))
+	assertStatus(t, rec, http.StatusOK)
+
+	var row struct {
+		UpdatedBy *uint `gorm:"column:updated_by"`
+	}
+	if err := f.st.DB.WithContext(f.ctx).Table("app_settings").
+		Select("updated_by").Where("key = ?", "ocr_bin").Take(&row).Error; err != nil {
+		t.Fatalf("read app_settings: %v", err)
+	}
+	if row.UpdatedBy == nil || *row.UpdatedBy != admin.ID {
+		t.Errorf("updated_by = %v, want %d", row.UpdatedBy, admin.ID)
+	}
+}
+
+func TestSettingsPutRejectsEmptyAndUnknownValues(t *testing.T) {
+	f := newSettingsFixture(t)
+	cookie := f.session(f.user("admin", true))
+
+	rec := f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{},
+	}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+
+	rec = f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{"not_a_setting": "x"},
+	}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+	var apiErr map[string]string
+	decodeJSON(t, rec, &apiErr)
+	if !strings.Contains(apiErr["error"], "not_a_setting") {
+		t.Errorf("error = %q, want the unknown key", apiErr["error"])
+	}
+}
+
+func TestSettingsPutRequiresAuthentication(t *testing.T) {
+	f := newSettingsFixture(t)
+	rec := f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{"ocr_bin": "x"},
+	}, nil)
+	assertStatus(t, rec, http.StatusUnauthorized)
+}
+
+func TestSettingsGetOverlaysStoredRowsOverProcessConfig(t *testing.T) {
+	f := newSettingsFixture(t)
+	cookie := f.session(f.user("admin", true))
+
+	rec := f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{"review_timeout": "30m"},
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+
+	rec = f.request(http.MethodGet, "/api/settings", nil, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var body struct {
+		Values map[string]string `json:"values"`
+	}
+	decodeJSON(t, rec, &body)
+	if body.Values["review_timeout"] != "30m0s" {
+		t.Errorf("review_timeout = %q, want the stored 30m0s", body.Values["review_timeout"])
+	}
+	if f.deps.Cfg.ReviewTimeout != 20*time.Minute {
+		t.Errorf("deps.Cfg.ReviewTimeout = %s, want the untouched 20m startup value", f.deps.Cfg.ReviewTimeout)
 	}
 }
