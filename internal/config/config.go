@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -41,17 +40,6 @@ type Config struct {
 	BackupRetention      int           // backup_retention, default 7; deploy/backup.sh lee la BD (Task 7)
 }
 
-// MonitorConfig is what `qa monitor` needs. It is deliberately separate from
-// Config: the monitor only speaks HTTP, so requiring the database URL and the
-// worker key (as Load does for the other commands) would make it unusable as
-// its own container.
-type MonitorConfig struct {
-	WorkerHealthURL string
-	Interval        time.Duration
-	RenotifyAfter   time.Duration
-	AlertWebhookURL string
-}
-
 // RequireMasterKey validates that a master key is available. Commands that
 // need it (e.g. runServe) call this explicitly; Load alone does not require it.
 func (c Config) RequireMasterKey() error {
@@ -70,77 +58,6 @@ func (c Config) LLMHealthStaleAfter() time.Duration {
 		interval = 30 * time.Minute
 	}
 	return 2 * interval
-}
-
-// LoadMonitor builds only the monitor settings. `qa monitor` has no database
-// nor keys to validate, so it never calls Load: that would reject a perfectly
-// working monitor container for missing QA_WORKER_KEY.
-func LoadMonitor(getenv func(string) string) (MonitorConfig, error) {
-	url, interval, renotify, webhook, err := loadMonitorSettings(getenv)
-	if err != nil {
-		return MonitorConfig{}, err
-	}
-	return MonitorConfig{
-		WorkerHealthURL: url,
-		Interval:        interval,
-		RenotifyAfter:   renotify,
-		AlertWebhookURL: webhook,
-	}, nil
-}
-
-// loadMonitorSettings reads the variables `qa monitor` still needs at startup,
-// kept separate because Load no longer reads them.
-func loadMonitorSettings(getenv func(string) string) (string, time.Duration, time.Duration, string, error) {
-	healthURL := "http://worker:9090"
-	if raw := getenv("QA_WORKER_HEALTH_URL"); raw != "" {
-		v := strings.TrimRight(strings.TrimSpace(raw), "/")
-		u, err := url.Parse(v)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return "", 0, 0, "", fmt.Errorf("QA_WORKER_HEALTH_URL must be an absolute http(s) URL, got %q", raw)
-		}
-		healthURL = v
-	}
-
-	interval := time.Minute
-	if v := strings.TrimSpace(getenv("QA_MONITOR_INTERVAL")); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_INTERVAL must be a duration: %w", err)
-		}
-		if d <= 0 {
-			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_INTERVAL must be greater than zero, got %q", v)
-		}
-		interval = d
-	}
-
-	renotify := 30 * time.Minute
-	if v := strings.TrimSpace(getenv("QA_MONITOR_RENOTIFY_AFTER")); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_RENOTIFY_AFTER must be a duration: %w", err)
-		}
-		if d <= 0 {
-			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_RENOTIFY_AFTER must be greater than zero, got %q", v)
-		}
-		renotify = d
-	}
-	// Re-notifying faster than the poll interval would make every tick an
-	// alert, which is the same as having no state machine at all.
-	if renotify < interval {
-		return "", 0, 0, "", fmt.Errorf(
-			"QA_MONITOR_RENOTIFY_AFTER must be greater than or equal to QA_MONITOR_INTERVAL, got %s < %s",
-			renotify, interval)
-	}
-
-	webhook := strings.TrimSpace(getenv("QA_ALERT_WEBHOOK_URL"))
-	if webhook != "" {
-		u, err := url.Parse(webhook)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return "", 0, 0, "", fmt.Errorf("QA_ALERT_WEBHOOK_URL must be an absolute http(s) URL, got %q", webhook)
-		}
-	}
-
-	return healthURL, interval, renotify, webhook, nil
 }
 
 // Default returns the configuration used when nothing is configured yet. Load

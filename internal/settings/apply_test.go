@@ -17,11 +17,15 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 		want string
 	}{
 		{"zero duration", KeyReviewTimeout, "0s", KeyReviewTimeout},
+		{"zero monitor interval", KeyMonitorInterval, "0s", KeyMonitorInterval},
+		{"zero renotify window", KeyMonitorRenotifyAfter, "0s", KeyMonitorRenotifyAfter},
 		{"garbage duration", KeyReconcileInterval, "pronto", KeyReconcileInterval},
 		{"negative int", KeyReviewConcurrency, "-1", KeyReviewConcurrency},
 		{"garbage int", KeyFetchDepthMax, "muchos", KeyFetchDepthMax},
 		{"bad bool", KeyWebhooksEnabled, "si", KeyWebhooksEnabled},
 		{"relative url", KeyPublicURL, "/solo-ruta", KeyPublicURL},
+		{"relative worker health url", KeyWorkerHealthURL, "worker:9090", KeyWorkerHealthURL},
+		{"relative webhook url", KeyAlertWebhookURL, "alerts.example.com/hook", KeyAlertWebhookURL},
 		{"url trimmed to empty", KeyGitBaseURL, "/", KeyGitBaseURL},
 		{"empty bin", KeyOCRBin, "  ", KeyOCRBin},
 	}

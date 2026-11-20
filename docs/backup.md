@@ -7,8 +7,15 @@ un operador puede descifrar.
 ## Backup programado
 
 El perfil `backup` de `deploy/docker-compose.yml` ejecuta `deploy/backup.sh`
-una vez al día a las 03:00 UTC y conserva los últimos `QA_BACKUP_RETENTION`
-backups (7 por defecto) en el volumen `backups-data`.
+una vez al día a las 03:00 UTC y conserva en el volumen `backups-data` los
+últimos `backup_retention` backups, un ajuste del panel en **Ajustes →
+Backups** (7 por defecto).
+
+El script lee `backup_retention` de `app_settings` con `psql` al empezar. Si no
+hay fila, la consulta falla o el valor no es un entero, usa `7`: el backup ya
+necesita la base para `pg_dump`, así que un fallo de lectura no debe abortar la
+copia. La retención se aplica al terminar, de modo que un cambio en el panel
+surte efecto en la siguiente ejecución sin reiniciar el contenedor.
 
 ```sh
 docker compose -f deploy/docker-compose.yml --profile backup up -d backup
