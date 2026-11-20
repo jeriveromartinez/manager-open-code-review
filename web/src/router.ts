@@ -8,6 +8,7 @@ import ReposView from './views/ReposView.vue'
 import SettingsView from './views/SettingsView.vue'
 import SetupView from './views/SetupView.vue'
 import TeamsView from './views/TeamsView.vue'
+import { useSessionStore } from './stores/session'
 
 let configured: boolean | null = null
 
@@ -36,7 +37,7 @@ const router = createRouter({
     { path: '/repos', name: 'repos', component: ReposView },
     { path: '/teams', name: 'teams', component: TeamsView },
     { path: '/agents', name: 'agents', component: AgentsView },
-    { path: '/settings', name: 'settings', component: SettingsView },
+    { path: '/settings', name: 'settings', component: SettingsView, meta: { admin: true } },
     { path: '/prs/:id', name: 'pr-detail', component: PrDetailView },
     { path: '/login', name: 'login', component: LoginView, meta: { layout: 'bare' } },
     { path: '/setup', name: 'setup', component: SetupView, meta: { layout: 'bare' } },
@@ -52,6 +53,13 @@ router.beforeEach(async (to) => {
   }
   if (ready && to.name === 'setup') {
     return { name: 'dashboard' }
+  }
+  // El menú ya oculta Ajustes a quien no es admin, pero un no-admin que teclee
+  // la ruta no debe llegar a un formulario que el backend va a rechazar.
+  if (to.meta.admin) {
+    const session = useSessionStore()
+    const me = await session.load()
+    if (!me?.is_admin) return { name: 'dashboard' }
   }
   return true
 })

@@ -5,6 +5,8 @@ import { api, type SettingsField } from '../api'
 const values = ref<Record<string, string>>({})
 const fields = ref<SettingsField[]>([])
 const saving = ref('')
+const loading = ref(false)
+const loadFailed = ref(false)
 const error = ref('')
 const saved = ref('')
 
@@ -20,22 +22,27 @@ function fieldsOf(group: SettingsField['group']): SettingsField[] {
   return fields.value.filter((field) => field.group === group)
 }
 
+const restartTargets = ['app', 'worker', 'monitor'] as const
+
 function restartLabel(group: SettingsField['group']): string {
-  const targets = new Set(fieldsOf(group).map((field) => field.restart))
-  if (targets.has('app')) return 'requiere reiniciar app'
-  if (targets.has('worker')) return 'requiere reiniciar worker'
-  if (targets.has('monitor')) return 'requiere reiniciar monitor'
-  return ''
+  const present = new Set(fieldsOf(group).map((field) => field.restart))
+  const names = restartTargets.filter((target) => present.has(target))
+  return names.length > 0 ? `requiere reiniciar ${names.join(' y ')}` : ''
 }
 
 async function load(): Promise<void> {
   error.value = ''
+  loadFailed.value = false
+  loading.value = true
   try {
     const response = await api.settings()
     values.value = { ...response.values }
     fields.value = response.fields
   } catch {
+    loadFailed.value = true
     error.value = 'No se pudieron cargar los ajustes.'
+  } finally {
+    loading.value = false
   }
 }
 
@@ -49,7 +56,12 @@ async function save(group: SettingsField['group']): Promise<void> {
   }
   try {
     const response = await api.saveSettings(payload)
-    values.value = { ...response.values }
+    // La respuesta trae todos los valores: reemplazarlos borraría lo que se esté
+    // escribiendo en otra sección, así que solo se refresca lo que se guardó.
+    for (const key of Object.keys(payload)) {
+      const value = response.values[key]
+      if (value !== undefined) values.value[key] = value
+    }
     saved.value = 'Cambios guardados.'
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'No se pudieron guardar los ajustes.'
@@ -73,6 +85,16 @@ onMounted(load)
     </header>
 
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
+    <button
+      v-if="loadFailed"
+      type="button"
+      class="button button--primary"
+      data-retry
+      :disabled="loading"
+      @click="load"
+    >
+      {{ loading ? 'Cargando…' : 'Reintentar' }}
+    </button>
     <span v-if="saved" class="badge badge--ok" role="status">{{ saved }}</span>
 
     <form
@@ -98,7 +120,8 @@ onMounted(load)
           :type="field.secret ? 'password' : 'text'"
           :name="field.key"
           :placeholder="field.default || 'sin valor'"
-          autocomplete="off"
+          :autocomplete="field.secret ? 'new-password' : 'off'"
+          @input="saved = ''"
         />
       </label>
 
