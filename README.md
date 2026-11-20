@@ -96,6 +96,7 @@ Para reintentar, abre el detalle del PR y pulsa **Reintentar** (admin o lead del
 make web        # compila la SPA y la copia a internal/web/dist
 make build      # go build -o bin/qa ./cmd/qa
 make test       # go test ./... + Vitest
+go test ./internal/review -run '^TestE2EFlow$' -count=1   # flujo E2E contra dobles (docs/e2e.md)
 ```
 
 El binario admite `qa serve`, `qa worker` y `qa migrate`.

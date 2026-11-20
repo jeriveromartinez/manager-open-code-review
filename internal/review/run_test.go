@@ -86,11 +86,18 @@ func (j *runTestJobs) published() []uint {
 	return append([]uint(nil), j.publish...)
 }
 
+func (j *runTestJobs) reviews() []uint {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]uint(nil), j.review...)
+}
+
 type runTestFixture struct {
 	s        *store.Store
 	box      *crypto.Box
 	ctx      context.Context
 	root     string
+	bare     string
 	baseSHA  string
 	headSHA  string
 	pr       store.PullRequest
@@ -111,14 +118,15 @@ func writeRunTestFile(t *testing.T, path, content string) {
 }
 
 // newRunTestFixture crea un repo bare con refs/pull/1/head, la configuración en
-// Postgres y los dobles de ocr/opencode. El nombre del repo es "origin" para que
-// GitBaseURL + "/" + FullName + ".git" apunte al bare local.
+// Postgres y los dobles de ocr/opencode. El nombre del repo es "acme/origin"
+// para que GitBaseURL + "/" + FullName + ".git" apunte al bare local y la
+// publicación resuelva owner/repo.
 func newRunTestFixture(t *testing.T) *runTestFixture {
 	t.Helper()
 
 	root := t.TempDir()
 	work := filepath.Join(root, "work")
-	bare := filepath.Join(root, "origin.git")
+	bare := filepath.Join(root, "acme", "origin.git")
 	runGit(t, root, "init", "-q", "-b", "main", work)
 	runGit(t, work, "config", "user.email", "test@example.com")
 	runGit(t, work, "config", "user.name", "Test")
@@ -133,6 +141,9 @@ func newRunTestFixture(t *testing.T) *runTestFixture {
 	runGit(t, work, "commit", "-qm", "feature")
 	headSHA := runGit(t, work, "rev-parse", "HEAD")
 
+	if err := os.MkdirAll(filepath.Dir(bare), 0o755); err != nil {
+		t.Fatalf("create bare parent: %v", err)
+	}
 	runGit(t, root, "clone", "-q", "--bare", work, bare)
 	runGit(t, bare, "update-ref", "refs/pull/1/head", headSHA)
 
@@ -162,7 +173,7 @@ func newRunTestFixture(t *testing.T) *runTestFixture {
 	mustCreateRunTest(t, s, ctx, &installation)
 	teamID := team.ID
 	repo := store.Repository{
-		ID: 88, InstallationID: 77, FullName: "origin", DefaultBranch: "main",
+		ID: 88, InstallationID: 77, FullName: "acme/origin", DefaultBranch: "main",
 		Enabled: true, TeamID: &teamID,
 	}
 	mustCreateRunTest(t, s, ctx, &repo)
@@ -187,7 +198,8 @@ func newRunTestFixture(t *testing.T) *runTestFixture {
 	}
 
 	f := &runTestFixture{
-		s: s, box: box, ctx: ctx, root: root, baseSHA: baseSHA, headSHA: headSHA,
+		s: s, box: box, ctx: ctx, root: root, bare: bare,
+		baseSHA: baseSHA, headSHA: headSHA,
 		pr: pr, runID: run.ID, events: &runTestEvents{}, jobs: &runTestJobs{},
 		policy: policy, calls: filepath.Join(root, "agent-calls.txt"),
 	}
@@ -236,6 +248,9 @@ func (f *runTestFixture) setOCR(t *testing.T, preview, rules string, fail bool) 
 		failLine = "echo 'ocr no disponible' >&2\nexit 1\n"
 	}
 	script := "#!/bin/sh\nset -eu\n" + failLine + `
+if [ -n "${RUN_FAKE_OCR_ARGV:-}" ]; then
+    printf '%s\n' "$@" >>"$RUN_FAKE_OCR_ARGV"
+fi
 dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 case "${2:-}" in
     preview) cat "$dir/preview.json" ;;
@@ -738,7 +753,7 @@ func TestRunHeadMovedBeforeCheckoutIsSuperseded(t *testing.T) {
 	writeRunTestFile(t, filepath.Join(work, "later.go"), "package main\n")
 	runGit(t, work, "add", "-A")
 	runGit(t, work, "commit", "-qm", "later")
-	runGit(t, work, "push", "-q", filepath.Join(f.root, "origin.git"), "HEAD:refs/pull/1/head")
+	runGit(t, work, "push", "-q", f.bare, "HEAD:refs/pull/1/head")
 
 	if err := f.runner().Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("Run() error = %v", err)
