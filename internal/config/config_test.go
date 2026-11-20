@@ -167,9 +167,8 @@ func TestLoadOnlyReadsTheEssentials(t *testing.T) {
 	}
 }
 
-// TestLoadIgnoresEveryLegacyKey sets all 22 retired variables to values that
-// used to be rejected outright, so nothing but the essentials can be read: a
-// leftover getenv branch would fail here instead of quietly resurfacing.
+// TestLoadIgnoresEveryLegacyKey cannot accept a silently honoured value: the
+// DeepEqual, not the junk, is what proves every retired variable is ignored.
 func TestLoadIgnoresEveryLegacyKey(t *testing.T) {
 	env := requiredEnv()
 	for _, key := range config.LegacyEnvKeys() {

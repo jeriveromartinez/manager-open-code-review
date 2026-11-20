@@ -183,6 +183,7 @@ func TestLoadLeavesTheMonitorSettingsAlone(t *testing.T) {
 	env["QA_MONITOR_INTERVAL"] = "45s"
 	env["QA_MONITOR_RENOTIFY_AFTER"] = "90s"
 	env["QA_WORKER_HEALTH_URL"] = "http://worker.qa:9091"
+	env["QA_ALERT_WEBHOOK_URL"] = "https://hooks.example.com/qa"
 
 	cfg, err := config.Load(getenv(env))
 	if err != nil {
@@ -190,7 +191,7 @@ func TestLoadLeavesTheMonitorSettingsAlone(t *testing.T) {
 	}
 	defaults := config.Default()
 	if cfg.MonitorInterval != defaults.MonitorInterval || cfg.MonitorRenotifyAfter != defaults.MonitorRenotifyAfter ||
-		cfg.WorkerHealthURL != defaults.WorkerHealthURL {
+		cfg.WorkerHealthURL != defaults.WorkerHealthURL || cfg.AlertWebhookURL != defaults.AlertWebhookURL {
 		t.Errorf("Load() = %+v, want the monitor settings at their defaults", cfg)
 	}
 }

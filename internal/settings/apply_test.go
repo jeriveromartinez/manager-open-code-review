@@ -22,6 +22,7 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 		{"garbage int", KeyFetchDepthMax, "muchos", KeyFetchDepthMax},
 		{"bad bool", KeyWebhooksEnabled, "si", KeyWebhooksEnabled},
 		{"relative url", KeyPublicURL, "/solo-ruta", KeyPublicURL},
+		{"url trimmed to empty", KeyGitBaseURL, "/", KeyGitBaseURL},
 		{"empty bin", KeyOCRBin, "  ", KeyOCRBin},
 	}
 	for _, tc := range cases {
@@ -68,6 +69,17 @@ func TestApplyRejectsUnknownKeys(t *testing.T) {
 	var keyErr *KeyError
 	if !errors.As(err, &keyErr) || keyErr.Key != "review_timout" {
 		t.Fatalf("Apply with a typo = %v, want KeyError naming the key", err)
+	}
+}
+
+func TestApplyClearsTheOptionalWebhook(t *testing.T) {
+	cfg := config.Default()
+	cfg.AlertWebhookURL = "https://hooks.example.com/old"
+	if err := Apply(&cfg, map[string]string{KeyAlertWebhookURL: "  "}); err != nil {
+		t.Fatalf("clearing alert_webhook_url = %v, want it accepted: an empty webhook means log only", err)
+	}
+	if cfg.AlertWebhookURL != "" {
+		t.Errorf("AlertWebhookURL = %q, want empty", cfg.AlertWebhookURL)
 	}
 }
 
