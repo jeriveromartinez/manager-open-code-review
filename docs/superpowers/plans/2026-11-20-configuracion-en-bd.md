@@ -1559,10 +1559,12 @@ function fieldsOf(group: SettingsField['group']): SettingsField[] {
 
 function restartLabel(group: SettingsField['group']): string {
   const targets = new Set(fieldsOf(group).map((field) => field.restart))
-  if (targets.has('app')) return 'requiere reiniciar app'
-  if (targets.has('worker')) return 'requiere reiniciar worker'
-  if (targets.has('monitor')) return 'requiere reiniciar monitor'
-  return ''
+  const names = [
+    targets.has('app') ? 'app' : '',
+    targets.has('worker') ? 'worker' : '',
+    targets.has('monitor') ? 'monitor' : '',
+  ].filter(Boolean)
+  return names.length > 0 ? `requiere reiniciar ${names.join(' y ')}` : ''
 }
 
 function restart(group: SettingsField['group']): string {
@@ -1590,7 +1592,13 @@ async function save(group: SettingsField['group']): Promise<void> {
   }
   try {
     const response = await api.saveSettings(payload)
-    values.value = { ...response.values }
+    // Solo se refresca lo que se acaba de guardar: la respuesta trae los 23
+    // valores y reemplazarlos todos borraría lo que el admin esté escribiendo en
+    // otra sección sin avisar.
+    for (const key of Object.keys(payload)) {
+      const saved = response.values[key]
+      if (saved !== undefined) values.value[key] = saved
+    }
     saved.value = `Guardado ${group}.`
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'No se pudieron guardar los ajustes.'
@@ -1654,8 +1662,22 @@ Usar las clases que ya existen en el panel; si `badge--warn` no existe, reutiliz
 `web/src/router.ts`: importar `SettingsView` y añadir
 
 ```ts
-    { path: '/settings', name: 'settings', component: SettingsView },
+    { path: '/settings', name: 'settings', component: SettingsView, meta: { admin: true } },
 ```
+
+y en el `beforeEach` existente, después del bloque de `/setup`:
+
+```ts
+  // La entrada del menú ya se oculta a quien no es admin, pero un no-admin que
+  // teclee la ruta no debe llegar a un formulario que el backend va a rechazar.
+  if (to.meta.admin) {
+    const session = useSessionStore()
+    const me = await session.load()
+    if (!me?.is_admin) return { name: 'dashboard' }
+  }
+```
+
+`useSessionStore` se importa de `./stores/session`; `session.load()` ya cachea, así que solo pide `/api/me` una vez por sesión.
 
 `web/src/components/AppShell.vue`, junto a «Agentes LLM»:
 
