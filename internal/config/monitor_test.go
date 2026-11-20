@@ -9,18 +9,18 @@ import (
 )
 
 func TestLoadMonitorDefaults(t *testing.T) {
-	cfg, err := config.Load(getenv(requiredEnv()))
+	cfg, err := config.LoadMonitor(getenv(requiredEnv()))
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("LoadMonitor() error = %v", err)
 	}
 	if cfg.WorkerHealthURL != "http://worker:9090" {
 		t.Errorf("WorkerHealthURL = %q, want %q", cfg.WorkerHealthURL, "http://worker:9090")
 	}
-	if cfg.MonitorInterval != time.Minute {
-		t.Errorf("MonitorInterval = %v, want %v", cfg.MonitorInterval, time.Minute)
+	if cfg.Interval != time.Minute {
+		t.Errorf("Interval = %v, want %v", cfg.Interval, time.Minute)
 	}
-	if cfg.MonitorRenotifyAfter != 30*time.Minute {
-		t.Errorf("MonitorRenotifyAfter = %v, want %v", cfg.MonitorRenotifyAfter, 30*time.Minute)
+	if cfg.RenotifyAfter != 30*time.Minute {
+		t.Errorf("RenotifyAfter = %v, want %v", cfg.RenotifyAfter, 30*time.Minute)
 	}
 	if cfg.AlertWebhookURL != "" {
 		t.Errorf("AlertWebhookURL = %q, want empty", cfg.AlertWebhookURL)
@@ -34,18 +34,18 @@ func TestLoadMonitorOverrides(t *testing.T) {
 	env["QA_MONITOR_RENOTIFY_AFTER"] = "2h"
 	env["QA_ALERT_WEBHOOK_URL"] = "https://alerts.example.com/hook"
 
-	cfg, err := config.Load(getenv(env))
+	cfg, err := config.LoadMonitor(getenv(env))
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("LoadMonitor() error = %v", err)
 	}
 	if cfg.WorkerHealthURL != "http://worker.qa:9090" {
 		t.Errorf("WorkerHealthURL = %q, want no trailing slash", cfg.WorkerHealthURL)
 	}
-	if cfg.MonitorInterval != 15*time.Second {
-		t.Errorf("MonitorInterval = %v, want %v", cfg.MonitorInterval, 15*time.Second)
+	if cfg.Interval != 15*time.Second {
+		t.Errorf("Interval = %v, want %v", cfg.Interval, 15*time.Second)
 	}
-	if cfg.MonitorRenotifyAfter != 2*time.Hour {
-		t.Errorf("MonitorRenotifyAfter = %v, want %v", cfg.MonitorRenotifyAfter, 2*time.Hour)
+	if cfg.RenotifyAfter != 2*time.Hour {
+		t.Errorf("RenotifyAfter = %v, want %v", cfg.RenotifyAfter, 2*time.Hour)
 	}
 	if cfg.AlertWebhookURL != "https://alerts.example.com/hook" {
 		t.Errorf("AlertWebhookURL = %q, want %q", cfg.AlertWebhookURL, "https://alerts.example.com/hook")
@@ -57,12 +57,12 @@ func TestLoadBadMonitorInterval(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			env := requiredEnv()
 			env["QA_MONITOR_INTERVAL"] = value
-			_, err := config.Load(getenv(env))
+			_, err := config.LoadMonitor(getenv(env))
 			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning QA_MONITOR_INTERVAL", value)
+				t.Fatalf("LoadMonitor() error = nil for %q, want error mentioning QA_MONITOR_INTERVAL", value)
 			}
 			if !strings.Contains(err.Error(), "QA_MONITOR_INTERVAL") {
-				t.Errorf("Load() error = %q, want it to mention QA_MONITOR_INTERVAL", err.Error())
+				t.Errorf("LoadMonitor() error = %q, want it to mention QA_MONITOR_INTERVAL", err.Error())
 			}
 		})
 	}
@@ -73,12 +73,12 @@ func TestLoadBadMonitorRenotifyAfter(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			env := requiredEnv()
 			env["QA_MONITOR_RENOTIFY_AFTER"] = value
-			_, err := config.Load(getenv(env))
+			_, err := config.LoadMonitor(getenv(env))
 			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning QA_MONITOR_RENOTIFY_AFTER", value)
+				t.Fatalf("LoadMonitor() error = nil for %q, want error mentioning QA_MONITOR_RENOTIFY_AFTER", value)
 			}
 			if !strings.Contains(err.Error(), "QA_MONITOR_RENOTIFY_AFTER") {
-				t.Errorf("Load() error = %q, want it to mention QA_MONITOR_RENOTIFY_AFTER", err.Error())
+				t.Errorf("LoadMonitor() error = %q, want it to mention QA_MONITOR_RENOTIFY_AFTER", err.Error())
 			}
 		})
 	}
@@ -91,12 +91,12 @@ func TestLoadMonitorRenotifyShorterThanInterval(t *testing.T) {
 	env["QA_MONITOR_INTERVAL"] = "10m"
 	env["QA_MONITOR_RENOTIFY_AFTER"] = "5m"
 
-	_, err := config.Load(getenv(env))
+	_, err := config.LoadMonitor(getenv(env))
 	if err == nil {
-		t.Fatal("Load() error = nil, want error mentioning QA_MONITOR_RENOTIFY_AFTER")
+		t.Fatal("LoadMonitor() error = nil, want error mentioning QA_MONITOR_RENOTIFY_AFTER")
 	}
 	if !strings.Contains(err.Error(), "QA_MONITOR_RENOTIFY_AFTER") {
-		t.Errorf("Load() error = %q, want it to mention QA_MONITOR_RENOTIFY_AFTER", err.Error())
+		t.Errorf("LoadMonitor() error = %q, want it to mention QA_MONITOR_RENOTIFY_AFTER", err.Error())
 	}
 }
 
@@ -105,12 +105,12 @@ func TestLoadBadWorkerHealthURL(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			env := requiredEnv()
 			env["QA_WORKER_HEALTH_URL"] = value
-			_, err := config.Load(getenv(env))
+			_, err := config.LoadMonitor(getenv(env))
 			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning QA_WORKER_HEALTH_URL", value)
+				t.Fatalf("LoadMonitor() error = nil for %q, want error mentioning QA_WORKER_HEALTH_URL", value)
 			}
 			if !strings.Contains(err.Error(), "QA_WORKER_HEALTH_URL") {
-				t.Errorf("Load() error = %q, want it to mention QA_WORKER_HEALTH_URL", err.Error())
+				t.Errorf("LoadMonitor() error = %q, want it to mention QA_WORKER_HEALTH_URL", err.Error())
 			}
 		})
 	}
@@ -120,12 +120,12 @@ func TestLoadBadAlertWebhookURL(t *testing.T) {
 	env := requiredEnv()
 	env["QA_ALERT_WEBHOOK_URL"] = "alerts.example.com/hook"
 
-	_, err := config.Load(getenv(env))
+	_, err := config.LoadMonitor(getenv(env))
 	if err == nil {
-		t.Fatal("Load() error = nil, want error mentioning QA_ALERT_WEBHOOK_URL")
+		t.Fatal("LoadMonitor() error = nil, want error mentioning QA_ALERT_WEBHOOK_URL")
 	}
 	if !strings.Contains(err.Error(), "QA_ALERT_WEBHOOK_URL") {
-		t.Errorf("Load() error = %q, want it to mention QA_ALERT_WEBHOOK_URL", err.Error())
+		t.Errorf("LoadMonitor() error = %q, want it to mention QA_ALERT_WEBHOOK_URL", err.Error())
 	}
 }
 
@@ -175,8 +175,10 @@ func TestLoadMonitorOnlyDefaultsAndGarbage(t *testing.T) {
 	}
 }
 
-// TestLoadMonitorUsesTheSameRules keeps Load and LoadMonitor from drifting.
-func TestLoadMonitorUsesTheSameRules(t *testing.T) {
+// TestLoadLeavesTheMonitorSettingsAlone pins the split this task introduces:
+// Load owns the essentials only, and the monitor settings come from the
+// database like every other behaviour setting.
+func TestLoadLeavesTheMonitorSettingsAlone(t *testing.T) {
 	env := requiredEnv()
 	env["QA_MONITOR_INTERVAL"] = "45s"
 	env["QA_MONITOR_RENOTIFY_AFTER"] = "90s"
@@ -186,11 +188,9 @@ func TestLoadMonitorUsesTheSameRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	mon, err := config.LoadMonitor(getenv(env))
-	if err != nil {
-		t.Fatalf("LoadMonitor() error = %v", err)
-	}
-	if cfg.MonitorInterval != mon.Interval || cfg.MonitorRenotifyAfter != mon.RenotifyAfter || cfg.WorkerHealthURL != mon.WorkerHealthURL {
-		t.Errorf("Load() = %+v, LoadMonitor() = %+v, want the same monitor settings", cfg, mon)
+	defaults := config.Default()
+	if cfg.MonitorInterval != defaults.MonitorInterval || cfg.MonitorRenotifyAfter != defaults.MonitorRenotifyAfter ||
+		cfg.WorkerHealthURL != defaults.WorkerHealthURL {
+		t.Errorf("Load() = %+v, want the monitor settings at their defaults", cfg)
 	}
 }
