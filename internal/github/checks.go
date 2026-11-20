@@ -31,25 +31,16 @@ func (c *Checks) RefreshPR(ctx context.Context, prID uint) (store.PRValidations,
 		return store.PRValidations{}, false, errors.New("github: checks refresher has no app provider")
 	}
 
-	var pr store.PullRequest
-	err := c.Store.DB.WithContext(ctx).Take(&pr, prID).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return store.PRValidations{}, false, fmt.Errorf("pull request %d: %w", prID, store.ErrNotFound)
-	}
+	pr, err := c.pullRequest(ctx, prID)
 	if err != nil {
-		return store.PRValidations{}, false, fmt.Errorf("find pull request %d: %w", prID, err)
+		return store.PRValidations{}, false, err
 	}
 	if pr.HeadSHA == "" {
 		return store.PRValidations{}, false, nil
 	}
-
-	var repo store.Repository
-	if err := c.Store.DB.WithContext(ctx).Take(&repo, pr.RepositoryID).Error; err != nil {
-		return store.PRValidations{}, false, fmt.Errorf("find repository %d: %w", pr.RepositoryID, err)
-	}
-	owner, name, ok := strings.Cut(repo.FullName, "/")
-	if !ok || owner == "" || name == "" {
-		return store.PRValidations{}, false, fmt.Errorf("invalid repository full name %q", repo.FullName)
+	repo, err := c.repository(ctx, pr.RepositoryID)
+	if err != nil {
+		return store.PRValidations{}, false, err
 	}
 
 	app, err := c.Apps.App(ctx)
@@ -60,12 +51,62 @@ func (c *Checks) RefreshPR(ctx context.Context, prID uint) (store.PRValidations,
 	if err != nil {
 		return store.PRValidations{}, false, fmt.Errorf("create installation %d client: %w", repo.InstallationID, err)
 	}
+	return c.storeValidations(ctx, client, app.Creds.AppID, pr, repo)
+}
 
-	state, err := ReadValidations(ctx, client, owner, name, pr.HeadSHA, app.Creds.AppID)
+// RefreshPRWith refreshes a pull request through an installation client the
+// caller already holds, so reconciliation does not mint a second token per PR.
+func (c *Checks) RefreshPRWith(ctx context.Context, client *gh.Client, pr store.PullRequest) (store.PRValidations, bool, error) {
+	if c == nil || c.Store == nil {
+		return store.PRValidations{}, false, errors.New("github: checks refresher has no store")
+	}
+	if c.Apps == nil {
+		return store.PRValidations{}, false, errors.New("github: checks refresher has no app provider")
+	}
+	if pr.HeadSHA == "" {
+		return store.PRValidations{}, false, nil
+	}
+	repo, err := c.repository(ctx, pr.RepositoryID)
 	if err != nil {
 		return store.PRValidations{}, false, err
 	}
-	changed, err := c.Store.SetPRValidations(ctx, prID, pr.HeadSHA, state)
+	app, err := c.Apps.App(ctx)
+	if err != nil {
+		return store.PRValidations{}, false, fmt.Errorf("load GitHub App: %w", err)
+	}
+	return c.storeValidations(ctx, client, app.Creds.AppID, pr, repo)
+}
+
+func (c *Checks) pullRequest(ctx context.Context, prID uint) (store.PullRequest, error) {
+	var pr store.PullRequest
+	err := c.Store.DB.WithContext(ctx).Take(&pr, prID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.PullRequest{}, fmt.Errorf("pull request %d: %w", prID, store.ErrNotFound)
+	}
+	if err != nil {
+		return store.PullRequest{}, fmt.Errorf("find pull request %d: %w", prID, err)
+	}
+	return pr, nil
+}
+
+func (c *Checks) repository(ctx context.Context, id int64) (store.Repository, error) {
+	var repo store.Repository
+	if err := c.Store.DB.WithContext(ctx).Take(&repo, id).Error; err != nil {
+		return store.Repository{}, fmt.Errorf("find repository %d: %w", id, err)
+	}
+	return repo, nil
+}
+
+func (c *Checks) storeValidations(ctx context.Context, client *gh.Client, ownAppID int64, pr store.PullRequest, repo store.Repository) (store.PRValidations, bool, error) {
+	owner, name, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || name == "" {
+		return store.PRValidations{}, false, fmt.Errorf("invalid repository full name %q", repo.FullName)
+	}
+	state, err := ReadValidations(ctx, client, owner, name, pr.HeadSHA, ownAppID)
+	if err != nil {
+		return store.PRValidations{}, false, err
+	}
+	changed, err := c.Store.SetPRValidations(ctx, pr.ID, pr.HeadSHA, state)
 	if err != nil {
 		return store.PRValidations{}, false, err
 	}

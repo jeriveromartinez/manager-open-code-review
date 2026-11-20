@@ -34,7 +34,7 @@ type Syncer struct {
 // Reconciliation uses it so polling mode gates reviews on the same verdict a
 // webhook delivery would have stored.
 type ChecksRefresher interface {
-	RefreshPR(ctx context.Context, prID uint) (store.PRValidations, bool, error)
+	RefreshPRWith(ctx context.Context, client *gh.Client, pr store.PullRequest) (store.PRValidations, bool, error)
 }
 
 // SyncInstallation reconciles the repositories visible to an installation and,
@@ -324,7 +324,7 @@ func (s *Syncer) syncPullRequests(ctx context.Context, client *gh.Client, instal
 					return err
 				}
 			}
-			if err := s.refreshChecks(ctx, pr); err != nil {
+			if err := s.refreshChecks(ctx, client, pr); err != nil {
 				slog.Error("refresh pull request checks failed",
 					"pull_request_id", pr.ID, "head_sha", pr.HeadSHA, "error", err)
 			}
@@ -341,11 +341,11 @@ func (s *Syncer) syncPullRequests(ctx context.Context, client *gh.Client, instal
 // stop the rest of the installation from syncing, and the next pass retries.
 // Drafts are measured too, so a PR that becomes ready for review is gated on a
 // verdict that already exists instead of waiting for the next pass.
-func (s *Syncer) refreshChecks(ctx context.Context, pr store.PullRequest) error {
+func (s *Syncer) refreshChecks(ctx context.Context, client *gh.Client, pr store.PullRequest) error {
 	if s.Checks == nil || pr.HeadSHA == "" || pr.IsFork {
 		return nil
 	}
-	_, changed, err := s.Checks.RefreshPR(ctx, pr.ID)
+	_, changed, err := s.Checks.RefreshPRWith(ctx, client, pr)
 	if err != nil {
 		return err
 	}
