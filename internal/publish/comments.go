@@ -102,10 +102,12 @@ type reviewCommentPayload struct {
 }
 
 type postedReviewComment struct {
-	ID     int64  `json:"id"`
-	NodeID string `json:"node_id"`
-	Path   string `json:"path"`
-	Line   int    `json:"line"`
+	ID           int64  `json:"id"`
+	NodeID       string `json:"node_id"`
+	Path         string `json:"path"`
+	Line         int    `json:"line"`
+	OriginalLine int    `json:"original_line"`
+	StartLine    int    `json:"start_line"`
 }
 
 // publishInlineComments posts one COMMENT review with only findings that do
@@ -183,14 +185,23 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 		}
 	}
 
+	used := make([]bool, len(posted))
 	for _, f := range candidates {
 		end := f.EndLine
 		if end < f.StartLine {
 			end = f.StartLine
 		}
-		match := findComment(posted, f.Path, end)
+		match := findComment(posted, used, f.Path, end)
 		if match == nil {
-			match = findComment(posted, f.Path, f.StartLine)
+			match = findComment(posted, used, f.Path, f.StartLine)
+		}
+		// GitHub omits `line` on some review comments it returns for a review
+		// that was just created (the payload only carries `position`). The
+		// comments come back in creation order, so pair the remaining candidate
+		// with the first unconsumed comment on the same path instead of losing
+		// its coordinates and, with them, the thread link resolutions need.
+		if match == nil {
+			match = findCommentByPath(posted, used, f.Path)
 		}
 		// Never invent a GitHub id: a fake value would silently suppress
 		// future publications. Coordinates stay unset when the API omits them.
@@ -225,11 +236,35 @@ func wholeRangeAdded(added addedLines, path string, start, end int) bool {
 	return true
 }
 
-func findComment(comments []postedReviewComment, path string, line int) *postedReviewComment {
+// findComment looks for an unconsumed comment that reports one of the finding's
+// lines. GitHub may expose the line under `line`, `original_line` or
+// `start_line` depending on whether the comment is a range and whether it is
+// still anchored to the current diff.
+func findComment(comments []postedReviewComment, used []bool, path string, line int) *postedReviewComment {
+	if line <= 0 {
+		return nil
+	}
 	for i := range comments {
-		if comments[i].Path == path && comments[i].Line == line {
+		if used[i] || comments[i].Path != path {
+			continue
+		}
+		if comments[i].Line == line || comments[i].OriginalLine == line || comments[i].StartLine == line {
+			used[i] = true
 			return &comments[i]
 		}
+	}
+	return nil
+}
+
+// findCommentByPath returns the first unconsumed comment on path. It is the
+// positional fallback for responses that omit every line field.
+func findCommentByPath(comments []postedReviewComment, used []bool, path string) *postedReviewComment {
+	for i := range comments {
+		if used[i] || comments[i].Path != path {
+			continue
+		}
+		used[i] = true
+		return &comments[i]
 	}
 	return nil
 }

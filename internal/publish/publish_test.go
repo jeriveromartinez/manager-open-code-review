@@ -81,7 +81,10 @@ type fakeGitHub struct {
 	gqlQueries         []string
 	nextCommentID      int64
 	omitReviewComments bool
-	failResolveOnce    bool
+	// reviewCommentsWithoutLine mimics GitHub returning a just-created review's
+	// comments with no line fields, only their position.
+	reviewCommentsWithoutLine bool
+	failResolveOnce           bool
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -177,12 +180,16 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(g.reviews) > 0 {
 			for i, c := range g.reviews[len(g.reviews)-1].Comments {
+				line := c.Line
+				if g.reviewCommentsWithoutLine {
+					line = 0
+				}
 				posted = append(posted, struct {
 					ID     int64  `json:"id"`
 					NodeID string `json:"node_id"`
 					Path   string `json:"path"`
 					Line   int    `json:"line"`
-				}{ID: int64(2000 + i), NodeID: fmt.Sprintf("NC_%d", 2000+i), Path: c.Path, Line: c.Line})
+				}{ID: int64(2000 + i), NodeID: fmt.Sprintf("NC_%d", 2000+i), Path: c.Path, Line: line})
 			}
 		}
 		writeJSON(posted, http.StatusOK)
@@ -911,6 +918,31 @@ func TestPublishResolutionRetryPostsReplyOnce(t *testing.T) {
 	for _, finding := range saved {
 		if finding.GithubThreadID != "THREAD_1" {
 			t.Errorf("thread id = %q, want THREAD_1", finding.GithubThreadID)
+		}
+	}
+}
+
+func TestPublishLinksReviewCommentsWithoutLine(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "sin-linea", 2, "minor", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	gh.reviewCommentsWithoutLine = true
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	saved, err := st.FindingsForPR(ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("FindingsForPR() error = %v", err)
+	}
+	for _, f := range saved {
+		if f.GithubCommentID == 0 || f.GithubCommentNodeID == "" {
+			t.Errorf("finding %s coordinates = %d/%q, want the review comment id",
+				f.ID, f.GithubCommentID, f.GithubCommentNodeID)
 		}
 	}
 }
