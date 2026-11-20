@@ -339,6 +339,7 @@ type qaPolicyResponse struct {
 	MaxFiles          int      `json:"max_files"`
 	MaxDiffLines      int      `json:"max_diff_lines"`
 	MaxPasses         int      `json:"max_passes"`
+	RequireGreenCI    bool     `json:"require_green_ci"`
 	UpdatedAt         string   `json:"updated_at"`
 }
 
@@ -355,7 +356,8 @@ func qaPolicyDTO(p store.QAPolicy) qaPolicyResponse {
 		BlockingThreshold: p.BlockingThreshold, ExtraInstructions: p.ExtraInstructions,
 		ExcludeGlobs: globs, MaxFiles: p.MaxFilesPerPass,
 		MaxDiffLines: p.MaxDiffLinesPerPass, MaxPasses: p.MaxPasses,
-		UpdatedAt: p.UpdatedAt.UTC().Format(time.RFC3339),
+		RequireGreenCI: p.RequireGreenCI,
+		UpdatedAt:      p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -458,6 +460,13 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusBadRequest, "invalid "+field.key)
 				return
 			}
+		}
+	}
+
+	if value, present := raw["require_green_ci"]; present {
+		if err := json.Unmarshal(value, &policy.RequireGreenCI); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid require_green_ci")
+			return
 		}
 	}
 

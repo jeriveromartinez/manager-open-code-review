@@ -100,7 +100,8 @@ func runServe() error {
 		}
 	}()
 
-	s := &syncer.Syncer{Store: st, Apps: apps, Events: publisher}
+	checks := &github.Checks{Store: st, Apps: apps}
+	s := &syncer.Syncer{Store: st, Apps: apps, Events: publisher, Checks: checks}
 	// The same worker starts/cancels checks for the trigger and publishes
 	// finished runs from the publish queue. It never executes a review.
 	publisherWorker := &publish.Worker{
@@ -154,7 +155,7 @@ func runServe() error {
 	}
 	webhooks := &github.WebhookHandler{
 		Store: st, Apps: apps, Events: publisher, Jobs: enqueuer, Reviews: trigger,
-		Findings: publisherWorker, Comments: publisherWorker,
+		Findings: publisherWorker, Comments: publisherWorker, Checks: checks,
 	}
 	router := api.NewRouter(api.Deps{
 		Cfg:        cfg,

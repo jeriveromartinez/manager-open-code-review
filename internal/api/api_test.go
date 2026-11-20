@@ -540,6 +540,48 @@ func TestPRsEndpointFiltersByTeam(t *testing.T) {
 	}
 }
 
+func TestPRsEndpointRendersStoredValidations(t *testing.T) {
+	f := newAPIFixture(t)
+	inst := f.installation(1016)
+	team := f.team("ci-team")
+	repo := f.repo(6201, inst.ID, "acme/ci", &team.ID, true)
+	pr := f.pr(repo.ID, 1, store.StatusPending)
+	admin := f.user("admin", true)
+
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.PullRequest{}).
+		Where("id = ?", pr.ID).Update("head_sha", "sha-api").Error; err != nil {
+		t.Fatalf("set head sha: %v", err)
+	}
+	if _, err := f.st.SetPRValidations(f.ctx, pr.ID, "sha-api", store.PRValidations{Passed: 9, Total: 9}); err != nil {
+		t.Fatalf("SetPRValidations: %v", err)
+	}
+
+	rec := f.request(http.MethodGet, "/api/prs", nil, f.session(admin))
+	assertStatus(t, rec, http.StatusOK)
+
+	var views []map[string]any
+	decodeJSON(t, rec, &views)
+	if len(views) != 1 {
+		t.Fatalf("views = %d, want 1", len(views))
+	}
+	validations, ok := views[0]["validations"].(map[string]any)
+	if !ok {
+		t.Fatalf("validations = %v, want an object", views[0]["validations"])
+	}
+	if validations["passed"] != float64(9) || validations["total"] != float64(9) {
+		t.Errorf("validations = %v, want 9/9", validations)
+	}
+
+	rec = f.request(http.MethodGet, fmt.Sprintf("/api/prs/%d", pr.ID), nil, f.session(admin))
+	assertStatus(t, rec, http.StatusOK)
+	var detail map[string]any
+	decodeJSON(t, rec, &detail)
+	validations, ok = detail["validations"].(map[string]any)
+	if !ok || validations["passed"] != float64(9) || validations["total"] != float64(9) {
+		t.Errorf("detail validations = %v, want 9/9", detail["validations"])
+	}
+}
+
 func TestPatchRepoEnableEnqueuesSync(t *testing.T) {
 	f := newAPIFixture(t)
 	f.installation(991)
