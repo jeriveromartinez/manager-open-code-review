@@ -44,16 +44,25 @@ type ReviewStarter interface {
 	OnPullRequest(ctx context.Context, prID uint) error
 }
 
+// FindingsReconciler applies a finding change that happened outside a review
+// run: it closes or reopens the GitHub review thread and republishes the gate so
+// the check run and the panel agree.
+type FindingsReconciler interface {
+	Republish(ctx context.Context, prID uint) error
+	SetFindingThread(ctx context.Context, prID uint, finding store.Finding, resolved bool) (bool, error)
+}
+
 // WebhookHandler receives GitHub App deliveries. Store persists the state they
 // describe, Apps supplies the webhook secret, Events notifies browsers, Jobs
-// schedules the initial synchronization of new installations and Reviews starts
-// automated reviews (optional).
+// schedules the initial synchronization of new installations, Reviews starts
+// automated reviews and Findings applies thread disputes (all optional).
 type WebhookHandler struct {
-	Store   *store.Store
-	Apps    AppProvider
-	Events  events.Publisher
-	Jobs    SyncEnqueuer
-	Reviews ReviewStarter
+	Store    *store.Store
+	Apps     AppProvider
+	Events   events.Publisher
+	Jobs     SyncEnqueuer
+	Reviews  ReviewStarter
+	Findings FindingsReconciler
 }
 
 // ServeHTTP verifies and dispatches a webhook delivery. Events this phase does
@@ -101,6 +110,8 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleInstallationRepositories(r.Context(), w, p)
 	case *gh.PullRequestEvent:
 		h.handlePullRequest(r.Context(), w, p)
+	case *gh.PullRequestReviewThreadEvent:
+		h.handleReviewThread(r.Context(), w, p)
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}

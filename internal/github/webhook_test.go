@@ -96,14 +96,54 @@ func (r *recordingReviews) snapshot() []uint {
 	return append([]uint(nil), r.ids...)
 }
 
+type recordingReconciler struct {
+	mu        sync.Mutex
+	republish []uint
+	threads   []threadSync
+	threadHit bool
+	err       error
+}
+
+type threadSync struct {
+	findingID string
+	resolved  bool
+}
+
+func (r *recordingReconciler) Republish(_ context.Context, prID uint) error {	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.republish = append(r.republish, prID)
+	return r.err
+}
+
+func (r *recordingReconciler) SetFindingThread(_ context.Context, prID uint, finding store.Finding, resolved bool) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.threads = append(r.threads, threadSync{findingID: finding.ID, resolved: resolved})
+	return r.threadHit, r.err
+}
+
+func (r *recordingReconciler) republishSnapshot() []uint {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint(nil), r.republish...)
+}
+
+func (r *recordingReconciler) threadSnapshot() []threadSync {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]threadSync(nil), r.threads...)
+}
+
+
 type webhookFixture struct {
-	t       *testing.T
-	ctx     context.Context
-	st      *store.Store
-	handler *ghapp.WebhookHandler
-	jobs    *recordingJobs
-	pub     *recordingPublisher
-	reviews *recordingReviews
+	t        *testing.T
+	ctx      context.Context
+	st       *store.Store
+	handler  *ghapp.WebhookHandler
+	jobs     *recordingJobs
+	pub      *recordingPublisher
+	reviews  *recordingReviews
+	findings *recordingReconciler
 }
 
 func newWebhookFixture(t *testing.T) *webhookFixture {
@@ -113,18 +153,21 @@ func newWebhookFixture(t *testing.T) *webhookFixture {
 	jobs := &recordingJobs{}
 	pub := &recordingPublisher{}
 	reviews := &recordingReviews{}
+	findings := &recordingReconciler{}
 	h := &ghapp.WebhookHandler{
 		Store: st,
 		Apps: fakeAppProvider{app: &ghapp.App{
 			Creds: ghapp.AppCredentials{WebhookSecret: webhookTestSecret},
 		}},
-		Events:  pub,
-		Jobs:    jobs,
-		Reviews: reviews,
+		Events:   pub,
+		Jobs:     jobs,
+		Reviews:  reviews,
+		Findings: findings,
 	}
 	return &webhookFixture{
 		t: t, ctx: context.Background(), st: st,
 		handler: h, jobs: jobs, pub: pub, reviews: reviews,
+		findings: findings,
 	}
 }
 
@@ -688,3 +731,118 @@ func TestWebhookOversizedBody413(t *testing.T) {
 		t.Fatalf("published events = %v, want none", got)
 	}
 }
+
+// seedOpenPR stores the pull request the review-thread and command fixtures
+// refer to (#142 of repository 501).
+func (f *webhookFixture) seedOpenPR() store.PullRequest {
+	f.t.Helper()
+
+	pr := store.PullRequest{
+		RepositoryID:    501,
+		Number:          142,
+		Title:           "Add QA endpoint",
+		HeadSHA:         "aaa111",
+		State:           "open",
+		QAStatus:        store.StatusChangesRequested,
+		GitHubUpdatedAt: time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC),
+	}
+	if err := f.st.DB.WithContext(f.ctx).Create(&pr).Error; err != nil {
+		f.t.Fatalf("seed pull request: %v", err)
+	}
+	return pr
+}
+
+// seedThreadFinding stores a published finding linked to the review comment the
+// thread fixtures describe. The first finding keeps the fixtures' coordinates;
+// later ones get their own so several findings never share a thread.
+func (f *webhookFixture) seedThreadFinding(prID uint, id, status string) store.Finding {
+	f.t.Helper()
+
+	var existing int64
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.Finding{}).
+		Where("pull_request_id = ?", prID).Count(&existing).Error; err != nil {
+		f.t.Fatalf("count findings: %v", err)
+	}
+	commentID, nodeID := 5001, "PRRC_root1"
+	if existing > 0 {
+		commentID, nodeID = 5100+int(existing), "PRRC_"+id
+	}
+
+	saved, err := f.st.UpsertFinding(f.ctx, store.Finding{
+		ID:                  id,
+		PullRequestID:       prID,
+		Fingerprint:         "fp-" + id,
+		Path:                "src/a.go",
+		StartLine:           2,
+		EndLine:             2,
+		Severity:            "major",
+		Category:            "bug",
+		Title:               "Título " + id,
+		Status:              status,
+		GithubCommentID:     int64(commentID),
+		GithubCommentNodeID: nodeID,
+	})
+	if err != nil {
+		f.t.Fatalf("seed finding %s: %v", id, err)
+	}
+	return saved
+}
+
+func (f *webhookFixture) finding(id string) store.Finding {
+	f.t.Helper()
+
+	var out store.Finding
+	if err := f.st.DB.WithContext(f.ctx).Where("id = ?", id).Take(&out).Error; err != nil {
+		f.t.Fatalf("read finding %s: %v", id, err)
+	}
+	return out
+}
+
+func (f *webhookFixture) auditRows() []store.AuditLog {
+	f.t.Helper()
+
+	var rows []store.AuditLog
+	if err := f.st.DB.WithContext(f.ctx).Order("id").Find(&rows).Error; err != nil {
+		f.t.Fatalf("list audit rows: %v", err)
+	}
+	return rows
+}
+
+// seedQALead creates the local user behind the authorized fixtures and makes
+// them lead of the repository's team.
+func (f *webhookFixture) seedQALead(teamID uint) store.User {
+	f.t.Helper()
+
+	user := store.User{GitHubID: 8001, Login: "qa-lead"}
+	if err := f.st.DB.WithContext(f.ctx).Create(&user).Error; err != nil {
+		f.t.Fatalf("seed lead user: %v", err)
+	}
+	if err := f.st.SetTeamMember(f.ctx, teamID, user.ID, "lead"); err != nil {
+		f.t.Fatalf("assign team lead: %v", err)
+	}
+	return user
+}
+
+func (f *webhookFixture) seedDeveloper() store.User {
+	f.t.Helper()
+
+	user := store.User{GitHubID: 8002, Login: "dev"}
+	if err := f.st.DB.WithContext(f.ctx).Create(&user).Error; err != nil {
+		f.t.Fatalf("seed developer user: %v", err)
+	}
+	return user
+}
+
+func (f *webhookFixture) repoTeam() uint {
+	f.t.Helper()
+
+	var repo store.Repository
+	if err := f.st.DB.WithContext(f.ctx).Where("id = ?", 501).Take(&repo).Error; err != nil {
+		f.t.Fatalf("read repository: %v", err)
+	}
+	if repo.TeamID == nil {
+		f.t.Fatal("repository has no team")
+	}
+	return *repo.TeamID
+}
+

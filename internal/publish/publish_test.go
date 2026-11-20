@@ -217,7 +217,13 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.Unmarshal(body, &in)
 		g.gqlQueries = append(g.gqlQueries, in.Query)
-		if strings.Contains(in.Query, "resolveReviewThread") {
+		switch {
+		case strings.Contains(in.Query, "unresolveReviewThread"):
+			writeJSON(map[string]any{"data": map[string]any{"unresolveReviewThread": map[string]any{
+				"thread": map[string]any{"id": "THREAD_1", "isResolved": false},
+			}}}, http.StatusOK)
+			return
+		case strings.Contains(in.Query, "resolveReviewThread"):
 			if g.failResolveOnce {
 				g.failResolveOnce = false
 				http.Error(w, "resolution temporarily unavailable", http.StatusInternalServerError)
@@ -227,13 +233,13 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 				"thread": map[string]any{"id": "THREAD_1", "isResolved": true},
 			}}}, http.StatusOK)
 			return
-		}
-		if strings.Contains(in.Query, "reviewThreads") {
+		case strings.Contains(in.Query, "reviewThreads"):
 			writeJSON(map[string]any{"data": map[string]any{"repository": map[string]any{"pullRequest": map[string]any{
 				"reviewThreads": map[string]any{
 					"nodes": []any{map[string]any{
-						"id":       "THREAD_1",
-						"comments": map[string]any{"nodes": []any{map[string]any{"id": "NC_resolve"}}},
+						"id":         "THREAD_1",
+						"isResolved": false,
+						"comments":   map[string]any{"nodes": []any{map[string]any{"id": "NC_resolve"}}},
 					}},
 					"pageInfo": map[string]any{"hasNextPage": false, "endCursor": nil},
 				},

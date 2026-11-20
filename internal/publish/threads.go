@@ -29,6 +29,12 @@ const resolveThreadMutation = `mutation ResolveReviewThread($threadId: ID!) {
   }
 }`
 
+const unresolveThreadMutation = `mutation UnresolveReviewThread($threadId: ID!) {
+  unresolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}`
+
 type graphQLThread struct {
 	ID       string `json:"id"`
 	Resolved bool   `json:"isResolved"`
@@ -88,6 +94,16 @@ func (p *publishContext) publishResolutions(ctx context.Context, findings []stor
 
 // lookupThread finds the review thread containing a comment node id.
 func (p *publishContext) lookupThread(ctx context.Context, commentNodeID string) (string, error) {
+	return p.lookupThreadIn(ctx, commentNodeID, false)
+}
+
+// lookupThreadAny finds the review thread containing a comment node id whether
+// it is currently resolved or not. Reopening a thread needs the resolved one.
+func (p *publishContext) lookupThreadAny(ctx context.Context, commentNodeID string) (string, error) {
+	return p.lookupThreadIn(ctx, commentNodeID, true)
+}
+
+func (p *publishContext) lookupThreadIn(ctx context.Context, commentNodeID string, includeResolved bool) (string, error) {
 	var after *string
 	for {
 		var response struct {
@@ -114,7 +130,7 @@ func (p *publishContext) lookupThread(ctx context.Context, commentNodeID string)
 		}
 		threads := response.Repository.PullRequest.ReviewThreads
 		for _, thread := range threads.Nodes {
-			if thread.Resolved {
+			if thread.Resolved && !includeResolved {
 				continue
 			}
 			for _, comment := range thread.Comments.Nodes {

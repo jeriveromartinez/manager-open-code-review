@@ -3,8 +3,10 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -678,6 +680,66 @@ func (s *Store) FindingsForPR(ctx context.Context, prID uint) ([]Finding, error)
 	return findings, nil
 }
 
+// Finding loads one finding by ID.
+func (s *Store) Finding(ctx context.Context, id string) (Finding, error) {
+	var f Finding
+	err := quietDB(s.DB.WithContext(ctx)).Where("id = ?", id).Take(&f).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Finding{}, fmt.Errorf("finding %q: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return Finding{}, fmt.Errorf("find finding %q: %w", id, err)
+	}
+	return f, nil
+}
+
+// FindingForThread resolves the finding published in a review thread. commentIDs
+// are the review comment node ids carried by the webhook payload; threadID is the
+// thread node id already recorded by an earlier resolution.
+func (s *Store) FindingForThread(ctx context.Context, prID uint, threadID string, commentIDs []string) (Finding, error) {
+	q := quietDB(s.DB.WithContext(ctx)).Where("pull_request_id = ?", prID)
+	switch {
+	case threadID != "" && len(commentIDs) > 0:
+		q = q.Where("github_thread_id = ? OR github_comment_node_id IN ?", threadID, commentIDs)
+	case threadID != "":
+		q = q.Where("github_thread_id = ?", threadID)
+	case len(commentIDs) > 0:
+		q = q.Where("github_comment_node_id IN ?", commentIDs)
+	default:
+		return Finding{}, fmt.Errorf("finding for review thread: %w", ErrNotFound)
+	}
+
+	var f Finding
+	err := q.Order("id").Take(&f).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Finding{}, fmt.Errorf("finding for review thread: %w", ErrNotFound)
+	}
+	if err != nil {
+		return Finding{}, fmt.Errorf("find finding for review thread: %w", err)
+	}
+	return f, nil
+}
+
+// SetFindingStatusIfChanged transitions a finding and reports whether the row
+// actually changed, so replaying the same webhook delivery is a no-op.
+func (s *Store) SetFindingStatusIfChanged(ctx context.Context, id, status string) (bool, error) {
+	res := s.DB.WithContext(ctx).Model(&Finding{}).
+		Where("id = ? AND status <> ?", id, status).
+		Updates(map[string]any{"status": status, "updated_at": time.Now().UTC()})
+	if res.Error != nil {
+		return false, fmt.Errorf("set finding %q status: %w", id, res.Error)
+	}
+	if res.RowsAffected > 0 {
+		return true, nil
+	}
+
+	// Zero rows means either an unchanged status or a missing finding.
+	if _, err := s.Finding(ctx, id); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 // OpenFindingsForPR lists the findings that still need attention.
 func (s *Store) OpenFindingsForPR(ctx context.Context, prID uint) ([]Finding, error) {
 	var findings []Finding
@@ -726,6 +788,134 @@ func (s *Store) SetFindingPublished(ctx context.Context, id string, commentID in
 		return fmt.Errorf("set finding %q published: %w", id, ErrNotFound)
 	}
 	return nil
+}
+
+// SetFindingThread stores the resolved GitHub thread node id of a finding.
+func (s *Store) SetFindingThread(ctx context.Context, id, threadID string) error {
+	res := s.DB.WithContext(ctx).Model(&Finding{}).Where("id = ?", id).Updates(map[string]any{
+		"github_thread_id": threadID,
+		"updated_at":       time.Now().UTC(),
+	})
+	if res.Error != nil {
+		return fmt.Errorf("set finding %q thread: %w", id, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("set finding %q thread: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// FindingAudit is the audit entry of a finding transition that happened outside
+// a review run: a review-thread dispute or a /qa command.
+type FindingAudit struct {
+	Action    string
+	Actor     string
+	ActorID   *uint
+	CommentID int64
+	Reason    string
+	ThreadID  string
+}
+
+// SetFindingStatusAudited transitions a finding and appends its audit row in a
+// single transaction. It reports whether the status actually changed, which is
+// what makes a replayed delivery neither re-audit nor flip state back.
+func (s *Store) SetFindingStatusAudited(ctx context.Context, id, status string, entry FindingAudit) (bool, error) {
+	changed := false
+	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		now := time.Now().UTC()
+		updates := map[string]any{"status": status, "updated_at": now}
+		if entry.ThreadID != "" {
+			updates["github_thread_id"] = entry.ThreadID
+		}
+
+		res := tx.Model(&Finding{}).Where("id = ? AND status <> ?", id, status).Updates(updates)
+		if res.Error != nil {
+			return fmt.Errorf("update finding %q status: %w", id, res.Error)
+		}
+		if res.RowsAffected == 0 {
+			// An unchanged status still lets us record a thread ignored by an
+			// earlier delivery, but it must not audit the transition twice.
+			var existing Finding
+			err := quietDB(tx).Where("id = ?", id).Take(&existing).Error
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("update finding %q status: %w", id, ErrNotFound)
+			}
+			if err != nil {
+				return fmt.Errorf("find finding %q: %w", id, err)
+			}
+			if entry.ThreadID != "" && existing.GithubThreadID == "" {
+				if err := tx.Model(&Finding{}).Where("id = ?", id).
+					Update("github_thread_id", entry.ThreadID).Error; err != nil {
+					return fmt.Errorf("set finding %q thread: %w", id, err)
+				}
+			}
+			return nil
+		}
+
+		data := map[string]any{"actor": entry.Actor}
+		if entry.CommentID != 0 {
+			data["comment_id"] = entry.CommentID
+		}
+		if entry.Reason != "" {
+			data["reason"] = entry.Reason
+		}
+		if entry.ThreadID != "" {
+			data["thread_id"] = entry.ThreadID
+		}
+		raw, err := json.Marshal(data)
+		if err != nil {
+			return fmt.Errorf("marshal audit data: %w", err)
+		}
+		row := AuditLog{
+			ActorUserID: entry.ActorID,
+			Action:      entry.Action,
+			TargetType:  "finding",
+			TargetID:    id,
+			Data:        datatypes.JSON(raw),
+		}
+		if err := tx.Create(&row).Error; err != nil {
+			return fmt.Errorf("write audit row: %w", err)
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
+}
+
+// AuditCommand records a /qa command that is not a finding transition, such as a
+// retry. Its comment_id is what makes a replayed delivery a no-op.
+func (s *Store) AuditCommand(ctx context.Context, actorID *uint, action, targetType, targetID, actor string, commentID int64) error {
+	raw, err := json.Marshal(map[string]any{"actor": actor, "comment_id": commentID})
+	if err != nil {
+		return fmt.Errorf("marshal audit data: %w", err)
+	}
+	row := AuditLog{
+		ActorUserID: actorID,
+		Action:      action,
+		TargetType:  targetType,
+		TargetID:    targetID,
+		Data:        datatypes.JSON(raw),
+	}
+	if err := s.DB.WithContext(ctx).Create(&row).Error; err != nil {
+		return fmt.Errorf("write audit row: %w", err)
+	}
+	return nil
+}
+
+// CommandHandled reports whether a /qa comment was already applied. GitHub
+// redelivers webhooks, and commands are not naturally idempotent.
+func (s *Store) CommandHandled(ctx context.Context, commentID int64) (bool, error) {
+	var count int64
+	err := s.DB.WithContext(ctx).Model(&AuditLog{}).
+		Where("data->>'comment_id' = ?", strconv.FormatInt(commentID, 10)).
+		Count(&count).Error
+	if err != nil {
+		return false, fmt.Errorf("look up command %d: %w", commentID, err)
+	}
+	return count > 0, nil
 }
 
 // UpsertArtifact records a published GitHub artifact. Summary comments are one
