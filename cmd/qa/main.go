@@ -86,7 +86,7 @@ func runServe() error {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	if err := loadSettings(ctx, st, &cfg); err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return fmt.Errorf("load settings: %w", err)
 	}
 
 	box, err := crypto.NewBox(cfg.MasterKey)
@@ -237,7 +237,7 @@ func runWorker() error {
 	}
 	defer st.Close()
 	if err := loadSettings(ctx, st, &cfg); err != nil {
-		return fmt.Errorf("load config: %w", err)
+		return fmt.Errorf("load settings: %w", err)
 	}
 
 	workerBox, err := crypto.NewBox(cfg.WorkerKey)
