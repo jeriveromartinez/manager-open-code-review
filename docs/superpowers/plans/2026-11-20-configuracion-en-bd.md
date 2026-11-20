@@ -1769,6 +1769,8 @@ QA_WORKER_KEY=
 
 `deploy/docker-compose.yml`: dejar en `app` y `worker` solo `QA_DATABASE_URL`, `QA_WORKER_KEY` (y `QA_MASTER_KEY` solo en `app`); añadir `QA_DATABASE_URL` al servicio `monitor`. Eliminar de ambos las variables movidas.
 
+El worker lee `app_settings` al arrancar y no migra, así que un worker que arranca antes de que la app haya migrado una base nueva muere con «relation app_settings does not exist». `depends_on: app: service_started` no basta: `service_started` no espera al migrate. Cambiar la condición del worker a `app: condition: service_healthy` (la app ya publica `/healthz`, que solo responde cuando la base responde y las migraciones pasaron) y comprobar que el `monitor`, que depende de `worker`, sigue teniendo sentido con esa espera.
+
 `README.md`: reemplazar la tabla/lista de variables opcionales por una referencia a *Ajustes* en el panel, dejar la tabla de variables de entorno con solo las cuatro, y documentar en el setup que `QA_SETUP_TOKEN` es opcional.
 
 `docs/backup.md`: `QA_BACKUP_RETENTION` pasa a explicarse como ajuste del panel.
