@@ -153,6 +153,45 @@ QA_RECONCILE_INTERVAL=5m
 
 Las disputas en hilos (`pull_request_review_thread`) y los comandos `/qa` (`issue_comment`) requieren webhooks; la tabla de eventos de la sección anterior detalla el resto. En modo polling, los descartes y las confirmaciones se hacen desde el panel.
 
+## Túnel público (opcional)
+
+`deploy/docker-compose.yml` incluye un servicio `tunnel` con Cloudflare Tunnel que solo se levanta con el perfil `tunnel`:
+
+```dotenv
+# deploy/.env
+CLOUDFLARE_TUNNEL_TOKEN=<token del túnel>
+```
+
+```sh
+docker compose -f deploy/docker-compose.yml --profile tunnel up -d --build
+```
+
+El servicio vive en la red del compose y resuelve la app por DNS (`http://app:8080`), no comparte su network namespace: recrear o reiniciar `app` deja el túnel intacto. En el ingress del túnel (panel de Cloudflare o `cloudflared tunnel route`) la URL de origen debe ser `http://app:8080`.
+
+La imagen de `cloudflared` es distroless (sin `sh`, `wget` ni `curl`), así que el contenedor no puede comprobarse a sí mismo con un healthcheck. Por eso publica su endpoint de métricas en `127.0.0.1:2000`: `GET /ready` devuelve 200 cuando hay al menos una conexión al edge y 503 mientras reconecta. Un **502** en el dominio público con `/ready` en 200 apunta a la app; con `/ready` en 503 apunta al túnel.
+
+Para el reinicio seguro de cada pieza:
+
+```sh
+# La app sola: el túnel sigue conectado.
+docker compose -f deploy/docker-compose.yml restart app
+
+# La app con un build o un cambio de .env: recrea el túnel en la misma orden.
+docker compose -f deploy/docker-compose.yml --profile tunnel up -d --build app
+
+# El worker no afecta al túnel.
+docker compose -f deploy/docker-compose.yml restart worker
+```
+
+### Alertas mínimas
+
+Dos comprobaciones externas (o el monitor que ya uses) cubren el issue:
+
+- `$QA_PUBLIC_URL/healthz` cada minuto: la app responde 200 con `{"status":"ok"}`; un 502 o un timeout indica app o túnel caídos.
+- `http://127.0.0.1:2000/ready` cada minuto en el host: 200 significa túnel conectado; 503 sostenido, túnel caído o sin salida al edge.
+
+`docker compose ps` distingue cuál de las dos piezas falla cuando alguna alerta salta.
+
 ## Comandos útiles
 
 ```sh

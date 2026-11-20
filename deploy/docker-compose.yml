@@ -29,6 +29,32 @@ services:
       postgres:
         condition: service_healthy
 
+  # El túnel vive en la red del compose y resuelve la app por DNS (`app:8080`).
+  # Con `network_mode: service:app` el túnel hereda el network namespace de
+  # `app`, así que recrear o reiniciar la app lo deja apuntando a un namespace
+  # muerto y el dominio público devuelve 502 hasta recrearlo a mano.
+  # Es opcional: sin el perfil `tunnel` no se levanta.
+  # En Cloudflare, el ingress del túnel debe apuntar a http://app:8080.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+    # El token viaja por entorno y no por argv, así no aparece en `docker
+    # inspect`. Sin token cloudflared falla al arrancar con un error explícito.
+    command: ["tunnel", "--no-autoupdate", "--metrics", "0.0.0.0:2000", "run"]
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    ports:
+      # La imagen es distroless: no hay sh, wget ni curl, así que el contenedor
+      # no puede comprobarse a sí mismo. Se publica el endpoint de métricas en
+      # loopback para que el monitor externo consulte /ready: 200 con al menos
+      # una conexión al edge, 503 mientras reconecta. Así un 502 público con
+      # /ready en 503 señala al túnel y con /ready en 200 señala a la app.
+      - "127.0.0.1:2000:2000"
+
   worker:
     build:
       context: ..
