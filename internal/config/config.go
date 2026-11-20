@@ -26,6 +26,8 @@ type Config struct {
 	ReviewTimeout     time.Duration // QA_REVIEW_TIMEOUT, default 20m
 	ReviewStaleAfter  time.Duration // QA_REVIEW_STALE_AFTER, default 45m
 	WorkspaceDir      string        // QA_WORKSPACE_DIR, default "/tmp/qa"
+	WorkerHealthAddr  string        // QA_WORKER_HEALTH_ADDR, default ":9090"
+	WorkerQueueStale  time.Duration // QA_WORKER_QUEUE_STALE_AFTER, default 10m
 	OCRBin            string        // QA_OCR_BIN, default "ocr"
 	OpencodeBin       string        // QA_OPENCODE_BIN, default "opencode"
 	FetchDepthMax     int           // QA_FETCH_DEPTH_MAX, default 500
@@ -54,6 +56,10 @@ func Load(getenv func(string) string) (Config, error) {
 		ReviewAgentSteps:  40,
 		ReviewTimeout:     20 * time.Minute,
 		WorkspaceDir:      "/tmp/qa",
+		WorkerHealthAddr:  ":9090",
+		// A job waiting ten minutes with nothing running means the worker is
+		// not consuming, not that the queue is merely busy.
+		WorkerQueueStale: 10 * time.Minute,
 		OCRBin:            "ocr",
 		OpencodeBin:       "opencode",
 		FetchDepthMax:     500,
@@ -178,6 +184,26 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, errors.New("QA_WORKSPACE_DIR must not be empty")
 		}
 		cfg.WorkspaceDir = v
+	}
+
+	if raw := getenv("QA_WORKER_HEALTH_ADDR"); raw != "" {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			return Config{}, errors.New("QA_WORKER_HEALTH_ADDR must not be empty")
+		}
+		cfg.WorkerHealthAddr = v
+	}
+
+	if raw := getenv("QA_WORKER_QUEUE_STALE_AFTER"); raw != "" {
+		v := strings.TrimSpace(raw)
+		stale, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("QA_WORKER_QUEUE_STALE_AFTER must be a duration: %w", err)
+		}
+		if stale <= 0 {
+			return Config{}, fmt.Errorf("QA_WORKER_QUEUE_STALE_AFTER must be greater than zero, got %q", v)
+		}
+		cfg.WorkerQueueStale = stale
 	}
 
 	if raw := getenv("QA_OCR_BIN"); raw != "" {

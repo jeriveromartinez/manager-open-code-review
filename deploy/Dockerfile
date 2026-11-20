@@ -27,6 +27,7 @@ RUN apt-get update \
 COPY --from=build /out/qa /usr/local/bin/qa
 USER qa
 WORKDIR /home/qa
+EXPOSE 9090
 ENTRYPOINT ["/usr/local/bin/qa"]
 CMD ["worker"]
 

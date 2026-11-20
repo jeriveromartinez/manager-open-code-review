@@ -28,6 +28,7 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/syncer"
 	"github.com/jeriveromartinez/qa-control-center/internal/web"
+	"github.com/jeriveromartinez/qa-control-center/internal/worker"
 )
 
 func usage() string {
@@ -284,7 +285,47 @@ func runWorker() error {
 	}()
 
 	slog.Info("review worker started", "concurrency", cfg.ReviewConcurrency)
-	<-ctx.Done()
+
+	health := worker.New(worker.Config{
+		Stats:           st,
+		StatsWindow:     time.Hour,
+		StaleQueueAfter: cfg.WorkerQueueStale,
+		Dependencies: []worker.Dependency{
+			{Name: cfg.OCRBin, Version: func(ctx context.Context) (string, error) {
+				return checkBinary(ctx, cfg.OCRBin)
+			}},
+			{Name: cfg.OpencodeBin, Version: func(ctx context.Context) (string, error) {
+				return checkBinary(ctx, cfg.OpencodeBin)
+			}},
+		},
+	})
+	healthSrv := &http.Server{
+		Addr:              cfg.WorkerHealthAddr,
+		Handler:           health.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	healthErr := make(chan error, 1)
+	go func() {
+		slog.Info("worker health listening", "addr", cfg.WorkerHealthAddr)
+		if err := healthSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			healthErr <- err
+		}
+		close(healthErr)
+	}()
+
+	select {
+	case <-ctx.Done():
+	case err := <-healthErr:
+		if err != nil {
+			return fmt.Errorf("worker health server: %w", err)
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := healthSrv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("stop worker health server", "error", err)
+	}
 	return nil
 }
 

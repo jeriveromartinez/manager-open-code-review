@@ -46,9 +46,20 @@ Los backups programados y la restauración verificada están en [docs/backup.md]
 | `QA_GITHUB_API_URL` | Base de la API de GitHub | `https://api.github.com` |
 | `POSTGRES_PASSWORD` | Contraseña del contenedor `postgres` | — |
 
-Ajustes opcionales del worker: `QA_REVIEW_CONCURRENCY` (`2`), `QA_REVIEW_AGENT_STEPS` (`40`, iteraciones del agente por pasada), `QA_REVIEW_TIMEOUT` (`20m`, presupuesto total del run), `QA_REVIEW_STALE_AFTER` (`45m`), `QA_WORKSPACE_DIR` (`/tmp/qa`), `QA_OCR_BIN` (`ocr`), `QA_OPENCODE_BIN` (`opencode`), `QA_FETCH_DEPTH_MAX` (`500`) y `QA_GIT_BASE_URL` (`https://github.com`).
+Ajustes opcionales del worker: `QA_REVIEW_CONCURRENCY` (`2`), `QA_REVIEW_AGENT_STEPS` (`40`, iteraciones del agente por pasada), `QA_REVIEW_TIMEOUT` (`20m`, presupuesto total del run), `QA_REVIEW_STALE_AFTER` (`45m`), `QA_WORKER_HEALTH_ADDR` (`:9090`), `QA_WORKER_QUEUE_STALE_AFTER` (`10m`), `QA_WORKSPACE_DIR` (`/tmp/qa`), `QA_OCR_BIN` (`ocr`), `QA_OPENCODE_BIN` (`opencode`), `QA_FETCH_DEPTH_MAX` (`500`) y `QA_GIT_BASE_URL` (`https://github.com`).
 
 `QA_REVIEW_STALE_AFTER` es el umbral del vigilante de runs huérfanos: al arrancar y cada 5 minutos, los runs en `running` cuya hora de inicio supera ese umbral pasan a `failed` con código `interrupted`, se publica el check como `action_required` y el PR queda `inconclusive`. Debe superar `QA_REVIEW_TIMEOUT` (más el margen de reintentos), o matará revisiones sanas.
+
+El worker expone salud y métricas en `QA_WORKER_HEALTH_ADDR` (`:9090` por defecto):
+
+| Ruta | Contenido |
+|---|---|
+| `GET /healthz` | Estado del proceso, `uptime_seconds`, ping a Postgres y versión de `ocr` y `opencode`. Devuelve **503** y `status: degraded` si la base o cualquiera de los binarios falla. |
+| `GET /metrics` | Cola de River (`available`, `running`, `scheduled`, `discarded`, `oldest_available_seconds`), runs de la última hora por estado, percentil 95 de duración y `stalled`. |
+
+`stalled` es `true` cuando hay jobs esperando, ninguno en ejecución y el más antiguo lleva más de `QA_WORKER_QUEUE_STALE_AFTER` (`10m`) esperando: la cola no avanza porque el worker no consume. Una cola con trabajo reciente no se marca, para que un pico legítimo no dispare alertas.
+
+Alertas mínimas sugeridas: `/healthz` distinto de 200 (worker caído o dependencia rota), `/metrics` con `stalled: true` (worker vivo pero sin consumir), y el check `QA Control Center` en `in_progress` más de `QA_REVIEW_STALE_AFTER` (lo cubre el watchdog, pero conviene vigilarlo desde fuera).
 
 ## Revisión automática (Fase 2)
 

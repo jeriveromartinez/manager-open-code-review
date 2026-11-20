@@ -57,6 +57,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DatabaseURL != "postgres://localhost/qa" {
 		t.Errorf("DatabaseURL = %q, want %q", cfg.DatabaseURL, "postgres://localhost/qa")
 	}
+	if cfg.WorkerHealthAddr != ":9090" {
+		t.Errorf("WorkerHealthAddr = %q, want %q", cfg.WorkerHealthAddr, ":9090")
+	}
+	if cfg.WorkerQueueStale != 10*time.Minute {
+		t.Errorf("WorkerQueueStale = %v, want %v", cfg.WorkerQueueStale, 10*time.Minute)
+	}
 }
 
 func TestLoadMissingRequired(t *testing.T) {
@@ -134,6 +140,8 @@ func TestLoadOverrides(t *testing.T) {
 	env["QA_RECONCILE_INTERVAL"] = "30s"
 	env["QA_GITHUB_URL"] = "https://ghe.example.com"
 	env["QA_GITHUB_API_URL"] = "https://ghe.example.com/api/v3"
+	env["QA_WORKER_HEALTH_ADDR"] = "127.0.0.1:9091"
+	env["QA_WORKER_QUEUE_STALE_AFTER"] = "2m"
 
 	cfg, err := config.Load(getenv(env))
 	if err != nil {
@@ -154,6 +162,24 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.GitHubAPIURL != "https://ghe.example.com/api/v3" {
 		t.Errorf("GitHubAPIURL = %q, want %q", cfg.GitHubAPIURL, "https://ghe.example.com/api/v3")
+	}
+	if cfg.WorkerHealthAddr != "127.0.0.1:9091" {
+		t.Errorf("WorkerHealthAddr = %q, want %q", cfg.WorkerHealthAddr, "127.0.0.1:9091")
+	}
+	if cfg.WorkerQueueStale != 2*time.Minute {
+		t.Errorf("WorkerQueueStale = %v, want %v", cfg.WorkerQueueStale, 2*time.Minute)
+	}
+}
+
+func TestLoadBadWorkerQueueStaleAfter(t *testing.T) {
+	for _, value := range []string{"nope", "0s", "-5m"} {
+		t.Run(value, func(t *testing.T) {
+			env := requiredEnv()
+			env["QA_WORKER_QUEUE_STALE_AFTER"] = value
+			if _, err := config.Load(getenv(env)); err == nil {
+				t.Fatalf("Load() with %q: esperaba error", value)
+			}
+		})
 	}
 }
 
