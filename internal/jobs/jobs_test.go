@@ -111,6 +111,25 @@ func TestControlClientRunsSyncJob(t *testing.T) {
 	}
 }
 
+// TestControlClientEnqueuesWorkerOwnedKinds verifies that the control process
+// can insert jobs handled only by the worker process. River's unknown-kind
+// check made health checks, reviews and therefore publication impossible.
+func TestControlClientEnqueuesWorkerOwnedKinds(t *testing.T) {
+	s := testutil.NewStore(t)
+	client, err := jobs.NewControlClient(s.Pool, &syncer.Syncer{Store: s}, time.Hour)
+	if err != nil {
+		t.Fatalf("NewControlClient() error = %v", err)
+	}
+	enqueuer := jobs.NewEnqueuer(client)
+	ctx := context.Background()
+	if err := enqueuer.EnqueueLLMHealth(ctx, 1); err != nil {
+		t.Errorf("EnqueueLLMHealth() error = %v", err)
+	}
+	if err := enqueuer.EnqueueReview(ctx, 2); err != nil {
+		t.Errorf("EnqueueReview() error = %v", err)
+	}
+}
+
 func TestReviewJobArgs(t *testing.T) {
 	args := jobs.ReviewRunArgs{RunID: 17}
 	if args.Kind() != "review_run" {

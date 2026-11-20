@@ -4,6 +4,7 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -51,12 +52,23 @@ func NewReviewClient(pool *pgxpool.Pool, runner *review.Runner, checker *review.
 	river.AddWorker[ReviewRunArgs](workers, &reviewRunWorker{runner: runner})
 	river.AddWorker[LLMHealthArgs](workers, &llmHealthWorker{checker: checker})
 
+	// River's default job timeout is one minute, far below the review budget
+	// (QA_REVIEW_TIMEOUT, 20m by default). Without this the job context dies
+	// before the LLM finishes and the run stays "running" after a retry.
+	jobTimeout := 30 * time.Minute
+	if runner != nil && runner.Cfg.Timeout > 0 {
+		jobTimeout = runner.Cfg.Timeout + 5*time.Minute
+	}
 	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
 			reviewQueue:    {MaxWorkers: concurrency},
 			llmHealthQueue: {MaxWorkers: healthWorkers},
 		},
-		Workers: workers,
+		Workers:    workers,
+		JobTimeout: jobTimeout,
+		// The review process enqueues publish jobs that only the control
+		// process registers. Without this, River rejects those inserts.
+		SkipUnknownJobCheck: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create River review client: %w", err)

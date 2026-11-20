@@ -223,6 +223,12 @@ func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, interval time.Durati
 	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues:  queues,
 		Workers: workers,
+		// Publish and sync do external HTTP calls; River's 1-minute default is
+		// too short for a summary + reviews + checks publication.
+		JobTimeout: 5 * time.Minute,
+		// The control process enqueues review and llm_health jobs that only the
+		// worker process registers. Without this, River rejects those inserts.
+		SkipUnknownJobCheck: true,
 		PeriodicJobs: []*river.PeriodicJob{
 			river.NewPeriodicJob(
 				river.PeriodicInterval(interval),
