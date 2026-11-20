@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -621,13 +622,44 @@ func budgetCut(err error, passesLeft int) bool {
 	return passesLeft > 0 && errors.Is(err, context.DeadlineExceeded)
 }
 
+// cloneCredentialSignals are the shapes git and the HTTP stack use to report a
+// rejected credential. They are matched against the lowercased error as whole
+// tokens or fixed phrases: a bare "401" is also a valid substring of a path, a
+// SHA or a count, and acting on it tells the operator to reinstall the App for
+// a failure that has nothing to do with credentials.
+var cloneCredentialSignals = []*regexp.Regexp{
+	// `fatal: unable to access '...': The requested URL returned error: 401`.
+	regexp.MustCompile(`\breturned error: 40[13]\b`),
+	// `HTTP 401` / `HTTP 403` from the transport.
+	regexp.MustCompile(`\bhttp 40[13]\b`),
+	// `401 Unauthorized` reported by a proxy in front of the remote.
+	regexp.MustCompile(`\b40[13] unauthorized\b`),
+	// `Permission denied (publickey).` and the `(publickey,password)` variant.
+	regexp.MustCompile(`\bpermission denied \(publickey`),
+}
+
+var cloneCredentialPhrases = []string{
+	"authentication failed",
+	"could not read username",
+	"unauthorized",
+	// GitHub wording for a revoked or wrongly scoped installation token.
+	"invalid username or password",
+	"bad credentials",
+	"support for password authentication was removed",
+}
+
 func classifyCloneError(ctx context.Context, out runOutcome, err error) (runOutcome, error) {
 	if truncatedContext(ctx, err) {
 		return out.inconclusive(err, "timeout"), nil
 	}
 	message := strings.ToLower(err.Error())
-	for _, needle := range []string{"401", "unauthorized", "authentication failed", "could not read username", "permission denied"} {
-		if strings.Contains(message, needle) {
+	for _, signal := range cloneCredentialSignals {
+		if signal.MatchString(message) {
+			return out.inconclusive(err, "token_expired"), nil
+		}
+	}
+	for _, phrase := range cloneCredentialPhrases {
+		if strings.Contains(message, phrase) {
 			return out.inconclusive(err, "token_expired"), nil
 		}
 	}

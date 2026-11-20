@@ -374,9 +374,27 @@ func TestRunErrorClassification(t *testing.T) {
 		wantStatus string
 		wantCode   string
 	}{
-		{"401 del remote", errors.New("git fetch: exit status 128: fatal: 401 Unauthorized"), store.RunInconclusive, "token_expired"},
+		// The original fixture "fatal: 401 Unauthorized" is not a message git
+		// actually emits, so it could not tell a real remote 401 apart from a
+		// bare number. It now carries the genuine git wording.
+		{"401 del remote", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned error: 401"), store.RunInconclusive, "token_expired"},
+		{"403 del remote", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned error: 403"), store.RunInconclusive, "token_expired"},
+		{"HTTP 403", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': HTTP 403"), store.RunInconclusive, "token_expired"},
 		{"autenticación", errors.New("fatal: Authentication failed for remote"), store.RunInconclusive, "token_expired"},
+		{"usuario no legible", errors.New("fatal: could not read Username for 'https://github.com': terminal prompts disabled"), store.RunInconclusive, "token_expired"},
+		{"clave pública", errors.New("git@github.com: Permission denied (publickey)."), store.RunInconclusive, "token_expired"},
+		{"clave pública y password", errors.New("git@github.com: Permission denied (publickey,password)."), store.RunInconclusive, "token_expired"},
+		{"no autorizado", errors.New("remote: Unauthorized"), store.RunInconclusive, "token_expired"},
+		{"token de instalación inválido", errors.New("remote: Invalid username or password."), store.RunInconclusive, "token_expired"},
+		{"credenciales rechazadas", errors.New("remote: Bad credentials"), store.RunInconclusive, "token_expired"},
 		{"red", errors.New("git fetch: EOF"), store.RunFailed, "git_error"},
+		// A bare "401" inside a path, a SHA or an unrelated count is not an HTTP
+		// status: telling the operator to reinstall the App for those is a
+		// misleading and expensive action.
+		{"401 en la ref", errors.New("git fetch: exit status 128: fatal: couldn't find remote ref refs/pull/1401/head"), store.RunFailed, "git_error"},
+		{"401 en la ruta", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': Could not resolve host: git-run-401.internal"), store.RunFailed, "git_error"},
+		{"401 en un SHA", errors.New("git fetch: exit status 128: fatal: reference is not a tree: 4f401a2"), store.RunFailed, "git_error"},
+		{"401 en un contador", errors.New("git fetch: exit status 128: fatal: fetch-pack: protocol error after 401 packets"), store.RunFailed, "git_error"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
