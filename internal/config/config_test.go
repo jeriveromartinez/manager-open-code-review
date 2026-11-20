@@ -302,6 +302,9 @@ func TestLoadReviewDefaults(t *testing.T) {
 	if cfg.ReviewStaleAfter != 45*time.Minute {
 		t.Errorf("ReviewStaleAfter = %v, want %v", cfg.ReviewStaleAfter, 45*time.Minute)
 	}
+	if cfg.LLMHealthInterval != 30*time.Minute {
+		t.Errorf("LLMHealthInterval = %v, want %v", cfg.LLMHealthInterval, 30*time.Minute)
+	}
 	if cfg.WorkspaceDir != "/tmp/qa" {
 		t.Errorf("WorkspaceDir = %q, want %q", cfg.WorkspaceDir, "/tmp/qa")
 	}
@@ -325,6 +328,7 @@ func TestLoadReviewOverrides(t *testing.T) {
 	env["QA_REVIEW_AGENT_STEPS"] = "12"
 	env["QA_REVIEW_TIMEOUT"] = "45s"
 	env["QA_REVIEW_STALE_AFTER"] = "2h"
+	env["QA_LLM_HEALTH_INTERVAL"] = "10m"
 	env["QA_WORKSPACE_DIR"] = "/var/qa"
 	env["QA_OCR_BIN"] = "/usr/bin/ocr"
 	env["QA_OPENCODE_BIN"] = "/usr/bin/opencode"
@@ -347,6 +351,9 @@ func TestLoadReviewOverrides(t *testing.T) {
 	}
 	if cfg.ReviewStaleAfter != 2*time.Hour {
 		t.Errorf("ReviewStaleAfter = %v, want %v", cfg.ReviewStaleAfter, 2*time.Hour)
+	}
+	if cfg.LLMHealthInterval != 10*time.Minute {
+		t.Errorf("LLMHealthInterval = %v, want %v", cfg.LLMHealthInterval, 10*time.Minute)
 	}
 	if cfg.WorkspaceDir != "/var/qa" {
 		t.Errorf("WorkspaceDir = %q, want %q", cfg.WorkspaceDir, "/var/qa")
@@ -428,6 +435,23 @@ func TestLoadBadReviewStaleAfter(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "QA_REVIEW_STALE_AFTER") {
 				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_STALE_AFTER", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoadBadLLMHealthInterval(t *testing.T) {
+	for _, value := range []string{"0s", "-1m", "media hora"} {
+		t.Run(value, func(t *testing.T) {
+			env := requiredEnv()
+			env["QA_LLM_HEALTH_INTERVAL"] = value
+
+			_, err := config.Load(getenv(env))
+			if err == nil {
+				t.Fatalf("Load() error = nil for %q, want error mentioning QA_LLM_HEALTH_INTERVAL", value)
+			}
+			if !strings.Contains(err.Error(), "QA_LLM_HEALTH_INTERVAL") {
+				t.Errorf("Load() error = %q, want it to mention QA_LLM_HEALTH_INTERVAL", err.Error())
 			}
 		})
 	}

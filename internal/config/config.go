@@ -25,6 +25,7 @@ type Config struct {
 	ReviewAgentSteps  int           // QA_REVIEW_AGENT_STEPS, default 40
 	ReviewTimeout     time.Duration // QA_REVIEW_TIMEOUT, default 20m
 	ReviewStaleAfter  time.Duration // QA_REVIEW_STALE_AFTER, default 45m
+	LLMHealthInterval time.Duration // QA_LLM_HEALTH_INTERVAL, default 30m
 	WorkspaceDir      string        // QA_WORKSPACE_DIR, default "/tmp/qa"
 	WorkerHealthAddr  string        // QA_WORKER_HEALTH_ADDR, default ":9090"
 	WorkerQueueStale  time.Duration // QA_WORKER_QUEUE_STALE_AFTER, default 10m
@@ -41,6 +42,17 @@ func (c Config) RequireMasterKey() error {
 		return errors.New("QA_MASTER_KEY is required")
 	}
 	return nil
+}
+
+// LLMHealthStaleAfter is when a profile's health verdict counts as stale: two
+// sweep intervals, so one delayed cycle does not mark every profile as stale.
+// The zero Config used by tests falls back to the same 30m default as Load.
+func (c Config) LLMHealthStaleAfter() time.Duration {
+	interval := c.LLMHealthInterval
+	if interval <= 0 {
+		interval = 30 * time.Minute
+	}
+	return 2 * interval
 }
 
 // Load builds a Config from the values returned by getenv. It returns an error
@@ -67,6 +79,9 @@ func Load(getenv func(string) string) (Config, error) {
 		// A review budget is 20m plus the River retry window, so a shorter
 		// threshold would fail healthy runs on a slow LLM.
 		ReviewStaleAfter: 45 * time.Minute,
+		// A provider credential changes rarely, so half an hour is frequent
+		// enough to notice a broken key without polling the provider.
+		LLMHealthInterval: 30 * time.Minute,
 	}
 
 	cfg.DatabaseURL = strings.TrimSpace(getenv("QA_DATABASE_URL"))
@@ -176,6 +191,17 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("QA_REVIEW_STALE_AFTER must be greater than zero, got %q", v)
 		}
 		cfg.ReviewStaleAfter = stale
+	}
+
+	if v := strings.TrimSpace(getenv("QA_LLM_HEALTH_INTERVAL")); v != "" {
+		interval, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("QA_LLM_HEALTH_INTERVAL must be a duration: %w", err)
+		}
+		if interval <= 0 {
+			return Config{}, fmt.Errorf("QA_LLM_HEALTH_INTERVAL must be greater than zero, got %q", v)
+		}
+		cfg.LLMHealthInterval = interval
 	}
 
 	if raw := getenv("QA_WORKSPACE_DIR"); raw != "" {
