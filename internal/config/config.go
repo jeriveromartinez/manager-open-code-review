@@ -38,7 +38,7 @@ type Config struct {
 	MonitorInterval      time.Duration // QA_MONITOR_INTERVAL, default 1m
 	MonitorRenotifyAfter time.Duration // QA_MONITOR_RENOTIFY_AFTER, default 30m
 	AlertWebhookURL      string        // QA_ALERT_WEBHOOK_URL (opcional, vacío = solo log)
-	BackupRetention      int           // backup_retention, default 7 (lo lee deploy/backup.sh)
+	BackupRetention      int           // backup_retention, default 7; deploy/backup.sh lee la BD (Task 7)
 }
 
 // MonitorConfig is what `qa monitor` needs. It is deliberately separate from
