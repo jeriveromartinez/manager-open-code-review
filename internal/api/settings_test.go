@@ -127,6 +127,32 @@ func TestSettingsPutValidatesAgainstStoredConfig(t *testing.T) {
 	}
 }
 
+// A row that only SQL can produce must not be reported as a bad save: the
+// administrator needs the key that is corrupt, and the stored value itself must
+// never travel back in the response.
+func TestSettingsPutNamesCorruptRowWithoutEchoingIt(t *testing.T) {
+	f := newSettingsFixture(t)
+	cookie := f.session(f.user("admin", true))
+
+	if err := f.st.SaveSettings(f.ctx, nil, map[string]string{"review_timeout": "0s"}); err != nil {
+		t.Fatalf("seed corrupt row: %v", err)
+	}
+
+	rec := f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{"ocr_bin": "/usr/local/bin/ocr"},
+	}, cookie)
+	assertStatus(t, rec, http.StatusInternalServerError)
+
+	var apiErr map[string]string
+	decodeJSON(t, rec, &apiErr)
+	if !strings.Contains(apiErr["error"], "review_timeout") {
+		t.Errorf("error = %q, want the corrupt key", apiErr["error"])
+	}
+	if body := rec.Body.String(); strings.Contains(body, "0s") {
+		t.Errorf("body = %q, want the stored value left out", body)
+	}
+}
+
 func TestSettingsPutRecordsUpdatedBy(t *testing.T) {
 	f := newSettingsFixture(t)
 	admin := f.user("admin", true)

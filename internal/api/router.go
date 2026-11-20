@@ -61,6 +61,8 @@ type server struct {
 	// settingsMu serialises the read-validate-write cycle of a settings save.
 	// Without it two admins saving different keys of an interdependent pair can
 	// each validate against the pre-save state and persist an incoherent pair.
+	// The serialisation is per process, which is sound because the deployment
+	// runs a single app instance; scaling out would need a lock in PostgreSQL.
 	settingsMu sync.Mutex
 }
 

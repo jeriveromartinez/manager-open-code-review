@@ -50,36 +50,46 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The baseline is the configuration the next start will load, not s.Cfg:
-	// the process keeps its startup config until the announced restart, so
-	// validating against it would let two saves persist an incoherent pair
-	// (review_timeout 40m, then review_stale_after 30m) that aborts the next
-	// boot.
+	stored, saving, status, message := s.saveSettings(r, body.Values)
+	if status != http.StatusOK {
+		writeAPIError(w, status, message)
+		return
+	}
+	// s.Cfg is not mutated: concurrent handlers read it.
+	s.writeSettings(w, stored, saving)
+}
+
+// saveSettings runs the read-merge-validate-persist cycle under settingsMu and
+// returns before the response is written, so a client that stops reading cannot
+// pin every other save.
+func (s *server) saveSettings(r *http.Request, values map[string]string) (stored, saving map[string]string, status int, message string) {
 	s.settingsMu.Lock()
 	defer s.settingsMu.Unlock()
 
 	stored, err := s.Store.Settings(r.Context())
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "read settings")
-		return
+		return nil, nil, http.StatusInternalServerError, "read settings"
 	}
+	// The baseline is the configuration the next start will load, not s.Cfg:
+	// the process keeps its startup config until the announced restart, so
+	// validating against it would let two saves persist an incoherent pair
+	// (review_timeout 40m, then review_stale_after 30m) that aborts the next
+	// boot.
 	next := config.Default()
 	if err := settings.Apply(&next, stored); err != nil {
 		// Only validated values are ever written through this API, so a bad row
 		// is corruption that needs SQL, not a save the panel refuses to accept.
-		writeAPIError(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, nil, http.StatusInternalServerError, err.Error()
 	}
-	if err := settings.Apply(&next, body.Values); err != nil {
-		writeAPIError(w, http.StatusBadRequest, err.Error())
-		return
+	if err := settings.Apply(&next, values); err != nil {
+		return nil, nil, http.StatusBadRequest, err.Error()
 	}
 
 	// Persist the normalised values, so the stored text matches what the
 	// process will parse at the next start.
 	validated := settings.ToMap(next)
-	saving := make(map[string]string, len(body.Values))
-	for key := range body.Values {
+	saving = make(map[string]string, len(values))
+	for key := range values {
 		saving[key] = validated[key]
 	}
 
@@ -89,9 +99,7 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 		userID = &user.ID
 	}
 	if err := s.Store.SaveSettings(r.Context(), userID, saving); err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "save settings")
-		return
+		return nil, nil, http.StatusInternalServerError, "save settings"
 	}
-	// s.Cfg is not mutated: concurrent handlers read it.
-	s.writeSettings(w, stored, saving)
+	return stored, saving, http.StatusOK, ""
 }
