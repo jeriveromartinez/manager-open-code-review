@@ -66,7 +66,11 @@ func (e *ProfileCapacityError) Error() string {
 type RunnerConfig struct {
 	WorkspaceDir, OCRBin, OpencodeBin, GitBaseURL string
 	FetchDepthMax                                 int
-	Timeout                                       time.Duration
+	// Timeout is the whole-run budget, not a per-invocation watchdog: every pass
+	// receives whatever is left of it and the run stops when nothing remains.
+	Timeout time.Duration
+	// Steps caps the agentic iterations of one pass. Zero uses the agent default.
+	Steps int
 }
 
 // Enqueuer is the minimal queue interface used by the review worker. Task 8
@@ -321,7 +325,17 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	}
 
 	findingIndex := make(map[string]int)
-	for _, pass := range passes {
+	budget := newRunBudget(r.Cfg.Timeout, nil)
+	for idx, pass := range passes {
+		passesLeft := len(passes) - idx - 1
+		timeout, ok := budget.timeout()
+		if !ok {
+			return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
+		}
+		slog.Info("review pass started",
+			"run_id", run.ID, "pass", idx+1, "passes", len(passes),
+			"files", len(pass.Files), "remaining", timeout)
+
 		diffPath, err := writePassDiff(ctx, workDir, baseSHA, headSHA, pass.Files)
 		if err != nil {
 			return out.failed(fmt.Errorf("generar diff de pasada: %w", err), "git_error"), nil
@@ -337,20 +351,31 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			Home:    filepath.Join(workDir, "home"),
 			Profile: cfg.Profile,
 			APIKey:  string(key),
-			Timeout: r.Cfg.Timeout,
+			Timeout: timeout,
+			Steps:   r.Cfg.Steps,
 		}
 		prompt := BuildPrompt(cfg.PR, pass.Rules, open, diffPath)
 
 		text, usage, runErr := r.runAgent(ctx, agent, prompt, diffPath)
 		if runErr != nil {
+			if budgetCut(runErr, passesLeft) {
+				return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
+			}
 			return classifyAgentError(ctx, out, runErr)
 		}
 		parsed, err := ValidateOutput(text)
 		if err != nil {
 			retry := prompt + "\n\nLa salida anterior no validó el esquema: " + err.Error() +
 				"\nCorrígela y responde solo con el JSON válido."
+			agent.Timeout, ok = budget.timeout()
+			if !ok {
+				return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
+			}
 			text, usage, runErr = r.runAgent(ctx, agent, retry, diffPath)
 			if runErr != nil {
+				if budgetCut(runErr, passesLeft) {
+					return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
+				}
 				return classifyAgentError(ctx, out, runErr)
 			}
 			parsed, err = ValidateOutput(text)
@@ -527,9 +552,73 @@ func (out runOutcome) inconclusive(err error, code string) runOutcome {
 	return out
 }
 
+// budgetExhausted ends the run when QA_REVIEW_TIMEOUT ran out before every pass
+// could run. The message has to name the aborted pass and the files left
+// unreviewed: a bare DeadlineExceeded leaves the operator with nothing to act
+// on. Inconclusive (not failed) so the findings of completed passes publish.
+//
+// pass is 1-based and is also the pass that could not run.
+func (out runOutcome) budgetExhausted(pass, passes int, all []Pass, budget time.Duration) runOutcome {
+	done := pass - 1
+	out.coverage = coverageJSON(countCovered(all[:done]), countCovered(all[done:]))
+	err := fmt.Errorf(
+		"presupuesto agotado en la pasada %d de %d: %d archivos sin revisar; "+
+			"aumenta QA_REVIEW_TIMEOUT (actual %s) para completar la revisión",
+		pass, passes, countCovered(all[done:]), budget)
+	return out.inconclusive(err, "budget_exhausted")
+}
+
 func truncatedContext(ctx context.Context, err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, context.Canceled) || ctx.Err() != nil
+}
+
+// runBudget is the whole-run time budget from QA_REVIEW_TIMEOUT. Every pass
+// spends from it, so a slow pass leaves less for the passes after it instead of
+// each invocation getting the full figure as an opaque watchdog.
+type runBudget struct {
+	total time.Duration
+	now   func() time.Time
+	start time.Time
+}
+
+func newRunBudget(total time.Duration, now func() time.Time) *runBudget {
+	if now == nil {
+		now = time.Now
+	}
+	return &runBudget{total: total, now: now, start: now()}
+}
+
+// remaining never goes negative. Without a configured budget it is 0.
+func (b *runBudget) remaining() time.Duration {
+	if b == nil || b.total <= 0 {
+		return 0
+	}
+	left := b.total - b.now().Sub(b.start)
+	if left < 0 {
+		return 0
+	}
+	return left
+}
+
+// timeout is what a pass may consume: whatever is left of the whole-run budget.
+// ok is false when nothing is left, so no further pass may start. Without a
+// configured budget it means "no per-pass deadline".
+func (b *runBudget) timeout() (time.Duration, bool) {
+	if b == nil || b.total <= 0 {
+		return 0, true
+	}
+	left := b.remaining()
+	return left, left > 0
+}
+
+// budgetCut separates a run that ran out of budget from a single slow pass. The
+// per-pass deadline is the whole remaining budget, so a pass cut short while
+// passes remain leaves nothing for them: that is budget exhaustion, and the run
+// must stop with an actionable message. On the last pass the pre-existing
+// `timeout` code is kept.
+func budgetCut(err error, passesLeft int) bool {
+	return passesLeft > 0 && errors.Is(err, context.DeadlineExceeded)
 }
 
 func classifyCloneError(ctx context.Context, out runOutcome, err error) (runOutcome, error) {

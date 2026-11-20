@@ -397,6 +397,131 @@ func TestRunErrorClassification(t *testing.T) {
 	}
 }
 
+func TestRunStopsWhenBudgetIsExhausted(t *testing.T) {
+	f := newRunTestFixture(t)
+	paths := []string{"a.go", "b.go", "c.go", "d.go", "e.go", "f.go"}
+	f.setOCR(t, runTestPreview(f.baseSHA, paths), runTestRules(paths), false)
+	f.setAgent(t, runTestOutput("a.go"), false)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).Updates(map[string]any{
+		"max_files_per_pass": 2, "max_passes": 3,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	runner := f.runner()
+	// El presupuesto se agota antes de que arranque la primera pasada.
+	runner.Cfg.Timeout = time.Nanosecond
+	time.Sleep(2 * time.Millisecond)
+
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := assertRunTerminal(t, f, store.RunInconclusive, "budget_exhausted")
+	if !strings.Contains(run.ErrorMessage, "pasada 1 de 3") {
+		t.Errorf("error_message = %q, want it to name the aborted pass", run.ErrorMessage)
+	}
+	if !strings.Contains(run.ErrorMessage, "6 archivos sin revisar") {
+		t.Errorf("error_message = %q, want it to count the unreviewed files", run.ErrorMessage)
+	}
+	if !strings.Contains(run.ErrorMessage, "QA_REVIEW_TIMEOUT") {
+		t.Errorf("error_message = %q, want it to mention QA_REVIEW_TIMEOUT", run.ErrorMessage)
+	}
+	if got := f.agentCalls(t); got != 0 {
+		t.Errorf("agent calls = %d, want 0 (no pass may start without budget)", got)
+	}
+
+	var coverage struct {
+		ReviewedFiles int `json:"reviewed_files"`
+		SkippedFiles  int `json:"skipped_files"`
+	}
+	if err := json.Unmarshal(run.Coverage, &coverage); err != nil {
+		t.Fatalf("decode coverage %q: %v", run.Coverage, err)
+	}
+	if coverage.ReviewedFiles != 0 || coverage.SkippedFiles != 6 {
+		t.Errorf("coverage = %+v, want 0 reviewed / 6 skipped", coverage)
+	}
+	assertPublishedAndQueued(t, f, f.runID)
+}
+
+func TestRunLastPassTimeoutStaysTimeout(t *testing.T) {
+	f := newRunTestFixture(t)
+	paths := []string{"a.go", "b.go"}
+	f.setOCR(t, runTestPreview(f.baseSHA, paths), runTestRules(paths), false)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).Updates(map[string]any{
+		"max_files_per_pass": 1, "max_passes": 2,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// La primera pasada responde y la última se cuelga: sin pasadas detrás, el
+	// corte es un timeout de pasada y no agotamiento del run.
+	f.setAgent(t, runTestOutput("a.go"), false)
+	t.Setenv("RUN_FAKE_AGENT_SLEEP_ON_CALL", "2")
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 300 * time.Millisecond
+
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunInconclusive, "timeout")
+}
+
+func TestRunBudgetShrinksWithEachPass(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	budget := newRunBudget(90*time.Second, clock)
+
+	first, ok := budget.timeout()
+	if !ok || first != 90*time.Second {
+		t.Fatalf("first pass timeout = %v/%v, want 90s/true", first, ok)
+	}
+	now = now.Add(40 * time.Second)
+	second, ok := budget.timeout()
+	if !ok || second != 50*time.Second {
+		t.Fatalf("second pass timeout = %v/%v, want 50s/true", second, ok)
+	}
+	now = now.Add(20 * time.Second)
+	third, ok := budget.timeout()
+	if !ok || third != 30*time.Second {
+		t.Fatalf("third pass timeout = %v/%v, want 30s/true", third, ok)
+	}
+	if !(first > second && second > third) {
+		t.Errorf("per-pass timeouts did not shrink: %v, %v, %v", first, second, third)
+	}
+
+	now = now.Add(45 * time.Second)
+	if got := budget.remaining(); got != 0 {
+		t.Errorf("remaining() past the deadline = %v, want 0", got)
+	}
+	if timeout, ok := budget.timeout(); ok {
+		t.Errorf("timeout() with no budget left = %v/true, want not ok", timeout)
+	}
+}
+
+func TestRunBudgetWithoutTimeoutIsUnlimited(t *testing.T) {
+	budget := newRunBudget(0, nil)
+	if timeout, ok := budget.timeout(); !ok || timeout != 0 {
+		t.Fatalf("timeout() without a configured budget = %v/%v, want 0/true", timeout, ok)
+	}
+	if got := budget.remaining(); got != 0 {
+		t.Errorf("remaining() = %v, want 0", got)
+	}
+}
+
+func TestRunBudgetCutIsNotASinglePassTimeout(t *testing.T) {
+	if !budgetCut(context.DeadlineExceeded, 2) {
+		t.Error("deadline with passes left should be budget exhaustion")
+	}
+	if budgetCut(context.DeadlineExceeded, 0) {
+		t.Error("deadline on the last pass should stay a plain timeout")
+	}
+	if budgetCut(errors.New("provider quota"), 2) {
+		t.Error("a non-timeout failure must not be classified as budget exhaustion")
+	}
+}
+
 func TestRunBlockingThreshold(t *testing.T) {
 	findings := []store.Finding{
 		{Status: store.FindingOpen, Severity: "minor"},

@@ -7,6 +7,7 @@
 #   RUN_FAKE_AGENT_CALLS          archivo donde se registra una línea por invocación
 #   RUN_FAKE_AGENT_FAIL           si está definida, escribe en stderr y falla
 #   RUN_FAKE_AGENT_FAIL_ON_CALL   número de invocación que debe fallar (1-based)
+#   RUN_FAKE_AGENT_SLEEP_ON_CALL  número de invocación que debe dormir (timeout)
 #   RUN_FAKE_AGENT_OUTPUT         archivo JSON alternativo (por defecto output.json)
 #
 # Si junto al script hay un invalid.json, la primera invocación emite ese
@@ -33,6 +34,14 @@ if [ -n "$fail_on" ] && [ -n "$calls" ] && [ -f "$calls" ]; then
     if [ "$n" -eq "$fail_on" ]; then
         printf 'fake opencode review: falló la invocación %s\n' "$n" >&2
         exit 1
+    fi
+fi
+
+sleep_on="${RUN_FAKE_AGENT_SLEEP_ON_CALL:-}"
+if [ -n "$sleep_on" ] && [ -n "$calls" ] && [ -f "$calls" ]; then
+    n=$(wc -l <"$calls" | tr -d ' ')
+    if [ "$n" -eq "$sleep_on" ]; then
+        sleep 30
     fi
 fi
 

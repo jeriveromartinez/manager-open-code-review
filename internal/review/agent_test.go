@@ -202,6 +202,66 @@ func TestAgentConfigDeniesTools(t *testing.T) {
 	})
 }
 
+func TestAgentConfigStepBudget(t *testing.T) {
+	home := t.TempDir()
+	a := testAgent(t, home)
+	if _, _, err := a.Run(context.Background(), "__FAKE_EVENTS__", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	raw := readAgentConfigRaw(t, home)
+
+	var cfg struct {
+		Agent map[string]map[string]json.RawMessage `json:"agent"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode generated config: %v\n%s", err, raw)
+	}
+	reviewer, ok := cfg.Agent["qa-reviewer"]
+	if !ok {
+		t.Fatalf("agent has no qa-reviewer entry: %s", raw)
+	}
+
+	steps, ok := reviewer["steps"]
+	if !ok {
+		t.Fatalf("agent.qa-reviewer has no steps field: %s", raw)
+	}
+	var value int
+	if err := json.Unmarshal(steps, &value); err != nil {
+		t.Fatalf("agent.qa-reviewer.steps is not an integer: %s", steps)
+	}
+	if value != defaultReviewerSteps {
+		t.Errorf("agent.qa-reviewer.steps = %d, want %d", value, defaultReviewerSteps)
+	}
+	if value <= 0 || value > 200 {
+		t.Errorf("agent.qa-reviewer.steps = %d, want a per-pass cap in the tens", value)
+	}
+	if _, deprecated := reviewer["maxSteps"]; deprecated {
+		t.Errorf("generated config must not emit the deprecated maxSteps: %s", raw)
+	}
+}
+
+func TestAgentConfigStepBudgetFromAgent(t *testing.T) {
+	home := t.TempDir()
+	a := testAgent(t, home)
+	a.Steps = 17
+	if _, _, err := a.Run(context.Background(), "__FAKE_EVENTS__", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var cfg struct {
+		Agent map[string]struct {
+			Steps int `json:"steps"`
+		} `json:"agent"`
+	}
+	raw := readAgentConfigRaw(t, home)
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode generated config: %v\n%s", err, raw)
+	}
+	if got := cfg.Agent["qa-reviewer"].Steps; got != 17 {
+		t.Errorf("agent.qa-reviewer.steps = %d, want 17", got)
+	}
+}
+
 func TestAgentCommandFlags(t *testing.T) {
 	a := testAgent(t, t.TempDir())
 	a.Profile.Variant = stringPtr("fast")
@@ -231,16 +291,21 @@ type generatedConfig struct {
 
 func readAgentConfig(t *testing.T, home string) generatedConfig {
 	t.Helper()
+	var cfg generatedConfig
+	if err := json.Unmarshal(readAgentConfigRaw(t, home), &cfg); err != nil {
+		t.Fatalf("generated config is not JSON: %v", err)
+	}
+	return cfg
+}
+
+func readAgentConfigRaw(t *testing.T, home string) []byte {
+	t.Helper()
 	path := filepath.Join(home, ".config", "opencode", "opencode.jsonc")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read generated config %q: %v", path, err)
 	}
-	var cfg generatedConfig
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		t.Fatalf("generated config is not JSON: %v\n%s", err, raw)
-	}
-	return cfg
+	return raw
 }
 
 func stringPtr(s string) *string { return &s }

@@ -44,7 +44,7 @@ Si no tienes una URL pública, consulta la sección [modo solo polling](docs/ins
 | `QA_GITHUB_API_URL` | Base de la API de GitHub | `https://api.github.com` |
 | `POSTGRES_PASSWORD` | Contraseña del contenedor `postgres` | — |
 
-Ajustes opcionales del worker: `QA_REVIEW_CONCURRENCY` (`2`), `QA_REVIEW_TIMEOUT` (`20m`), `QA_REVIEW_STALE_AFTER` (`45m`), `QA_WORKSPACE_DIR` (`/tmp/qa`), `QA_OCR_BIN` (`ocr`), `QA_OPENCODE_BIN` (`opencode`), `QA_FETCH_DEPTH_MAX` (`500`) y `QA_GIT_BASE_URL` (`https://github.com`).
+Ajustes opcionales del worker: `QA_REVIEW_CONCURRENCY` (`2`), `QA_REVIEW_AGENT_STEPS` (`40`, iteraciones del agente por pasada), `QA_REVIEW_TIMEOUT` (`20m`, presupuesto total del run), `QA_REVIEW_STALE_AFTER` (`45m`), `QA_WORKSPACE_DIR` (`/tmp/qa`), `QA_OCR_BIN` (`ocr`), `QA_OPENCODE_BIN` (`opencode`), `QA_FETCH_DEPTH_MAX` (`500`) y `QA_GIT_BASE_URL` (`https://github.com`).
 
 `QA_REVIEW_STALE_AFTER` es el umbral del vigilante de runs huérfanos: al arrancar y cada 5 minutos, los runs en `running` cuya hora de inicio supera ese umbral pasan a `failed` con código `interrupted`, se publica el check como `action_required` y el PR queda `inconclusive`. Debe superar `QA_REVIEW_TIMEOUT` (más el margen de reintentos), o matará revisiones sanas.
 
@@ -71,7 +71,7 @@ En `/prs/:id` se consultan los runs, el motivo del error, la cobertura y los hal
 
 ### `inconclusive` y reintento
 
-`inconclusive` significa que la revisión no pudo completarse con cobertura completa: fallo de `ocr` o JSON inválido, error del LLM (cuota, timeout, 5xx), salida que no valida el esquema, cobertura incompleta, token de clonado caducado o timeout. **Nunca resuelve hallazgos**: puede publicar los hallazgos de pasadas completas como comentarios nuevos, pero no cierra hilos. El check queda `action_required` y el PR pasa a `inconclusive`.
+`inconclusive` significa que la revisión no pudo completarse con cobertura completa: fallo de `ocr` o JSON inválido, error del LLM (cuota, timeout, 5xx), salida que no valida el esquema, cobertura incompleta, token de clonado caducado, timeout o presupuesto agotado (`budget_exhausted`, con la pasada y los archivos pendientes en el mensaje). **Nunca resuelve hallazgos**: puede publicar los hallazgos de pasadas completas como comentarios nuevos, pero no cierra hilos. El check queda `action_required` y el PR pasa a `inconclusive`.
 
 Para reintentar, abre el detalle del PR y pulsa **Reintentar** (admin o lead del equipo). Se crea un run con trigger `retry` para el mismo SHA, se reactiva el check y se encola de nuevo. Comprueba antes la causa (por ejemplo, un modelo inválido en el perfil): la reconciliación no reencola automáticamente un SHA que ya terminó en `failed` o `inconclusive`.
 

@@ -22,6 +22,11 @@ const (
 	apiKeyEnvVar  = "QA_LLM_API_KEY"
 	// maxAgentErrorDetail bounds the provider message stored as a health error.
 	maxAgentErrorDetail = 500
+	// defaultReviewerSteps caps one `opencode run` at 40 agentic iterations.
+	// A pass carries at most MaxFilesPerPass files whose diff is attached, so
+	// 40 read/grep rounds are plenty; without a cap a stuck agent loops until
+	// the wall-clock timeout and the run ends with no useful diagnosis.
+	defaultReviewerSteps = 40
 )
 
 // Agent runs one isolated `opencode run` invocation. Home is the temporary HOME
@@ -34,6 +39,9 @@ type Agent struct {
 	Profile store.LLMProfile
 	APIKey  string
 	Timeout time.Duration
+	// Steps is the agentic iteration cap written to the generated config.
+	// Zero means defaultReviewerSteps.
+	Steps int
 }
 
 // Run executes OpenCode with a private HOME/XDG environment and a locked-down
@@ -52,7 +60,7 @@ func (a *Agent) Run(ctx context.Context, prompt string, files []string) (text st
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return "", nil, fmt.Errorf("review: create home %q: %w", home, err)
 	}
-	if err := writeOpenCodeConfig(home, a.Profile); err != nil {
+	if err := writeOpenCodeConfig(home, a.Profile, a.Steps); err != nil {
 		return "", nil, err
 	}
 
@@ -158,7 +166,10 @@ func childEnv(key, home string) []string {
 // reviewer must be unable to spawn one: `task` is the V1 name for that action.
 // The global block keeps every other tool denied even if a future version
 // changes the inheritance rules.
-func writeOpenCodeConfig(home string, profile store.LLMProfile) error {
+func writeOpenCodeConfig(home string, profile store.LLMProfile, steps int) error {
+	if steps <= 0 {
+		steps = defaultReviewerSteps
+	}
 	options := map[string]string{
 		"apiKey": "{env:" + apiKeyEnvVar + "}",
 	}
@@ -186,6 +197,7 @@ func writeOpenCodeConfig(home string, profile store.LLMProfile) error {
 				"description": "Solo lectura: revisa el diff sin modificar el repo",
 				"mode":        "primary",
 				"permission":  permission,
+				"steps":       steps,
 			},
 		},
 	}

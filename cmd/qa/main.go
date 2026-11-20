@@ -248,6 +248,7 @@ func runWorker() error {
 			GitBaseURL:    cfg.GitBaseURL,
 			FetchDepthMax: cfg.FetchDepthMax,
 			Timeout:       cfg.ReviewTimeout,
+			Steps:         cfg.ReviewAgentSteps,
 		},
 	}
 	checker := &review.ProfileChecker{
