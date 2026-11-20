@@ -327,6 +327,15 @@ func TestSetupAsksOnlyForTheAppName(t *testing.T) {
 	if body.ActionURL != "https://github.example/settings/apps/new" {
 		t.Errorf("action_url = %q, want the personal account URL", body.ActionURL)
 	}
+
+	// El fixture ya trae public_url: el setup no debe reescribir la fila.
+	stored, err := f.st.Settings(f.ctx)
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if stored["public_url"] != "" {
+		t.Errorf("public_url = %q, want nothing persisted when the config already knows it", stored["public_url"])
+	}
 }
 
 func TestSetupPersistsTheDetectedPublicURL(t *testing.T) {
@@ -344,12 +353,56 @@ func TestSetupPersistsTheDetectedPublicURL(t *testing.T) {
 	f.router.ServeHTTP(rec, req)
 	assertStatus(t, rec, http.StatusOK)
 
+	var body struct {
+		Manifest struct {
+			URL          string   `json:"url"`
+			RedirectURL  string   `json:"redirect_url"`
+			CallbackURLs []string `json:"callback_urls"`
+			SetupURL     string   `json:"setup_url"`
+		} `json:"manifest"`
+	}
+	decodeJSON(t, rec, &body)
+	if body.Manifest.URL != "https://qa.example.com" {
+		t.Errorf("manifest url = %q, want https://qa.example.com", body.Manifest.URL)
+	}
+	if body.Manifest.RedirectURL != "https://qa.example.com/setup/callback" {
+		t.Errorf("manifest redirect_url = %q, want the detected URL", body.Manifest.RedirectURL)
+	}
+	if len(body.Manifest.CallbackURLs) != 1 || body.Manifest.CallbackURLs[0] != "https://qa.example.com/auth/callback" {
+		t.Errorf("manifest callback_urls = %v, want [https://qa.example.com/auth/callback]", body.Manifest.CallbackURLs)
+	}
+	if body.Manifest.SetupURL != "https://qa.example.com/setup/installed" {
+		t.Errorf("manifest setup_url = %q, want the detected URL", body.Manifest.SetupURL)
+	}
+
 	stored, err := f.st.Settings(f.ctx)
 	if err != nil {
 		t.Fatalf("Settings: %v", err)
 	}
 	if stored["public_url"] != "https://qa.example.com" {
 		t.Errorf("public_url = %q, want https://qa.example.com", stored["public_url"])
+	}
+}
+
+func TestSetupTreatsAWhitespaceOnlyPublicURLAsUnset(t *testing.T) {
+	f := newSecureFixture(t)
+	f.deps.Cfg.PublicURL = "   "
+	f.rebuildRouter()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/setup/manifest",
+		strings.NewReader(`{"name":"Acme QA"}`))
+	req.Host = "qa.example.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	stored, err := f.st.Settings(f.ctx)
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if stored["public_url"] != "https://qa.example.com" {
+		t.Errorf("public_url = %q, want the detected URL: a blank value is unset", stored["public_url"])
 	}
 }
 
@@ -407,12 +460,13 @@ func TestSetupStatus(t *testing.T) {
 	rec := f.request(http.MethodGet, "/api/setup/status", nil, nil)
 	assertStatus(t, rec, http.StatusOK)
 	var status struct {
-		Configured bool   `json:"configured"`
-		InstallURL string `json:"install_url"`
+		Configured    bool   `json:"configured"`
+		InstallURL    string `json:"install_url"`
+		TokenRequired bool   `json:"token_required"`
 	}
 	decodeJSON(t, rec, &status)
-	if status.Configured || status.InstallURL != "" {
-		t.Errorf("initial setup status = %+v, want false/\"\"", status)
+	if status.Configured || status.InstallURL != "" || status.TokenRequired {
+		t.Errorf("initial setup status = %+v, want false/\"\"/false", status)
 	}
 
 	if err := ghapp.SaveCredentials(f.ctx, f.st, f.box, ghapp.AppCredentials{
@@ -431,6 +485,22 @@ func TestSetupStatus(t *testing.T) {
 	}
 	if want := "https://github.example/apps/qa-control-center/installations/new"; status.InstallURL != want {
 		t.Errorf("install_url = %q, want %q", status.InstallURL, want)
+	}
+}
+
+func TestSetupStatusReportsWhetherTheTokenIsRequired(t *testing.T) {
+	f := newSecureFixture(t)
+	f.deps.SetupToken = "s3cret"
+	f.rebuildRouter()
+
+	rec := f.request(http.MethodGet, "/api/setup/status", nil, nil)
+	assertStatus(t, rec, http.StatusOK)
+	var status struct {
+		TokenRequired bool `json:"token_required"`
+	}
+	decodeJSON(t, rec, &status)
+	if !status.TokenRequired {
+		t.Error("token_required = false, want true when the operator configured a setup token")
 	}
 }
 

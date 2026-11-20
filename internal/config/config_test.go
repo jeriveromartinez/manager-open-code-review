@@ -167,7 +167,6 @@ func TestLoadIgnoresEveryLegacyKey(t *testing.T) {
 
 	essentials := cfg
 	essentials.DatabaseURL = ""
-	essentials.PublicURL = ""
 	essentials.MasterKey = nil
 	essentials.WorkerKey = nil
 	if !reflect.DeepEqual(essentials, config.Default()) {

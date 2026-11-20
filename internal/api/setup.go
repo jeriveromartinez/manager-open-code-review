@@ -10,8 +10,9 @@ import (
 )
 
 type setupStatusResponse struct {
-	Configured bool   `json:"configured"`
-	InstallURL string `json:"install_url"`
+	Configured    bool   `json:"configured"`
+	InstallURL    string `json:"install_url"`
+	TokenRequired bool   `json:"token_required"`
 }
 
 type setupManifestResponse struct {
@@ -27,7 +28,7 @@ func (s *server) isConfigured(r *http.Request) bool {
 // setupStatus tells the SPA whether the App has been created and where to send
 // the administrator for installation.
 func (s *server) setupStatus(w http.ResponseWriter, r *http.Request) {
-	response := setupStatusResponse{}
+	response := setupStatusResponse{TokenRequired: s.SetupToken != ""}
 	if _, err := s.Store.LoadAppConfig(r.Context()); err == nil {
 		response.Configured = true
 		app, err := s.Apps.App(r.Context())
@@ -66,7 +67,8 @@ func (s *server) setupManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	publicURL := strings.TrimRight(strings.TrimSpace(s.Cfg.PublicURL), "/")
+	configuredURL := strings.TrimRight(strings.TrimSpace(s.Cfg.PublicURL), "/")
+	publicURL := configuredURL
 	if publicURL == "" {
 		publicURL = s.requestPublicURL(r)
 	}
@@ -74,7 +76,7 @@ func (s *server) setupManifest(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "cannot determine the public URL")
 		return
 	}
-	if s.Cfg.PublicURL == "" {
+	if configuredURL == "" {
 		if err := s.Store.SaveSettings(r.Context(), nil, map[string]string{"public_url": publicURL}); err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "save public url")
 			return

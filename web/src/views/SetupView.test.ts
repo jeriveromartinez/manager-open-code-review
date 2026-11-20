@@ -12,10 +12,16 @@ vi.mock('../api', () => ({
       this.status = status
     }
   },
-  api: { setupManifest: vi.fn() },
+  api: { setupManifest: vi.fn(), setupStatus: vi.fn() },
 }))
 
 beforeEach(() => {
+  vi.mocked(api.setupStatus).mockReset()
+  vi.mocked(api.setupStatus).mockResolvedValue({
+    configured: false,
+    install_url: '',
+    token_required: false,
+  })
   vi.mocked(api.setupManifest).mockReset()
   vi.mocked(api.setupManifest).mockResolvedValue({
     action_url: 'https://github.com/settings/apps/new',
@@ -30,8 +36,9 @@ afterEach(() => {
 })
 
 describe('SetupView', () => {
-  it('asks only for the App name', () => {
+  it('asks only for the App name', async () => {
     const wrapper = mount(SetupView)
+    await flushPromises()
 
     const inputs = wrapper.findAll('input')
     expect(inputs).toHaveLength(1)
@@ -41,8 +48,56 @@ describe('SetupView', () => {
     expect(inputs[0].attributes('required')).toBeDefined()
   })
 
+  it('keeps asking only for the name when the status call fails', async () => {
+    vi.mocked(api.setupStatus).mockRejectedValue(new Error('red'))
+    const wrapper = mount(SetupView)
+    await flushPromises()
+
+    expect(wrapper.findAll('input')).toHaveLength(1)
+  })
+
+  it('asks for the setup token when the server requires it', async () => {
+    vi.mocked(api.setupStatus).mockResolvedValue({
+      configured: false,
+      install_url: '',
+      token_required: true,
+    })
+    const wrapper = mount(SetupView)
+    await flushPromises()
+
+    const inputs = wrapper.findAll('input')
+    const token = wrapper.find('input[name="setup_token"]')
+    expect(inputs).toHaveLength(2)
+    expect(token.exists()).toBe(true)
+    expect(wrapper.text()).toContain('QA_SETUP_TOKEN')
+
+    await wrapper.find('input[name="name"]').setValue('Acme QA')
+    await token.setValue('s3cret')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(api.setupManifest).toHaveBeenCalledWith({ name: 'Acme QA', setup_token: 's3cret' })
+  })
+
+  it('omits the setup token when the field is left empty', async () => {
+    vi.mocked(api.setupStatus).mockResolvedValue({
+      configured: false,
+      install_url: '',
+      token_required: true,
+    })
+    const wrapper = mount(SetupView)
+    await flushPromises()
+
+    await wrapper.find('input[name="name"]').setValue('Acme QA')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(api.setupManifest).toHaveBeenCalledWith({ name: 'Acme QA' })
+  })
+
   it('submits the manifest with the trimmed App name', async () => {
     const wrapper = mount(SetupView)
+    await flushPromises()
 
     await wrapper.find('input[name="name"]').setValue('  Acme QA  ')
     await wrapper.find('form').trigger('submit')
@@ -54,6 +109,7 @@ describe('SetupView', () => {
   it('explains that the instance is already configured', async () => {
     vi.mocked(api.setupManifest).mockRejectedValue(new ApiError(409, 'already configured'))
     const wrapper = mount(SetupView)
+    await flushPromises()
 
     await wrapper.find('input[name="name"]').setValue('Acme QA')
     await wrapper.find('form').trigger('submit')

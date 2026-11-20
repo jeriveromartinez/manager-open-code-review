@@ -1,10 +1,21 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { ApiError, api, type SetupManifest } from '../api'
+import { onMounted, ref } from 'vue'
+import { ApiError, api, type SetupManifest, type SetupManifestRequest } from '../api'
 
 const name = ref('')
+const setupToken = ref('')
+const tokenRequired = ref(false)
 const busy = ref(false)
 const error = ref('')
+
+// Un fallo del estado no puede bloquear el asistente: se asume setup abierto.
+onMounted(async () => {
+  try {
+    tokenRequired.value = (await api.setupStatus()).token_required
+  } catch {
+    tokenRequired.value = false
+  }
+})
 
 /** Envía el manifiesto a GitHub con un POST de formulario, como exige su flujo. */
 function postManifest({ action_url, manifest }: SetupManifest): void {
@@ -26,8 +37,13 @@ function postManifest({ action_url, manifest }: SetupManifest): void {
 async function submit(): Promise<void> {
   error.value = ''
   busy.value = true
+  const body: SetupManifestRequest = { name: name.value.trim() }
+  const token = setupToken.value.trim()
+  if (tokenRequired.value && token !== '') {
+    body.setup_token = token
+  }
   try {
-    postManifest(await api.setupManifest({ name: name.value.trim() }))
+    postManifest(await api.setupManifest(body))
   } catch (err) {
     if (err instanceof ApiError && err.status === 403) {
       error.value = 'El token de setup del servidor no coincide.'
@@ -62,6 +78,22 @@ async function submit(): Promise<void> {
             placeholder="QA Control Center"
             required
           />
+        </label>
+
+        <label v-if="tokenRequired" class="field">
+          <span class="field__label">Token de setup</span>
+          <input
+            v-model="setupToken"
+            class="field__input"
+            type="password"
+            name="setup_token"
+            autocomplete="off"
+            placeholder="Valor de QA_SETUP_TOKEN"
+          />
+          <span class="field__hint">
+            Este servidor tiene configurado <code>QA_SETUP_TOKEN</code>: escribe el mismo valor para
+            crear la App.
+          </span>
         </label>
 
         <p v-if="error" class="form-error" role="alert">{{ error }}</p>

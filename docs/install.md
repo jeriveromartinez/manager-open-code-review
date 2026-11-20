@@ -51,6 +51,8 @@ Abre `http://localhost:8080/setup` y escribe el **nombre de la App**. El asisten
 
 Si defines `QA_SETUP_TOKEN` en `deploy/.env`, el asistente además pide ese token; sin él, no hace falta ningún valor de los logs del servidor.
 
+Si la URL detectada no es la correcta, corrígela en **Ajustes → General**: eso arregla los enlaces del panel y los redirects de OAuth. Las URLs `redirect_url`, `callback_urls` y `setup_url` ya quedaron registradas en la GitHub App al crearla, así que actualízalas también en GitHub o repite el setup desde la URL correcta antes de configurar la instancia.
+
 ## 4. Poner en marcha el panel
 
 Entra con el login de GitHub y, desde la interfaz:

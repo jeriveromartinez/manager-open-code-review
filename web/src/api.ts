@@ -133,6 +133,7 @@ export type User = {
 export type SetupStatus = {
   configured: boolean
   install_url: string
+  token_required: boolean
 }
 
 export type SetupManifest = {
@@ -142,6 +143,7 @@ export type SetupManifest = {
 
 export type SetupManifestRequest = {
   name: string
+  setup_token?: string
 }
 
 export type RepoPatch = {

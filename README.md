@@ -27,7 +27,7 @@ docker compose -f deploy/docker-compose.yml up -d --build
 
 Abre `http://localhost:8080/setup`, escribe el **nombre de la App** y crea la GitHub App; se registra en tu cuenta personal, y después puedes instalarla en cualquier organización donde tengas permiso. En el mismo paso se detecta la URL pública desde la petición y se guarda en la base. Tras instalar la App en los repositorios, habilítalos desde el panel. La guía completa está en [docs/install.md](docs/install.md).
 
-`QA_SETUP_TOKEN` es un endurecimiento opcional: si lo defines en `deploy/.env`, el setup exige ese valor; si no, el formulario solo pide el nombre. Termina el setup antes de exponer la instancia a internet: hasta que exista configuración, la ventana de setup sigue abierta. Si la URL detectada no es la correcta, corrígela en **Ajustes → General**.
+`QA_SETUP_TOKEN` es un endurecimiento opcional: si lo defines en `deploy/.env`, el setup exige ese valor; si no, el formulario solo pide el nombre. Termina el setup antes de exponer la instancia a internet: hasta que exista configuración, la ventana de setup sigue abierta. Si la URL detectada no es la correcta, corrígela en **Ajustes → General** (eso arregla los enlaces del panel y los redirects de OAuth del panel) y actualiza también `redirect_url`, `callback_urls` y `setup_url` en la GitHub App desde GitHub, o repite el setup desde la URL correcta antes de configurarla.
 
 Si no tienes una URL pública, consulta la sección [modo solo polling](docs/install.md#modo-solo-polling-sin-url-pública).
 
