@@ -157,37 +157,86 @@ func (s *Store) SetLLMHealth(ctx context.Context, id uint, status, message strin
 	return nil
 }
 
-// LockProfile takes a session-level PostgreSQL advisory lock keyed by profile
-// ID on a dedicated pool connection. Call unlock when the critical section is
-// done; it is safe to call more than once.
-func (s *Store) LockProfile(ctx context.Context, profileID uint) (unlock func(), err error) {
-	conn, err := s.Pool.Acquire(ctx)
+// profileSlotNamespace occupies the high 16 bits of the 64-bit advisory keys
+// used for profile slots. The old exclusive LockProfile used bare profile IDs
+// (high bits zero)
+// and LockPR uses the (4242, id) pair, so the three key spaces are disjoint.
+// The remaining 48 bits are a 32-bit profile ID and a 16-bit slot index.
+const (
+	profileSlotNamespace = 9001
+	profileSlotBits      = 16
+	maxProfileSlots      = 1 << profileSlotBits
+)
+
+func profileSlotKey(profileID uint, slot int) int64 {
+	return int64(profileSlotNamespace)<<48 |
+		int64(uint64(profileID)&0xffffffff)<<profileSlotBits |
+		int64(slot)
+}
+
+// AcquireProfileSlot takes one of the profile's concurrency slots as a
+// session-level PostgreSQL advisory lock on a dedicated pool connection, so the
+// limit holds across processes. The slot count is re-read on every call. It
+// reports acquired=false when every slot is busy; that is not an error. Call
+// release when the work is done; it is safe to call more than once.
+func (s *Store) AcquireProfileSlot(ctx context.Context, profileID uint) (release func(), acquired bool, err error) {
+	profile, err := s.LLMProfile(ctx, profileID)
 	if err != nil {
-		return nil, fmt.Errorf("acquire connection for llm profile %d lock: %w", profileID, err)
+		return nil, false, err
+	}
+	slots := profile.Concurrency
+	if slots < 1 {
+		// A zero or negative setting must fall back to the schema default
+		// instead of leaving the profile unusable.
+		slots = 1
+	}
+	if slots > maxProfileSlots {
+		slots = maxProfileSlots
 	}
 
-	key := int64(profileID)
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", key); err != nil {
+	conn, err := s.Pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("acquire connection for llm profile %d slot: %w", profileID, err)
+	}
+
+	var key int64
+	found := false
+	for slot := 0; slot < slots && !found; slot++ {
+		candidate := profileSlotKey(profileID, slot)
+		var taken bool
+		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", candidate).Scan(&taken); err != nil {
+			conn.Release()
+			return nil, false, fmt.Errorf("try slot %d of llm profile %d: %w", slot, profileID, err)
+		}
+		if taken {
+			key, found = candidate, true
+		}
+	}
+	if !found {
+		// No lock was taken, so the connection only goes back to the pool.
 		conn.Release()
-		return nil, fmt.Errorf("lock llm profile %d: %w", profileID, err)
+		return nil, false, nil
 	}
 
 	var once sync.Once
-	unlock = func() {
+	release = func() {
 		once.Do(func() {
 			unlockCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			// Closing the connection releases the session lock even when the
-			// explicit unlock fails, so no error can leak into the func() API.
-			_, _ = conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", key)
+			// A session lock that could not be released keeps the slot busy
+			// forever once the connection returns to the pool, so a failed
+			// unlock retires the connection instead.
+			if _, err := conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", key); err != nil {
+				_ = conn.Conn().Close(unlockCtx)
+			}
 			conn.Release()
 		})
 	}
-	return unlock, nil
+	return release, true, nil
 }
 
 // prLockNamespace is a two-int advisory-lock namespace distinct from the
-// single-int keys used by LockProfile, so PR and profile locks never collide.
+// profile-slot keys, so PR and profile locks never collide.
 const prLockNamespace = 4242
 
 // LockPR takes a session-level PostgreSQL advisory lock keyed by pull request
@@ -402,6 +451,30 @@ func (s *Store) ClaimReviewRun(ctx context.Context, id uint) (ReviewRun, bool, e
 		return ReviewRun{}, false, err
 	}
 	return run, true, nil
+}
+
+// RequeueReviewRun returns a claimed run to the queue without finishing it, so
+// a worker that found no profile capacity can retry it later. The attempt
+// counter doubles as the number of times the run had to wait: it bounds the
+// backoff and it is what the worker compares against its budget.
+func (s *Store) RequeueReviewRun(ctx context.Context, id uint, errCode, errMsg string) error {
+	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunRunning).
+		Updates(map[string]any{
+			"status":        RunQueued,
+			"attempt":       gorm.Expr("attempt + 1"),
+			"error_code":    errCode,
+			"error_message": errMsg,
+			"started_at":    nil,
+			"updated_at":    time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return fmt.Errorf("requeue review run %d: %w", id, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("requeue review run %d: %w", id, ErrRunNotActive)
+	}
+	return nil
 }
 
 // ReviewRun loads one run by ID.

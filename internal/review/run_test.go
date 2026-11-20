@@ -365,7 +365,10 @@ func TestRunErrorClassification(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := classifyCloneError(ctx, out, tt.err)
+			got, retryErr := classifyCloneError(ctx, out, tt.err)
+			if retryErr != nil {
+				t.Fatalf("classifyCloneError() retry error = %v, want nil", retryErr)
+			}
 			if got.status != tt.wantStatus || got.code != tt.wantCode {
 				t.Errorf("status/code = %q/%q, want %q/%q", got.status, got.code, tt.wantStatus, tt.wantCode)
 			}
@@ -377,14 +380,17 @@ func TestRunErrorClassification(t *testing.T) {
 
 	deadline, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
 	defer cancel()
-	if got := classifyAgentError(deadline, out, context.DeadlineExceeded); got.status != store.RunInconclusive || got.code != "timeout" {
+	if got, _ := classifyAgentError(deadline, out, context.DeadlineExceeded); got.status != store.RunInconclusive || got.code != "timeout" {
 		t.Errorf("deadline classification = %q/%q, want inconclusive/timeout", got.status, got.code)
 	}
-	if got := classifyOCR(ctx, out, errors.New("invalid JSON")); got.code != "ocr_error" {
+	if got, _ := classifyOCR(ctx, out, errors.New("invalid JSON")); got.code != "ocr_error" {
 		t.Errorf("OCR classification code = %q, want ocr_error", got.code)
 	}
-	if got := classifyAgentError(ctx, out, errors.New("quota")); got.code != "llm_error" {
+	if got, _ := classifyAgentError(ctx, out, errors.New("quota")); got.code != "llm_error" {
 		t.Errorf("agent classification code = %q, want llm_error", got.code)
+	}
+	if got, retryErr := classifyAgentError(ctx, out, &ProfileCapacityError{ProfileID: 3}); retryErr == nil || got.status != "" {
+		t.Errorf("capacity classification = %q/%v, want the error and no outcome", got.status, retryErr)
 	}
 	if got := truncateRunMessage(strings.Repeat("x", 2000)); len(got) != maxRunErrorMessage {
 		t.Errorf("truncated message has %d chars, want %d", len(got), maxRunErrorMessage)
@@ -780,6 +786,93 @@ func TestRunSucceededResolvesStaleFindings(t *testing.T) {
 	}
 	if pr := f.loadPR(t); pr.QAStatus != store.StatusReadyForHuman {
 		t.Errorf("qa_status = %q, want %q", pr.QAStatus, store.StatusReadyForHuman)
+	}
+}
+
+func TestRunSaturatedProfileIsRequeued(t *testing.T) {
+	f := newRunTestFixture(t)
+
+	release, acquired, err := f.s.AcquireProfileSlot(f.ctx, f.policy.LLMProfileID)
+	if err != nil || !acquired {
+		t.Fatalf("hold the profile slot = %v/%v", acquired, err)
+	}
+	defer release()
+
+	err = f.runner().Run(f.ctx, f.runID)
+	var capacity *ProfileCapacityError
+	if !errors.As(err, &capacity) {
+		t.Fatalf("Run() error = %v, want a ProfileCapacityError", err)
+	}
+	if capacity.ProfileID != f.policy.LLMProfileID {
+		t.Errorf("capacity profile = %d, want %d", capacity.ProfileID, f.policy.LLMProfileID)
+	}
+	if capacity.Wait <= 0 {
+		t.Errorf("capacity wait = %v, want a positive backoff", capacity.Wait)
+	}
+
+	run := f.loadRun(t)
+	if run.Status != store.RunQueued {
+		t.Errorf("run status = %q, want %q (error %q: %q)", run.Status, store.RunQueued, run.ErrorCode, run.ErrorMessage)
+	}
+	if run.FinishedAt != nil {
+		t.Error("a run waiting for capacity was finished")
+	}
+	if run.Attempt != 2 {
+		t.Errorf("run attempt = %d, want 2 (the wait is recorded)", run.Attempt)
+	}
+	if run.ErrorCode != capacityErrorCode {
+		t.Errorf("run error_code = %q, want %q", run.ErrorCode, capacityErrorCode)
+	}
+	if got := f.agentCalls(t); got != 0 {
+		t.Errorf("agent calls = %d, want 0", got)
+	}
+	if got := f.jobs.published(); len(got) != 0 {
+		t.Errorf("EnqueuePublish calls = %v, want none for a requeued run", got)
+	}
+	if got := f.events.len(); got != 0 {
+		t.Errorf("published %d events, want none for a requeued run", got)
+	}
+
+	// Releasing the slot lets the retried run go through.
+	release()
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("retried Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+}
+
+func TestRunSaturatedProfileFailsAfterWaitingBudget(t *testing.T) {
+	f := newRunTestFixture(t)
+
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", f.runID).Update("attempt", maxCapacityWaits+1).Error; err != nil {
+		t.Fatal(err)
+	}
+	release, acquired, err := f.s.AcquireProfileSlot(f.ctx, f.policy.LLMProfileID)
+	if err != nil || !acquired {
+		t.Fatalf("hold the profile slot = %v/%v", acquired, err)
+	}
+	defer release()
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunFailed, capacityErrorCode)
+	if got := f.agentCalls(t); got != 0 {
+		t.Errorf("agent calls = %d, want 0", got)
+	}
+	assertPublishedAndQueued(t, f, f.runID)
+}
+
+func TestRunCapacityWaitGrowsAndIsBounded(t *testing.T) {
+	if first, second := CapacityWait(1), CapacityWait(2); second <= first {
+		t.Errorf("CapacityWait(2) = %v, want more than CapacityWait(1) = %v", second, first)
+	}
+	if got := CapacityWait(1000); got != capacityWaitMax {
+		t.Errorf("CapacityWait(1000) = %v, want the %v cap", got, capacityWaitMax)
+	}
+	if got := CapacityWait(0); got != capacityWaitBase {
+		t.Errorf("CapacityWait(0) = %v, want the %v base", got, capacityWaitBase)
 	}
 }
 
