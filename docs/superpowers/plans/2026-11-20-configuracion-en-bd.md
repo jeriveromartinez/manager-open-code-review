@@ -1302,13 +1302,23 @@ type settingsResponse struct {
 }
 
 func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
-	values, err := s.Store.Settings(r.Context())
+	stored, err := s.Store.Settings(r.Context())
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "read settings")
 		return
 	}
+	s.writeSettings(w, stored, nil)
+}
+
+// writeSettings answers with the process's configuration overlaid by the stored
+// rows and by the values just saved, so a save never fails on a re-read after
+// committing.
+func (s *server) writeSettings(w http.ResponseWriter, stored, justSaved map[string]string) {
 	effective := settings.ToMap(s.Cfg)
-	for key, value := range values {
+	for key, value := range stored {
+		effective[key] = value
+	}
+	for key, value := range justSaved {
 		effective[key] = value
 	}
 	writeJSON(w, http.StatusOK, settingsResponse{Values: effective, Fields: settings.Fields()})
@@ -1327,28 +1337,77 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	next := s.Cfg
+	// The baseline is the configuration the next start will load, not s.Cfg:
+	// the process keeps its startup config until the announced restart, so
+	// validating against it would let two saves persist an incoherent pair
+	// (review_timeout 40m, then review_stale_after 30m) that aborts the next
+	// boot.
+	stored, err := s.Store.Settings(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "read settings")
+		return
+	}
+	next := config.Default()
+	if err := settings.Apply(&next, stored); err != nil {
+		// Only validated values are ever written, so a bad row is corruption.
+		writeAPIError(w, http.StatusInternalServerError, "stored settings are invalid")
+		return
+	}
 	if err := settings.Apply(&next, body.Values); err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	user := auth.UserFrom(r.Context())
+	// Persist the normalised values, so the stored text matches what the
+	// process will parse at the next start.
+	validated := settings.ToMap(next)
+	saving := make(map[string]string, len(body.Values))
+	for key := range body.Values {
+		saving[key] = validated[key]
+	}
+
+	user, _ := auth.UserFrom(r.Context())
 	var userID *uint
 	if user != nil {
 		userID = &user.ID
 	}
-	if err := s.Store.SaveSettings(r.Context(), userID, body.Values); err != nil {
+	if err := s.Store.SaveSettings(r.Context(), userID, saving); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "save settings")
 		return
 	}
-	// No se muta s.Cfg: los handlers concurrentes lo leen y la respuesta ya se
-	// construye mezclando lo recién guardado sobre la configuración del proceso.
-	s.getSettings(w, r)
+	// No se muta s.Cfg: los handlers concurrentes lo leen.
+	s.writeSettings(w, stored, saving)
 }
 ```
 
-Ajustar a los nombres reales: comprobar cómo obtiene el usuario el resto de handlers (`auth.UserFrom` o `s.currentUser(r)`), y usar ese. `s.Cfg` se reasigna para que el `GET` siguiente refleje lo guardado sin reiniciar.
+Y `getSettings`/la respuesta comparten un helper para no releer tras guardar:
+
+```go
+func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
+	stored, err := s.Store.Settings(r.Context())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "read settings")
+		return
+	}
+	s.writeSettings(w, stored, nil)
+}
+
+// writeSettings answers with the process's configuration overlaid by the stored
+// rows and by the values just saved, so a save never fails on a re-read after
+// committing.
+func (s *server) writeSettings(w http.ResponseWriter, stored, justSaved map[string]string) {
+	effective := settings.ToMap(s.Cfg)
+	for key, value := range stored {
+		effective[key] = value
+	}
+	for key, value := range justSaved {
+		effective[key] = value
+	}
+	writeJSON(w, http.StatusOK, settingsResponse{Values: effective, Fields: settings.Fields()})
+}
+```
+
+El handler importa `internal/config` además de `internal/settings` y `internal/auth`.
 
 - [ ] **Step 5: Register the routes**
 
