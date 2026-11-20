@@ -47,6 +47,8 @@ const profiles: LLMProfile[] = [
     health_status: 'ok',
     health_checked_at: '2026-11-19T10:00:00Z',
     health_error: '',
+    health_age_seconds: 300,
+    health_stale: false,
     created_at: '2026-11-01T10:00:00Z',
     updated_at: '2026-11-19T10:00:00Z',
   },
@@ -64,8 +66,29 @@ const profiles: LLMProfile[] = [
     health_status: 'error',
     health_checked_at: '2026-11-18T10:00:00Z',
     health_error: 'connection refused',
+    health_age_seconds: 90000,
+    health_stale: true,
     created_at: '2026-11-02T10:00:00Z',
     updated_at: '2026-11-18T10:00:00Z',
+  },
+  {
+    id: 12,
+    name: 'Sin estrenar',
+    provider: 'openai',
+    model: 'gpt-5',
+    variant: null,
+    mode: 'api',
+    base_url: null,
+    concurrency: 1,
+    enabled: true,
+    api_key_set: true,
+    health_status: 'unknown',
+    health_checked_at: null,
+    health_error: '',
+    health_age_seconds: 0,
+    health_stale: true,
+    created_at: '2026-11-03T10:00:00Z',
+    updated_at: '2026-11-03T10:00:00Z',
   },
 ]
 
@@ -84,6 +107,7 @@ const policy: QAPolicy = {
   max_files: 40,
   max_diff_lines: 3000,
   max_passes: 4,
+  require_green_ci: false,
   updated_at: '2026-11-19T10:00:00Z',
 }
 
@@ -187,6 +211,96 @@ describe('AgentsView', () => {
     expect(mocks.api.updateLLMProfile).toHaveBeenCalledTimes(1)
     expect(mocks.api.updateLLMProfile.mock.calls[0][0]).toBe(11)
     expect(mocks.api.updateLLMProfile.mock.calls[0][1]).not.toHaveProperty('api_key')
+
+    wrapper.unmount()
+  })
+
+  it('shows the health age of a fresh profile without a stale marker', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    const cell = wrapper.get('[data-profile-row="7"] [data-health-cell]')
+    expect(cell.text()).toContain('comprobado hace 5 min')
+    expect(cell.find('[data-health-stale]').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('marks a stale verdict distinctly', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    const cell = wrapper.get('[data-profile-row="11"] [data-health-cell]')
+    expect(cell.text()).toContain('comprobado hace 1 d')
+    expect(cell.find('[data-health-stale]').exists()).toBe(true)
+    expect(cell.find('[data-health-stale]').text()).toContain('Desactualizado')
+
+    wrapper.unmount()
+  })
+
+  it('says never checked for a profile without a verdict', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    const cell = wrapper.get('[data-profile-row="12"] [data-health-cell]')
+    expect(cell.text()).toContain('nunca comprobado')
+    expect(cell.find('[data-health-stale]').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('renders the CI requirement unchecked when the policy is off', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    const checkbox = wrapper.get('[data-policy-require-green-ci]')
+      .element as HTMLInputElement
+    expect(checkbox.checked).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('renders the CI requirement checked when the policy is on', async () => {
+    mocks.api.getPolicy.mockResolvedValue({ ...policy, require_green_ci: true })
+    mocks.api.savePolicy.mockResolvedValue({ ...policy, require_green_ci: true })
+
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    const checkbox = wrapper.get('[data-policy-require-green-ci]')
+      .element as HTMLInputElement
+    expect(checkbox.checked).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('sends require_green_ci true when the CI requirement is enabled', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-policy-require-green-ci]').setValue(true)
+    await wrapper.get('[data-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.savePolicy).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ require_green_ci: true }),
+    )
+
+    wrapper.unmount()
+  })
+
+  it('still sends require_green_ci false when the requirement is off', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.savePolicy).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ require_green_ci: false }),
+    )
 
     wrapper.unmount()
   })

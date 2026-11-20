@@ -168,6 +168,8 @@ export type LLMProfile = {
   health_status: string
   health_checked_at: string | null
   health_error: string
+  health_age_seconds: number
+  health_stale: boolean
   created_at: string
   updated_at: string
 }
@@ -196,6 +198,7 @@ export type QAPolicy = {
   max_files: number
   max_diff_lines: number
   max_passes: number
+  require_green_ci: boolean
   updated_at: string
 }
 
@@ -208,6 +211,7 @@ export type QAPolicyInput = Pick<
   | 'max_files'
   | 'max_diff_lines'
   | 'max_passes'
+  | 'require_green_ci'
 >
 
 export type ReviewEvent = {

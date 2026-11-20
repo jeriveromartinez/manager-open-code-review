@@ -51,6 +51,7 @@ const formError = ref<string | null>(null)
 const selectedTeamId = ref<number | null>(null)
 const policy = ref<QAPolicy | null>(null)
 const policyProfileId = ref<number | null>(null)
+const policyRequireGreenCI = ref(false)
 const policyError = ref<string | null>(null)
 const policyMessage = ref<string | null>(null)
 
@@ -69,6 +70,15 @@ function healthTone(status: string): string {
   return 'badge--muted'
 }
 
+function healthAge(profile: LLMProfile): string {
+  if (profile.health_checked_at === null) return 'nunca comprobado'
+  const seconds = profile.health_age_seconds
+  if (seconds < 60) return 'comprobado hace menos de 1 min'
+  if (seconds < 3600) return `comprobado hace ${Math.floor(seconds / 60)} min`
+  if (seconds < 86400) return `comprobado hace ${Math.floor(seconds / 3600)} h`
+  return `comprobado hace ${Math.floor(seconds / 86400)} d`
+}
+
 async function refreshProfiles(): Promise<void> {
   profiles.value = await api.llmProfiles()
 }
@@ -81,6 +91,7 @@ async function loadPolicy(): Promise<void> {
     const saved = await api.getPolicy(selectedTeamId.value)
     policy.value = saved
     policyProfileId.value = saved.llm_profile_id || null
+    policyRequireGreenCI.value = saved.require_green_ci
   } catch {
     policyError.value = 'No se pudo cargar la política del equipo'
   }
@@ -189,9 +200,12 @@ async function savePolicy(): Promise<void> {
     max_files: policy.value?.max_files ?? 40,
     max_diff_lines: policy.value?.max_diff_lines ?? 3000,
     max_passes: policy.value?.max_passes ?? 4,
+    require_green_ci: policyRequireGreenCI.value,
   }
   try {
-    policy.value = await api.savePolicy(selectedTeamId.value, body)
+    const saved = await api.savePolicy(selectedTeamId.value, body)
+    policy.value = saved
+    policyRequireGreenCI.value = saved.require_green_ci
     policyMessage.value = 'Política guardada'
   } catch {
     policyError.value = 'No se pudo guardar la política'
@@ -243,9 +257,15 @@ onMounted(() => {
             <td class="profile-table__name">{{ profile.name }}</td>
             <td>{{ profile.provider }} / {{ profile.model }}</td>
             <td>
-              <span class="badge" :class="healthTone(profile.health_status)" data-health-badge>
-                {{ healthLabel(profile.health_status) }}
-              </span>
+              <div class="health" data-health-cell>
+                <span class="badge" :class="healthTone(profile.health_status)" data-health-badge>
+                  {{ healthLabel(profile.health_status) }}
+                </span>
+                <span v-if="profile.health_stale" class="badge badge--bad" data-health-stale>
+                  Desactualizado
+                </span>
+                <span class="health__age">{{ healthAge(profile) }}</span>
+              </div>
               <span v-if="profile.health_error" class="profile-table__health-error">
                 {{ profile.health_error }}
               </span>
@@ -305,6 +325,15 @@ onMounted(() => {
           Guardar política
         </button>
       </div>
+      <label class="policy-ci">
+        <input v-model="policyRequireGreenCI" type="checkbox" data-policy-require-green-ci />
+        <span class="policy-ci__text">
+          <span class="field__label">Exigir CI en verde</span>
+          <span class="field__hint">
+            Ninguna revisión empieza hasta que el último commit tenga checks y ninguno haya fallado.
+          </span>
+        </span>
+      </label>
       <p v-if="policyError" class="form-error">{{ policyError }}</p>
       <p v-else-if="policyMessage" class="policy-card__message">{{ policyMessage }}</p>
     </section>
@@ -421,6 +450,18 @@ onMounted(() => {
   font-size: 12px;
 }
 
+.health {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.health__age {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
 .profile-table__action {
   padding: 5px 9px;
   font-size: 12.5px;
@@ -451,6 +492,30 @@ onMounted(() => {
   margin-top: var(--space-2);
   color: var(--ok);
   font-size: 13px;
+}
+
+.policy-ci {
+  display: flex;
+  align-items: start;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.policy-ci input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.policy-ci__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
 }
 
 .field {
