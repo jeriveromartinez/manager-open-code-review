@@ -27,6 +27,14 @@ type Syncer struct {
 	Store  *store.Store
 	Apps   github.AppProvider
 	Events events.Publisher
+	Checks ChecksRefresher
+}
+
+// ChecksRefresher re-reads the CI state of a pull request head and stores it.
+// Reconciliation uses it so polling mode gates reviews on the same verdict a
+// webhook delivery would have stored.
+type ChecksRefresher interface {
+	RefreshPR(ctx context.Context, prID uint) (store.PRValidations, bool, error)
 }
 
 // SyncInstallation reconciles the repositories visible to an installation and,
@@ -316,10 +324,36 @@ func (s *Syncer) syncPullRequests(ctx context.Context, client *gh.Client, instal
 					return err
 				}
 			}
+			if err := s.refreshChecks(ctx, pr); err != nil {
+				slog.Error("refresh pull request checks failed",
+					"pull_request_id", pr.ID, "head_sha", pr.HeadSHA, "error", err)
+			}
 		}
 		if err := s.Store.CloseMissingPullRequests(ctx, repo.ID, openNumbers); err != nil {
 			return fmt.Errorf("close missing pull requests of %s: %w", repo.FullName, err)
 		}
+	}
+	return nil
+}
+
+// refreshChecks keeps the stored counters current in polling mode. A failure is
+// logged and never aborts the reconciliation: a GitHub hiccup on one PR must not
+// stop the rest of the installation from syncing, and the next pass retries.
+// Drafts are measured too, so a PR that becomes ready for review is gated on a
+// verdict that already exists instead of waiting for the next pass.
+func (s *Syncer) refreshChecks(ctx context.Context, pr store.PullRequest) error {
+	if s.Checks == nil || pr.HeadSHA == "" || pr.IsFork {
+		return nil
+	}
+	_, changed, err := s.Checks.RefreshPR(ctx, pr.ID)
+	if err != nil {
+		return err
+	}
+	if changed {
+		return s.publish(ctx, events.Event{
+			Type: "pr.updated",
+			ID:   strconv.FormatUint(uint64(pr.ID), 10),
+		})
 	}
 	return nil
 }
