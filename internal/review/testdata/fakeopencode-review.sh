@@ -9,11 +9,16 @@
 #   RUN_FAKE_AGENT_FAIL_ON_CALL   número de invocación que debe fallar (1-based)
 #   RUN_FAKE_AGENT_SLEEP_ON_CALL  número de invocación que debe dormir (timeout)
 #   RUN_FAKE_AGENT_OUTPUT         archivo JSON alternativo (por defecto output.json)
+#   RUN_FAKE_AGENT_CONFIG_OUT     copia el opencode.jsonc generado a ese archivo
 #
 # Si junto al script hay un invalid.json, la primera invocación emite ese
 # contenido (para probar el reintento por esquema inválido).
 
 set -eu
+
+if [ -n "${RUN_FAKE_AGENT_CONFIG_OUT:-}" ]; then
+    cp "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.jsonc" "$RUN_FAKE_AGENT_CONFIG_OUT" 2>/dev/null || true
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 default_output='{"summary":"Revisión completada","coverage":{"reviewed_files":1,"skipped_files":0},"previous_findings":[],"findings":[{"path":"auth.go","severity":"major","category":"security","title":"Comparación insegura","body":"usar hash seguro","suggestion":"","confidence":"high","start_line":3,"end_line":3}]}'
