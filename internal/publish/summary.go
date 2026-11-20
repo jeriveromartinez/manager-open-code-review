@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -19,8 +20,8 @@ type reviewCoverage struct {
 
 // publishSummary creates the single summary comment of the pull request or
 // edits the one carrying the marker. It never posts a second summary.
-func (p *publishContext) publishSummary(ctx context.Context, withoutDiffLine []store.Finding, resolvedSincePrevious int) error {
-	body := p.buildSummary(withoutDiffLine, resolvedSincePrevious)
+func (p *publishContext) publishSummary(ctx context.Context, findings []store.Finding, resolvedSincePrevious int) error {
+	body := p.buildSummary(findings, resolvedSincePrevious)
 
 	var existingID int64
 	commentsPath := p.issueCommentsPath()
@@ -82,7 +83,7 @@ func (p *publishContext) publishSummary(ctx context.Context, withoutDiffLine []s
 	return nil
 }
 
-func (p *publishContext) buildSummary(withoutDiffLine []store.Finding, resolvedSincePrevious int) string {
+func (p *publishContext) buildSummary(findings []store.Finding, resolvedSincePrevious int) string {
 	var b strings.Builder
 	b.WriteString(summaryMarker)
 	b.WriteString("\n")
@@ -128,14 +129,18 @@ func (p *publishContext) buildSummary(withoutDiffLine []store.Finding, resolvedS
 	b.WriteString(p.sanitize(p.run.Summary))
 	b.WriteString("\n")
 
-	if len(withoutDiffLine) > 0 {
-		b.WriteString("\n**Hallazgos sin línea en el diff:**\n")
-		for _, f := range withoutDiffLine {
-			location := p.sanitize(f.Path)
-			if location == "" {
-				location = "sin ruta"
+	if missing := p.findingsWithoutInlineComment(findings); len(missing) > 0 {
+		b.WriteString(fmt.Sprintf("\n**Hallazgos sin comentario inline (%d):**\n", len(missing)))
+		for _, f := range missing {
+			severity := f.Severity
+			if severity == "" {
+				severity = "sin severidad"
 			}
-			fmt.Fprintf(&b, "- `%s`: %s\n", location, p.sanitize(f.Title))
+			fmt.Fprintf(&b, "\n- **%s** · `%s` — %s\n",
+				p.sanitize(severity), p.findingLocation(f), p.sanitize(f.Title))
+			if body := p.sanitize(f.Body); body != "" {
+				b.WriteString("  " + strings.ReplaceAll(body, "\n", "\n  ") + "\n")
+			}
 		}
 	}
 
@@ -144,4 +149,50 @@ func (p *publishContext) buildSummary(withoutDiffLine []store.Finding, resolvedS
 		fmt.Fprintf(&b, "\n[Ver en el panel](%s)\n", link)
 	}
 	return b.String()
+}
+
+// findingsWithoutInlineComment selects the open findings that have no inline
+// comment yet. It re-checks both conditions even though the caller supplies a
+// snapshot, so a retried publish can never list an already published finding.
+func (p *publishContext) findingsWithoutInlineComment(findings []store.Finding) []store.Finding {
+	missing := make([]store.Finding, 0)
+	for _, f := range findings {
+		if f.Status != store.FindingOpen || f.GithubCommentID != 0 {
+			continue
+		}
+		missing = append(missing, f)
+	}
+	sort.SliceStable(missing, func(i, j int) bool {
+		if a, b := severityRank[missing[i].Severity], severityRank[missing[j].Severity]; a != b {
+			return a > b
+		}
+		if missing[i].Path != missing[j].Path {
+			return missing[i].Path < missing[j].Path
+		}
+		if missing[i].StartLine != missing[j].StartLine {
+			return missing[i].StartLine < missing[j].StartLine
+		}
+		return missing[i].Title < missing[j].Title
+	})
+	return missing
+}
+
+// findingLocation renders path:start-end, path:start or the bare path.
+func (p *publishContext) findingLocation(f store.Finding) string {
+	path := p.sanitize(f.Path)
+	if path == "" {
+		return "sin ruta"
+	}
+	start := f.StartLine
+	end := f.EndLine
+	if start <= 0 {
+		return path
+	}
+	if end < start {
+		end = start
+	}
+	if end == start {
+		return fmt.Sprintf("%s:%d", path, start)
+	}
+	return fmt.Sprintf("%s:%d-%d", path, start, end)
 }

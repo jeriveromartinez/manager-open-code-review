@@ -947,6 +947,101 @@ func TestPublishLinksReviewCommentsWithoutLine(t *testing.T) {
 	}
 }
 
+func TestPublishSummaryListsFindingsWithoutInlineComment(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+
+	blocker := seedFinding(t, st, pr.ID, run.ID, "bloqueante", 5, "blocker", store.FindingOpen)
+	blocker.Path = "src/b.go"
+	blocker.EndLine = 7
+	blocker.Title = "Firewall abierto"
+	blocker.Body = "El firewall queda expuesto a Internet."
+	if _, err := st.UpsertFinding(ctx, blocker); err != nil {
+		t.Fatalf("set blocker finding: %v", err)
+	}
+	seedFinding(t, st, pr.ID, run.ID, "sin-linea", 0, "minor", store.FindingOpen)
+
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	bodies := summaryBodies(t, gh)
+	if len(bodies) != 1 {
+		t.Fatalf("summary comments = %d, want 1", len(bodies))
+	}
+	section := summaryFindingsSection(t, bodies[0])
+	for _, want := range []string{
+		"**blocker**", "`src/b.go:5-7`", "Firewall abierto", "El firewall queda expuesto a Internet.",
+		"`src/a.go`", "Título sin-linea",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("summary section %q does not contain %q", section, want)
+		}
+	}
+	for _, unwanted := range []string{"src/a.go:", "src/a.go-"} {
+		if strings.Contains(section, unwanted) {
+			t.Errorf("summary section %q renders a dangling location %q", section, unwanted)
+		}
+	}
+	blockerAt := strings.Index(section, "Firewall abierto")
+	minorAt := strings.Index(section, "Título sin-linea")
+	if blockerAt < 0 || minorAt < 0 || blockerAt > minorAt {
+		t.Errorf("summary section %q does not order findings by severity", section)
+	}
+}
+
+func TestPublishSummarySkipsFindingsWithInlineComment(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	published := seedFinding(t, st, pr.ID, run.ID, "ya-publicado", 5, "major", store.FindingOpen)
+	if err := st.DB.WithContext(ctx).Model(&store.Finding{}).Where("id = ?", published.ID).
+		Update("github_comment_id", 123).Error; err != nil {
+		t.Fatalf("mark finding published: %v", err)
+	}
+	seedFinding(t, st, pr.ID, run.ID, "inline", 2, "minor", store.FindingOpen)
+	seedFinding(t, st, pr.ID, run.ID, "pendiente", 9, "nit", store.FindingOpen)
+	seedFinding(t, st, pr.ID, run.ID, "resuelta", 5, "minor", store.FindingResolved)
+
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+	for i := 0; i < 2; i++ {
+		if err := w.Publish(ctx, run.ID); err != nil {
+			t.Fatalf("Publish() #%d error = %v", i+1, err)
+		}
+	}
+
+	bodies := summaryBodies(t, gh)
+	if len(bodies) != 1 {
+		t.Fatalf("summary comments = %d, want 1", len(bodies))
+	}
+	section := summaryFindingsSection(t, bodies[0])
+	if !strings.Contains(section, "Título pendiente") {
+		t.Fatalf("summary section %q does not list the finding without an inline comment", section)
+	}
+	for _, unwanted := range []string{"Título ya-publicado", "Título inline", "Título resuelta"} {
+		if strings.Contains(section, unwanted) {
+			t.Errorf("summary section %q lists %q, which has no missing inline comment", section, unwanted)
+		}
+	}
+}
+
+func summaryFindingsSection(t *testing.T, body string) string {
+	t.Helper()
+	const heading = "**Hallazgos sin comentario inline"
+	i := strings.Index(body, heading)
+	if i < 0 {
+		return ""
+	}
+	if end := strings.Index(body[i:], "[Ver en el panel]"); end >= 0 {
+		return body[i : i+end]
+	}
+	return body[i:]
+}
+
 func TestPublishLeavesCommentIDUnsetWithoutCoordinates(t *testing.T) {
 	st := testutil.NewStore(t)
 	ctx := context.Background()
