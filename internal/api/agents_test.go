@@ -334,6 +334,71 @@ func TestPolicyLeadCanEditOwnTeam(t *testing.T) {
 	assertStatus(t, rec, http.StatusBadRequest)
 	rec = f.request(http.MethodPut, ownPath, map[string]any{"max_files": 0}, cookie)
 	assertStatus(t, rec, http.StatusBadRequest)
+	rec = f.request(http.MethodPut, ownPath, map[string]any{"require_green_ci": "yes"}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+}
+
+func TestPolicyRequireGreenCIRoundTrip(t *testing.T) {
+	f := newSecureFixture(t)
+	profile, err := f.st.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "primary", Provider: "openai", Model: "gpt-4o-mini", APIKeyEnc: "sealed", Enabled: true,
+		HealthStatus: store.HealthOK,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+	team := f.team("gated-team")
+	admin := f.user("admin", true)
+	cookie := f.session(admin)
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	// A team without a policy still renders a complete form, including the new
+	// option at its default.
+	rec := f.request(http.MethodGet, path, nil, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var current map[string]any
+	decodeJSON(t, rec, &current)
+	assertKeys(t, current, "team_id", "llm_profile_id", "blocking_threshold", "max_files",
+		"max_diff_lines", "max_passes", "exclude_globs", "require_green_ci")
+	if current["require_green_ci"] != false {
+		t.Errorf("default require_green_ci = %v, want false", current["require_green_ci"])
+	}
+
+	body := map[string]any{"llm_profile_id": profile.ID, "require_green_ci": true}
+	rec = f.request(http.MethodPut, path, body, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var saved map[string]any
+	decodeJSON(t, rec, &saved)
+	if saved["require_green_ci"] != true {
+		t.Errorf("PUT require_green_ci = %v, want true", saved["require_green_ci"])
+	}
+
+	policy, err := f.st.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if !policy.RequireGreenCI {
+		t.Error("stored RequireGreenCI = false, want true")
+	}
+
+	rec = f.request(http.MethodGet, path, nil, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &current)
+	if current["require_green_ci"] != true {
+		t.Errorf("GET require_green_ci = %v, want true", current["require_green_ci"])
+	}
+
+	// PUT replaces the whole policy: an explicit false must clear the flag.
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": profile.ID, "require_green_ci": false,
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	if policy, err = f.st.QAPolicyForTeam(f.ctx, team.ID); err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if policy.RequireGreenCI {
+		t.Error("RequireGreenCI = true after an explicit false")
+	}
 }
 
 func seedProfile(t *testing.T, f *secureFixture, name string, profile store.LLMProfile) store.LLMProfile {

@@ -21,6 +21,10 @@ import (
 // maxWebhookBody is the largest delivery accepted from GitHub (25 MiB).
 const maxWebhookBody = 25 << 20
 
+// stateOpenPR is GitHub's state for a pull request that is still open. A CI
+// delivery for a closed or merged pull request has nothing to gate.
+const stateOpenPR = "open"
+
 // VerifySignature checks the X-Hub-Signature-256 value of a delivery against
 // its raw body. Comparison is constant-time; a malformed header is rejected.
 func VerifySignature(secret, body []byte, header string) bool {
@@ -42,6 +46,7 @@ func VerifySignature(secret, body []byte, header string) bool {
 // work; the webhook boundary only applies the exclusion rules.
 type ReviewStarter interface {
 	OnPullRequest(ctx context.Context, prID uint) error
+	OnChecksUpdated(ctx context.Context, prID uint) error
 	Retry(ctx context.Context, prID uint) error
 }
 
@@ -59,11 +64,18 @@ type PRCommenter interface {
 	CommentOnPullRequest(ctx context.Context, repoFullName string, number int, body string) error
 }
 
+// ChecksRefresher re-reads the CI state of a pull request head from GitHub and
+// stores it, so the dashboard and the trigger gate agree on the same verdict.
+type ChecksRefresher interface {
+	RefreshPR(ctx context.Context, prID uint) (store.PRValidations, bool, error)
+}
+
 // WebhookHandler receives GitHub App deliveries. Store persists the state they
 // describe, Apps supplies the webhook secret, Events notifies browsers, Jobs
 // schedules the initial synchronization of new installations, Reviews starts
-// automated reviews and Findings/Comments apply thread disputes and /qa
-// commands (all optional).
+// automated reviews, Findings/Comments apply thread disputes and /qa commands,
+// and Checks refreshes the CI counters of a head (all optional, except Apps,
+// Store and Events).
 type WebhookHandler struct {
 	Store    *store.Store
 	Apps     AppProvider
@@ -72,6 +84,7 @@ type WebhookHandler struct {
 	Reviews  ReviewStarter
 	Findings FindingsReconciler
 	Comments PRCommenter
+	Checks   ChecksRefresher
 }
 
 // ServeHTTP verifies and dispatches a webhook delivery. Events this phase does
@@ -119,6 +132,12 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleInstallationRepositories(r.Context(), w, p)
 	case *gh.PullRequestEvent:
 		h.handlePullRequest(r.Context(), w, p)
+	case *gh.CheckRunEvent:
+		h.handleCheckEvent(r.Context(), w, p.GetRepo(), p.GetCheckRun().GetHeadSHA())
+	case *gh.CheckSuiteEvent:
+		h.handleCheckEvent(r.Context(), w, p.GetRepo(), p.GetCheckSuite().GetHeadSHA())
+	case *gh.StatusEvent:
+		h.handleCheckEvent(r.Context(), w, p.GetRepo(), p.GetSHA())
 	case *gh.PullRequestReviewThreadEvent:
 		h.handleReviewThread(r.Context(), w, p)
 	case *gh.IssueCommentEvent:
@@ -278,6 +297,70 @@ func isReviewTriggerAction(action string) bool {
 	default:
 		return false
 	}
+}
+
+// handleCheckEvent applies a check_run, check_suite or status delivery. The
+// payload only tells which commit moved: the verdict is re-read from GitHub so
+// the counters always describe the whole head and never a single check. Any
+// delivery that does not map to a known, open pull request at that exact SHA is
+// acknowledged without work, because GitHub would otherwise retry it forever.
+func (h *WebhookHandler) handleCheckEvent(ctx context.Context, w http.ResponseWriter, repo *gh.Repository, headSHA string) {
+	if repo == nil || headSHA == "" || h.Checks == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	var row store.Repository
+	err := h.Store.DB.WithContext(ctx).Where("id = ?", repo.GetID()).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		h.serverError(w)
+		return
+	}
+	if !row.Enabled {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	var pr store.PullRequest
+	err = h.Store.DB.WithContext(ctx).
+		Where("repository_id = ? AND head_sha = ? AND state = ?", row.ID, headSHA, stateOpenPR).
+		Take(&pr).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		h.serverError(w)
+		return
+	}
+
+	_, changed, err := h.Checks.RefreshPR(ctx, pr.ID)
+	if err != nil {
+		h.serverError(w)
+		return
+	}
+
+	// The gate is re-evaluated even when the counters did not move: a review
+	// blocked on a red head must be released by the delivery that completes the
+	// checks, and OnChecksUpdated is what deduplicates it against existing runs.
+	if changed && !pr.IsFork {
+		ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)}
+		if err := h.Events.Publish(ctx, ev); err != nil {
+			h.serverError(w)
+			return
+		}
+	}
+	if !pr.Draft && !pr.IsFork && h.Reviews != nil {
+		if err := h.Reviews.OnChecksUpdated(ctx, pr.ID); err != nil {
+			h.serverError(w)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 func (h *WebhookHandler) publishRepoUpdated(ctx context.Context, repoID int64) error {

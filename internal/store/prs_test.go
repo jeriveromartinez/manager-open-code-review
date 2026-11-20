@@ -710,6 +710,106 @@ func TestListVisiblePullRequestsOrderedByUpdatedAt(t *testing.T) {
 	}
 }
 
+func TestPRValidationsArePersisted(t *testing.T) {
+	f := newFixture(t)
+	inst := f.installation(1014)
+	repo := f.repo(6101, inst.ID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 1, store.StatusPending, false)
+
+	want := store.PRValidations{Passed: 9, Total: 9}
+	changed, err := f.s.SetPRValidations(f.ctx, pr.ID, pr.HeadSHA, want)
+	if err != nil {
+		t.Fatalf("SetPRValidations: %v", err)
+	}
+	if !changed {
+		t.Fatal("SetPRValidations changed = false, want true")
+	}
+
+	stored, err := f.s.PRValidationsFor(f.ctx, pr.ID, pr.HeadSHA)
+	if err != nil {
+		t.Fatalf("PRValidationsFor: %v", err)
+	}
+	if stored != want {
+		t.Fatalf("stored validations = %+v, want %+v", stored, want)
+	}
+
+	// Replaying the same verdict is a no-op so deliveries do not republish.
+	changed, err = f.s.SetPRValidations(f.ctx, pr.ID, pr.HeadSHA, want)
+	if err != nil {
+		t.Fatalf("SetPRValidations(replay): %v", err)
+	}
+	if changed {
+		t.Error("SetPRValidations(replay) changed = true, want false")
+	}
+
+	admin := f.user("admin", true)
+	views, err := f.s.ListVisiblePullRequests(f.ctx, admin, store.PRFilter{})
+	if err != nil {
+		t.Fatalf("ListVisiblePullRequests: %v", err)
+	}
+	if len(views) != 1 {
+		t.Fatalf("views = %d, want 1", len(views))
+	}
+	if views[0].Validations != want {
+		t.Errorf("view validations = %+v, want %+v", views[0].Validations, want)
+	}
+
+	// A refresh of a head the pull request has already left must not overwrite
+	// the counters of the current head.
+	changed, err = f.s.SetPRValidations(f.ctx, pr.ID, "another-sha", store.PRValidations{Passed: 1, Total: 5})
+	if err != nil {
+		t.Fatalf("SetPRValidations(stale head): %v", err)
+	}
+	if changed {
+		t.Error("SetPRValidations(stale head) changed = true, want false")
+	}
+	if stored, err := f.s.PRValidationsFor(f.ctx, pr.ID, pr.HeadSHA); err != nil || stored != want {
+		t.Errorf("validations after stale write = %+v, err = %v; want %+v", stored, err, want)
+	}
+}
+
+func TestPRValidationsResetOnNewHead(t *testing.T) {
+	f := newFixture(t)
+	inst := f.installation(1015)
+	repo := f.repo(6102, inst.ID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 1, store.StatusPending, false)
+
+	if _, err := f.s.SetPRValidations(f.ctx, pr.ID, pr.HeadSHA, store.PRValidations{Passed: 9, Total: 9}); err != nil {
+		t.Fatalf("SetPRValidations: %v", err)
+	}
+	updated, _, err := f.s.SyncPullRequest(f.ctx, store.PullRequest{
+		RepositoryID:    repo.ID,
+		Number:          pr.Number,
+		Title:           pr.Title,
+		HeadSHA:         "new-head-sha",
+		State:           "open",
+		GitHubUpdatedAt: time.Now().UTC().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("SyncPullRequest(new head): %v", err)
+	}
+	if updated.HeadSHA != "new-head-sha" {
+		t.Fatalf("HeadSHA = %q, want new-head-sha", updated.HeadSHA)
+	}
+
+	stored, err := f.s.PRValidationsFor(f.ctx, pr.ID, "new-head-sha")
+	if err != nil {
+		t.Fatalf("PRValidationsFor: %v", err)
+	}
+	if stored != (store.PRValidations{}) {
+		t.Errorf("validations of the new head = %+v, want 0/0 for a different SHA", stored)
+	}
+
+	admin := f.user("admin", true)
+	views, err := f.s.ListVisiblePullRequests(f.ctx, admin, store.PRFilter{})
+	if err != nil {
+		t.Fatalf("ListVisiblePullRequests: %v", err)
+	}
+	if len(views) != 1 || views[0].Validations != (store.PRValidations{}) {
+		t.Errorf("view validations = %+v, want 0/0 after a new head", views)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

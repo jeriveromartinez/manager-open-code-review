@@ -80,6 +80,7 @@ func (p *recordingPublisher) snapshot() []events.Event {
 type recordingReviews struct {
 	mu      sync.Mutex
 	ids     []uint
+	checks  []uint
 	retries []uint
 	err     error
 }
@@ -98,6 +99,13 @@ func (r *recordingReviews) Retry(_ context.Context, prID uint) error {
 	return r.err
 }
 
+func (r *recordingReviews) OnChecksUpdated(_ context.Context, prID uint) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.checks = append(r.checks, prID)
+	return r.err
+}
+
 func (r *recordingReviews) snapshot() []uint {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -108,6 +116,12 @@ func (r *recordingReviews) retrySnapshot() []uint {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]uint(nil), r.retries...)
+}
+
+func (r *recordingReviews) checksSnapshot() []uint {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint(nil), r.checks...)
 }
 
 type recordingComments struct {

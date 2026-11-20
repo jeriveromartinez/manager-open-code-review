@@ -111,12 +111,13 @@ type triggerFixture struct {
 }
 
 type seedOpts struct {
-	draft          bool
-	fork           bool
-	repoEnabled    bool
-	withPolicy     bool
-	profileEnabled bool
-	headSHA        string
+	draft           bool
+	fork            bool
+	repoEnabled     bool
+	withPolicy      bool
+	profileEnabled  bool
+	headSHA         string
+	requireGreenCI  bool
 }
 
 func newTriggerFixture(t *testing.T) *triggerFixture {
@@ -187,7 +188,7 @@ func (f *triggerFixture) seed(name string, opts seedOpts) store.PullRequest {
 	}
 	if opts.withPolicy {
 		if _, err := f.st.SaveQAPolicy(f.ctx, store.QAPolicy{
-			TeamID: team.ID, LLMProfileID: profile.ID,
+			TeamID: team.ID, LLMProfileID: profile.ID, RequireGreenCI: opts.requireGreenCI,
 		}); err != nil {
 			f.t.Fatalf("SaveQAPolicy(%q): %v", name, err)
 		}
