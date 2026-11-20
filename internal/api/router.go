@@ -128,6 +128,9 @@ func NewRouter(d Deps) http.Handler {
 				r.Patch("/llm-profiles/{id}", s.patchLLMProfile)
 				r.Delete("/llm-profiles/{id}", s.deleteLLMProfile)
 				r.Post("/llm-profiles/{id}/health", s.enqueueLLMHealth)
+
+				r.Get("/settings", s.getSettings)
+				r.Put("/settings", s.putSettings)
 			})
 		})
 	})
