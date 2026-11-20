@@ -253,13 +253,21 @@ func runWorker() error {
 	checker := &review.ProfileChecker{
 		Store: st, Box: workerBox, Bin: cfg.OpencodeBin, Timeout: cfg.ReviewTimeout,
 	}
-	client, err := jobs.NewReviewClient(st.Pool, runner, checker, cfg.ReviewConcurrency)
+	watchdog := &review.Watchdog{
+		Store: st, Events: eventsPublisher, StaleAfter: cfg.ReviewStaleAfter,
+	}
+	client, err := jobs.NewReviewClient(st.Pool, runner, checker, cfg.ReviewConcurrency, jobs.ReviewDeps{
+		Watchdog: watchdog,
+	})
 	if err != nil {
 		return fmt.Errorf("create review client: %w", err)
 	}
 	// The enqueuer must exist before Start: the runner needs it to schedule
-	// publication and further health checks while processing a review.
-	runner.Jobs = jobs.NewEnqueuer(client)
+	// publication and further health checks while processing a review, and the
+	// watchdog uses it to publish interrupted runs.
+	enqueuer := jobs.NewEnqueuer(client)
+	runner.Jobs = enqueuer
+	watchdog.Jobs = enqueuer
 
 	if err := client.Start(ctx); err != nil {
 		return fmt.Errorf("start review client: %w", err)

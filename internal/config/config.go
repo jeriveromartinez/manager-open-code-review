@@ -23,6 +23,7 @@ type Config struct {
 	GitHubAPIURL      string        // QA_GITHUB_API_URL, default "https://api.github.com"
 	ReviewConcurrency int           // QA_REVIEW_CONCURRENCY, default 2
 	ReviewTimeout     time.Duration // QA_REVIEW_TIMEOUT, default 20m
+	ReviewStaleAfter  time.Duration // QA_REVIEW_STALE_AFTER, default 45m
 	WorkspaceDir      string        // QA_WORKSPACE_DIR, default "/tmp/qa"
 	OCRBin            string        // QA_OCR_BIN, default "ocr"
 	OpencodeBin       string        // QA_OPENCODE_BIN, default "opencode"
@@ -55,6 +56,9 @@ func Load(getenv func(string) string) (Config, error) {
 		OpencodeBin:       "opencode",
 		FetchDepthMax:     500,
 		GitBaseURL:        "https://github.com",
+		// A review budget is 20m plus the River retry window, so a shorter
+		// threshold would fail healthy runs on a slow LLM.
+		ReviewStaleAfter: 45 * time.Minute,
 	}
 
 	cfg.DatabaseURL = strings.TrimSpace(getenv("QA_DATABASE_URL"))
@@ -142,6 +146,17 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("QA_REVIEW_TIMEOUT must be greater than zero, got %q", v)
 		}
 		cfg.ReviewTimeout = timeout
+	}
+
+	if v := strings.TrimSpace(getenv("QA_REVIEW_STALE_AFTER")); v != "" {
+		stale, err := time.ParseDuration(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("QA_REVIEW_STALE_AFTER must be a duration: %w", err)
+		}
+		if stale <= 0 {
+			return Config{}, fmt.Errorf("QA_REVIEW_STALE_AFTER must be greater than zero, got %q", v)
+		}
+		cfg.ReviewStaleAfter = stale
 	}
 
 	if raw := getenv("QA_WORKSPACE_DIR"); raw != "" {
