@@ -48,6 +48,8 @@ La URL pública no se declara en el entorno: el asistente de `/setup` la detecta
 
 Todo lo demás —escucha, reconciliación, revisión, worker, alertas y backups— se edita en el panel, en **Ajustes** (solo administradores). La base manda sobre el entorno: las variables retiradas se ignoran y el arranque avisa de las que sigan definidas. Cada sección del panel indica si el cambio necesita reiniciar la app, el worker o el monitor.
 
+`listen_addr` y `worker_health_addr` deben seguir coincidiendo con los `healthcheck` de [deploy/docker-compose.yml](deploy/docker-compose.yml): el worker solo arranca cuando el healthcheck de `app` (que sondea `127.0.0.1:8080`) está sano, y el suyo sondea `127.0.0.1:9090`. Si cambias una dirección sin actualizar el compose, el contenedor queda unhealthy y, con `listen_addr`, el worker y el monitor no llegan a arrancar.
+
 `llm_health_interval` es la cadencia del barrido de salud de los perfiles LLM: al arrancar el worker y cada intervalo, encola una comprobación para cada perfil activo cuyo último resultado supera dos veces ese intervalo, y para los que nunca se comprobaron. Un perfil en error espera `15m` antes de reintentarse, para no gastar cuota en una clave rota. `GET /api/llm-profiles` devuelve `health_age_seconds` y `health_stale` (marcado con el mismo umbral de dos intervalos), de modo que un barrido detenido se ve en el panel en lugar de parecer un perfil sano.
 
 `review_stale_after` es el umbral del vigilante de runs huérfanos: al arrancar y cada 5 minutos, los runs en `running` cuya hora de inicio supera ese umbral pasan a `failed` con código `interrupted`, se publica el check como `action_required` y el PR queda `inconclusive`. Debe superar `review_timeout` (más el margen de reintentos), o matará revisiones sanas.

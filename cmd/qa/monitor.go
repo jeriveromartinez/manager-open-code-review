@@ -25,10 +25,7 @@ func runMonitor(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := monitorConfig(ctx, strings.TrimSpace(os.Getenv("QA_DATABASE_URL")))
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
+	cfg, _ := monitorConfig(ctx, strings.TrimSpace(os.Getenv("QA_DATABASE_URL")))
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	notifiers := monitor.MultiNotifier{monitor.NewLogNotifier(logger)}
@@ -54,7 +51,9 @@ func runMonitor(logger *slog.Logger) error {
 // monitorConfig reads the stored settings, because the monitor is configured
 // from the panel like everything else. A missing or unreachable database must
 // not stop it: a monitor that refuses to start when PostgreSQL is down cannot
-// report that PostgreSQL is down, so it falls back to the defaults.
+// report that PostgreSQL is down, so it falls back to the defaults. The error
+// return is part of the planned signature and is reserved for a future hard
+// failure; today every path succeeds.
 func monitorConfig(ctx context.Context, dsn string) (config.Config, error) {
 	cfg := config.Default()
 	if dsn == "" {

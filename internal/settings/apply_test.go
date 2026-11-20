@@ -18,13 +18,17 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 	}{
 		{"zero duration", KeyReviewTimeout, "0s", KeyReviewTimeout},
 		{"zero monitor interval", KeyMonitorInterval, "0s", KeyMonitorInterval},
+		{"negative monitor interval", KeyMonitorInterval, "-1m", KeyMonitorInterval},
 		{"zero renotify window", KeyMonitorRenotifyAfter, "0s", KeyMonitorRenotifyAfter},
+		{"negative renotify window", KeyMonitorRenotifyAfter, "-1m", KeyMonitorRenotifyAfter},
 		{"garbage duration", KeyReconcileInterval, "pronto", KeyReconcileInterval},
 		{"negative int", KeyReviewConcurrency, "-1", KeyReviewConcurrency},
 		{"garbage int", KeyFetchDepthMax, "muchos", KeyFetchDepthMax},
 		{"bad bool", KeyWebhooksEnabled, "si", KeyWebhooksEnabled},
 		{"relative url", KeyPublicURL, "/solo-ruta", KeyPublicURL},
 		{"relative worker health url", KeyWorkerHealthURL, "worker:9090", KeyWorkerHealthURL},
+		{"non-http worker health url", KeyWorkerHealthURL, "ftp://worker:9090", KeyWorkerHealthURL},
+		{"worker health url without host", KeyWorkerHealthURL, "http://", KeyWorkerHealthURL},
 		{"relative webhook url", KeyAlertWebhookURL, "alerts.example.com/hook", KeyAlertWebhookURL},
 		{"url trimmed to empty", KeyGitBaseURL, "/", KeyGitBaseURL},
 		{"empty bin", KeyOCRBin, "  ", KeyOCRBin},
@@ -41,6 +45,18 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 				t.Errorf("KeyError.Key = %q, want %q", keyErr.Key, tc.want)
 			}
 		})
+	}
+}
+
+// The pair rules also reject some negative durations (e.g. a negative renotify
+// window is below every interval), which would hide a setDuration that lost its
+// own check. Pin the branch directly.
+func TestSetDurationRejectsNonPositive(t *testing.T) {
+	for _, raw := range []string{"0s", "-1m"} {
+		var d time.Duration
+		if err := setDuration(&d, KeyMonitorInterval, raw); err == nil {
+			t.Errorf("setDuration(%q) = %v, want an error", raw, d)
+		}
 	}
 }
 
@@ -126,7 +142,8 @@ func TestApplySetsEveryField(t *testing.T) {
 	}
 	if cfg.ReconcileInterval != 2*time.Minute || cfg.ReviewTimeout != 30*time.Minute ||
 		cfg.ReviewStaleAfter != 90*time.Minute || cfg.LLMHealthInterval != 10*time.Minute ||
-		cfg.WorkerQueueStale != 20*time.Minute || cfg.MonitorRenotifyAfter != 5*time.Minute {
+		cfg.WorkerQueueStale != 20*time.Minute || cfg.MonitorRenotifyAfter != 5*time.Minute ||
+		cfg.MonitorInterval != 30*time.Second {
 		t.Error("one of the durations was not applied")
 	}
 	if cfg.ReviewConcurrency != 4 || cfg.ReviewAgentSteps != 60 || cfg.FetchDepthMax != 900 || cfg.BackupRetention != 14 {

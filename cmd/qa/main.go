@@ -35,6 +35,9 @@ func usage() string {
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Package-level slog calls must reach the same JSON stream as the logger
+	// the commands receive, or a parsed log pipeline loses the fallback warnings.
+	slog.SetDefault(logger)
 
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, usage())

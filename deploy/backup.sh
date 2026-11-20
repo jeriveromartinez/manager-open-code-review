@@ -26,7 +26,7 @@ retencion=$(psql "$QA_DATABASE_URL" -tAc \
     "SELECT value FROM app_settings WHERE key = 'backup_retention'" 2>/dev/null || true)
 retencion=$(printf '%s' "$retencion" | tr -d '[:space:]')
 case "$retencion" in
-    ''|*[!0-9]*) retencion=7 ;;
+    ''|0|*[!0-9]*) retencion=7 ;;
 esac
 
 mkdir -p "$destino"
