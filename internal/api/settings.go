@@ -55,6 +55,9 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 	// validating against it would let two saves persist an incoherent pair
 	// (review_timeout 40m, then review_stale_after 30m) that aborts the next
 	// boot.
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+
 	stored, err := s.Store.Settings(r.Context())
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "read settings")
@@ -62,8 +65,9 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	next := config.Default()
 	if err := settings.Apply(&next, stored); err != nil {
-		// Only validated values are ever written, so a bad row is corruption.
-		writeAPIError(w, http.StatusInternalServerError, "stored settings are invalid")
+		// Only validated values are ever written through this API, so a bad row
+		// is corruption that needs SQL, not a save the panel refuses to accept.
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if err := settings.Apply(&next, body.Values); err != nil {

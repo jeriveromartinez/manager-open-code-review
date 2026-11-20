@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 
@@ -57,6 +58,10 @@ type Deps struct {
 
 type server struct {
 	Deps
+	// settingsMu serialises the read-validate-write cycle of a settings save.
+	// Without it two admins saving different keys of an interdependent pair can
+	// each validate against the pre-save state and persist an incoherent pair.
+	settingsMu sync.Mutex
 }
 
 // NewRouter builds the complete HTTP handler: public setup/auth routes, the
