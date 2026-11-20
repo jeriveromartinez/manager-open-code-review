@@ -81,4 +81,12 @@ func TestSaveSettingsIsPartialAndRecordsUser(t *testing.T) {
 	if row.UpdatedBy == nil || *row.UpdatedBy != user.ID {
 		t.Errorf("updated_by = %v, want %d", row.UpdatedBy, user.ID)
 	}
+
+	var opencodeRow settingRow
+	if err := s.DB.WithContext(ctx).Where("key = ?", "opencode_bin").First(&opencodeRow).Error; err != nil {
+		t.Fatalf("read opencode_bin row: %v", err)
+	}
+	if opencodeRow.UpdatedBy != nil {
+		t.Errorf("opencode_bin updated_by = %d, want NULL", *opencodeRow.UpdatedBy)
+	}
 }
