@@ -83,7 +83,7 @@ En el panel, `/prs/:id` muestra el historial de runs (con disparador, intento y 
 
 ### `inconclusive` y reintento
 
-Un run `inconclusive` indica que no se completó la revisión con cobertura completa: `ocr` caído o con JSON inválido, error del LLM (cuota, timeout o 5xx), salida que no valida el esquema, cobertura incompleta, token de clonado caducado o timeout del run. Puede publicar hallazgos de pasadas completas como comentarios nuevos, pero **no resuelve ningún hallazgo ni cierra hilos**. El check queda `action_required` y el PR pasa a `inconclusive`.
+Un run `inconclusive` indica que no se completó la revisión con cobertura completa: `ocr` caído o con JSON inválido, error del LLM (cuota, timeout o 5xx), salida que no valida el esquema, cobertura incompleta, token de clonado caducado, timeout del run o presupuesto agotado (`budget_exhausted`: el mensaje dice en qué pasada paró y cuántos archivos quedaron sin revisar; súbelo con `QA_REVIEW_TIMEOUT`). Puede publicar hallazgos de pasadas completas como comentarios nuevos, pero **no resuelve ningún hallazgo ni cierra hilos**. El check queda `action_required` y el PR pasa a `inconclusive`.
 
 Para reintentar, abre el detalle del PR y pulsa **Reintentar** (admin o lead del equipo). Se crea un run `retry` para el mismo SHA, se reactiva el check y se encola de nuevo. Revisa antes la causa: un modelo inválido, por ejemplo, seguirá fallando hasta corregir el perfil. La reconciliación no reencola automáticamente un SHA que ya terminó en `failed` o `inconclusive`.
 

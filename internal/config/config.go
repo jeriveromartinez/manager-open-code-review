@@ -22,6 +22,7 @@ type Config struct {
 	GitHubURL         string        // QA_GITHUB_URL, default "https://github.com"
 	GitHubAPIURL      string        // QA_GITHUB_API_URL, default "https://api.github.com"
 	ReviewConcurrency int           // QA_REVIEW_CONCURRENCY, default 2
+	ReviewAgentSteps  int           // QA_REVIEW_AGENT_STEPS, default 40
 	ReviewTimeout     time.Duration // QA_REVIEW_TIMEOUT, default 20m
 	ReviewStaleAfter  time.Duration // QA_REVIEW_STALE_AFTER, default 45m
 	WorkspaceDir      string        // QA_WORKSPACE_DIR, default "/tmp/qa"
@@ -50,6 +51,7 @@ func Load(getenv func(string) string) (Config, error) {
 		GitHubURL:         "https://github.com",
 		GitHubAPIURL:      "https://api.github.com",
 		ReviewConcurrency: 2,
+		ReviewAgentSteps:  40,
 		ReviewTimeout:     20 * time.Minute,
 		WorkspaceDir:      "/tmp/qa",
 		OCRBin:            "ocr",
@@ -135,6 +137,17 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("QA_REVIEW_CONCURRENCY must be greater than zero, got %q", v)
 		}
 		cfg.ReviewConcurrency = concurrency
+	}
+
+	if v := strings.TrimSpace(getenv("QA_REVIEW_AGENT_STEPS")); v != "" {
+		steps, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("QA_REVIEW_AGENT_STEPS must be an integer: %w", err)
+		}
+		if steps <= 0 {
+			return Config{}, fmt.Errorf("QA_REVIEW_AGENT_STEPS must be greater than zero, got %q", v)
+		}
+		cfg.ReviewAgentSteps = steps
 	}
 
 	if v := strings.TrimSpace(getenv("QA_REVIEW_TIMEOUT")); v != "" {

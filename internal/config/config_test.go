@@ -267,6 +267,9 @@ func TestLoadReviewDefaults(t *testing.T) {
 	if cfg.ReviewConcurrency != 2 {
 		t.Errorf("ReviewConcurrency = %d, want 2", cfg.ReviewConcurrency)
 	}
+	if cfg.ReviewAgentSteps != 40 {
+		t.Errorf("ReviewAgentSteps = %d, want 40", cfg.ReviewAgentSteps)
+	}
 	if cfg.ReviewTimeout != 20*time.Minute {
 		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 20*time.Minute)
 	}
@@ -293,6 +296,7 @@ func TestLoadReviewDefaults(t *testing.T) {
 func TestLoadReviewOverrides(t *testing.T) {
 	env := requiredEnv()
 	env["QA_REVIEW_CONCURRENCY"] = "8"
+	env["QA_REVIEW_AGENT_STEPS"] = "12"
 	env["QA_REVIEW_TIMEOUT"] = "45s"
 	env["QA_REVIEW_STALE_AFTER"] = "2h"
 	env["QA_WORKSPACE_DIR"] = "/var/qa"
@@ -308,6 +312,9 @@ func TestLoadReviewOverrides(t *testing.T) {
 
 	if cfg.ReviewConcurrency != 8 {
 		t.Errorf("ReviewConcurrency = %d, want 8", cfg.ReviewConcurrency)
+	}
+	if cfg.ReviewAgentSteps != 12 {
+		t.Errorf("ReviewAgentSteps = %d, want 12", cfg.ReviewAgentSteps)
 	}
 	if cfg.ReviewTimeout != 45*time.Second {
 		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 45*time.Second)
@@ -344,6 +351,23 @@ func TestLoadBadReviewConcurrency(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "QA_REVIEW_CONCURRENCY") {
 				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_CONCURRENCY", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoadBadReviewAgentSteps(t *testing.T) {
+	for _, value := range []string{"0", "-1", "x"} {
+		t.Run(value, func(t *testing.T) {
+			env := requiredEnv()
+			env["QA_REVIEW_AGENT_STEPS"] = value
+
+			_, err := config.Load(getenv(env))
+			if err == nil {
+				t.Fatalf("Load() error = nil for %q, want error mentioning QA_REVIEW_AGENT_STEPS", value)
+			}
+			if !strings.Contains(err.Error(), "QA_REVIEW_AGENT_STEPS") {
+				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_AGENT_STEPS", err.Error())
 			}
 		})
 	}
