@@ -260,8 +260,14 @@ func runWorker() error {
 	watchdog := &review.Watchdog{
 		Store: st, Events: eventsPublisher, StaleAfter: cfg.ReviewStaleAfter,
 	}
+	// A verdict is refreshed by the worker every QA_LLM_HEALTH_INTERVAL; the
+	// panel marks it stale at twice that, so one delayed cycle is not alarming.
+	healthStaleAfter := cfg.LLMHealthStaleAfter()
+	sweeper := &review.HealthSweeper{Store: st, StaleAfter: healthStaleAfter}
 	client, err := jobs.NewReviewClient(st.Pool, runner, checker, cfg.ReviewConcurrency, jobs.ReviewDeps{
-		Watchdog: watchdog,
+		Watchdog:       watchdog,
+		Health:         sweeper,
+		HealthInterval: cfg.LLMHealthInterval,
 	})
 	if err != nil {
 		return fmt.Errorf("create review client: %w", err)
@@ -272,6 +278,7 @@ func runWorker() error {
 	enqueuer := jobs.NewEnqueuer(client)
 	runner.Jobs = enqueuer
 	watchdog.Jobs = enqueuer
+	sweeper.Enqueue = enqueuer.EnqueueLLMHealth
 
 	if err := client.Start(ctx); err != nil {
 		return fmt.Errorf("start review client: %w", err)
