@@ -13,6 +13,35 @@ services:
       timeout: 5s
       retries: 10
 
+  # Backup programado con retención. Vive fuera de la app a propósito: usa
+  # pg_dump contra el servidor, así que no necesita QA_MASTER_KEY ni puede
+  # descifrar nada de lo que copia.
+  backup:
+    image: postgres:17
+    profiles: ["backup"]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      QA_DATABASE_URL: ${QA_DATABASE_URL}
+      QA_BACKUP_RETENTION: ${QA_BACKUP_RETENTION:-7}
+    volumes:
+      - backups-data:/backups
+      # Los scripts viven en el repo, así que se montan en solo lectura.
+      - ./backup.sh:/scripts/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c"]
+    # Un backup diario a las 03:00 UTC. El bucle duerme hasta la siguiente
+    # ventana en vez de confiar en cron, que la imagen no trae.
+    command:
+      - |
+        while true; do
+          now=$$(date -u +%s)
+          next=$$(date -u -d "tomorrow 03:00" +%s)
+          sleep $$((next - now))
+          /bin/sh /scripts/backup.sh /backups || echo "backup failed, retrying at the next window" >&2
+        done
+
   app:
     build:
       context: ..
@@ -63,3 +92,4 @@ services:
 volumes:
   postgres-data:
   opencode-data:
+  backups-data:

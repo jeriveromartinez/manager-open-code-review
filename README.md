@@ -29,6 +29,8 @@ Abre `http://localhost:8080/setup`, pega el token y crea la GitHub App (en tu cu
 
 Si no tienes una URL pública, consulta la sección [modo solo polling](docs/install.md#modo-solo-polling-sin-url-pública).
 
+Los backups programados y la restauración verificada están en [docs/backup.md](docs/backup.md).
+
 ## Variables de entorno
 
 | Variable | Descripción | Valor por defecto |
