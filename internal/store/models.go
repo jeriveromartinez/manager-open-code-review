@@ -132,6 +132,9 @@ type PullRequest struct {
 	HeadRepoFullName  string    `gorm:"column:head_repo_full_name"`
 	CreatedAt         time.Time `gorm:"column:created_at"`
 	UpdatedAt         time.Time `gorm:"column:updated_at"`
+	ValidationsPassed int       `gorm:"column:validations_passed"`
+	ValidationsFailed int       `gorm:"column:validations_failed"`
+	ValidationsTotal  int       `gorm:"column:validations_total"`
 }
 
 // AuditLog records an administrative action.
@@ -178,6 +181,7 @@ type QAPolicy struct {
 	MaxFilesPerPass     int            `gorm:"column:max_files_per_pass"`
 	MaxDiffLinesPerPass int            `gorm:"column:max_diff_lines_per_pass"`
 	MaxPasses           int            `gorm:"column:max_passes"`
+	RequireGreenCI      bool           `gorm:"column:require_green_ci"`
 	CreatedAt           time.Time      `gorm:"column:created_at"`
 	UpdatedAt           time.Time      `gorm:"column:updated_at"`
 }

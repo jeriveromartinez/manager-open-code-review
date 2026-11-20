@@ -193,6 +193,13 @@ func syncExisting(tx *gorm.DB, prev *PullRequest, in PullRequest, out *PullReque
 		"head_repo_full_name": in.HeadRepoFullName,
 		"updated_at":          time.Now().UTC(),
 	}
+	if prev.HeadSHA != in.HeadSHA {
+		// Counters belong to the head they were measured on; a new head starts
+		// unknown instead of inheriting the verdict of the previous commit.
+		updates["validations_passed"] = 0
+		updates["validations_failed"] = 0
+		updates["validations_total"] = 0
+	}
 	if err := tx.Model(&PullRequest{}).Where("id = ?", prev.ID).Updates(updates).Error; err != nil {
 		return fmt.Errorf("update pull request %d: %w", prev.ID, err)
 	}
@@ -248,8 +255,9 @@ func (s *Store) CloseMissingPullRequests(ctx context.Context, repoID int64, open
 // unknown group applies no filter.
 type PRFilter struct{ Group string }
 
-// PRView is the dashboard representation of a pull request. Validations are
-// always 0/0 in Phase 1.
+// PRView is the dashboard representation of a pull request. Validations are the
+// stored counters of the current head; they stay 0/0 until the check state of
+// that head has been read from GitHub.
 type PRView struct {
 	ID          uint
 	Repo        string
@@ -259,24 +267,24 @@ type PRView struct {
 	HTMLURL     string
 	QAStatus    string
 	Group       string
-	Validations struct {
-		Passed int
-		Total  int
-	}
-	UpdatedAt time.Time
+	Validations PRValidations
+	UpdatedAt   time.Time
 }
 
 // prViewRow mirrors the columns selected from the joined query. Keeping it
 // separate from PRView avoids GORM trying to map the computed fields.
 type prViewRow struct {
-	ID          uint
-	Repo        string
-	Number      int
-	Title       string
-	AuthorLogin string
-	HTMLURL     string
-	QAStatus    string
-	UpdatedAt   time.Time
+	ID                uint
+	Repo              string
+	Number            int
+	Title             string
+	AuthorLogin       string
+	HTMLURL           string
+	QAStatus          string
+	ValidationsPassed int
+	ValidationsFailed int
+	ValidationsTotal  int
+	UpdatedAt         time.Time
 }
 
 // Stats holds the dashboard KPIs for a user's visible pull requests.
@@ -335,6 +343,9 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 			"pr.author_login AS author_login",
 			"pr.html_url AS html_url",
 			"pr.qa_status AS qa_status",
+			"pr.validations_passed AS validations_passed",
+			"pr.validations_failed AS validations_failed",
+			"pr.validations_total AS validations_total",
 			"pr.updated_at AS updated_at",
 		}, ", ")).
 		Order("pr.updated_at DESC").
@@ -354,7 +365,12 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 			HTMLURL:     row.HTMLURL,
 			QAStatus:    row.QAStatus,
 			Group:       GroupOf(row.QAStatus),
-			UpdatedAt:   row.UpdatedAt,
+			Validations: PRValidations{
+				Passed: row.ValidationsPassed,
+				Failed: row.ValidationsFailed,
+				Total:  row.ValidationsTotal,
+			},
+			UpdatedAt: row.UpdatedAt,
 		}
 	}
 	return views, nil

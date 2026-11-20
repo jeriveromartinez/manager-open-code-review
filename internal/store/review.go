@@ -315,7 +315,8 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		Columns: []clause.Column{{Name: "team_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"llm_profile_id", "blocking_threshold", "extra_instructions", "exclude_globs",
-			"max_files_per_pass", "max_diff_lines_per_pass", "max_passes", "updated_at",
+			"max_files_per_pass", "max_diff_lines_per_pass", "max_passes",
+			"require_green_ci", "updated_at",
 		}),
 	}).Create(&p).Error
 	if err != nil {
