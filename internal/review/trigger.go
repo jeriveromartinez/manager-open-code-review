@@ -123,6 +123,19 @@ func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ig
 		}
 	}
 
+	// The CI gate sits next to the draft/fork exclusions: it is re-evaluated on
+	// every delivery, so the head is released by the very event that makes CI
+	// green instead of waiting for a human retry.
+	if cfg.Policy.RequireGreenCI {
+		validations, err := t.Store.PRValidationsFor(ctx, prID, cfg.PR.HeadSHA)
+		if err != nil {
+			return false, fmt.Errorf("load validations of pull request %d: %w", prID, err)
+		}
+		if !validations.Green() {
+			return false, nil
+		}
+	}
+
 	if t.Apps == nil {
 		return false, errors.New("review: trigger has no app provider")
 	}
