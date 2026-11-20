@@ -31,13 +31,13 @@ function restartLabel(group: SettingsField['group']): string {
 }
 
 async function load(): Promise<void> {
-  error.value = ''
-  loadFailed.value = false
   loading.value = true
   try {
     const response = await api.settings()
     values.value = { ...response.values }
     fields.value = response.fields
+    loadFailed.value = false
+    error.value = ''
   } catch {
     loadFailed.value = true
     error.value = 'No se pudieron cargar los ajustes.'
@@ -86,7 +86,7 @@ onMounted(load)
 
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
     <button
-      v-if="loadFailed"
+      v-if="loadFailed || loading"
       type="button"
       class="button button--primary"
       data-retry
@@ -97,37 +97,39 @@ onMounted(load)
     </button>
     <span v-if="saved" class="badge badge--ok" role="status">{{ saved }}</span>
 
-    <form
-      v-for="group in groups"
-      :key="group.id"
-      class="pr-card"
-      :data-group="group.id"
-      @submit.prevent="save(group.id)"
-    >
-      <div class="pr-section__head">
-        <h2 class="pr-section__title">{{ group.title }}</h2>
-        <span v-if="restartLabel(group.id)" class="badge badge--busy">
-          {{ restartLabel(group.id) }}
-        </span>
-      </div>
-      <p class="field__hint">{{ group.hint }}</p>
+    <template v-if="fields.length > 0">
+      <form
+        v-for="group in groups"
+        :key="group.id"
+        class="pr-card"
+        :data-group="group.id"
+        @submit.prevent="save(group.id)"
+      >
+        <div class="pr-section__head">
+          <h2 class="pr-section__title">{{ group.title }}</h2>
+          <span v-if="restartLabel(group.id)" class="badge badge--busy">
+            {{ restartLabel(group.id) }}
+          </span>
+        </div>
+        <p class="field__hint">{{ group.hint }}</p>
 
-      <label v-for="field in fieldsOf(group.id)" :key="field.key" class="field">
-        <span class="field__label">{{ field.key }}</span>
-        <input
-          v-model="values[field.key]"
-          class="field__input"
-          :type="field.secret ? 'password' : 'text'"
-          :name="field.key"
-          :placeholder="field.default || 'sin valor'"
-          :autocomplete="field.secret ? 'new-password' : 'off'"
-          @input="saved = ''"
-        />
-      </label>
+        <label v-for="field in fieldsOf(group.id)" :key="field.key" class="field">
+          <span class="field__label">{{ field.key }}</span>
+          <input
+            v-model="values[field.key]"
+            class="field__input"
+            :type="field.secret ? 'password' : 'text'"
+            :name="field.key"
+            :placeholder="field.default || 'sin valor'"
+            :autocomplete="field.secret ? 'new-password' : 'off'"
+            @input="saved = ''"
+          />
+        </label>
 
-      <button type="submit" class="button button--primary" :disabled="saving === group.id">
-        {{ saving === group.id ? 'Guardando…' : 'Guardar' }}
-      </button>
-    </form>
+        <button type="submit" class="button button--primary" :disabled="saving === group.id">
+          {{ saving === group.id ? 'Guardando…' : 'Guardar' }}
+        </button>
+      </form>
+    </template>
   </section>
 </template>

@@ -14,6 +14,14 @@ const fields: SettingsField[] = [
 
 const stored = { public_url: '', review_timeout: '20m0s', ocr_bin: 'ocr', alert_webhook_url: '' }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 beforeEach(() => {
   vi.mocked(api.settings).mockReset()
   vi.mocked(api.settings).mockResolvedValue({ values: { ...stored }, fields })
@@ -128,6 +136,52 @@ describe('SettingsView', () => {
     expect((wrapper.find('input[name="review_timeout"]').element as HTMLInputElement).value).toBe(
       '20m0s',
     )
+  })
+
+  it('renders only the error and one retry control when the load fails', async () => {
+    vi.mocked(api.settings).mockRejectedValueOnce(new Error('boom'))
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('No se pudieron cargar los ajustes.')
+    expect(wrapper.findAll('form[data-group]')).toHaveLength(0)
+    expect(wrapper.findAll('[data-retry]')).toHaveLength(1)
+  })
+
+  it('renders the sections again when the retry succeeds', async () => {
+    vi.mocked(api.settings).mockRejectedValueOnce(new Error('boom'))
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+    expect(wrapper.findAll('form[data-group]')).toHaveLength(0)
+
+    await wrapper.get('[data-retry]').trigger('click')
+    await flushPromises()
+
+    expect(api.settings).toHaveBeenCalledTimes(2)
+    expect(wrapper.findAll('form[data-group]')).toHaveLength(5)
+    expect(wrapper.find('[data-retry]').exists()).toBe(false)
+  })
+
+  it('keeps the retry control disabled and the error visible while the retry is pending', async () => {
+    vi.mocked(api.settings).mockRejectedValueOnce(new Error('boom'))
+    const retry = deferred<{ values: Record<string, string>; fields: SettingsField[] }>()
+    vi.mocked(api.settings).mockReturnValueOnce(retry.promise)
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    await wrapper.get('[data-retry]').trigger('click')
+
+    const button = wrapper.get('[data-retry]')
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(button.text()).toBe('Cargando…')
+    expect(wrapper.text()).toContain('No se pudieron cargar los ajustes.')
+    expect(wrapper.findAll('form[data-group]')).toHaveLength(0)
+
+    retry.resolve({ values: { ...stored }, fields })
+    await flushPromises()
+
+    expect(wrapper.findAll('form[data-group]')).toHaveLength(5)
+    expect(wrapper.find('[data-retry]').exists()).toBe(false)
   })
 
   it('clears the success notice as soon as any field changes', async () => {
