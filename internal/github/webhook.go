@@ -42,18 +42,36 @@ func VerifySignature(secret, body []byte, header string) bool {
 // work; the webhook boundary only applies the exclusion rules.
 type ReviewStarter interface {
 	OnPullRequest(ctx context.Context, prID uint) error
+	Retry(ctx context.Context, prID uint) error
+}
+
+// FindingsReconciler applies a finding change that happened outside a review
+// run: it closes or reopens the GitHub review thread and republishes the gate so
+// the check run and the panel agree.
+type FindingsReconciler interface {
+	Republish(ctx context.Context, prID uint) error
+	SetFindingThread(ctx context.Context, prID uint, finding store.Finding, resolved bool) (bool, error)
+}
+
+// PRCommenter posts an issue comment on a pull request. Commands reply through
+// it so the person who typed /qa sees the outcome where they wrote it.
+type PRCommenter interface {
+	CommentOnPullRequest(ctx context.Context, repoFullName string, number int, body string) error
 }
 
 // WebhookHandler receives GitHub App deliveries. Store persists the state they
 // describe, Apps supplies the webhook secret, Events notifies browsers, Jobs
-// schedules the initial synchronization of new installations and Reviews starts
-// automated reviews (optional).
+// schedules the initial synchronization of new installations, Reviews starts
+// automated reviews and Findings/Comments apply thread disputes and /qa
+// commands (all optional).
 type WebhookHandler struct {
-	Store   *store.Store
-	Apps    AppProvider
-	Events  events.Publisher
-	Jobs    SyncEnqueuer
-	Reviews ReviewStarter
+	Store    *store.Store
+	Apps     AppProvider
+	Events   events.Publisher
+	Jobs     SyncEnqueuer
+	Reviews  ReviewStarter
+	Findings FindingsReconciler
+	Comments PRCommenter
 }
 
 // ServeHTTP verifies and dispatches a webhook delivery. Events this phase does
@@ -101,6 +119,10 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleInstallationRepositories(r.Context(), w, p)
 	case *gh.PullRequestEvent:
 		h.handlePullRequest(r.Context(), w, p)
+	case *gh.PullRequestReviewThreadEvent:
+		h.handleReviewThread(r.Context(), w, p)
+	case *gh.IssueCommentEvent:
+		h.handleIssueComment(r.Context(), w, p)
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}

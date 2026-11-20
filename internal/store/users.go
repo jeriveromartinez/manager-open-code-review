@@ -138,6 +138,20 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	return users, nil
 }
 
+// UserByGitHubID resolves the local user behind a GitHub account. Users who
+// never signed in with OAuth are reported as ErrNotFound.
+func (s *Store) UserByGitHubID(ctx context.Context, githubID int64) (User, error) {
+	var user User
+	err := quietDB(s.DB.WithContext(ctx)).Where("github_id = ?", githubID).Take(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return User{}, fmt.Errorf("user with GitHub id %d: %w", githubID, ErrNotFound)
+	}
+	if err != nil {
+		return User{}, fmt.Errorf("find user with GitHub id %d: %w", githubID, err)
+	}
+	return user, nil
+}
+
 // CreateTeam inserts a team with a URL-safe slug derived from its name.
 // Unique name or slug violations are returned to the caller.
 func (s *Store) CreateTeam(ctx context.Context, name string) (Team, error) {

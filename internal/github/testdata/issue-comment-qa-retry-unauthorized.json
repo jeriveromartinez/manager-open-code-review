@@ -1,0 +1,14 @@
+{
+  "action": "created",
+  "issue": {
+    "number": 142,
+    "pull_request": {"url": "https://api.github.com/repos/acme/backend-api/pulls/142"}
+  },
+  "comment": {
+    "id": 9005,
+    "body": "/qa retry",
+    "user": {"id": 8002, "login": "dev", "type": "User"}
+  },
+  "repository": {"id": 501, "name": "backend-api", "full_name": "acme/backend-api"},
+  "sender": {"id": 8002, "login": "dev", "type": "User"}
+}

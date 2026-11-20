@@ -68,6 +68,32 @@ Entra con el login de GitHub y, desde la interfaz:
 
 Los pull requests abiertos aparecen en el Dashboard. La reconciliación periódica incorpora los que llegaron sin webhook.
 
+### Eventos de webhook y qué queda fuera en modo polling
+
+La App creada desde el manifiesto se suscribe a estos eventos. Sin webhooks solo funcionan las acciones marcadas como «también en polling»:
+
+| Evento | Para qué sirve | ¿Funciona en modo polling? |
+| --- | --- | --- |
+| `installation`, `installation_repositories` | Alta, baja, suspensión y repositorios de la instalación | Sí: la reconciliación descubre instalaciones y repositorios nuevos en cada ciclo. |
+| `pull_request` | Sincronizar el PR y lanzar la revisión de `opened`, `synchronize`, `reopened` y `ready_for_review` | Sí: la reconciliación encola los PRs abiertos sin run para su SHA. |
+| `pull_request_review_thread` | Resolver o reabrir un hallazgo cuando alguien marca el hilo como resuelto o sin resolver en GitHub | No. En polling el hallazgo conserva el estado del último run. |
+| `issue_comment` | Comandos `/qa retry`, `/qa dismiss` y `/qa confirm` en el PR | No. En polling, los descartes y las confirmaciones se hacen desde el panel. |
+| `check_suite`, `check_run`, `status` | Reevaluar el gate cuando termina el CI | La App los recibe, pero esta fase todavía no los procesa: el gate se recalcula al publicar un run, al resolver o reabrir un hilo y al aplicar un comando `/qa`. |
+
+La App necesita además la suscripción a `pull_request_review_thread`: una App creada antes de que este evento estuviera en el manifiesto debe añadirlo a mano en **Settings → GitHub Apps → Permissions & events**, o resolver los hilos solo se reflejará en el panel tras la siguiente revisión.
+
+## Disputas en hilos y comandos `/qa`
+
+Cuando alguien marca un hilo de revisión como **resuelto** en GitHub, el hallazgo correspondiente pasa a `resolved` y su check se recalcula; si alguien lo **vuelve a abrir**, el hallazgo vuelve a `open`. El enlace se hace por el comentario en línea publicado, así que solo aplica a hallazgos que llegaron a GitHub.
+
+En un PR puedes escribir un comentario cuyo **primer** renglón sea un comando:
+
+- `/qa retry`: encola una revisión nueva de este PR. Útil cuando el run anterior quedó `inconclusive` o `failed`.
+- `/qa dismiss <motivo>`: marca los hallazgos abiertos como `withdrawn` y cierra sus hilos en GitHub. El motivo queda en la auditoría.
+- `/qa confirm`: devuelve a `open` los hallazgos descartados y recalcula el check; úsalo cuando un descarte fue un error.
+
+Solo un **admin** o el **lead del equipo** al que pertenece el repositorio pueden ejecutar comandos. El rol se resuelve con el usuario que envió el comentario contra los datos de la instalación; el comando se ignora con una respuesta corta cuando el autor no tiene permiso. Cada cambio queda en la auditoría con el login del autor.
+
 ## Revisión de un pull request
 
 Al abrir o actualizar un PR elegible (`opened`, `synchronize`, `reopened`, `ready_for_review`) se crea un run para su SHA. Si llega un push nuevo, el run anterior queda `superseded` y se cancela su check.
@@ -123,9 +149,9 @@ QA_WEBHOOKS_ENABLED=false
 QA_RECONCILE_INTERVAL=5m
 ```
 
-`app` sigue sirviendo la interfaz en `localhost:8080`. El scheduler consulta cada `QA_RECONCILE_INTERVAL` los PRs abiertos de los repos activos y los checks de CI de los PRs en espera, de modo que las revisiones y el estado de CI siguen funcionando. No hace falta registrar una URL de webhook en la GitHub App.
+`app` sigue sirviendo la interfaz en `localhost:8080`. El scheduler consulta cada `QA_RECONCILE_INTERVAL` los PRs abiertos de los repos activos, de modo que la sincronización de PRs y las revisiones pendientes siguen funcionando. No hace falta registrar una URL de webhook en la GitHub App.
 
-Las disputas en hilos y los comandos `/qa` requieren webhooks. En modo polling, los descartes y las confirmaciones se hacen desde el panel.
+Las disputas en hilos (`pull_request_review_thread`) y los comandos `/qa` (`issue_comment`) requieren webhooks; la tabla de eventos de la sección anterior detalla el resto. En modo polling, los descartes y las confirmaciones se hacen desde el panel.
 
 ## Comandos útiles
 

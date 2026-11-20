@@ -153,6 +153,7 @@ func runServe() error {
 	}
 	webhooks := &github.WebhookHandler{
 		Store: st, Apps: apps, Events: publisher, Jobs: enqueuer, Reviews: trigger,
+		Findings: publisherWorker, Comments: publisherWorker,
 	}
 	router := api.NewRouter(api.Deps{
 		Cfg:        cfg,

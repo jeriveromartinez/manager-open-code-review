@@ -46,6 +46,7 @@ func BuildManifest(publicURL string, webhooksEnabled bool, name string) Manifest
 		DefaultEvents: []string{
 			"pull_request",
 			"pull_request_review_comment",
+			"pull_request_review_thread",
 			"issue_comment",
 			"check_suite",
 			"check_run",

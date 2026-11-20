@@ -1,0 +1,13 @@
+{
+  "action": "unresolved",
+  "thread": {
+    "node_id": "PRRT_thread1",
+    "comments": [
+      {"id": 5001, "node_id": "PRRC_root1"},
+      {"id": 5002, "node_id": "PRRC_reply1"}
+    ]
+  },
+  "pull_request": {"number": 142},
+  "repository": {"id": 501, "name": "backend-api", "full_name": "acme/backend-api"},
+  "sender": {"id": 7001, "login": "alice", "type": "User"}
+}
