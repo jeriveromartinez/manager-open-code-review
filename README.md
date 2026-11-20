@@ -4,12 +4,13 @@ Revisor automático de pull requests, auto-hospedado. Crea su propia GitHub App 
 
 ## Arquitectura
 
-Se despliega con **una sola imagen** en tres contenedores:
+Se despliega con **una sola imagen** en tres contenedores, más un cuarto opcional con las alertas:
 
 | Servicio | Proceso | Función |
 |---|---|---|
 | `app` | `qa serve` | API REST + SSE, webhooks, web Vue embebida con `go:embed`, scheduler de reconciliación, disparo de revisiones y publicación en GitHub |
 | `worker` | `qa worker` | Cola `review`: clona el PR, ejecuta `ocr` + `opencode` y guarda el resultado |
+| `monitor` | `qa monitor` | Opcional (perfil `monitor`): sondea `/healthz` y `/metrics` del worker y avisa por log y webhook |
 | `postgres` | `postgres:17` | Estado, cola River y eventos `LISTEN/NOTIFY` |
 
 El Dockerfile produce dos targets: `app` (mínimo) y `worker` (con `git`, Node 24, `ocr` 1.13.13 y `opencode` 1.19.0). `app` publica en GitHub con la GitHub App; el worker nunca tiene su clave privada ni tokens de escritura, y clona con un token de solo lectura. `QA_MASTER_KEY` cifra la configuración de la App y la usa solo `app`; `QA_WORKER_KEY` cifra las API keys y los tokens de clonado, y la comparten `app` y `worker`.
@@ -50,6 +51,8 @@ Ajustes opcionales del worker: `QA_REVIEW_CONCURRENCY` (`2`), `QA_REVIEW_AGENT_S
 
 `QA_LLM_HEALTH_INTERVAL` es la cadencia del barrido de salud de los perfiles LLM: al arrancar el worker y cada intervalo, encola una comprobación para cada perfil activo cuyo último resultado supera dos veces ese intervalo, y para los que nunca se comprobaron. Un perfil en error espera `15m` antes de reintentarse, para no gastar cuota en una clave rota. `GET /api/llm-profiles` devuelve `health_age_seconds` y `health_stale` (marcado con el mismo umbral de dos intervalos), de modo que un barrido detenido se ve en el panel en lugar de parecer un perfil sano.
 
+Ajustes opcionales del monitor de alertas (`qa monitor`, perfil `monitor`): `QA_WORKER_HEALTH_URL` (`http://worker:9090`), `QA_MONITOR_INTERVAL` (`1m`), `QA_MONITOR_RENOTIFY_AFTER` (`30m`) y `QA_ALERT_WEBHOOK_URL` (vacío = solo log). Detalle en [Alertas](#alertas-qa-monitor).
+
 `QA_REVIEW_STALE_AFTER` es el umbral del vigilante de runs huérfanos: al arrancar y cada 5 minutos, los runs en `running` cuya hora de inicio supera ese umbral pasan a `failed` con código `interrupted`, se publica el check como `action_required` y el PR queda `inconclusive`. Debe superar `QA_REVIEW_TIMEOUT` (más el margen de reintentos), o matará revisiones sanas.
 
 El worker expone salud y métricas en `QA_WORKER_HEALTH_ADDR` (`:9090` por defecto):
@@ -61,7 +64,52 @@ El worker expone salud y métricas en `QA_WORKER_HEALTH_ADDR` (`:9090` por defec
 
 `stalled` es `true` cuando hay jobs esperando, ninguno en ejecución y el más antiguo lleva más de `QA_WORKER_QUEUE_STALE_AFTER` (`10m`) esperando: la cola no avanza porque el worker no consume. Una cola con trabajo reciente no se marca, para que un pico legítimo no dispare alertas.
 
-Alertas mínimas sugeridas: `/healthz` distinto de 200 (worker caído o dependencia rota), `/metrics` con `stalled: true` (worker vivo pero sin consumir), y el check `QA Control Center` en `in_progress` más de `QA_REVIEW_STALE_AFTER` (lo cubre el watchdog, pero conviene vigilarlo desde fuera).
+### Alertas: `qa monitor`
+
+Un worker caído no puede avisar de que está caído, así que las alertas viven fuera de él. `qa monitor` sondea `/healthz` y `/metrics`, compara con el ciclo anterior y avisa solo en las transiciones. Es un contenedor más, opcional, bajo el perfil `monitor`:
+
+```sh
+docker compose -f deploy/docker-compose.yml --profile monitor up -d
+```
+
+No necesita base de datos ni claves: solo HTTP contra `QA_WORKER_HEALTH_URL`, así que se levanta con la misma imagen `qa-control-center:local` sin `QA_MASTER_KEY` ni `QA_WORKER_KEY`. Cada alerta se escribe siempre en el log JSON; si además defines `QA_ALERT_WEBHOOK_URL`, se envía un `POST`.
+
+| Variable | Descripción | Valor por defecto |
+|---|---|---|
+| `QA_WORKER_HEALTH_URL` | Base del endpoint de salud del worker, sin ruta final | `http://worker:9090` |
+| `QA_MONITOR_INTERVAL` | Cadencia de sondeo (debe ser > 0) | `1m` |
+| `QA_MONITOR_RENOTIFY_AFTER` | Cada cuánto se recuerda un problema que sigue abierto (>= `QA_MONITOR_INTERVAL`) | `30m` |
+| `QA_ALERT_WEBHOOK_URL` | Endpoint `POST` opcional para las alertas; vacío = solo log | — |
+
+Códigos estables de alerta:
+
+| Código | Cuándo |
+|---|---|
+| `worker_unreachable` | Conexión rechazada, timeout, o `/healthz` no devuelve el JSON del contrato |
+| `worker_degraded` | `/healthz` responde 503, `status != "ok"`, o `/metrics` no se puede leer |
+| `database_down` | El ping a PostgreSQL del worker falla; incluye el error observado |
+| `dependency_down` | Un binario del worker (`ocr`, `opencode`) no responde; el `subject` lleva su nombre |
+| `queue_stalled` | `/metrics` devuelve `stalled: true`; el mensaje lleva los conteos observados |
+
+Un problema nuevo avisa una vez; si persiste, se recuerda cada `QA_MONITOR_RENOTIFY_AFTER`; cuando desaparece se emite **una** recuperación. Un problema que se resuelve y vuelve a aparecer cuenta como nuevo. Un webhook que responde 5xx se registra como error y el bucle sigue: la alerta siguiente se entrega igual.
+
+El cuerpo del webhook es un JSON pequeño y estable, sin envoltorio de ningún proveedor:
+
+```json
+{
+  "severity": "warning",
+  "code": "queue_stalled",
+  "message": "review queue stalled: 5 waiting jobs, 0 running, oldest waiting 3600s",
+  "values": { "available": 5, "running": 0, "scheduled": 0, "discarded": 0, "oldest_available_seconds": 3600 },
+  "timestamp": "2026-11-20T10:00:00Z"
+}
+```
+
+`severity` es `warning` al abrir o recordar un problema y `recovered` al cerrarlo; `code` es el mismo en la recuperación, así un receptor puede cerrar el incidente por código sin interpretar el texto.
+
+`app` y `worker` tienen `healthcheck` en compose, de modo que `docker compose ps` refleja la realidad. La imagen del worker es `node:24-trixie-slim` (sin `curl` ni `wget`), así que usa `node -e 'fetch(...)'`; la de `app` es `debian:bookworm-slim` con solo `ca-certificates` y `git`, así que el propio binario hace de cliente con `qa healthcheck` (0 si `/healthz` responde 200, 1 en cualquier otro caso).
+
+El check `QA Control Center` en `in_progress` más de `QA_REVIEW_STALE_AFTER` lo cubre el watchdog, no este monitor; conviene vigilarlo desde fuera.
 
 ## Revisión automática (Fase 2)
 
@@ -99,7 +147,7 @@ make test       # go test ./... + Vitest
 go test ./internal/review -run '^TestE2EFlow$' -count=1   # flujo E2E contra dobles (docs/e2e.md)
 ```
 
-El binario admite `qa serve`, `qa worker` y `qa migrate`.
+El binario admite `qa serve`, `qa worker`, `qa migrate`, `qa monitor` y `qa healthcheck [url]`.
 
 ## Rutas principales
 
