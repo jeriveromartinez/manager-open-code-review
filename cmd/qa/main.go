@@ -32,7 +32,7 @@ import (
 )
 
 func usage() string {
-	return "usage: qa <serve|worker|migrate>"
+	return "usage: qa <serve|worker|migrate|monitor|healthcheck>"
 }
 
 func main() {
@@ -51,6 +51,10 @@ func main() {
 		err = runWorker()
 	case "migrate":
 		err = runMigrate()
+	case "monitor":
+		err = runMonitor(logger)
+	case "healthcheck":
+		err = runHealthcheck(os.Args[2:])
 	default:
 		fmt.Fprintln(os.Stderr, usage())
 		os.Exit(2)

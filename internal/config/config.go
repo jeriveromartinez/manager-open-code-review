@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -12,27 +13,42 @@ import (
 // Config holds the runtime configuration of the QA Control Center, loaded from
 // environment variables.
 type Config struct {
-	DatabaseURL       string        // QA_DATABASE_URL (requerido)
-	PublicURL         string        // QA_PUBLIC_URL (requerido, sin "/" final)
-	ListenAddr        string        // QA_LISTEN_ADDR, default ":8080"
-	MasterKey         []byte        // QA_MASTER_KEY base64 std, exactamente 32 bytes (opcional en Load)
-	WorkerKey         []byte        // QA_WORKER_KEY base64 std, exactamente 32 bytes (requerido)
-	WebhooksEnabled   bool          // QA_WEBHOOKS_ENABLED, default true
-	ReconcileInterval time.Duration // QA_RECONCILE_INTERVAL, default 5m
-	GitHubURL         string        // QA_GITHUB_URL, default "https://github.com"
-	GitHubAPIURL      string        // QA_GITHUB_API_URL, default "https://api.github.com"
-	ReviewConcurrency int           // QA_REVIEW_CONCURRENCY, default 2
-	ReviewAgentSteps  int           // QA_REVIEW_AGENT_STEPS, default 40
-	ReviewTimeout     time.Duration // QA_REVIEW_TIMEOUT, default 20m
-	ReviewStaleAfter  time.Duration // QA_REVIEW_STALE_AFTER, default 45m
-	LLMHealthInterval time.Duration // QA_LLM_HEALTH_INTERVAL, default 30m
-	WorkspaceDir      string        // QA_WORKSPACE_DIR, default "/tmp/qa"
-	WorkerHealthAddr  string        // QA_WORKER_HEALTH_ADDR, default ":9090"
-	WorkerQueueStale  time.Duration // QA_WORKER_QUEUE_STALE_AFTER, default 10m
-	OCRBin            string        // QA_OCR_BIN, default "ocr"
-	OpencodeBin       string        // QA_OPENCODE_BIN, default "opencode"
-	FetchDepthMax     int           // QA_FETCH_DEPTH_MAX, default 500
-	GitBaseURL        string        // QA_GIT_BASE_URL, default "https://github.com", sin "/" final
+	DatabaseURL          string        // QA_DATABASE_URL (requerido)
+	PublicURL            string        // QA_PUBLIC_URL (requerido, sin "/" final)
+	ListenAddr           string        // QA_LISTEN_ADDR, default ":8080"
+	MasterKey            []byte        // QA_MASTER_KEY base64 std, exactamente 32 bytes (opcional en Load)
+	WorkerKey            []byte        // QA_WORKER_KEY base64 std, exactamente 32 bytes (requerido)
+	WebhooksEnabled      bool          // QA_WEBHOOKS_ENABLED, default true
+	ReconcileInterval    time.Duration // QA_RECONCILE_INTERVAL, default 5m
+	GitHubURL            string        // QA_GITHUB_URL, default "https://github.com"
+	GitHubAPIURL         string        // QA_GITHUB_API_URL, default "https://api.github.com"
+	ReviewConcurrency    int           // QA_REVIEW_CONCURRENCY, default 2
+	ReviewAgentSteps     int           // QA_REVIEW_AGENT_STEPS, default 40
+	ReviewTimeout        time.Duration // QA_REVIEW_TIMEOUT, default 20m
+	ReviewStaleAfter     time.Duration // QA_REVIEW_STALE_AFTER, default 45m
+	LLMHealthInterval    time.Duration // QA_LLM_HEALTH_INTERVAL, default 30m
+	WorkspaceDir         string        // QA_WORKSPACE_DIR, default "/tmp/qa"
+	WorkerHealthAddr     string        // QA_WORKER_HEALTH_ADDR, default ":9090"
+	WorkerQueueStale     time.Duration // QA_WORKER_QUEUE_STALE_AFTER, default 10m
+	OCRBin               string        // QA_OCR_BIN, default "ocr"
+	OpencodeBin          string        // QA_OPENCODE_BIN, default "opencode"
+	FetchDepthMax        int           // QA_FETCH_DEPTH_MAX, default 500
+	GitBaseURL           string        // QA_GIT_BASE_URL, default "https://github.com", sin "/" final
+	WorkerHealthURL      string        // QA_WORKER_HEALTH_URL, default "http://worker:9090", sin "/" final
+	MonitorInterval      time.Duration // QA_MONITOR_INTERVAL, default 1m
+	MonitorRenotifyAfter time.Duration // QA_MONITOR_RENOTIFY_AFTER, default 30m
+	AlertWebhookURL      string        // QA_ALERT_WEBHOOK_URL (opcional, vacío = solo log)
+}
+
+// MonitorConfig is what `qa monitor` needs. It is deliberately separate from
+// Config: the monitor only speaks HTTP, so requiring the database URL and the
+// worker key (as Load does for the other commands) would make it unusable as
+// its own container.
+type MonitorConfig struct {
+	WorkerHealthURL string
+	Interval        time.Duration
+	RenotifyAfter   time.Duration
+	AlertWebhookURL string
 }
 
 // RequireMasterKey validates that a master key is available. Commands that
@@ -55,6 +71,77 @@ func (c Config) LLMHealthStaleAfter() time.Duration {
 	return 2 * interval
 }
 
+// LoadMonitor builds only the monitor settings. `qa monitor` has no database
+// nor keys to validate, so it never calls Load: that would reject a perfectly
+// working monitor container for missing QA_WORKER_KEY.
+func LoadMonitor(getenv func(string) string) (MonitorConfig, error) {
+	url, interval, renotify, webhook, err := loadMonitorSettings(getenv)
+	if err != nil {
+		return MonitorConfig{}, err
+	}
+	return MonitorConfig{
+		WorkerHealthURL: url,
+		Interval:        interval,
+		RenotifyAfter:   renotify,
+		AlertWebhookURL: webhook,
+	}, nil
+}
+
+// loadMonitorSettings is shared by Load and LoadMonitor so both commands read
+// the same variables with the same rules.
+func loadMonitorSettings(getenv func(string) string) (string, time.Duration, time.Duration, string, error) {
+	healthURL := "http://worker:9090"
+	if raw := getenv("QA_WORKER_HEALTH_URL"); raw != "" {
+		v := strings.TrimRight(strings.TrimSpace(raw), "/")
+		u, err := url.Parse(v)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return "", 0, 0, "", fmt.Errorf("QA_WORKER_HEALTH_URL must be an absolute http(s) URL, got %q", raw)
+		}
+		healthURL = v
+	}
+
+	interval := time.Minute
+	if v := strings.TrimSpace(getenv("QA_MONITOR_INTERVAL")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_INTERVAL must be a duration: %w", err)
+		}
+		if d <= 0 {
+			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_INTERVAL must be greater than zero, got %q", v)
+		}
+		interval = d
+	}
+
+	renotify := 30 * time.Minute
+	if v := strings.TrimSpace(getenv("QA_MONITOR_RENOTIFY_AFTER")); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_RENOTIFY_AFTER must be a duration: %w", err)
+		}
+		if d <= 0 {
+			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_RENOTIFY_AFTER must be greater than zero, got %q", v)
+		}
+		renotify = d
+	}
+	// Re-notifying faster than the poll interval would make every tick an
+	// alert, which is the same as having no state machine at all.
+	if renotify < interval {
+		return "", 0, 0, "", fmt.Errorf(
+			"QA_MONITOR_RENOTIFY_AFTER must be greater than or equal to QA_MONITOR_INTERVAL, got %s < %s",
+			renotify, interval)
+	}
+
+	webhook := strings.TrimSpace(getenv("QA_ALERT_WEBHOOK_URL"))
+	if webhook != "" {
+		u, err := url.Parse(webhook)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return "", 0, 0, "", fmt.Errorf("QA_ALERT_WEBHOOK_URL must be an absolute http(s) URL, got %q", webhook)
+		}
+	}
+
+	return healthURL, interval, renotify, webhook, nil
+}
+
 // Load builds a Config from the values returned by getenv. It returns an error
 // when a required variable is missing or malformed.
 func Load(getenv func(string) string) (Config, error) {
@@ -72,10 +159,15 @@ func Load(getenv func(string) string) (Config, error) {
 		// A job waiting ten minutes with nothing running means the worker is
 		// not consuming, not that the queue is merely busy.
 		WorkerQueueStale: 10 * time.Minute,
-		OCRBin:            "ocr",
-		OpencodeBin:       "opencode",
-		FetchDepthMax:     500,
-		GitBaseURL:        "https://github.com",
+		OCRBin:           "ocr",
+		OpencodeBin:      "opencode",
+		FetchDepthMax:    500,
+		GitBaseURL:       "https://github.com",
+		// Las alertas viven fuera del worker: si el worker muere, nada dentro
+		// del contenedor puede avisar.
+		WorkerHealthURL:      "http://worker:9090",
+		MonitorInterval:      time.Minute,
+		MonitorRenotifyAfter: 30 * time.Minute,
 		// A review budget is 20m plus the River retry window, so a shorter
 		// threshold would fail healthy runs on a slow LLM.
 		ReviewStaleAfter: 45 * time.Minute,
@@ -266,6 +358,15 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		cfg.GitBaseURL = v
 	}
+
+	healthURL, interval, renotify, webhook, err := loadMonitorSettings(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.WorkerHealthURL = healthURL
+	cfg.MonitorInterval = interval
+	cfg.MonitorRenotifyAfter = renotify
+	cfg.AlertWebhookURL = webhook
 
 	return cfg, nil
 }
