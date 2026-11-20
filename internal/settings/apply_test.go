@@ -2,6 +2,7 @@ package settings
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -46,10 +47,27 @@ func TestApplyRejectsIncoherentPairs(t *testing.T) {
 		t.Fatalf("timeout 60m with stale 45m = %v, want KeyError on %s", err, KeyReviewStaleAfter)
 	}
 
+	// Equality is the whole point of the rule: the watchdog would kill a run at
+	// the same instant the review's own timeout expires.
+	cfg = config.Default()
+	err = Apply(&cfg, map[string]string{KeyReviewTimeout: "45m"})
+	if !errors.As(err, &keyErr) || keyErr.Key != KeyReviewStaleAfter {
+		t.Fatalf("timeout 45m with stale 45m = %v, want KeyError on %s", err, KeyReviewStaleAfter)
+	}
+
 	cfg = config.Default()
 	err = Apply(&cfg, map[string]string{KeyMonitorRenotifyAfter: "30s", KeyMonitorInterval: "1m"})
 	if !errors.As(err, &keyErr) || keyErr.Key != KeyMonitorRenotifyAfter {
 		t.Fatalf("renotify < interval = %v, want KeyError on %s", err, KeyMonitorRenotifyAfter)
+	}
+}
+
+func TestApplyRejectsUnknownKeys(t *testing.T) {
+	cfg := config.Default()
+	err := Apply(&cfg, map[string]string{"review_timout": "30m"})
+	var keyErr *KeyError
+	if !errors.As(err, &keyErr) || keyErr.Key != "review_timout" {
+		t.Fatalf("Apply with a typo = %v, want KeyError naming the key", err)
 	}
 }
 
@@ -110,29 +128,86 @@ func TestApplySetsEveryField(t *testing.T) {
 }
 
 func TestDefaultsAndFieldsAgree(t *testing.T) {
-	defaults := Defaults()
+	valid := map[string]bool{"": true, "app": true, "worker": true, "monitor": true}
 	fields := Fields()
-	if len(defaults) != len(fields) {
-		t.Fatalf("Defaults() has %d keys, Fields() has %d", len(defaults), len(fields))
+	if len(fields) != 23 {
+		t.Fatalf("Fields() has %d keys, want 23", len(fields))
 	}
+	seen := map[string]bool{}
 	for _, field := range fields {
-		if _, ok := defaults[field.Key]; !ok {
-			t.Errorf("field %q missing from Defaults()", field.Key)
+		if seen[field.Key] {
+			t.Errorf("duplicate key %q", field.Key)
 		}
-		if field.Restart != "" && field.Restart != "app" && field.Restart != "worker" {
+		seen[field.Key] = true
+		if !valid[field.Restart] {
 			t.Errorf("field %q has invalid restart %q", field.Key, field.Restart)
 		}
 	}
 }
 
+func TestRestartNamesTheProcessThatReadsTheKey(t *testing.T) {
+	want := map[string]string{
+		KeyWorkerHealthURL:      "monitor",
+		KeyMonitorInterval:      "monitor",
+		KeyMonitorRenotifyAfter: "monitor",
+		KeyAlertWebhookURL:      "monitor",
+		KeyBackupRetention:      "",
+	}
+	for _, field := range Fields() {
+		if target, ok := want[field.Key]; ok && field.Restart != target {
+			t.Errorf("%q restarts %q, want %q", field.Key, field.Restart, target)
+		}
+	}
+}
+
+// TestDefaultsMatchConfigDefault is the only thing that keeps the panel's
+// defaults and the process's defaults from drifting: Fields() cannot be derived
+// from config.Default() without importing every consumer, so a mistake in one
+// place has to fail here instead of silently changing behaviour on an install
+// that never saved anything.
+func TestDefaultsMatchConfigDefault(t *testing.T) {
+	stored := Defaults()
+	effective := ToMap(config.Default())
+	for key, want := range effective {
+		raw, ok := stored[key]
+		if !ok {
+			t.Errorf("%q is in config.Default() but not in Fields()", key)
+			continue
+		}
+		if !equalSetting(raw, want) {
+			t.Errorf("%q default = %q, config.Default() uses %q", key, raw, want)
+		}
+	}
+	for key := range stored {
+		if _, ok := effective[key]; !ok {
+			t.Errorf("%q is in Fields() but not in config.Default()", key)
+		}
+	}
+}
+
+// equalSetting compares durations and integers by value, not by spelling:
+// "20m" and "20m0s" are the same setting, and both forms reach the panel.
+func equalSetting(a, b string) bool {
+	if d, err := time.ParseDuration(a); err == nil {
+		if other, err := time.ParseDuration(b); err == nil {
+			return d == other
+		}
+	}
+	if n, err := strconv.Atoi(a); err == nil {
+		if other, err := strconv.Atoi(b); err == nil {
+			return n == other
+		}
+	}
+	return a == b
+}
+
 func TestToMapRoundTripsThroughApply(t *testing.T) {
-	cfg := config.Default()
-	values := ToMap(cfg)
+	values := ToMap(config.Default())
 	other := config.Config{}
 	if err := Apply(&other, values); err != nil {
 		t.Fatalf("Apply(ToMap(default)): %v", err)
 	}
-	if ToMap(other)["review_timeout"] != "20m0s" && ToMap(other)["review_timeout"] != "20m" {
-		t.Errorf("ToMap round trip lost review_timeout: %q", ToMap(other)["review_timeout"])
+	if got, want := ToMap(other)["review_timeout"], values["review_timeout"]; got != want {
+		t.Errorf("ToMap round trip changed review_timeout from %q to %q", want, got)
 	}
 }

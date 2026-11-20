@@ -20,7 +20,9 @@ type KeyError struct {
 func (e *KeyError) Error() string { return e.Key + ": " + e.Msg }
 
 // Apply validates and writes the given keys onto cfg. Keys absent from values
-// keep whatever cfg already had, which is how a partial save works.
+// keep whatever cfg already had, which is how a partial save works. A rejected
+// value leaves cfg partially written, so callers validate on a copy and only
+// publish it once Apply returns nil.
 func Apply(cfg *config.Config, values map[string]string) error {
 	for key, raw := range values {
 		if err := applyOne(cfg, key, raw); err != nil {

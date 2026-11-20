@@ -44,11 +44,13 @@ const (
 
 // Field tells the panel how to group a key and what has to restart for a new
 // value to take effect. The UI renders explicit inputs; this is metadata only.
+// Restart names the process that reads the key at startup: the panel is
+// useless if it tells an administrator to restart something that never read it.
 type Field struct {
 	Key     string `json:"key"`
 	Group   Group  `json:"group"`
 	Default string `json:"default"`
-	Restart string `json:"restart"` // "", "app" o "worker"
+	Restart string `json:"restart"` // "", "app", "worker" or "monitor"
 	Secret  bool   `json:"secret"`
 }
 
@@ -72,11 +74,11 @@ func Fields() []Field {
 		{KeyOpencodeBin, GroupWorker, "opencode", "worker", false},
 		{KeyWorkerHealthAddr, GroupWorker, ":9090", "worker", false},
 		{KeyWorkerQueueStale, GroupWorker, "10m", "worker", false},
-		{KeyWorkerHealthURL, GroupAlerts, "http://worker:9090", "worker", false},
-		{KeyMonitorInterval, GroupAlerts, "1m", "worker", false},
-		{KeyMonitorRenotifyAfter, GroupAlerts, "30m", "worker", false},
-		{KeyAlertWebhookURL, GroupAlerts, "", "worker", true},
-		{KeyBackupRetention, GroupBackups, "7", "worker", false},
+		{KeyWorkerHealthURL, GroupAlerts, "http://worker:9090", "monitor", false},
+		{KeyMonitorInterval, GroupAlerts, "1m", "monitor", false},
+		{KeyMonitorRenotifyAfter, GroupAlerts, "30m", "monitor", false},
+		{KeyAlertWebhookURL, GroupAlerts, "", "monitor", true},
+		{KeyBackupRetention, GroupBackups, "7", "", false},
 	}
 }
 
