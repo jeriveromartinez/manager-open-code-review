@@ -1337,6 +1337,9 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+
 	// The baseline is the configuration the next start will load, not s.Cfg:
 	// the process keeps its startup config until the announced restart, so
 	// validating against it would let two saves persist an incoherent pair
@@ -1366,9 +1369,9 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 		saving[key] = validated[key]
 	}
 
-	user, _ := auth.UserFrom(r.Context())
+	user, ok := auth.UserFrom(r.Context())
 	var userID *uint
-	if user != nil {
+	if ok {
 		userID = &user.ID
 	}
 	if err := s.Store.SaveSettings(r.Context(), userID, saving); err != nil {
@@ -1380,34 +1383,9 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-Y `getSettings`/la respuesta comparten un helper para no releer tras guardar:
+El handler importa `internal/config` además de `internal/settings` y `internal/auth`, y `auth.UserFrom` devuelve `(store.User, bool)`, no un puntero: el `userID` se toma con `user, ok := auth.UserFrom(r.Context()); if ok { userID = &user.ID }`.
 
-```go
-func (s *server) getSettings(w http.ResponseWriter, r *http.Request) {
-	stored, err := s.Store.Settings(r.Context())
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "read settings")
-		return
-	}
-	s.writeSettings(w, stored, nil)
-}
-
-// writeSettings answers with the process's configuration overlaid by the stored
-// rows and by the values just saved, so a save never fails on a re-read after
-// committing.
-func (s *server) writeSettings(w http.ResponseWriter, stored, justSaved map[string]string) {
-	effective := settings.ToMap(s.Cfg)
-	for key, value := range stored {
-		effective[key] = value
-	}
-	for key, value := range justSaved {
-		effective[key] = value
-	}
-	writeJSON(w, http.StatusOK, settingsResponse{Values: effective, Fields: settings.Fields()})
-}
-```
-
-El handler importa `internal/config` además de `internal/settings` y `internal/auth`.
+La escritura lleva un mutex en `server` (`settingsMu sync.Mutex` en `internal/api/router.go`, con su comentario): sin él, dos PUT concurrentes pueden leer el mismo estado válido y persistir cada uno su mitad de un par incoherente.
 
 - [ ] **Step 5: Register the routes**
 
