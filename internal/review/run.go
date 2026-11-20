@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,6 +21,46 @@ import (
 
 // maxRunErrorMessage bounds the error text persisted on a terminal run.
 const maxRunErrorMessage = 500
+
+// Capacity waits bound how long a run may keep looking for a free profile slot.
+// A permanently saturated profile must end as a terminal failure instead of
+// being rescheduled forever.
+const (
+	maxCapacityWaits = 12
+	capacityWaitBase = 15 * time.Second
+	capacityWaitMax  = 5 * time.Minute
+
+	// capacityErrorCode labels a run that never got a profile slot.
+	capacityErrorCode = "capacity"
+)
+
+// CapacityWait returns the delay before retrying a run that found no free
+// profile slot, growing with the attempts already spent addressing the same
+// saturation.
+func CapacityWait(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	wait := capacityWaitBase
+	for i := 1; i < attempt && wait < capacityWaitMax; i++ {
+		wait *= 2
+	}
+	if wait > capacityWaitMax {
+		wait = capacityWaitMax
+	}
+	return wait
+}
+
+// ProfileCapacityError reports that every slot of the profile was busy. The
+// worker turns it into a snooze: the run is queued again, not failed.
+type ProfileCapacityError struct {
+	ProfileID uint
+	Wait      time.Duration
+}
+
+func (e *ProfileCapacityError) Error() string {
+	return fmt.Sprintf("perfil %d sin capacidad disponible", e.ProfileID)
+}
 
 // RunnerConfig holds the worker-side settings of the review pipeline.
 type RunnerConfig struct {
@@ -78,7 +119,9 @@ func (r *Runner) CheckProfile(ctx context.Context, profileID uint) error {
 
 // Run claims a queued run, executes the pipeline and records a terminal state.
 // An unclaimed run (already taken, superseded or terminal) is a no-op: no
-// event, no enqueue and no notification.
+// event, no enqueue and no notification. When no profile slot is free the run
+// goes back to the queue and the returned ProfileCapacityError asks the caller
+// to reschedule; once the waiter budget is spent it ends as a capacity failure.
 func (r *Runner) Run(ctx context.Context, runID uint) error {
 	run, claimed, err := r.Store.ClaimReviewRun(ctx, runID)
 	if err != nil {
@@ -90,11 +133,34 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 
 	var cfg store.ReviewConfig
 	var outcome runOutcome
+	var retryErr error
 	cfg, err = r.Store.ReviewConfigForPR(ctx, run.PullRequestID)
 	if err != nil {
 		outcome = (&runOutcome{}).failed(fmt.Errorf("configuración de revisión: %w", err), "config")
 	} else {
-		outcome = r.execute(ctx, run, cfg)
+		outcome, retryErr = r.execute(ctx, run, cfg)
+	}
+
+	if retryErr != nil {
+		var capacity *ProfileCapacityError
+		if errors.As(retryErr, &capacity) && run.Attempt <= maxCapacityWaits {
+			if err := r.Store.RequeueReviewRun(ctx, run.ID, capacityErrorCode, capacity.Error()); err != nil {
+				if errors.Is(err, store.ErrRunNotActive) {
+					// A new head superseded the run while it waited for a slot;
+					// there is nothing left to retry.
+					return nil
+				}
+				return fmt.Errorf("requeue review run %d: %w", runID, err)
+			}
+			capacity.Wait = CapacityWait(run.Attempt)
+			slog.Info("review run waiting for profile capacity",
+				"run_id", run.ID, "profile_id", capacity.ProfileID,
+				"attempt", run.Attempt, "wait", capacity.Wait)
+			return capacity
+		}
+		// A saturated profile that outlived the waiter budget is reported as a
+		// terminal failure: a queued run cannot stay pending forever.
+		outcome = outcome.failed(retryErr, capacityErrorCode)
 	}
 
 	if len(outcome.coverage) == 0 {
@@ -160,8 +226,9 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 }
 
 // execute runs the pipeline and returns the state to persist. Every early exit
-// returns a terminal outcome so the caller can always complete the run.
-func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig) runOutcome {
+// returns a terminal outcome so the caller can always complete the run. The
+// error is only set when the run must be retried instead of finished.
+func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig) (runOutcome, error) {
 	out := runOutcome{
 		coverage: coverageJSON(0, 0),
 		usage:    []byte(`{}`),
@@ -171,7 +238,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 	open, err := r.Store.OpenFindingsForPR(ctx, run.PullRequestID)
 	if err != nil {
-		return out.failed(fmt.Errorf("listar hallazgos abiertos: %w", err), "config")
+		return out.failed(fmt.Errorf("listar hallazgos abiertos: %w", err), "config"), nil
 	}
 	out.open = open
 
@@ -180,7 +247,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		if err == nil {
 			err = errors.New("token de clonado ausente")
 		}
-		return out.inconclusive(fmt.Errorf("token de clonado: %w", err), "token_expired")
+		return out.inconclusive(fmt.Errorf("token de clonado: %w", err), "token_expired"), nil
 	}
 
 	workDir := filepath.Join(r.Cfg.WorkspaceDir, fmt.Sprintf("run-%d", run.ID))
@@ -199,13 +266,13 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	}
 	headSHA, err := git(ctx, workDir, "rev-parse", "--no-pager", "rev-parse", "HEAD")
 	if err != nil {
-		return out.failed(fmt.Errorf("resolver HEAD del checkout: %w", err), "git_error")
+		return out.failed(fmt.Errorf("resolver HEAD del checkout: %w", err), "git_error"), nil
 	}
 	if run.HeadSHA != "" && !strings.EqualFold(headSHA, run.HeadSHA) {
 		// refs/pull/<n>/head is a moving ref: a push can land between the
 		// trigger and the clone. Reviewing that code and publishing it under
 		// run.HeadSHA would approve a SHA that was never reviewed.
-		return out.superseded(fmt.Errorf("la ref del PR avanzó de %s a %s antes del checkout", run.HeadSHA, headSHA), "head_moved")
+		return out.superseded(fmt.Errorf("la ref del PR avanzó de %s a %s antes del checkout", run.HeadSHA, headSHA), "head_moved"), nil
 	}
 
 	ocr := &OCR{Bin: r.Cfg.OCRBin, RepoDir: workDir}
@@ -216,7 +283,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if ocrBase == "" {
 		ocrBase, err = fetchHeadBase(workDir)
 		if err != nil {
-			return out.failed(fmt.Errorf("resolver base del checkout: %w", err), "git_error")
+			return out.failed(fmt.Errorf("resolver base del checkout: %w", err), "git_error"), nil
 		}
 	}
 	preview, err := ocr.Preview(ctx, ocrBase, headSHA)
@@ -242,7 +309,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		MaxPasses:    cfg.Policy.MaxPasses,
 	})
 	if err != nil {
-		return out.failed(fmt.Errorf("planificar pasadas: %w", err), "config")
+		return out.failed(fmt.Errorf("planificar pasadas: %w", err), "config"), nil
 	}
 
 	reviewed := countCovered(passes)
@@ -250,19 +317,19 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if len(uncovered) > 0 {
 		return out.inconclusive(
 			fmt.Errorf("cobertura incompleta: %d archivos sin revisar", len(uncovered)),
-			"coverage_incomplete")
+			"coverage_incomplete"), nil
 	}
 
 	findingIndex := make(map[string]int)
 	for _, pass := range passes {
 		diffPath, err := writePassDiff(ctx, workDir, baseSHA, headSHA, pass.Files)
 		if err != nil {
-			return out.failed(fmt.Errorf("generar diff de pasada: %w", err), "git_error")
+			return out.failed(fmt.Errorf("generar diff de pasada: %w", err), "git_error"), nil
 		}
 
 		key, err := r.boxOpen(cfg.Profile.APIKeyEnc)
 		if err != nil {
-			return out.inconclusive(fmt.Errorf("descifrar clave del perfil %d: %w", cfg.Profile.ID, err), "llm_error")
+			return out.inconclusive(fmt.Errorf("descifrar clave del perfil %d: %w", cfg.Profile.ID, err), "llm_error"), nil
 		}
 		agent := &Agent{
 			Bin:     r.Cfg.OpencodeBin,
@@ -288,7 +355,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			}
 			parsed, err = ValidateOutput(text)
 			if err != nil {
-				return out.inconclusive(fmt.Errorf("salida del agente inválida: %w", err), "schema_invalid")
+				return out.inconclusive(fmt.Errorf("salida del agente inválida: %w", err), "schema_invalid"), nil
 			}
 		}
 
@@ -314,17 +381,20 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	out.status = store.RunSucceeded
 	out.findings = upserts
 	out.resolved = resolved
-	return out
+	return out, nil
 }
 
-// runAgent holds the profile lock for exactly one agent invocation. Agent.Run
+// runAgent holds one profile slot for exactly one agent invocation. Agent.Run
 // adds the `-f` flag for the attached diff path.
 func (r *Runner) runAgent(ctx context.Context, agent *Agent, prompt, diffPath string) (string, []byte, error) {
-	unlock, err := r.Store.LockProfile(ctx, agent.Profile.ID)
+	release, acquired, err := r.Store.AcquireProfileSlot(ctx, agent.Profile.ID)
 	if err != nil {
 		return "", nil, fmt.Errorf("bloquear perfil %d: %w", agent.Profile.ID, err)
 	}
-	defer unlock()
+	if !acquired {
+		return "", nil, &ProfileCapacityError{ProfileID: agent.Profile.ID}
+	}
+	defer release()
 	return agent.Run(ctx, prompt, []string{diffPath})
 }
 
@@ -462,31 +532,37 @@ func truncatedContext(ctx context.Context, err error) bool {
 		errors.Is(err, context.Canceled) || ctx.Err() != nil
 }
 
-func classifyCloneError(ctx context.Context, out runOutcome, err error) runOutcome {
+func classifyCloneError(ctx context.Context, out runOutcome, err error) (runOutcome, error) {
 	if truncatedContext(ctx, err) {
-		return out.inconclusive(err, "timeout")
+		return out.inconclusive(err, "timeout"), nil
 	}
 	message := strings.ToLower(err.Error())
 	for _, needle := range []string{"401", "unauthorized", "authentication failed", "could not read username", "permission denied"} {
 		if strings.Contains(message, needle) {
-			return out.inconclusive(err, "token_expired")
+			return out.inconclusive(err, "token_expired"), nil
 		}
 	}
-	return out.failed(err, "git_error")
+	return out.failed(err, "git_error"), nil
 }
 
-func classifyOCR(ctx context.Context, out runOutcome, err error) runOutcome {
+func classifyOCR(ctx context.Context, out runOutcome, err error) (runOutcome, error) {
 	if truncatedContext(ctx, err) {
-		return out.inconclusive(err, "timeout")
+		return out.inconclusive(err, "timeout"), nil
 	}
-	return out.inconclusive(err, "ocr_error")
+	return out.inconclusive(err, "ocr_error"), nil
 }
 
-func classifyAgentError(ctx context.Context, out runOutcome, err error) runOutcome {
-	if truncatedContext(ctx, err) {
-		return out.inconclusive(err, "timeout")
+// classifyAgentError keeps a run waiting for a profile slot out of the LLM
+// error path: it must be retried, not finished.
+func classifyAgentError(ctx context.Context, out runOutcome, err error) (runOutcome, error) {
+	var capacity *ProfileCapacityError
+	if errors.As(err, &capacity) {
+		return out, capacity
 	}
-	return out.inconclusive(err, "llm_error")
+	if truncatedContext(ctx, err) {
+		return out.inconclusive(err, "timeout"), nil
+	}
+	return out.inconclusive(err, "llm_error"), nil
 }
 
 func truncateRunMessage(message string) string {

@@ -3,7 +3,9 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -42,8 +44,19 @@ type reviewRunWorker struct {
 	runner ReviewRunner
 }
 
+// Work turns a saturated profile into a snooze: the run stays queued and the
+// job is retried after the backoff the runner computed. Snoozing does not
+// consume an attempt, so a busy profile is never discarded just for being busy.
 func (w *reviewRunWorker) Work(ctx context.Context, job *river.Job[ReviewRunArgs]) error {
-	return w.runner.Run(ctx, job.Args.RunID)
+	err := w.runner.Run(ctx, job.Args.RunID)
+	var capacity *review.ProfileCapacityError
+	if errors.As(err, &capacity) {
+		slog.Info("review job snoozed for profile capacity",
+			"run_id", job.Args.RunID, "profile_id", capacity.ProfileID,
+			"attempt", job.Attempt, "wait", capacity.Wait)
+		return river.JobSnooze(capacity.Wait)
+	}
+	return err
 }
 
 type llmHealthWorker struct {

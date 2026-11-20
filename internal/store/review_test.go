@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"sync"
 	"testing"
@@ -499,6 +498,9 @@ func TestSetLLMHealth(t *testing.T) {
 	}
 }
 
+// TestLockProfileSerializes keeps its original intent (one profile, one agent
+// at a time) against the slot API: at concurrency 1 the second caller is
+// refused instead of blocking, and unlock stays idempotent.
 func TestLockProfileSerializes(t *testing.T) {
 	f := newFixture(t)
 
@@ -509,84 +511,27 @@ func TestLockProfileSerializes(t *testing.T) {
 		t.Fatalf("CreateLLMProfile: %v", err)
 	}
 
-	firstHeld := make(chan struct{})
-	releaseFirst := make(chan struct{})
-	firstUnlocked := make(chan struct{})
-	secondAcquired := make(chan struct{})
-	releaseSecond := make(chan struct{})
-	secondDone := make(chan struct{})
-	errCh := make(chan error, 2)
-
-	go func() {
-		unlock, err := f.s.LockProfile(f.ctx, profile.ID)
-		if err != nil {
-			errCh <- fmt.Errorf("first LockProfile: %w", err)
-			close(firstHeld)
-			return
-		}
-		close(firstHeld)
-		<-releaseFirst
-		unlock()
-		// unlock must be idempotent: a second call must not release the
-		// session lock now held by another caller.
-		unlock()
-		close(firstUnlocked)
-	}()
-
-	select {
-	case <-firstHeld:
-	case err := <-errCh:
-		t.Fatal(err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("first LockProfile did not acquire")
+	release, acquired, err := f.s.AcquireProfileSlot(f.ctx, profile.ID)
+	if err != nil || !acquired {
+		t.Fatalf("first AcquireProfileSlot() = %v/%v", acquired, err)
 	}
 
-	go func() {
-		defer close(secondDone)
-		unlock, err := f.s.LockProfile(f.ctx, profile.ID)
-		if err != nil {
-			errCh <- fmt.Errorf("second LockProfile: %w", err)
-			return
-		}
-		close(secondAcquired)
-		<-releaseSecond
-		unlock()
-	}()
-
-	select {
-	case <-secondAcquired:
-		t.Fatal("second LockProfile acquired while the first caller held the lock")
-	case err := <-errCh:
-		t.Fatal(err)
-	case <-time.After(150 * time.Millisecond):
-		// Expected: the second caller is blocked on the advisory lock.
+	if _, acquired, err := f.s.AcquireProfileSlot(f.ctx, profile.ID); err != nil {
+		t.Fatalf("second AcquireProfileSlot(): %v", err)
+	} else if acquired {
+		t.Fatal("second AcquireProfileSlot acquired while the first caller held the only slot")
 	}
 
-	close(releaseFirst)
-	select {
-	case <-firstUnlocked:
-	case err := <-errCh:
-		t.Fatal(err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("first unlock did not finish")
-	}
+	// release must be idempotent: a second call must not free the slot now
+	// held by another caller.
+	release()
+	release()
 
-	select {
-	case <-secondAcquired:
-	case err := <-errCh:
-		t.Fatal(err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("second LockProfile did not acquire after unlock")
+	next, acquired, err := f.s.AcquireProfileSlot(f.ctx, profile.ID)
+	if err != nil || !acquired {
+		t.Fatalf("AcquireProfileSlot() after release = %v/%v, want acquired", acquired, err)
 	}
-
-	close(releaseSecond)
-	select {
-	case <-secondDone:
-	case err := <-errCh:
-		t.Fatal(err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("second lock did not finish")
-	}
+	next()
 }
 
 // llmProfile creates a profile directly so tests can choose its enabled state.
