@@ -742,12 +742,13 @@ git commit -m "feat(settings): add defaults, validation and config apply"
 **Files:**
 - Modify: `internal/config/config.go`
 - Modify: `internal/config/config_test.go`
-- Delete: `internal/config/monitor_test.go` (su cobertura se mueve a `internal/settings`)
 - Test: `internal/config/config_test.go`
 
 **Interfaces:**
 - Consumes: `config.Default()` de la Task 2.
-- Produces: `config.Load(getenv)` que solo lee `QA_DATABASE_URL`, `QA_MASTER_KEY`, `QA_WORKER_KEY`; `config.LegacyEnvKeys() []string` con las 20 variables que ya no se leen.
+- Produces: `config.Load(getenv)` que solo lee `QA_DATABASE_URL`, `QA_PUBLIC_URL`, `QA_MASTER_KEY` y `QA_WORKER_KEY`; `config.LegacyEnvKeys() []string` con las 22 variables de comportamiento que ya no se leen.
+
+`QA_PUBLIC_URL` se queda una tarea más: el setup que la deduce y la persiste llega en la Task 8, y quitarla antes dejaría a una instalación existente sin URL de callback. `LoadMonitor` sigue vivo hasta la Task 7, que es donde deja de usarse.
 
 - [ ] **Step 1: Rewrite the failing test**
 
@@ -778,8 +779,8 @@ func TestLoadOnlyReadsTheEssentials(t *testing.T) {
 	if cfg.ReviewTimeout != 20*time.Minute {
 		t.Errorf("ReviewTimeout = %s, want the 20m default: the environment must be ignored", cfg.ReviewTimeout)
 	}
-	if cfg.PublicURL != "" {
-		t.Errorf("PublicURL = %q, want empty: it comes from the database or the request", cfg.PublicURL)
+	if cfg.PublicURL != "https://ignored.example.com" {
+		t.Errorf("PublicURL = %q, want the provided value: it is still read until the setup detects it", cfg.PublicURL)
 	}
 	if cfg.OCRBin != "ocr" {
 		t.Errorf("OCRBin = %q, want the default", cfg.OCRBin)
@@ -788,8 +789,8 @@ func TestLoadOnlyReadsTheEssentials(t *testing.T) {
 
 func TestLegacyEnvKeysCoverEveryMovedSetting(t *testing.T) {
 	keys := LegacyEnvKeys()
-	if len(keys) != 23 {
-		t.Fatalf("LegacyEnvKeys() has %d entries, want 23", len(keys))
+	if len(keys) != 22 {
+		t.Fatalf("LegacyEnvKeys() has %d entries, want 22", len(keys))
 	}
 	seen := map[string]bool{}
 	for _, key := range keys {
@@ -798,10 +799,16 @@ func TestLegacyEnvKeysCoverEveryMovedSetting(t *testing.T) {
 		}
 		seen[key] = true
 	}
-	for _, want := range []string{"QA_PUBLIC_URL", "QA_REVIEW_TIMEOUT", "QA_MONITOR_INTERVAL", "QA_WORKER_HEALTH_ADDR"} {
+	for _, want := range []string{"QA_REVIEW_TIMEOUT", "QA_MONITOR_INTERVAL", "QA_WORKER_HEALTH_ADDR", "QA_BACKUP_RETENTION"} {
 		if !seen[want] {
 			t.Errorf("LegacyEnvKeys() missing %q", want)
 		}
+	}
+	if seen["QA_PUBLIC_URL"] {
+		t.Error("QA_PUBLIC_URL is still read until the setup detects it")
+	}
+	if seen["QA_DATABASE_URL"] || seen["QA_WORKER_KEY"] {
+		t.Error("the essentials are not legacy")
 	}
 }
 ```
@@ -825,7 +832,7 @@ Eliminar todas las ramas `getenv("QA_...")` salvo las tres esenciales, y dejar:
 // now ignored: they live in the database and are edited from the panel.
 func LegacyEnvKeys() []string {
 	return []string{
-		"QA_PUBLIC_URL", "QA_LISTEN_ADDR", "QA_WEBHOOKS_ENABLED", "QA_RECONCILE_INTERVAL",
+		"QA_LISTEN_ADDR", "QA_WEBHOOKS_ENABLED", "QA_RECONCILE_INTERVAL",
 		"QA_GITHUB_URL", "QA_GITHUB_API_URL",
 		"QA_REVIEW_CONCURRENCY", "QA_REVIEW_AGENT_STEPS", "QA_REVIEW_TIMEOUT",
 		"QA_REVIEW_STALE_AFTER", "QA_LLM_HEALTH_INTERVAL", "QA_FETCH_DEPTH_MAX", "QA_GIT_BASE_URL",
@@ -842,6 +849,13 @@ func Load(getenv func(string) string) (Config, error) {
 	cfg.DatabaseURL = strings.TrimSpace(getenv("QA_DATABASE_URL"))
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("QA_DATABASE_URL is required")
+	}
+
+	// QA_PUBLIC_URL disappears once the setup can detect it (Task 8); until
+	// then an existing installation must keep its callback URL.
+	cfg.PublicURL = strings.TrimRight(strings.TrimSpace(getenv("QA_PUBLIC_URL")), "/")
+	if cfg.PublicURL == "" {
+		return Config{}, errors.New("QA_PUBLIC_URL is required")
 	}
 
 	if raw := strings.TrimSpace(getenv("QA_MASTER_KEY")); raw != "" {
@@ -868,24 +882,23 @@ func Load(getenv func(string) string) (Config, error) {
 
 (`decodeKey` es el helper que hoy valida base64 y que decodifique exactamente 32 bytes; extraerlo del bloque actual sin cambiar su comportamiento. `LegacyEnvKeys` tiene 23 entradas: las 23 claves de `app_settings`.)
 
-- [ ] **Step 4: Delete the obsolete monitor test file**
+- [ ] **Step 4: Leave `LoadMonitor` alone for now**
 
-`config.LoadMonitor` y `loadMonitorSettings` desaparecen junto con `MonitorConfig`: sus reglas (defaults, `> 0`, `renotify >= interval`, URL absoluta) ya están cubiertas por `internal/settings/apply_test.go`. Borrar `internal/config/monitor_test.go` y comprobar que ninguna regla se queda sin test:
+`config.LoadMonitor` y `loadMonitorSettings` siguen compilando y con sus tests intactos: `cmd/qa/monitor.go` todavía los usa. La Task 7 los retira junto con `internal/config/monitor_test.go`, cuando el monitor ya lee de la base.
 
 ```bash
-git rm internal/config/monitor_test.go
-grep -rn "LoadMonitor\|MonitorConfig" --include=*.go . | grep -v node_modules
+grep -rn "LoadMonitor" --include=*.go . | grep -v node_modules
 ```
 
-Expected: sin resultados fuera de `cmd/qa` (que se actualiza en la Task 6).
+Expected: solo `internal/config` y `cmd/qa/monitor.go`.
 
 - [ ] **Step 5: Run test to verify it passes**
 
 ```bash
-cd .worktrees/feat-db-settings && go build ./... 2>&1 | head
+cd .worktrees/feat-db-settings && go build ./... && go vet ./... && go test ./internal/config/ ./internal/settings/
 ```
 
-Expected: falla solo en `cmd/qa` por `LoadMonitor`; se arregla en la Task 6. `go test ./internal/config/ ./internal/settings/` debe dar `ok`.
+Expected: build limpio y ambos paquetes `ok`. Cada tarea deja la rama compilando.
 
 - [ ] **Step 6: Commit**
 
@@ -1645,7 +1658,7 @@ y en `runMonitor`:
 	}
 ```
 
-Usar `cfg.MonitorInterval`, `cfg.MonitorRenotifyAfter`, `cfg.WorkerHealthURL` y `cfg.AlertWebhookURL`.
+Usar `cfg.MonitorInterval`, `cfg.MonitorRenotifyAfter`, `cfg.WorkerHealthURL` y `cfg.AlertWebhookURL`. Con esto `config.LoadMonitor`, `loadMonitorSettings` y `MonitorConfig` quedan sin uso: borrarlos junto con `internal/config/monitor_test.go`, y comprobar que sus reglas siguen cubiertas por `internal/settings/apply_test.go` (defaults, duraciones > 0, `renotify >= interval`, URL absoluta).
 
 - [ ] **Step 4: `backup.sh` reads the retention from the database**
 
@@ -1670,6 +1683,8 @@ Con un comentario que explique por qué hay fallback: el script ya necesita la b
 # Copiar a deploy/.env. Todo lo demás se configura desde el panel (Ajustes).
 QA_DATABASE_URL=postgres://postgres:change-me@postgres:5432/qa_control_center?sslmode=disable
 POSTGRES_PASSWORD=change-me
+# Sigue aquí hasta que el setup pueda detectarla (Task 8).
+QA_PUBLIC_URL=http://localhost:8080
 # Generar con: openssl rand -base64 32 (32 bytes). Solo las usa la app/worker;
 # cifran los secretos que viven en la base, por eso no pueden estar en ella.
 QA_MASTER_KEY=
@@ -1851,6 +1866,23 @@ cd .worktrees/feat-db-settings && go test ./internal/api/ -count=1
 ```
 
 Expected: `ok`. Los tests de `TestSetupStatus` y `TestSetupInstalled*` siguen pasando.
+
+- [ ] **Step 5: Retire `QA_PUBLIC_URL` from the environment**
+
+Ahora que el setup la detecta y la persiste, deja de leerse:
+
+- `internal/config/config.go`: borrar el bloque que lee `QA_PUBLIC_URL` y su error; añadir `"QA_PUBLIC_URL"` a `LegacyEnvKeys()`.
+- `internal/config/config_test.go`: `TestLegacyEnvKeysCoverEveryMovedSetting` pasa a esperar 23 y a exigir que `QA_PUBLIC_URL` **sí** esté en la lista; en `TestLoadOnlyReadsTheEssentials`, borrar la aserción sobre `PublicURL` (o afirmar que queda vacío). Ajustar `TestLoadDefaults` y cualquier test que dependa de que sea obligatoria.
+- `deploy/.env.example`: eliminar `QA_PUBLIC_URL`.
+- `deploy/docker-compose.yml`: eliminar `QA_PUBLIC_URL` de `app` y `worker`.
+
+Verificar que no queda ninguna lectura:
+
+```bash
+grep -rn "QA_PUBLIC_URL" --include=*.go --include=*.yml --include=*.example . | grep -v node_modules
+```
+
+Expected: solo `internal/config/config.go` (la lista de legadas) y `.env.example`/compose sin ella, más la documentación.
 
 - [ ] **Step 5: Rewrite the setup form**
 
