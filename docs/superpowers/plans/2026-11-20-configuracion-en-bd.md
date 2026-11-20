@@ -1099,7 +1099,7 @@ cd .worktrees/feat-db-settings && go build ./... && go vet ./...
 MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- bash -lc 'cd /mnt/e/Projects/manager-open-code-review/.worktrees/feat-db-settings; export PATH=/usr/local/go/bin:/usr/bin:/bin; export GOFLAGS=-buildvcs=false; export DOCKER_HOST=tcp://127.0.0.1:2375; go vet ./... && go test -p 1 ./... -count=1'
 ```
 
-Expected: todo `ok` salvo `cmd/qa`, que aún referencia `LoadMonitor` en `monitor.go`; se arregla en la Task 6. Si el resto no está verde, no continuar.
+Expected: todo `ok`, incluido `cmd/qa` (`config.LoadMonitor` sigue vivo hasta la Task 7). Si algo no está verde, no continuar.
 
 - [ ] **Step 6: Commit**
 
