@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/api"
 	"github.com/jeriveromartinez/qa-control-center/internal/auth"
@@ -277,6 +278,7 @@ func TestPolicyLeadCanEditOwnTeam(t *testing.T) {
 	f := newSecureFixture(t)
 	profile, err := f.st.CreateLLMProfile(f.ctx, store.LLMProfile{
 		Name: "primary", Provider: "openai", Model: "gpt-4o-mini", APIKeyEnc: "sealed", Enabled: true,
+		HealthStatus: store.HealthOK,
 	})
 	if err != nil {
 		t.Fatalf("CreateLLMProfile: %v", err)
@@ -332,4 +334,147 @@ func TestPolicyLeadCanEditOwnTeam(t *testing.T) {
 	assertStatus(t, rec, http.StatusBadRequest)
 	rec = f.request(http.MethodPut, ownPath, map[string]any{"max_files": 0}, cookie)
 	assertStatus(t, rec, http.StatusBadRequest)
+}
+
+func seedProfile(t *testing.T, f *secureFixture, name string, profile store.LLMProfile) store.LLMProfile {
+	t.Helper()
+	profile.Name = name
+	profile.Provider = "openai"
+	profile.Model = "gpt-4o-mini"
+	profile.APIKeyEnc = "sealed"
+	created, err := f.st.CreateLLMProfile(f.ctx, profile)
+	if err != nil {
+		t.Fatalf("CreateLLMProfile(%s): %v", name, err)
+	}
+	return created
+}
+
+func policyBodyFor(profileID uint) map[string]any {
+	return map[string]any{
+		"llm_profile_id":     profileID,
+		"blocking_threshold": "major",
+		"max_files":          12,
+		"max_diff_lines":     900,
+		"max_passes":         3,
+	}
+}
+
+// TestPolicyRefusesUnhealthyProfile is the 409 contract: an operator must not
+// point a team at a profile that is off, broken or never proven to work without
+// saying so explicitly.
+func TestPolicyRefusesUnhealthyProfile(t *testing.T) {
+	checked := time.Now().UTC().Add(-time.Hour)
+	cases := []struct {
+		name    string
+		profile store.LLMProfile
+	}{
+		{"disabled", store.LLMProfile{Enabled: false, HealthStatus: store.HealthOK, HealthCheckedAt: &checked}},
+		{"error", store.LLMProfile{Enabled: true, HealthStatus: store.HealthError, HealthCheckedAt: &checked, HealthError: "401 unauthorized"}},
+		{"never checked", store.LLMProfile{Enabled: true, HealthStatus: store.HealthUnknown}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSecureFixture(t)
+			profile := seedProfile(t, f, "primary", tc.profile)
+			team := f.team("team")
+			admin := f.user("admin", true)
+			cookie := f.session(admin)
+			path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+			rec := f.request(http.MethodPut, path, policyBodyFor(profile.ID), cookie)
+			assertStatus(t, rec, http.StatusConflict)
+			var body map[string]any
+			decodeJSON(t, rec, &body)
+			assertKeys(t, body, "error", "profile_id", "reason", "health_status", "health_checked_at", "hint")
+			if body["error"] != "unhealthy_profile" {
+				t.Errorf("error = %v, want unhealthy_profile", body["error"])
+			}
+			if uint(body["profile_id"].(float64)) != profile.ID {
+				t.Errorf("profile_id = %v, want %d", body["profile_id"], profile.ID)
+			}
+			if body["health_status"] != tc.profile.HealthStatus {
+				t.Errorf("health_status = %v, want %q", body["health_status"], tc.profile.HealthStatus)
+			}
+			if body["reason"] == "" || body["hint"] == "" {
+				t.Errorf("reason/hint empty: %v", body)
+			}
+			if _, err := f.st.QAPolicyForTeam(f.ctx, team.ID); err == nil {
+				t.Error("the policy was saved despite the 409")
+			}
+		})
+	}
+}
+
+func TestPolicyConfirmUnhealthyProfileSaves(t *testing.T) {
+	f := newSecureFixture(t)
+	profile := seedProfile(t, f, "broken", store.LLMProfile{
+		Enabled: true, HealthStatus: store.HealthError, HealthError: "401 unauthorized",
+	})
+	team := f.team("team")
+	cookie := f.session(f.user("admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	body := policyBodyFor(profile.ID)
+	body["confirm_unhealthy_profile"] = true
+	rec := f.request(http.MethodPut, path, body, cookie)
+	assertStatus(t, rec, http.StatusOK)
+
+	saved, err := f.st.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if saved.LLMProfileID != profile.ID {
+		t.Errorf("saved profile = %d, want %d", saved.LLMProfileID, profile.ID)
+	}
+}
+
+func TestPolicyRejectsInvalidConfirmationFlag(t *testing.T) {
+	f := newSecureFixture(t)
+	profile := seedProfile(t, f, "primary", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	team := f.team("team")
+	cookie := f.session(f.user("admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	body := policyBodyFor(profile.ID)
+	body["confirm_unhealthy_profile"] = "yes"
+	rec := f.request(http.MethodPut, path, body, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+}
+
+// TestProfilesExposeHealthAge covers the panel's staleness signal: a healthy
+// profile whose verdict is old must not look current.
+func TestProfilesExposeHealthAge(t *testing.T) {
+	f := newSecureFixture(t)
+	fresh := time.Now().UTC().Add(-time.Minute)
+	stale := time.Now().UTC().Add(-3 * time.Hour)
+	seedProfile(t, f, "fresh", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK, HealthCheckedAt: &fresh})
+	seedProfile(t, f, "stale", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK, HealthCheckedAt: &stale})
+	seedProfile(t, f, "never", store.LLMProfile{Enabled: true, HealthStatus: store.HealthUnknown})
+	cookie := f.session(f.user("admin", true))
+
+	rec := f.request(http.MethodGet, "/api/llm-profiles", nil, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var profiles []map[string]any
+	decodeJSON(t, rec, &profiles)
+	if len(profiles) != 3 {
+		t.Fatalf("profiles = %d, want 3", len(profiles))
+	}
+
+	byName := map[string]map[string]any{}
+	for _, profile := range profiles {
+		assertKeys(t, profile, "health_age_seconds", "health_stale")
+		byName[profile["name"].(string)] = profile
+	}
+	if age := byName["fresh"]["health_age_seconds"].(float64); age < 0 || age > 120 {
+		t.Errorf("fresh age = %v, want a minute at most", age)
+	}
+	if byName["fresh"]["health_stale"] != false {
+		t.Errorf("fresh health_stale = %v, want false", byName["fresh"]["health_stale"])
+	}
+	if byName["stale"]["health_stale"] != true {
+		t.Errorf("stale health_stale = %v, want true", byName["stale"]["health_stale"])
+	}
+	if byName["never"]["health_stale"] != true {
+		t.Errorf("never-checked health_stale = %v, want true", byName["never"]["health_stale"])
+	}
 }
