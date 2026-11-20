@@ -270,6 +270,9 @@ func TestLoadReviewDefaults(t *testing.T) {
 	if cfg.ReviewTimeout != 20*time.Minute {
 		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 20*time.Minute)
 	}
+	if cfg.ReviewStaleAfter != 45*time.Minute {
+		t.Errorf("ReviewStaleAfter = %v, want %v", cfg.ReviewStaleAfter, 45*time.Minute)
+	}
 	if cfg.WorkspaceDir != "/tmp/qa" {
 		t.Errorf("WorkspaceDir = %q, want %q", cfg.WorkspaceDir, "/tmp/qa")
 	}
@@ -291,6 +294,7 @@ func TestLoadReviewOverrides(t *testing.T) {
 	env := requiredEnv()
 	env["QA_REVIEW_CONCURRENCY"] = "8"
 	env["QA_REVIEW_TIMEOUT"] = "45s"
+	env["QA_REVIEW_STALE_AFTER"] = "2h"
 	env["QA_WORKSPACE_DIR"] = "/var/qa"
 	env["QA_OCR_BIN"] = "/usr/bin/ocr"
 	env["QA_OPENCODE_BIN"] = "/usr/bin/opencode"
@@ -307,6 +311,9 @@ func TestLoadReviewOverrides(t *testing.T) {
 	}
 	if cfg.ReviewTimeout != 45*time.Second {
 		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 45*time.Second)
+	}
+	if cfg.ReviewStaleAfter != 2*time.Hour {
+		t.Errorf("ReviewStaleAfter = %v, want %v", cfg.ReviewStaleAfter, 2*time.Hour)
 	}
 	if cfg.WorkspaceDir != "/var/qa" {
 		t.Errorf("WorkspaceDir = %q, want %q", cfg.WorkspaceDir, "/var/qa")
@@ -354,6 +361,23 @@ func TestLoadBadReviewTimeout(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), "QA_REVIEW_TIMEOUT") {
 				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_TIMEOUT", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoadBadReviewStaleAfter(t *testing.T) {
+	for _, value := range []string{"0s", "-1m", "una hora"} {
+		t.Run(value, func(t *testing.T) {
+			env := requiredEnv()
+			env["QA_REVIEW_STALE_AFTER"] = value
+
+			_, err := config.Load(getenv(env))
+			if err == nil {
+				t.Fatalf("Load() error = nil for %q, want error mentioning QA_REVIEW_STALE_AFTER", value)
+			}
+			if !strings.Contains(err.Error(), "QA_REVIEW_STALE_AFTER") {
+				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_STALE_AFTER", err.Error())
 			}
 		})
 	}

@@ -15,6 +15,10 @@ const (
 	RunFailed       = "failed"
 	RunSuperseded   = "superseded"
 
+	// RunErrorInterrupted marks a run the watchdog failed because the worker
+	// that claimed it disappeared before writing a terminal state.
+	RunErrorInterrupted = "interrupted"
+
 	HealthUnknown = "unknown"
 	HealthOK      = "ok"
 	HealthError   = "error"

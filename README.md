@@ -44,7 +44,9 @@ Si no tienes una URL pública, consulta la sección [modo solo polling](docs/ins
 | `QA_GITHUB_API_URL` | Base de la API de GitHub | `https://api.github.com` |
 | `POSTGRES_PASSWORD` | Contraseña del contenedor `postgres` | — |
 
-Ajustes opcionales del worker: `QA_REVIEW_CONCURRENCY` (`2`), `QA_REVIEW_TIMEOUT` (`20m`), `QA_WORKSPACE_DIR` (`/tmp/qa`), `QA_OCR_BIN` (`ocr`), `QA_OPENCODE_BIN` (`opencode`), `QA_FETCH_DEPTH_MAX` (`500`) y `QA_GIT_BASE_URL` (`https://github.com`).
+Ajustes opcionales del worker: `QA_REVIEW_CONCURRENCY` (`2`), `QA_REVIEW_TIMEOUT` (`20m`), `QA_REVIEW_STALE_AFTER` (`45m`), `QA_WORKSPACE_DIR` (`/tmp/qa`), `QA_OCR_BIN` (`ocr`), `QA_OPENCODE_BIN` (`opencode`), `QA_FETCH_DEPTH_MAX` (`500`) y `QA_GIT_BASE_URL` (`https://github.com`).
+
+`QA_REVIEW_STALE_AFTER` es el umbral del vigilante de runs huérfanos: al arrancar y cada 5 minutos, los runs en `running` cuya hora de inicio supera ese umbral pasan a `failed` con código `interrupted`, se publica el check como `action_required` y el PR queda `inconclusive`. Debe superar `QA_REVIEW_TIMEOUT` (más el margen de reintentos), o matará revisiones sanas.
 
 ## Revisión automática (Fase 2)
 

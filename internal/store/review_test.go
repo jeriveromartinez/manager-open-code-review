@@ -1,10 +1,12 @@
 package store_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -1139,6 +1141,149 @@ func prIDsOfRuns(runs []store.ReviewRun) []uint {
 		ids = append(ids, run.ID)
 	}
 	return ids
+}
+
+func TestInterruptStaleRuns(t *testing.T) {
+	f := newFixture(t)
+
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+
+	oldStarted := time.Now().UTC().Add(-3 * time.Hour).Truncate(time.Microsecond)
+	recentStarted := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+
+	stalePR := f.openPR(repo.ID, 1, store.StatusReviewing, false)
+	stale, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: stalePR.ID, HeadSHA: stalePR.HeadSHA, Status: store.RunRunning,
+		StartedAt: &oldStarted, CloneTokenEnc: "sealed-token",
+	})
+	if err != nil {
+		t.Fatalf("create stale running run: %v", err)
+	}
+	recentPR := f.openPR(repo.ID, 2, store.StatusReviewing, false)
+	recent := f.run(recentPR, store.RunRunning)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", recent.ID).Update("started_at", recentStarted).Error; err != nil {
+		t.Fatalf("set recent started_at: %v", err)
+	}
+	queuedPR := f.openPR(repo.ID, 3, store.StatusPending, false)
+	queued := f.run(queuedPR, store.RunQueued)
+
+	cutoff := time.Now().UTC().Add(-time.Hour)
+	runs, err := f.s.InterruptStaleRuns(f.ctx, cutoff)
+	if err != nil {
+		t.Fatalf("InterruptStaleRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != stale.ID {
+		t.Fatalf("interrupted runs = %v, want only %d", prIDsOfRuns(runs), stale.ID)
+	}
+
+	got, err := f.s.ReviewRun(f.ctx, stale.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun(stale): %v", err)
+	}
+	if got.Status != store.RunFailed || got.ErrorCode != store.RunErrorInterrupted {
+		t.Errorf("stale run = status %q code %q, want failed/%s",
+			got.Status, got.ErrorCode, store.RunErrorInterrupted)
+	}
+	if got.ErrorMessage == "" {
+		t.Error("stale run has no error message")
+	}
+	if got.FinishedAt == nil {
+		t.Error("stale run finished_at is nil")
+	}
+	if got.StartedAt == nil || !got.StartedAt.Equal(oldStarted) {
+		t.Errorf("started_at = %v, want the original %v", got.StartedAt, oldStarted)
+	}
+	if got.CloneTokenEnc != "" {
+		t.Errorf("clone token = %q, want it cleared", got.CloneTokenEnc)
+	}
+
+	untouchedRecent, err := f.s.ReviewRun(f.ctx, recent.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun(recent): %v", err)
+	}
+	if untouchedRecent.Status != store.RunRunning || untouchedRecent.FinishedAt != nil {
+		t.Errorf("recent run = %+v, want still running", untouchedRecent)
+	}
+	untouchedQueued, err := f.s.ReviewRun(f.ctx, queued.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun(queued): %v", err)
+	}
+	if untouchedQueued.Status != store.RunQueued || untouchedQueued.FinishedAt != nil {
+		t.Errorf("queued run = %+v, want still queued", untouchedQueued)
+	}
+
+	// A second sweep has nothing left to interrupt.
+	again, err := f.s.InterruptStaleRuns(f.ctx, cutoff)
+	if err != nil {
+		t.Fatalf("second InterruptStaleRuns: %v", err)
+	}
+	if len(again) != 0 {
+		t.Errorf("second sweep interrupted %v, want none", prIDsOfRuns(again))
+	}
+}
+
+func TestInterruptStaleRunsConcurrent(t *testing.T) {
+	f := newFixture(t)
+
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+
+	started := time.Now().UTC().Add(-3 * time.Hour)
+	pr := f.openPR(repo.ID, 1, store.StatusReviewing, false)
+	run, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: pr.ID, HeadSHA: pr.HeadSHA, Status: store.RunRunning,
+		StartedAt: &started,
+	})
+	if err != nil {
+		t.Fatalf("create stale running run: %v", err)
+	}
+
+	cutoff := time.Now().UTC().Add(-time.Hour)
+	type result struct {
+		runs []store.ReviewRun
+		err  error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			runs, err := f.s.InterruptStaleRuns(context.Background(), cutoff)
+			results <- result{runs: runs, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	interrupted := 0
+	for res := range results {
+		if res.err != nil {
+			t.Fatalf("InterruptStaleRuns() error = %v", res.err)
+		}
+		interrupted += len(res.runs)
+	}
+	if interrupted != 1 {
+		t.Errorf("interrupted rows across both callers = %d, want 1", interrupted)
+	}
+
+	got, err := f.s.ReviewRun(f.ctx, run.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun: %v", err)
+	}
+	if got.Status != store.RunFailed || got.ErrorCode != store.RunErrorInterrupted {
+		t.Errorf("run after concurrent sweep = %+v, want failed/%s", got, store.RunErrorInterrupted)
+	}
+	if got.FinishedAt == nil {
+		t.Error("finished_at is nil after concurrent sweep")
+	}
 }
 
 func TestRunLifecycleSupersede(t *testing.T) {

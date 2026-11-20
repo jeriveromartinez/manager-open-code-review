@@ -515,6 +515,35 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, status, errCode,
 	})
 }
 
+// InterruptStaleRuns fails every running run whose start is older than cutoff
+// and returns the runs it moved. Queued and terminal runs are never touched.
+// A single UPDATE decides and persists the transition, so several instances can
+// sweep the same database concurrently: row locks serialize them and the
+// losers see zero rows, which keeps the count exact and each run interrupted
+// once.
+func (s *Store) InterruptStaleRuns(ctx context.Context, cutoff time.Time) ([]ReviewRun, error) {
+	now := time.Now().UTC()
+	// A running run always has started_at; the COALESCE keeps a row claimed
+	// without one from staying stranded forever.
+	const query = `
+UPDATE review_runs
+SET status = ?, error_code = ?, error_message = ?, clone_token_enc = '',
+    finished_at = ?, updated_at = ?
+WHERE status = ? AND COALESCE(started_at, created_at) < ?
+RETURNING *`
+
+	var runs []ReviewRun
+	err := s.DB.WithContext(ctx).Raw(query,
+		RunFailed, RunErrorInterrupted,
+		"la revisión quedó interrumpida: el worker que la ejecutaba desapareció antes de terminar",
+		now, now, RunRunning, cutoff,
+	).Scan(&runs).Error
+	if err != nil {
+		return nil, fmt.Errorf("interrupt review runs started before %s: %w", cutoff.UTC().Format(time.RFC3339), err)
+	}
+	return runs, nil
+}
+
 // ListReviewRuns returns the runs of a pull request oldest first.
 func (s *Store) ListReviewRuns(ctx context.Context, prID uint) ([]ReviewRun, error) {
 	var runs []ReviewRun
