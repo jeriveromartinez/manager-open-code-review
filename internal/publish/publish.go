@@ -111,23 +111,24 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 	}
 
 	resolvedSincePrevious := 0
-	withoutDiffLine := make([]store.Finding, 0)
 	for _, f := range findings {
 		if f.Status == store.FindingResolved && f.LastSeenRunID == p.run.ID {
 			resolvedSincePrevious++
 		}
-		if f.Status == store.FindingWithdrawn {
-			continue
-		}
-		if f.StartLine <= 0 || !added.has(f.Path, f.StartLine) {
-			withoutDiffLine = append(withoutDiffLine, f)
-		}
 	}
 
-	if err := p.publishSummary(ctx, withoutDiffLine, resolvedSincePrevious); err != nil {
+	// Inline comments are published first so the summary lists only findings
+	// that are genuinely left without one; reloading the snapshot keeps a
+	// retried publish from re-listing findings that already have a comment.
+	if err := p.publishInlineComments(ctx, added, findings); err != nil {
 		return err
 	}
-	if err := p.publishInlineComments(ctx, added, findings); err != nil {
+	findings, err = w.Store.FindingsForPR(ctx, p.pr.ID)
+	if err != nil {
+		return err
+	}
+	p.findingSnapshot = findings
+	if err := p.publishSummary(ctx, findings, resolvedSincePrevious); err != nil {
 		return err
 	}
 	if p.run.Status == store.RunSucceeded {
