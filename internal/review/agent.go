@@ -6,14 +6,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
@@ -77,19 +75,7 @@ func (a *Agent) Run(ctx context.Context, prompt string, files []string) (text st
 	cmd := exec.CommandContext(runCtx, bin, buildArgs(a.Profile, dir, prompt, files)...)
 	cmd.Dir = dir
 	cmd.Env = childEnv(a.APIKey, home)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// CommandContext kills only the direct child by default. Kill the whole
-	// process group so no spawned shell or helper survives a timeout.
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		killErr := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(killErr, syscall.ESRCH) {
-			return nil
-		}
-		return killErr
-	}
+	isolateProcessGroup(cmd)
 	cmd.WaitDelay = 2 * time.Second
 
 	var stdout, stderr bytes.Buffer
