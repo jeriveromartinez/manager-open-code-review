@@ -38,6 +38,7 @@ type Config struct {
 	MonitorInterval      time.Duration // QA_MONITOR_INTERVAL, default 1m
 	MonitorRenotifyAfter time.Duration // QA_MONITOR_RENOTIFY_AFTER, default 30m
 	AlertWebhookURL      string        // QA_ALERT_WEBHOOK_URL (opcional, vacío = solo log)
+	BackupRetention      int           // backup_retention, default 7 (lo lee deploy/backup.sh)
 }
 
 // MonitorConfig is what `qa monitor` needs. It is deliberately separate from
@@ -142,10 +143,10 @@ func loadMonitorSettings(getenv func(string) string) (string, time.Duration, tim
 	return healthURL, interval, renotify, webhook, nil
 }
 
-// Load builds a Config from the values returned by getenv. It returns an error
-// when a required variable is missing or malformed.
-func Load(getenv func(string) string) (Config, error) {
-	cfg := Config{
+// Default returns the configuration used when nothing is configured yet. Load
+// starts from it and the database overrides only what an administrator saved.
+func Default() Config {
+	return Config{
 		ListenAddr:        ":8080",
 		WebhooksEnabled:   true,
 		ReconcileInterval: 5 * time.Minute,
@@ -174,7 +175,14 @@ func Load(getenv func(string) string) (Config, error) {
 		// A provider credential changes rarely, so half an hour is frequent
 		// enough to notice a broken key without polling the provider.
 		LLMHealthInterval: 30 * time.Minute,
+		BackupRetention:   7,
 	}
+}
+
+// Load builds a Config from the values returned by getenv. It returns an error
+// when a required variable is missing or malformed.
+func Load(getenv func(string) string) (Config, error) {
+	cfg := Default()
 
 	cfg.DatabaseURL = strings.TrimSpace(getenv("QA_DATABASE_URL"))
 	if cfg.DatabaseURL == "" {
