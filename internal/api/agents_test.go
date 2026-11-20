@@ -342,6 +342,7 @@ func TestPolicyRequireGreenCIRoundTrip(t *testing.T) {
 	f := newSecureFixture(t)
 	profile, err := f.st.CreateLLMProfile(f.ctx, store.LLMProfile{
 		Name: "primary", Provider: "openai", Model: "gpt-4o-mini", APIKeyEnc: "sealed", Enabled: true,
+		HealthStatus: store.HealthOK,
 	})
 	if err != nil {
 		t.Fatalf("CreateLLMProfile: %v", err)
