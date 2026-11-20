@@ -237,6 +237,164 @@ func TestOAuthFlow(t *testing.T) {
 	}
 }
 
+// loginRedirectURI drives Login and returns the redirect_uri it asked GitHub to
+// use, which is the only observable effect of the resolved public URL.
+func loginRedirectURI(t *testing.T, a *auth.Auth, r *http.Request) string {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	a.Login(rec, r)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("login status = %d, want 302 (body %q)", rec.Code, rec.Body.String())
+	}
+	location, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse login Location %q: %v", rec.Header().Get("Location"), err)
+	}
+	return location.Query().Get("redirect_uri")
+}
+
+func TestPublicURLPrefersTheConfiguredField(t *testing.T) {
+	srv := newFakeGitHub(t, &tokenExchange{})
+	a, _ := newAuthForTest(t, srv)
+	a.PublicURL = "https://configured.example.test"
+	if err := a.Store.SaveSettings(context.Background(), nil, map[string]string{
+		"public_url": "https://stored.example.test",
+	}); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	req.Host = "detected.example.test"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if got, want := loginRedirectURI(t, a, req), "https://configured.example.test/auth/callback"; got != want {
+		t.Errorf("redirect_uri = %q, want %q", got, want)
+	}
+}
+
+func TestPublicURLUsesTheStoredSettingWhenTheFieldIsEmpty(t *testing.T) {
+	srv := newFakeGitHub(t, &tokenExchange{})
+	a, _ := newAuthForTest(t, srv)
+	a.PublicURL = ""
+	if err := a.Store.SaveSettings(context.Background(), nil, map[string]string{
+		"public_url": "https://stored.example.test",
+	}); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	req.Host = "detected.example.test"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if got, want := loginRedirectURI(t, a, req), "https://stored.example.test/auth/callback"; got != want {
+		t.Errorf("redirect_uri = %q, want %q", got, want)
+	}
+}
+
+func TestPublicURLFallsBackToTheRequest(t *testing.T) {
+	srv := newFakeGitHub(t, &tokenExchange{})
+	a, _ := newAuthForTest(t, srv)
+	a.PublicURL = ""
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	req.Host = "detected.example.test"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if got, want := loginRedirectURI(t, a, req), "https://detected.example.test/auth/callback"; got != want {
+		t.Errorf("redirect_uri = %q, want the detected %q", got, want)
+	}
+}
+
+func TestPublicURLWithoutAStoreDoesNotPanic(t *testing.T) {
+	srv := newFakeGitHub(t, &tokenExchange{})
+	a, _ := newAuthForTest(t, srv)
+	a.PublicURL = ""
+	a.Store = nil
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	req.Host = "detected.example.test"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if got, want := loginRedirectURI(t, a, req), "https://detected.example.test/auth/callback"; got != want {
+		t.Errorf("redirect_uri = %q, want the detected %q", got, want)
+	}
+}
+
+// TestCallbackExchangesTheSameRedirectURI covers the upgrade path: an existing
+// installation has no configured URL and no stored row yet, so both the
+// authorize and the token exchange must agree on the detected address.
+func TestCallbackExchangesTheSameRedirectURI(t *testing.T) {
+	exchange := &tokenExchange{}
+	srv := newFakeGitHub(t, exchange)
+	a, _ := newAuthForTest(t, srv)
+	a.PublicURL = ""
+
+	loginReq := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	loginReq.Host = "detected.example.test"
+	loginReq.Header.Set("X-Forwarded-Proto", "https")
+	loginRec := httptest.NewRecorder()
+	a.Login(loginRec, loginReq)
+	if loginRec.Code != http.StatusFound {
+		t.Fatalf("login status = %d, want 302", loginRec.Code)
+	}
+	location, err := url.Parse(loginRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse login Location: %v", err)
+	}
+	authorizeRedirect := location.Query().Get("redirect_uri")
+	state := cookieByName(loginRec.Result().Cookies(), "qa_oauth_state")
+	if state == nil {
+		t.Fatal("login did not set qa_oauth_state")
+	}
+
+	callbackReq := httptest.NewRequest(http.MethodGet,
+		"/auth/callback?state="+url.QueryEscape(state.Value)+"&code=abc123", nil)
+	callbackReq.Host = "detected.example.test"
+	callbackReq.Header.Set("X-Forwarded-Proto", "https")
+	callbackReq.AddCookie(state)
+	callbackRec := httptest.NewRecorder()
+	a.Callback(callbackRec, callbackReq)
+	if callbackRec.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302 (body %q)", callbackRec.Code, callbackRec.Body.String())
+	}
+
+	if got := exchange.snapshot().redirectURI; got != authorizeRedirect {
+		t.Errorf("exchange redirect_uri = %q, want the authorize one %q", got, authorizeRedirect)
+	}
+	if want := "https://detected.example.test/auth/callback"; authorizeRedirect != want {
+		t.Errorf("authorize redirect_uri = %q, want %q", authorizeRedirect, want)
+	}
+}
+
+func TestSessionCookieIsSecureForAStoredHTTPSURL(t *testing.T) {
+	exchange := &tokenExchange{}
+	srv := newFakeGitHub(t, exchange)
+	a, _ := newAuthForTest(t, srv)
+	a.PublicURL = ""
+	if err := a.Store.SaveSettings(context.Background(), nil, map[string]string{
+		"public_url": "https://stored.example.test",
+	}); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+
+	loginRec := httptest.NewRecorder()
+	a.Login(loginRec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	state := cookieByName(loginRec.Result().Cookies(), "qa_oauth_state")
+	if state == nil {
+		t.Fatal("login did not set qa_oauth_state")
+	}
+
+	callbackReq := httptest.NewRequest(http.MethodGet,
+		"/auth/callback?state="+url.QueryEscape(state.Value)+"&code=abc123", nil)
+	callbackReq.AddCookie(state)
+	callbackRec := httptest.NewRecorder()
+	a.Callback(callbackRec, callbackReq)
+	if callbackRec.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302 (body %q)", callbackRec.Code, callbackRec.Body.String())
+	}
+	session := cookieByName(callbackRec.Result().Cookies(), auth.SessionCookie)
+	if session == nil || !session.Secure {
+		t.Errorf("session cookie = %+v, want Secure because the resolved URL is https", session)
+	}
+}
+
 func TestMiddlewareLoadsUser(t *testing.T) {
 	exchange := &tokenExchange{}
 	srv := newFakeGitHub(t, exchange)

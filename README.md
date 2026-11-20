@@ -23,12 +23,11 @@ cp deploy/.env.example deploy/.env
 openssl rand -base64 32   # QA_MASTER_KEY (solo app)
 openssl rand -base64 32   # QA_WORKER_KEY (app y worker)
 docker compose -f deploy/docker-compose.yml up -d --build
-docker compose -f deploy/docker-compose.yml logs app | grep setup_token
 ```
 
-Abre `http://localhost:8080/setup`, pega el token y crea la GitHub App (en tu cuenta personal o en una organización). Después instálala en los repositorios y habilítalos desde el panel. La guía completa está en [docs/install.md](docs/install.md).
+Abre `http://localhost:8080/setup`, escribe el **nombre de la App** y crea la GitHub App; se registra en tu cuenta personal, y después puedes instalarla en cualquier organización donde tengas permiso. En el mismo paso se detecta la URL pública desde la petición y se guarda en la base. Tras instalar la App en los repositorios, habilítalos desde el panel. La guía completa está en [docs/install.md](docs/install.md).
 
-`QA_SETUP_TOKEN` es un endurecimiento opcional: si lo defines en `deploy/.env`, el setup exige ese valor en lugar del token generado. En cualquier caso, termina el setup antes de exponer la instancia a internet: hasta que exista configuración, la ventana de setup sigue abierta.
+`QA_SETUP_TOKEN` es un endurecimiento opcional: si lo defines en `deploy/.env`, el setup exige ese valor; si no, el formulario solo pide el nombre. Termina el setup antes de exponer la instancia a internet: hasta que exista configuración, la ventana de setup sigue abierta. Si la URL detectada no es la correcta, corrígela en **Ajustes → General**.
 
 Si no tienes una URL pública, consulta la sección [modo solo polling](docs/install.md#modo-solo-polling-sin-url-pública).
 
@@ -39,9 +38,11 @@ Los backups programados y la restauración verificada están en [docs/backup.md]
 | Variable | Descripción | Valor por defecto |
 |---|---|---|
 | `QA_DATABASE_URL` | Cadena de conexión a PostgreSQL (obligatoria) | — |
-| `QA_PUBLIC_URL` | URL pública sin `/` final (obligatoria) | — |
 | `QA_MASTER_KEY` | Base64 de 32 bytes para cifrar la configuración de la GitHub App (obligatoria en `app`; `openssl rand -base64 32`) | — |
 | `QA_WORKER_KEY` | Base64 de 32 bytes para cifrar API keys y tokens de clonado (obligatoria en `app` y `worker`; clave distinta de `QA_MASTER_KEY`) | — |
+| `QA_SETUP_TOKEN` | Opcional: si se define, el asistente de `/setup` exige ese valor para crear la App | vacío (setup abierto) |
+
+La URL pública no se declara en el entorno: el asistente de `/setup` la detecta de la petición y la guarda en `app_settings`, y se puede corregir en **Ajustes → General**.
 
 `POSTGRES_PASSWORD` no la lee la app: solo configura el contenedor `postgres` y debe coincidir con la contraseña de `QA_DATABASE_URL`.
 

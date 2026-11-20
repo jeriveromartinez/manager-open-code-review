@@ -84,17 +84,16 @@ func newSecureFixture(t *testing.T) *secureFixture {
 		HTTP:      http.DefaultClient,
 	}
 	deps := api.Deps{
-		Cfg:        f.cfg,
-		Store:      f.st,
-		Box:        f.box,
-		WorkerBox:  workerBox,
-		Apps:       provider,
-		Auth:       a,
-		Webhooks:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
-		Broker:     events.NewBroker(f.st.Pool),
-		Events:     f.pub,
-		Jobs:       f.jobs,
-		SetupToken: testSetupToken,
+		Cfg:       f.cfg,
+		Store:     f.st,
+		Box:       f.box,
+		WorkerBox: workerBox,
+		Apps:      provider,
+		Auth:      a,
+		Webhooks:  http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+		Broker:    events.NewBroker(f.st.Pool),
+		Events:    f.pub,
+		Jobs:      f.jobs,
 		Static: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("spa"))

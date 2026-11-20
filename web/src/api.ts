@@ -141,8 +141,7 @@ export type SetupManifest = {
 }
 
 export type SetupManifestRequest = {
-  setup_token: string
-  org: string
+  name: string
 }
 
 export type RepoPatch = {

@@ -6,7 +6,7 @@ QA Control Center se entrega como **una sola imagen** con dos roles (`serve` y `
 
 - Docker con Compose v2 (`docker compose version`).
 - OpenSSL, para generar la clave maestra y la clave del worker.
-- Permisos de administrador sobre la cuenta personal o la organización de GitHub donde se creará la GitHub App.
+- Permisos de administrador sobre tu cuenta personal de GitHub, que es donde se crea la GitHub App (después puedes instalarla en cualquier organización donde tengas permiso).
 
 ## 1. Preparar el entorno
 
@@ -28,10 +28,9 @@ openssl rand -base64 32   # QA_WORKER_KEY
 Revisa también estos valores de `deploy/.env`:
 
 - `POSTGRES_PASSWORD`: contraseña de PostgreSQL; debe repetirse en `QA_DATABASE_URL`.
-- `QA_PUBLIC_URL`: URL pública de la app **sin `/` final** (por ejemplo `https://qa.example.com`). Si no hay entrada pública, consulta el modo solo polling más abajo.
-- `QA_WEBHOOKS_ENABLED` y `QA_RECONCILE_INTERVAL`: ajusta según el modo de operación.
+- `QA_SETUP_TOKEN` (opcional): si lo defines, el asistente de `/setup` exige ese valor para crear la App.
 
-`QA_DATABASE_URL` ya apunta al servicio `postgres` de Compose; no hace falta cambiar el host.
+`QA_DATABASE_URL` ya apunta al servicio `postgres` de Compose; no hace falta cambiar el host. El resto de la configuración —escucha, reconciliación, revisión, worker, alertas y backups— se edita en **Ajustes**, no en el `.env`. La URL pública tampoco se declara aquí: el asistente de `/setup` la detecta de la petición y la guarda en la base.
 
 ## 2. Levantar el stack
 
@@ -48,13 +47,9 @@ curl -s localhost:8080/healthz
 
 ## 3. Crear la GitHub App
 
-Lee el token de setup de los logs del contenedor `app` (aparece una vez, mientras la app no esté configurada):
+Abre `http://localhost:8080/setup` y escribe el **nombre de la App**. El asistente la crea en tu cuenta **personal** y detecta la URL pública de la petición en ese momento, guardándola en la base para el callback de OAuth, el webhook y los enlaces del panel. GitHub mostrará el manifiesto; confirma la creación y, a continuación, instala la App en los repositorios que quieras revisar. Después de crearla puedes instalarla en cualquier organización donde tengas permiso.
 
-```sh
-docker compose -f deploy/docker-compose.yml logs app | grep setup_token
-```
-
-Abre `http://localhost:8080/setup` (o `$QA_PUBLIC_URL/setup`), pega el token y elige la creación en tu cuenta **personal** o en una **organización**. GitHub mostrará el manifiesto de la App; confirma la creación y, a continuación, instala la App en los repositorios que quieras revisar.
+Si defines `QA_SETUP_TOKEN` en `deploy/.env`, el asistente además pide ese token; sin él, no hace falta ningún valor de los logs del servidor.
 
 ## 4. Poner en marcha el panel
 
@@ -120,7 +115,7 @@ En el panel, `/prs/:id` muestra el historial de runs (con disparador, intento y 
 
 ### `inconclusive` y reintento
 
-Un run `inconclusive` indica que no se completó la revisión con cobertura completa: `ocr` caído o con JSON inválido, error del LLM (cuota, timeout o 5xx), salida que no valida el esquema, cobertura incompleta, token de clonado caducado, timeout del run o presupuesto agotado (`budget_exhausted`: el mensaje dice en qué pasada paró y cuántos archivos quedaron sin revisar; súbelo con `QA_REVIEW_TIMEOUT`). Puede publicar hallazgos de pasadas completas como comentarios nuevos, pero **no resuelve ningún hallazgo ni cierra hilos**. El check queda `action_required` y el PR pasa a `inconclusive`.
+Un run `inconclusive` indica que no se completó la revisión con cobertura completa: `ocr` caído o con JSON inválido, error del LLM (cuota, timeout o 5xx), salida que no valida el esquema, cobertura incompleta, token de clonado caducado, timeout del run o presupuesto agotado (`budget_exhausted`: el mensaje dice en qué pasada paró y cuántos archivos quedaron sin revisar; súbelo con `review_timeout` en **Ajustes → Revisión**). Puede publicar hallazgos de pasadas completas como comentarios nuevos, pero **no resuelve ningún hallazgo ni cierra hilos**. El check queda `action_required` y el PR pasa a `inconclusive`.
 
 Para reintentar, abre el detalle del PR y pulsa **Reintentar** (admin o lead del equipo). Se crea un run `retry` para el mismo SHA, se reactiva el check y se encola de nuevo. Revisa antes la causa: un modelo inválido, por ejemplo, seguirá fallando hasta corregir el perfil. La reconciliación no reencola automáticamente un SHA que ya terminó en `failed` o `inconclusive`.
 
@@ -152,15 +147,14 @@ Los repositorios de una cuenta recién instalada quedan deshabilitados hasta que
 
 ## Modo solo polling (sin URL pública)
 
-Cuando el servicio no se expone a Internet:
+Cuando el servicio no se expone a Internet, basta con desactivar los webhooks y ajustar la reconciliación en el panel, en **Ajustes → General**:
 
-```dotenv
-QA_PUBLIC_URL=http://localhost:8080
-QA_WEBHOOKS_ENABLED=false
-QA_RECONCILE_INTERVAL=5m
-```
+- `webhooks_enabled`: `false`.
+- `reconcile_interval`: `5m` (o lo que convenga).
 
-`app` sigue sirviendo la interfaz en `localhost:8080`. El scheduler consulta cada `QA_RECONCILE_INTERVAL` los PRs abiertos de los repos activos, de modo que la sincronización de PRs y las revisiones pendientes siguen funcionando. No hace falta registrar una URL de webhook en la GitHub App.
+No hace falta poner nada en `deploy/.env`. `app` sigue sirviendo la interfaz en `localhost:8080`, y el asistente de `/setup` guarda `http://localhost:8080` como URL pública si abres el setup desde ahí. Con `webhooks_enabled` en `false`, el scheduler consulta cada `reconcile_interval` los PRs abiertos de los repos activos, de modo que la sincronización de PRs y las revisiones pendientes siguen funcionando. No hace falta registrar una URL de webhook en la GitHub App.
+
+Los dos ajustes piden reiniciar la app; el panel lo indica junto a la sección.
 
 Las disputas en hilos (`pull_request_review_thread`) y los comandos `/qa` (`issue_comment`) requieren webhooks; la tabla de eventos de la sección anterior detalla el resto. En modo polling, los descartes y las confirmaciones se hacen desde el panel.
 
@@ -198,7 +192,7 @@ docker compose -f deploy/docker-compose.yml restart worker
 
 Dos comprobaciones externas (o el monitor que ya uses) cubren el issue:
 
-- `$QA_PUBLIC_URL/healthz` cada minuto: la app responde 200 con `{"status":"ok"}`; un 502 o un timeout indica app o túnel caídos.
+- `https://<tu-dominio>/healthz` cada minuto: la app responde 200 con `{"status":"ok"}`; un 502 o un timeout indica app o túnel caídos.
 - `http://127.0.0.1:2000/ready` cada minuto en el host: 200 significa túnel conectado; 503 sostenido, túnel caído o sin salida al edge.
 
 `docker compose ps` distingue cuál de las dos piezas falla cuando alguna alerta salta.

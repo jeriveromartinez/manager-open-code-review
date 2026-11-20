@@ -26,7 +26,6 @@ func getenv(m map[string]string) func(string) string {
 func requiredEnv() map[string]string {
 	return map[string]string{
 		"QA_DATABASE_URL": "postgres://localhost/qa",
-		"QA_PUBLIC_URL":   "https://qa.example.com",
 		"QA_MASTER_KEY":   testMasterKey(),
 		"QA_WORKER_KEY":   testWorkerKey(),
 	}
@@ -73,7 +72,6 @@ func TestLoadMissingRequired(t *testing.T) {
 		missing string
 	}{
 		{name: "database url", missing: "QA_DATABASE_URL"},
-		{name: "public url", missing: "QA_PUBLIC_URL"},
 	}
 
 	for _, tt := range tests {
@@ -122,19 +120,6 @@ func TestLoadBadMasterKey(t *testing.T) {
 	}
 }
 
-func TestLoadTrimsPublicURL(t *testing.T) {
-	env := requiredEnv()
-	env["QA_PUBLIC_URL"] = "https://qa.example.com/"
-
-	cfg, err := config.Load(getenv(env))
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.PublicURL != "https://qa.example.com" {
-		t.Errorf("PublicURL = %q, want %q", cfg.PublicURL, "https://qa.example.com")
-	}
-}
-
 func TestLoadOnlyReadsTheEssentials(t *testing.T) {
 	cfg, err := config.Load(func(key string) string {
 		switch key {
@@ -159,8 +144,8 @@ func TestLoadOnlyReadsTheEssentials(t *testing.T) {
 	if cfg.ReviewTimeout != 20*time.Minute {
 		t.Errorf("ReviewTimeout = %s, want the 20m default: the environment must be ignored", cfg.ReviewTimeout)
 	}
-	if cfg.PublicURL != "https://ignored.example.com" {
-		t.Errorf("PublicURL = %q, want the provided value: it is still read until the setup detects it", cfg.PublicURL)
+	if cfg.PublicURL != "" {
+		t.Errorf("PublicURL = %q, want it empty: the setup detects and stores it", cfg.PublicURL)
 	}
 	if cfg.OCRBin != "ocr" {
 		t.Errorf("OCRBin = %q, want the default", cfg.OCRBin)
@@ -192,8 +177,8 @@ func TestLoadIgnoresEveryLegacyKey(t *testing.T) {
 
 func TestLegacyEnvKeysCoverEveryMovedSetting(t *testing.T) {
 	keys := config.LegacyEnvKeys()
-	if len(keys) != 22 {
-		t.Fatalf("LegacyEnvKeys() has %d entries, want 22", len(keys))
+	if len(keys) != 23 {
+		t.Fatalf("LegacyEnvKeys() has %d entries, want 23", len(keys))
 	}
 	seen := map[string]bool{}
 	for _, key := range keys {
@@ -202,13 +187,10 @@ func TestLegacyEnvKeysCoverEveryMovedSetting(t *testing.T) {
 		}
 		seen[key] = true
 	}
-	for _, want := range []string{"QA_REVIEW_TIMEOUT", "QA_MONITOR_INTERVAL", "QA_WORKER_HEALTH_ADDR", "QA_BACKUP_RETENTION"} {
+	for _, want := range []string{"QA_REVIEW_TIMEOUT", "QA_MONITOR_INTERVAL", "QA_WORKER_HEALTH_ADDR", "QA_BACKUP_RETENTION", "QA_PUBLIC_URL"} {
 		if !seen[want] {
 			t.Errorf("LegacyEnvKeys() missing %q", want)
 		}
-	}
-	if seen["QA_PUBLIC_URL"] {
-		t.Error("QA_PUBLIC_URL is still read until the setup detects it")
 	}
 	if seen["QA_DATABASE_URL"] || seen["QA_WORKER_KEY"] {
 		t.Error("the essentials are not legacy")

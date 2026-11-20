@@ -2,8 +2,7 @@
 import { ref } from 'vue'
 import { ApiError, api, type SetupManifest } from '../api'
 
-const setupToken = ref('')
-const org = ref('')
+const name = ref('')
 const busy = ref(false)
 const error = ref('')
 
@@ -28,14 +27,10 @@ async function submit(): Promise<void> {
   error.value = ''
   busy.value = true
   try {
-    const result = await api.setupManifest({
-      setup_token: setupToken.value.trim(),
-      org: org.value.trim(),
-    })
-    postManifest(result)
+    postManifest(await api.setupManifest({ name: name.value.trim() }))
   } catch (err) {
     if (err instanceof ApiError && err.status === 403) {
-      error.value = 'El token de setup no es válido. Revisa los logs del servidor.'
+      error.value = 'El token de setup del servidor no coincide.'
     } else if (err instanceof ApiError && err.status === 409) {
       error.value = 'La instancia ya está configurada.'
     } else {
@@ -52,34 +47,21 @@ async function submit(): Promise<void> {
       <span class="brand__mark brand__mark--large" aria-hidden="true">QA</span>
       <h1 class="auth-card__title">Configurar QA Control Center</h1>
       <p class="auth-card__subtitle">
-        Crea la GitHub App de la instancia. Necesitas el token de setup que aparece en los logs del
-        servidor.
+        Elige el nombre con el que se creará la GitHub App de esta instancia.
       </p>
 
       <form class="setup-form" @submit.prevent="submit">
         <label class="field">
-          <span class="field__label">Token de setup</span>
+          <span class="field__label">Nombre de la App</span>
           <input
-            v-model="setupToken"
+            v-model="name"
             class="field__input"
             type="text"
-            name="setup_token"
+            name="name"
             autocomplete="off"
+            placeholder="QA Control Center"
             required
           />
-        </label>
-
-        <label class="field">
-          <span class="field__label">Organización (opcional)</span>
-          <input
-            v-model="org"
-            class="field__input"
-            type="text"
-            name="org"
-            autocomplete="off"
-            placeholder="mi-organizacion"
-          />
-          <span class="field__hint">Vacío para crear la App en tu cuenta personal.</span>
         </label>
 
         <p v-if="error" class="form-error" role="alert">{{ error }}</p>

@@ -13,7 +13,7 @@ import (
 // default and is later overwritten from the settings table.
 type Config struct {
 	DatabaseURL          string        // QA_DATABASE_URL (requerido)
-	PublicURL            string        // QA_PUBLIC_URL (requerido, sin "/" final); public_url en la BD desde la Task 8
+	PublicURL            string        // public_url en la BD; el setup la detecta y la guarda
 	ListenAddr           string        // listen_addr, default ":8080"
 	MasterKey            []byte        // QA_MASTER_KEY base64 std, exactamente 32 bytes (opcional en Load)
 	WorkerKey            []byte        // QA_WORKER_KEY base64 std, exactamente 32 bytes (requerido)
@@ -108,6 +108,9 @@ func LegacyEnvKeys() []string {
 		"QA_WORKER_HEALTH_ADDR", "QA_WORKER_QUEUE_STALE_AFTER",
 		"QA_WORKER_HEALTH_URL", "QA_MONITOR_INTERVAL", "QA_MONITOR_RENOTIFY_AFTER", "QA_ALERT_WEBHOOK_URL",
 		"QA_BACKUP_RETENTION",
+		// Set by the setup wizard from the incoming request and stored in
+		// app_settings, so a process never reads it from the environment.
+		"QA_PUBLIC_URL",
 	}
 }
 
@@ -121,13 +124,6 @@ func Load(getenv func(string) string) (Config, error) {
 	cfg.DatabaseURL = strings.TrimSpace(getenv("QA_DATABASE_URL"))
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("QA_DATABASE_URL is required")
-	}
-
-	// QA_PUBLIC_URL disappears once the setup can detect it (Task 8); until
-	// then an existing installation must keep its callback URL.
-	cfg.PublicURL = strings.TrimRight(strings.TrimSpace(getenv("QA_PUBLIC_URL")), "/")
-	if cfg.PublicURL == "" {
-		return Config{}, errors.New("QA_PUBLIC_URL is required")
 	}
 
 	if raw := strings.TrimSpace(getenv("QA_MASTER_KEY")); raw != "" {

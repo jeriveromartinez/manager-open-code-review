@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -140,16 +138,17 @@ func runServe() error {
 		}
 	}()
 
-	// A fresh instance has no App credentials. Generate a one-time setup token
-	// so only an operator with access to the logs can create the App.
-	setupToken := ""
+	// A fresh instance has no App credentials. The setup window is open: the
+	// form asks only for the App name, and QA_SETUP_TOKEN locks it down when
+	// the operator sets it.
+	setupToken := strings.TrimSpace(os.Getenv("QA_SETUP_TOKEN"))
 	if _, err := st.LoadAppConfig(ctx); errors.Is(err, store.ErrNotConfigured) {
-		raw := make([]byte, 16)
-		if _, err := rand.Read(raw); err != nil {
-			return fmt.Errorf("generate setup token: %w", err)
+		if cfg.PublicURL == "" {
+			slog.Warn("setup required", "url", "/setup",
+				"detail", "the public URL will be detected when the wizard runs")
+		} else {
+			slog.Warn("setup required", "url", strings.TrimRight(cfg.PublicURL, "/")+"/setup")
 		}
-		setupToken = hex.EncodeToString(raw)
-		slog.Warn("setup required", "setup_token", setupToken, "url", cfg.PublicURL+"/setup")
 	}
 
 	authn := &auth.Auth{
