@@ -29,6 +29,13 @@ type ReviewRetrier interface {
 	Retry(ctx context.Context, prID uint) error
 }
 
+// FindingsPublisher mirrors a finding change made in the panel on GitHub: it
+// resolves or reopens the published thread and recomputes the check.
+type FindingsPublisher interface {
+	Republish(ctx context.Context, prID uint) error
+	SetFindingThread(ctx context.Context, prID uint, finding store.Finding, resolved bool) (bool, error)
+}
+
 // Deps groups every dependency the HTTP layer needs.
 type Deps struct {
 	Cfg        config.Config
@@ -43,6 +50,7 @@ type Deps struct {
 	Jobs       jobs.Enqueuer
 	Health     HealthEnqueuer
 	Reviews    ReviewRetrier
+	Findings   FindingsPublisher
 	SetupToken string
 	Static     http.Handler
 }
@@ -102,8 +110,11 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/teams/{id}/policy", s.getPolicy)
 			r.Put("/teams/{id}/policy", s.putPolicy)
 
-			// Retry is limited to admins and the lead of the repo's team.
+			// Retry and finding actions are limited to admins and the lead of
+			// the repo's team.
 			r.Post("/prs/{id}/retry", s.retryPR)
+			r.Post("/prs/{id}/findings/{findingID}/withdraw", s.withdrawFinding)
+			r.Post("/prs/{id}/findings/{findingID}/confirm", s.confirmFinding)
 
 			r.Group(func(r chi.Router) {
 				r.Use(auth.RequireAdmin)

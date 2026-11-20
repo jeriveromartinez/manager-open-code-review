@@ -11,6 +11,9 @@ const detail = ref<PRDetail | null>(null)
 const loading = ref(true)
 const retrying = ref(false)
 const error = ref<string | null>(null)
+const acting = ref<string | null>(null)
+const confirming = ref<{ finding: Finding; action: 'withdraw' | 'confirm' } | null>(null)
+const reason = ref('')
 
 const severityLabels: Record<string, string> = {
   blocker: 'Bloqueantes',
@@ -27,11 +30,18 @@ const groupedFindings = computed(() => {
     findings: [] as Finding[],
   }))
   for (const finding of detail.value?.findings ?? []) {
+    if (finding.status === 'withdrawn') continue
     const key = severityLabels[finding.severity] ? finding.severity : 'other'
     groups.find((group) => group.key === key)!.findings.push(finding)
   }
   return groups.filter((group) => group.findings.length > 0)
 })
+
+// Los descartados desde el panel o con /qa dismiss se apartan del recuento por
+// severidad pero siguen visibles para poder confirmarlos de vuelta.
+const withdrawnFindings = computed(() =>
+  (detail.value?.findings ?? []).filter((finding) => finding.status === 'withdrawn'),
+)
 
 // ListReviewRuns devuelve las ejecuciones en orden ascendente de id: la última
 // es la más reciente y la que aporta el SHA y la cobertura de la cabecera.
@@ -75,6 +85,63 @@ async function retry(): Promise<void> {
     error.value = 'No se pudo reintentar la revisión'
   } finally {
     retrying.value = false
+  }
+}
+
+function askWithdraw(finding: Finding): void {
+  confirming.value = { finding, action: 'withdraw' }
+  reason.value = ''
+}
+
+function askConfirm(finding: Finding): void {
+  confirming.value = { finding, action: 'confirm' }
+  reason.value = ''
+}
+
+function cancelAction(): void {
+  confirming.value = null
+  reason.value = ''
+}
+
+/**
+ * Aplica el descarte o la confirmación con estado optimista: el hallazgo cambia
+ * de estado en cuanto responde la API y, si falla, se restaura el detalle
+ * anterior para que la lista no mienta.
+ */
+async function applyAction(): Promise<void> {
+  const pending = confirming.value
+  if (!pending) return
+  const { finding, action } = pending
+  const previous = detail.value
+  acting.value = finding.id
+  error.value = null
+
+  if (detail.value) {
+    detail.value = {
+      ...detail.value,
+      findings: detail.value.findings.map((item) =>
+        item.id === finding.id
+          ? { ...item, status: action === 'withdraw' ? 'withdrawn' : 'open' }
+          : item,
+      ),
+    }
+  }
+  confirming.value = null
+
+  try {
+    if (action === 'withdraw') {
+      await api.withdrawFinding(prId.value, finding.id, reason.value.trim() || undefined)
+    } else {
+      await api.confirmFinding(prId.value, finding.id)
+    }
+    await load()
+  } catch {
+    detail.value = previous
+    error.value =
+      action === 'withdraw' ? 'No se pudo descartar el hallazgo' : 'No se pudo confirmar el hallazgo'
+  } finally {
+    acting.value = null
+    reason.value = ''
   }
 }
 
@@ -156,9 +223,76 @@ onMounted(() => {
             <p v-if="finding.suggestion" class="finding__suggestion">
               Sugerencia: {{ finding.suggestion }}
             </p>
+            <button
+              class="button button--ghost finding__action"
+              type="button"
+              data-withdraw
+              :data-finding-id="finding.id"
+              :disabled="acting === finding.id"
+              @click="askWithdraw(finding)"
+            >
+              Descartar
+            </button>
+          </article>
+        </div>
+
+        <div v-if="withdrawnFindings.length > 0" class="severity" data-withdrawn>
+          <h3 class="severity__title">Descartados ({{ withdrawnFindings.length }})</h3>
+          <article
+            v-for="finding in withdrawnFindings"
+            :key="finding.id"
+            class="finding finding--muted"
+            data-finding
+          >
+            <h4 class="finding__title">{{ finding.title }}</h4>
+            <p class="finding__location">
+              <code>{{ finding.path }}</code>:{{ finding.start_line }}–{{ finding.end_line }}
+            </p>
+            <button
+              class="button button--ghost finding__action"
+              type="button"
+              data-confirm
+              :data-finding-id="finding.id"
+              :disabled="acting === finding.id"
+              @click="askConfirm(finding)"
+            >
+              Confirmar
+            </button>
           </article>
         </div>
       </section>
+    </div>
+
+    <div v-if="confirming" class="dialog-backdrop" data-confirm-dialog>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="finding-action-title">
+        <h2 id="finding-action-title" class="dialog__title">
+          {{ confirming.action === 'withdraw' ? 'Descartar hallazgo' : 'Confirmar hallazgo' }}
+        </h2>
+        <p class="dialog__text">
+          <strong>{{ confirming.finding.title }}</strong>
+          <br />
+          <code>{{ confirming.finding.path }}</code
+          >:{{ confirming.finding.start_line }}–{{ confirming.finding.end_line }}
+        </p>
+        <label v-if="confirming.action === 'withdraw'" class="dialog__field">
+          <span>Motivo (queda en la auditoría)</span>
+          <input v-model="reason" type="text" data-finding-reason placeholder="Falso positivo" />
+        </label>
+        <div class="dialog__actions">
+          <button class="button button--ghost" type="button" data-cancel @click="cancelAction">
+            Cancelar
+          </button>
+          <button
+            class="button button--primary"
+            type="button"
+            data-apply
+            :disabled="acting !== null"
+            @click="applyAction"
+          >
+            {{ confirming.action === 'withdraw' ? 'Descartar' : 'Confirmar' }}
+          </button>
+        </div>
+      </div>
     </div>
   </section>
 </template>
@@ -297,5 +431,60 @@ onMounted(() => {
 
 .finding__suggestion {
   color: var(--text-muted);
+}
+
+.finding__action {
+  margin-top: var(--space-2);
+}
+
+.finding--muted {
+  opacity: 0.7;
+}
+
+/* El diálogo usa <div> en lugar de <dialog> para no depender del soporte de
+   showModal en el entorno de test, que solo monta el componente. */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: rgb(12 16 24 / 60%);
+}
+
+.dialog {
+  width: min(420px, 100%);
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.dialog__title {
+  margin: 0 0 var(--space-2);
+  font-size: 16px;
+}
+
+.dialog__text {
+  margin: 0 0 var(--space-3);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.dialog__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+  font-size: 13px;
+}
+
+.dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }
 </style>

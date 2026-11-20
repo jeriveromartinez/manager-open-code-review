@@ -168,6 +168,7 @@ func runServe() error {
 		Jobs:       enqueuer,
 		Health:     enqueuer,
 		Reviews:    trigger,
+		Findings:   publisherWorker,
 		SetupToken: setupToken,
 		Static:     web.Handler(),
 	})

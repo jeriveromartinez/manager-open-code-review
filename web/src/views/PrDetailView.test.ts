@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   api: {
     prDetail: vi.fn(),
     retryPR: vi.fn(),
+    withdrawFinding: vi.fn(),
+    confirmFinding: vi.fn(),
   },
 }))
 
@@ -111,6 +113,8 @@ describe('PrDetailView', () => {
     vi.clearAllMocks()
     mocks.api.prDetail.mockResolvedValue(detail)
     mocks.api.retryPR.mockResolvedValue({ status: 'queued' })
+    mocks.api.withdrawFinding.mockResolvedValue({ ...detail.findings[0], status: 'withdrawn' })
+    mocks.api.confirmFinding.mockResolvedValue({ ...detail.findings[0], status: 'open' })
   })
 
   it('shows findings grouped by severity and retries the review', async () => {
@@ -163,6 +167,75 @@ describe('PrDetailView', () => {
     expect(wrapper.get('[data-run]').text()).toContain('timeout contacting provider')
     expect(wrapper.get('[data-coverage-reviewed]').text()).toContain('2')
     expect(wrapper.get('[data-coverage-skipped]').text()).toContain('1')
+
+    wrapper.unmount()
+  })
+
+  it('withdraws a finding with a reason after confirming', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    await wrapper.get('[data-withdraw][data-finding-id="f1"]').trigger('click')
+    expect(wrapper.find('[data-confirm-dialog]').exists()).toBe(true)
+    expect(mocks.api.withdrawFinding).not.toHaveBeenCalled()
+
+    await wrapper.get('[data-finding-reason]').setValue('falso positivo')
+    await wrapper.get('[data-apply]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.withdrawFinding).toHaveBeenCalledWith(42, 'f1', 'falso positivo')
+    expect(wrapper.find('[data-confirm-dialog]').exists()).toBe(false)
+    expect(mocks.api.prDetail).toHaveBeenCalledTimes(2)
+
+    wrapper.unmount()
+  })
+
+  it('does nothing when the confirmation is cancelled', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    await wrapper.get('[data-withdraw][data-finding-id="f1"]').trigger('click')
+    await wrapper.get('[data-cancel]').trigger('click')
+
+    expect(wrapper.find('[data-confirm-dialog]').exists()).toBe(false)
+    expect(mocks.api.withdrawFinding).not.toHaveBeenCalled()
+
+    wrapper.unmount()
+  })
+
+  it('lists withdrawn findings separately and confirms them', async () => {
+    const withdrawn = { ...detail.findings[0], status: 'withdrawn' }
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      findings: [withdrawn, ...detail.findings.slice(1)],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.find('[data-severity="blocker"]').exists()).toBe(false)
+    expect(wrapper.get('[data-withdrawn]').text()).toContain('Fallo bloqueante')
+
+    await wrapper.get('[data-confirm][data-finding-id="f1"]').trigger('click')
+    await wrapper.get('[data-apply]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.confirmFinding).toHaveBeenCalledWith(42, 'f1')
+
+    wrapper.unmount()
+  })
+
+  it('restores the finding when the action fails', async () => {
+    mocks.api.withdrawFinding.mockRejectedValue(new Error('boom'))
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    await wrapper.get('[data-withdraw][data-finding-id="f1"]').trigger('click')
+    await wrapper.get('[data-apply]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('No se pudo descartar el hallazgo')
+    expect(wrapper.get('[data-severity="blocker"]').text()).toContain('Fallo bloqueante')
 
     wrapper.unmount()
   })

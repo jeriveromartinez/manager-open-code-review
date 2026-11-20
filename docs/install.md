@@ -94,6 +94,17 @@ En un PR puedes escribir un comentario cuyo **primer** renglón sea un comando:
 
 Solo un **admin** o el **lead del equipo** al que pertenece el repositorio pueden ejecutar comandos. El rol se resuelve con el usuario que envió el comentario contra los datos de la instalación; el comando se ignora con una respuesta corta cuando el autor no tiene permiso. Cada cambio queda en la auditoría con el login del autor.
 
+## Descartar y confirmar hallazgos desde el panel
+
+El detalle del PR permite **descartar** un hallazgo abierto (con un motivo opcional que queda en la auditoría) y **confirmar** uno descartado. Es el camino documentado en modo polling, y produce exactamente el mismo estado que `/qa dismiss` y `/qa confirm`:
+
+- El hallazgo pasa a `withdrawn` o vuelve a `open`.
+- Se resuelve o reabre su hilo en GitHub cuando el hallazgo llegó a publicarse.
+- Se recalcula `qa_status` y se republica el check del SHA actual.
+- Se escribe una fila en la auditoría con el login del autor y el motivo.
+
+Solo un **admin** o el **lead del equipo** pueden usar estas acciones; el panel muestra el error y restaura la lista si la llamada falla.
+
 ## Revisión de un pull request
 
 Al abrir o actualizar un PR elegible (`opened`, `synchronize`, `reopened`, `ready_for_review`) se crea un run para su SHA. Si llega un push nuevo, el run anterior queda `superseded` y se cancela su check.

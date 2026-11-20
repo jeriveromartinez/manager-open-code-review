@@ -275,6 +275,15 @@ export const api = {
   prDetail: (id: number) => request<PRDetail>(`/api/prs/${id}`),
   retryPR: (id: number) =>
     request<{ status: string }>(`/api/prs/${id}/retry`, { method: 'POST' }),
+  withdrawFinding: (prId: number, findingId: string, reason?: string) =>
+    request<Finding>(`/api/prs/${prId}/findings/${encodeURIComponent(findingId)}/withdraw`, {
+      method: 'POST',
+      body: reason ? { reason } : undefined,
+    }),
+  confirmFinding: (prId: number, findingId: string) =>
+    request<Finding>(`/api/prs/${prId}/findings/${encodeURIComponent(findingId)}/confirm`, {
+      method: 'POST',
+    }),
   llmProfiles: () => request<LLMProfile[]>('/api/llm-profiles'),
   createLLMProfile: (body: LLMProfileInput) =>
     request<LLMProfile>('/api/llm-profiles', { method: 'POST', body }),
