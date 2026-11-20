@@ -30,7 +30,7 @@ func legacyEnvSet(getenv func(string) string) []string {
 func loadSettings(ctx context.Context, st *store.Store, cfg *config.Config) error {
 	values, err := st.Settings(ctx)
 	if err != nil {
-		return fmt.Errorf("load settings: %w", err)
+		return fmt.Errorf("read app settings: %w", err)
 	}
 	if err := settings.Apply(cfg, values); err != nil {
 		return fmt.Errorf("apply stored settings: %w", err)
