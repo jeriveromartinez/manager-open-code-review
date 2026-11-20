@@ -295,10 +295,27 @@ func TestApplyRejectsIncoherentPairs(t *testing.T) {
 		t.Fatalf("timeout 60m with stale 45m = %v, want KeyError on %s", err, KeyReviewStaleAfter)
 	}
 
+	// Equality is the whole point of the rule: the watchdog would kill a run at
+	// the same instant the review's own timeout expires.
+	cfg = config.Default()
+	err = Apply(&cfg, map[string]string{KeyReviewTimeout: "45m"})
+	if !errors.As(err, &keyErr) || keyErr.Key != KeyReviewStaleAfter {
+		t.Fatalf("timeout 45m with stale 45m = %v, want KeyError on %s", err, KeyReviewStaleAfter)
+	}
+
 	cfg = config.Default()
 	err = Apply(&cfg, map[string]string{KeyMonitorRenotifyAfter: "30s", KeyMonitorInterval: "1m"})
 	if !errors.As(err, &keyErr) || keyErr.Key != KeyMonitorRenotifyAfter {
 		t.Fatalf("renotify < interval = %v, want KeyError on %s", err, KeyMonitorRenotifyAfter)
+	}
+}
+
+func TestApplyRejectsUnknownKeys(t *testing.T) {
+	cfg := config.Default()
+	err := Apply(&cfg, map[string]string{"review_timout": "30m"})
+	var keyErr *KeyError
+	if !errors.As(err, &keyErr) || keyErr.Key != "review_timout" {
+		t.Fatalf("Apply with a typo = %v, want KeyError naming the key", err)
 	}
 }
 
@@ -359,30 +376,72 @@ func TestApplySetsEveryField(t *testing.T) {
 }
 
 func TestDefaultsAndFieldsAgree(t *testing.T) {
-	defaults := Defaults()
+	valid := map[string]bool{"": true, "app": true, "worker": true, "monitor": true}
 	fields := Fields()
-	if len(defaults) != len(fields) {
-		t.Fatalf("Defaults() has %d keys, Fields() has %d", len(defaults), len(fields))
+	if len(fields) != 23 {
+		t.Fatalf("Fields() has %d keys, want 23", len(fields))
 	}
+	seen := map[string]bool{}
 	for _, field := range fields {
-		if _, ok := defaults[field.Key]; !ok {
-			t.Errorf("field %q missing from Defaults()", field.Key)
+		if seen[field.Key] {
+			t.Errorf("duplicate key %q", field.Key)
 		}
-		if field.Restart != "" && field.Restart != "app" && field.Restart != "worker" {
+		seen[field.Key] = true
+		if !valid[field.Restart] {
 			t.Errorf("field %q has invalid restart %q", field.Key, field.Restart)
 		}
 	}
 }
 
+// TestDefaultsMatchConfigDefault is the only thing that keeps the panel's
+// defaults and the process's defaults from drifting: Fields() cannot be derived
+// from config.Default() without importing every consumer, so a mistake in one
+// place has to fail here instead of silently changing behaviour on an install
+// that never saved anything.
+func TestDefaultsMatchConfigDefault(t *testing.T) {
+	stored := Defaults()
+	effective := ToMap(config.Default())
+	for key, want := range effective {
+		raw, ok := stored[key]
+		if !ok {
+			t.Errorf("%q is in config.Default() but not in Fields()", key)
+			continue
+		}
+		if !equalSetting(raw, want) {
+			t.Errorf("%q default = %q, config.Default() uses %q", key, raw, want)
+		}
+	}
+	for key := range stored {
+		if _, ok := effective[key]; !ok {
+			t.Errorf("%q is in Fields() but not in config.Default()", key)
+		}
+	}
+}
+
+// equalSetting compares durations and integers by value, not by spelling:
+// "20m" and "20m0s" are the same setting, and both forms reach the panel.
+func equalSetting(a, b string) bool {
+	if d, err := time.ParseDuration(a); err == nil {
+		if other, err := time.ParseDuration(b); err == nil {
+			return d == other
+		}
+	}
+	if n, err := strconv.Atoi(a); err == nil {
+		if other, err := strconv.Atoi(b); err == nil {
+			return n == other
+		}
+	}
+	return a == b
+}
+
 func TestToMapRoundTripsThroughApply(t *testing.T) {
-	cfg := config.Default()
-	values := ToMap(cfg)
+	values := ToMap(config.Default())
 	other := config.Config{}
 	if err := Apply(&other, values); err != nil {
 		t.Fatalf("Apply(ToMap(default)): %v", err)
 	}
-	if ToMap(other)["review_timeout"] != "20m0s" && ToMap(other)["review_timeout"] != "20m" {
-		t.Errorf("ToMap round trip lost review_timeout: %q", ToMap(other)["review_timeout"])
+	if got, want := ToMap(other)["review_timeout"], values["review_timeout"]; got != want {
+		t.Errorf("ToMap round trip changed review_timeout from %q to %q", want, got)
 	}
 }
 ```
@@ -400,7 +459,7 @@ Expected: FAIL, `no non-test Go files in .../internal/settings`.
 En `internal/config/config.go`, añadir el campo al struct:
 
 ```go
-	BackupRetention      int           // backup_retention, default 7 (lo lee deploy/backup.sh)
+	BackupRetention      int           // backup_retention, default 7; deploy/backup.sh lee la BD (Task 7)
 ```
 
 Extraer los defaults a `Default()` y usarlo desde `Load`:
@@ -486,11 +545,13 @@ const (
 
 // Field tells the panel how to group a key and what has to restart for a new
 // value to take effect. The UI renders explicit inputs; this is metadata only.
+// Restart names the process that reads the key at startup: the panel is
+// useless if it tells an administrator to restart something that never read it.
 type Field struct {
 	Key     string `json:"key"`
 	Group   Group  `json:"group"`
 	Default string `json:"default"`
-	Restart string `json:"restart"` // "", "app" o "worker"
+	Restart string `json:"restart"` // "", "app", "worker" or "monitor"
 	Secret  bool   `json:"secret"`
 }
 
@@ -514,11 +575,11 @@ func Fields() []Field {
 		{KeyOpencodeBin, GroupWorker, "opencode", "worker", false},
 		{KeyWorkerHealthAddr, GroupWorker, ":9090", "worker", false},
 		{KeyWorkerQueueStale, GroupWorker, "10m", "worker", false},
-		{KeyWorkerHealthURL, GroupAlerts, "http://worker:9090", "worker", false},
-		{KeyMonitorInterval, GroupAlerts, "1m", "worker", false},
-		{KeyMonitorRenotifyAfter, GroupAlerts, "30m", "worker", false},
-		{KeyAlertWebhookURL, GroupAlerts, "", "worker", true},
-		{KeyBackupRetention, GroupBackups, "7", "worker", false},
+		{KeyWorkerHealthURL, GroupAlerts, "http://worker:9090", "monitor", false},
+		{KeyMonitorInterval, GroupAlerts, "1m", "monitor", false},
+		{KeyMonitorRenotifyAfter, GroupAlerts, "30m", "monitor", false},
+		{KeyAlertWebhookURL, GroupAlerts, "", "monitor", true},
+		{KeyBackupRetention, GroupBackups, "7", "", false},
 	}
 }
 
@@ -586,7 +647,9 @@ type KeyError struct {
 func (e *KeyError) Error() string { return e.Key + ": " + e.Msg }
 
 // Apply validates and writes the given keys onto cfg. Keys absent from values
-// keep whatever cfg already had, which is how a partial save works.
+// keep whatever cfg already had, which is how a partial save works. A rejected
+// value leaves cfg partially written, so callers validate on a copy and only
+// publish it once Apply returns nil.
 func Apply(cfg *config.Config, values map[string]string) error {
 	for key, raw := range values {
 		if err := applyOne(cfg, key, raw); err != nil {
@@ -1328,7 +1391,7 @@ vi.mock('../api', () => ({ api: { settings: vi.fn(), saveSettings: vi.fn() } }))
 const fields = [
   { key: 'review_timeout', group: 'review', default: '20m', restart: 'worker', secret: false },
   { key: 'ocr_bin', group: 'worker', default: 'ocr', restart: 'worker', secret: false },
-  { key: 'alert_webhook_url', group: 'alerts', default: '', restart: 'worker', secret: true },
+  { key: 'alert_webhook_url', group: 'alerts', default: '', restart: 'monitor', secret: true },
 ]
 
 beforeEach(() => {
@@ -1400,7 +1463,7 @@ export interface SettingsField {
   key: string
   group: 'general' | 'review' | 'worker' | 'alerts' | 'backups'
   default: string
-  restart: '' | 'app' | 'worker'
+  restart: '' | 'app' | 'worker' | 'monitor'
   secret: boolean
 }
 
@@ -1449,6 +1512,7 @@ function restartLabel(group: SettingsField['group']): string {
   const targets = new Set(fieldsOf(group).map((field) => field.restart))
   if (targets.has('app')) return 'requiere reiniciar app'
   if (targets.has('worker')) return 'requiere reiniciar worker'
+  if (targets.has('monitor')) return 'requiere reiniciar monitor'
   return ''
 }
 
