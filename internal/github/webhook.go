@@ -46,6 +46,7 @@ func VerifySignature(secret, body []byte, header string) bool {
 // work; the webhook boundary only applies the exclusion rules.
 type ReviewStarter interface {
 	OnPullRequest(ctx context.Context, prID uint) error
+	OnChecksUpdated(ctx context.Context, prID uint) error
 	Retry(ctx context.Context, prID uint) error
 }
 
@@ -344,8 +345,8 @@ func (h *WebhookHandler) handleCheckEvent(ctx context.Context, w http.ResponseWr
 	}
 
 	// The gate is re-evaluated even when the counters did not move: a review
-	// blocked on a red head must be released by a later reconciliation-free
-	// path, and OnPullRequest is what deduplicates it against existing runs.
+	// blocked on a red head must be released by the delivery that completes the
+	// checks, and OnChecksUpdated is what deduplicates it against existing runs.
 	if changed && !pr.IsFork {
 		ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)}
 		if err := h.Events.Publish(ctx, ev); err != nil {
@@ -354,7 +355,7 @@ func (h *WebhookHandler) handleCheckEvent(ctx context.Context, w http.ResponseWr
 		}
 	}
 	if !pr.Draft && !pr.IsFork && h.Reviews != nil {
-		if err := h.Reviews.OnPullRequest(ctx, pr.ID); err != nil {
+		if err := h.Reviews.OnChecksUpdated(ctx, pr.ID); err != nil {
 			h.serverError(w)
 			return
 		}

@@ -117,6 +117,40 @@ func (f *gateFixture) runCount(prID uint) int {
 	return len(n)
 }
 
+// With gating off, a CI delivery refreshes the counters but must not become a
+// second review trigger: the default behaviour of existing deployments stays
+// exactly as it was.
+func TestWebhookCheckEventDoesNotTriggerUngatedReview(t *testing.T) {
+	api := newFakeChecksGitHub(t)
+	f := newGateFixture(t, api)
+
+	f.seedRepoWithTeam()
+	pr := f.seedOpenPR()
+	profile, err := f.st.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "ungated", Provider: "openai", Model: "gpt-4o-mini",
+		APIKeyEnc: "sealed", Enabled: true, Concurrency: 1, HealthStatus: store.HealthUnknown,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+	if _, err := f.st.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: f.repoTeam(), LLMProfileID: profile.ID,
+	}); err != nil {
+		t.Fatalf("SaveQAPolicy: %v", err)
+	}
+
+	api.setRuns("aaa111", "success", "success")
+	body := []byte(`{"action":"completed","repository":{"id":501},"check_run":{"head_sha":"aaa111","status":"completed","conclusion":"success"}}`)
+	assertStatus(t, f.deliverBody("check_run", body, signWebhook(body)), http.StatusAccepted)
+
+	if got := f.runCount(pr.ID); got != 0 {
+		t.Fatalf("runs = %d, want none from a check event with gating off", got)
+	}
+	if got := f.validationsOf(t, pr.ID, "aaa111"); got != (store.PRValidations{Passed: 2, Total: 2}) {
+		t.Errorf("validations = %+v, want 2/2", got)
+	}
+}
+
 func TestWebhookCIGateBlocksThenReleasesReview(t *testing.T) {
 	api := newFakeChecksGitHub(t)
 	f := newGateFixture(t, api)

@@ -203,8 +203,8 @@ func TestWebhookCheckRunRefreshesValidations(t *testing.T) {
 	if got := f.validationsOf(t, pr.ID, "aaa111"); got != want {
 		t.Fatalf("stored validations = %+v, want %+v", got, want)
 	}
-	if got := f.reviews.snapshot(); len(got) != 1 || got[0] != pr.ID {
-		t.Fatalf("OnPullRequest calls = %v, want [%d]", got, pr.ID)
+	if got := f.reviews.checksSnapshot(); len(got) != 1 || got[0] != pr.ID {
+		t.Fatalf("OnChecksUpdated calls = %v, want [%d]", got, pr.ID)
 	}
 	if got := f.pub.snapshot(); len(got) != 1 {
 		t.Fatalf("published events = %v, want one pr.updated", got)
@@ -294,8 +294,8 @@ func TestWebhookCheckEventsUnknownTargetIgnored(t *testing.T) {
 		})
 	}
 
-	if got := f.reviews.snapshot(); len(got) != 0 {
-		t.Fatalf("OnPullRequest calls = %v, want none", got)
+	if got := f.reviews.checksSnapshot(); len(got) != 0 {
+		t.Fatalf("OnChecksUpdated calls = %v, want none", got)
 	}
 	if checks, statuses := api.calls(); checks != 0 || statuses != 0 {
 		t.Fatalf("GitHub calls = %d checks / %d statuses, want none", checks, statuses)
@@ -317,7 +317,7 @@ func TestWebhookCheckRunForDisabledRepoIgnored(t *testing.T) {
 
 	body := []byte(`{"action":"completed","repository":{"id":501},"check_run":{"head_sha":"aaa111"}}`)
 	assertStatus(t, f.deliverBody("check_run", body, signWebhook(body)), http.StatusNoContent)
-	if got := f.reviews.snapshot(); len(got) != 0 {
-		t.Fatalf("OnPullRequest calls = %v, want none", got)
+	if got := f.reviews.checksSnapshot(); len(got) != 0 {
+		t.Fatalf("OnChecksUpdated calls = %v, want none", got)
 	}
 }

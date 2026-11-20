@@ -39,6 +39,25 @@ func (t *Trigger) OnPullRequest(ctx context.Context, prID uint) error {
 	return err
 }
 
+// OnChecksUpdated re-evaluates the CI gate of a pull request whose check state
+// changed on GitHub. Only teams that gate reviews on CI are acted on: for
+// everyone else a check delivery must not become a second review trigger, so
+// the gate stays exactly where it was.
+func (t *Trigger) OnChecksUpdated(ctx context.Context, prID uint) error {
+	cfg, err := t.Store.ReviewConfigForPR(ctx, prID)
+	if errors.Is(err, store.ErrNoReviewConfig) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load review configuration of pull request %d: %w", prID, err)
+	}
+	if !cfg.Policy.RequireGreenCI {
+		return nil
+	}
+	_, err = t.enqueue(ctx, prID, "webhook", false)
+	return err
+}
+
 // Retry queues a fresh run even when the current SHA already has a terminal
 // run. Active runs of other SHAs are still superseded.
 func (t *Trigger) Retry(ctx context.Context, prID uint) error {
