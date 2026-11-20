@@ -270,6 +270,7 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 		{"garbage int", KeyFetchDepthMax, "muchos", KeyFetchDepthMax},
 		{"bad bool", KeyWebhooksEnabled, "si", KeyWebhooksEnabled},
 		{"relative url", KeyPublicURL, "/solo-ruta", KeyPublicURL},
+		{"url trimmed to empty", KeyGitBaseURL, "/", KeyGitBaseURL},
 		{"empty bin", KeyOCRBin, "  ", KeyOCRBin},
 	}
 	for _, tc := range cases {
@@ -316,6 +317,17 @@ func TestApplyRejectsUnknownKeys(t *testing.T) {
 	var keyErr *KeyError
 	if !errors.As(err, &keyErr) || keyErr.Key != "review_timout" {
 		t.Fatalf("Apply with a typo = %v, want KeyError naming the key", err)
+	}
+}
+
+func TestApplyClearsTheOptionalWebhook(t *testing.T) {
+	cfg := config.Default()
+	cfg.AlertWebhookURL = "https://hooks.example.com/old"
+	if err := Apply(&cfg, map[string]string{KeyAlertWebhookURL: "  "}); err != nil {
+		t.Fatalf("clearing alert_webhook_url = %v, want it accepted: an empty webhook means log only", err)
+	}
+	if cfg.AlertWebhookURL != "" {
+		t.Errorf("AlertWebhookURL = %q, want empty", cfg.AlertWebhookURL)
 	}
 }
 
@@ -943,7 +955,7 @@ func Load(getenv func(string) string) (Config, error) {
 }
 ```
 
-(`decodeKey` es el helper que hoy valida base64 y que decodifique exactamente 32 bytes; extraerlo del bloque actual sin cambiar su comportamiento. `LegacyEnvKeys` tiene 23 entradas: las 23 claves de `app_settings`.)
+(`decodeKey` es el helper que hoy valida base64 y que decodifica exactamente 32 bytes; extraerlo del bloque actual sin cambiar su comportamiento. `LegacyEnvKeys` tiene 22 entradas: las 23 claves de `app_settings` menos `public_url`, que sigue leyéndose hasta la Task 8.)
 
 - [ ] **Step 4: Leave `LoadMonitor` alone for now**
 
