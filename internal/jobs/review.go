@@ -169,14 +169,24 @@ func NewReviewClient(pool *pgxpool.Pool, runner *review.Runner, checker *review.
 		))
 	}
 
-	// River's default job timeout is one minute, far below the review budget
-	// (QA_REVIEW_TIMEOUT, 20m by default). Without this the job context dies
-	// before the LLM finishes and the run stays "running" after a retry.
+	client, err := river.NewClient(riverpgxv5.New(pool), reviewClientConfig(runner, workers, queues, periodic))
+	if err != nil {
+		return nil, fmt.Errorf("create River review client: %w", err)
+	}
+	return client, nil
+}
+
+// reviewClientConfig is separate from NewReviewClient so a test can assert the
+// job timeout River actually receives. River's one-minute default is far below
+// the review budget (QA_REVIEW_TIMEOUT, 20m by default): without this the job
+// context died before the LLM finished and the run stayed "running" after a
+// retry.
+func reviewClientConfig(runner *review.Runner, workers *river.Workers, queues map[string]river.QueueConfig, periodic []*river.PeriodicJob) *river.Config {
 	jobTimeout := 30 * time.Minute
 	if runner != nil && runner.Cfg.Timeout > 0 {
 		jobTimeout = runner.Cfg.Timeout + 5*time.Minute
 	}
-	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
+	return &river.Config{
 		Queues:       queues,
 		Workers:      workers,
 		JobTimeout:   jobTimeout,
@@ -184,9 +194,5 @@ func NewReviewClient(pool *pgxpool.Pool, runner *review.Runner, checker *review.
 		// The review process enqueues publish jobs that only the control
 		// process registers. Without this, River rejects those inserts.
 		SkipUnknownJobCheck: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create River review client: %w", err)
 	}
-	return client, nil
 }
