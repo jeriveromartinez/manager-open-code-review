@@ -78,9 +78,10 @@ func (p *recordingPublisher) snapshot() []events.Event {
 }
 
 type recordingReviews struct {
-	mu  sync.Mutex
-	ids []uint
-	err error
+	mu      sync.Mutex
+	ids     []uint
+	retries []uint
+	err     error
 }
 
 func (r *recordingReviews) OnPullRequest(_ context.Context, prID uint) error {
@@ -90,10 +91,48 @@ func (r *recordingReviews) OnPullRequest(_ context.Context, prID uint) error {
 	return r.err
 }
 
+func (r *recordingReviews) Retry(_ context.Context, prID uint) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.retries = append(r.retries, prID)
+	return r.err
+}
+
 func (r *recordingReviews) snapshot() []uint {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]uint(nil), r.ids...)
+}
+
+func (r *recordingReviews) retrySnapshot() []uint {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint(nil), r.retries...)
+}
+
+type recordingComments struct {
+	mu     sync.Mutex
+	repos  []string
+	nums   []int
+	bodies []string
+	err    error
+}
+
+func (c *recordingComments) CommentOnPullRequest(_ context.Context, repoFullName string, number int, body string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.repos = append(c.repos, repoFullName)
+	c.nums = append(c.nums, number)
+	c.bodies = append(c.bodies, body)
+	return c.err
+}
+
+func (c *recordingComments) snapshot() ([]string, []int, []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.repos...),
+		append([]int(nil), c.nums...),
+		append([]string(nil), c.bodies...)
 }
 
 type recordingReconciler struct {
@@ -144,6 +183,7 @@ type webhookFixture struct {
 	pub      *recordingPublisher
 	reviews  *recordingReviews
 	findings *recordingReconciler
+	comments *recordingComments
 }
 
 func newWebhookFixture(t *testing.T) *webhookFixture {
@@ -154,6 +194,7 @@ func newWebhookFixture(t *testing.T) *webhookFixture {
 	pub := &recordingPublisher{}
 	reviews := &recordingReviews{}
 	findings := &recordingReconciler{}
+	comments := &recordingComments{}
 	h := &ghapp.WebhookHandler{
 		Store: st,
 		Apps: fakeAppProvider{app: &ghapp.App{
@@ -163,11 +204,12 @@ func newWebhookFixture(t *testing.T) *webhookFixture {
 		Jobs:     jobs,
 		Reviews:  reviews,
 		Findings: findings,
+		Comments: comments,
 	}
 	return &webhookFixture{
 		t: t, ctx: context.Background(), st: st,
 		handler: h, jobs: jobs, pub: pub, reviews: reviews,
-		findings: findings,
+		findings: findings, comments: comments,
 	}
 }
 
