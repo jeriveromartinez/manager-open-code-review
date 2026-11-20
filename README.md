@@ -46,7 +46,9 @@ Los backups programados y la restauración verificada están en [docs/backup.md]
 | `QA_GITHUB_API_URL` | Base de la API de GitHub | `https://api.github.com` |
 | `POSTGRES_PASSWORD` | Contraseña del contenedor `postgres` | — |
 
-Ajustes opcionales del worker: `QA_REVIEW_CONCURRENCY` (`2`), `QA_REVIEW_AGENT_STEPS` (`40`, iteraciones del agente por pasada), `QA_REVIEW_TIMEOUT` (`20m`, presupuesto total del run), `QA_REVIEW_STALE_AFTER` (`45m`), `QA_WORKER_HEALTH_ADDR` (`:9090`), `QA_WORKER_QUEUE_STALE_AFTER` (`10m`), `QA_WORKSPACE_DIR` (`/tmp/qa`), `QA_OCR_BIN` (`ocr`), `QA_OPENCODE_BIN` (`opencode`), `QA_FETCH_DEPTH_MAX` (`500`) y `QA_GIT_BASE_URL` (`https://github.com`).
+Ajustes opcionales del worker: `QA_REVIEW_CONCURRENCY` (`2`), `QA_REVIEW_AGENT_STEPS` (`40`, iteraciones del agente por pasada), `QA_REVIEW_TIMEOUT` (`20m`, presupuesto total del run), `QA_REVIEW_STALE_AFTER` (`45m`), `QA_LLM_HEALTH_INTERVAL` (`30m`, cada cuánto se comprueba la salud de los perfiles LLM caducados), `QA_WORKER_HEALTH_ADDR` (`:9090`), `QA_WORKER_QUEUE_STALE_AFTER` (`10m`), `QA_WORKSPACE_DIR` (`/tmp/qa`), `QA_OCR_BIN` (`ocr`), `QA_OPENCODE_BIN` (`opencode`), `QA_FETCH_DEPTH_MAX` (`500`) y `QA_GIT_BASE_URL` (`https://github.com`).
+
+`QA_LLM_HEALTH_INTERVAL` es la cadencia del barrido de salud de los perfiles LLM: al arrancar el worker y cada intervalo, encola una comprobación para cada perfil activo cuyo último resultado supera dos veces ese intervalo, y para los que nunca se comprobaron. Un perfil en error espera `15m` antes de reintentarse, para no gastar cuota en una clave rota. `GET /api/llm-profiles` devuelve `health_age_seconds` y `health_stale` (marcado con el mismo umbral de dos intervalos), de modo que un barrido detenido se ve en el panel en lugar de parecer un perfil sano.
 
 `QA_REVIEW_STALE_AFTER` es el umbral del vigilante de runs huérfanos: al arrancar y cada 5 minutos, los runs en `running` cuya hora de inicio supera ese umbral pasan a `failed` con código `interrupted`, se publica el check como `action_required` y el PR queda `inconclusive`. Debe superar `QA_REVIEW_TIMEOUT` (más el margen de reintentos), o matará revisiones sanas.
 

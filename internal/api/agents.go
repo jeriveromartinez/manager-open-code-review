@@ -29,8 +29,12 @@ type llmProfileResponse struct {
 	HealthStatus    string  `json:"health_status"`
 	HealthCheckedAt *string `json:"health_checked_at"`
 	HealthError     string  `json:"health_error"`
-	CreatedAt       string  `json:"created_at"`
-	UpdatedAt       string  `json:"updated_at"`
+	// HealthAgeSeconds is how old the verdict is; HealthStale says the worker
+	// stopped refreshing it, so "healthy" is not mistaken for current.
+	HealthAgeSeconds int    `json:"health_age_seconds"`
+	HealthStale      bool   `json:"health_stale"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
 }
 
 func formatTimePtr(v *time.Time) *string {
@@ -41,24 +45,42 @@ func formatTimePtr(v *time.Time) *string {
 	return &formatted
 }
 
-func llmProfileDTO(p store.LLMProfile) llmProfileResponse {
+func llmProfileDTO(p store.LLMProfile, health store.LLMProfileHealth) llmProfileResponse {
 	return llmProfileResponse{
-		ID:              p.ID,
-		Name:            p.Name,
-		Provider:        p.Provider,
-		Model:           p.Model,
-		Variant:         p.Variant,
-		Mode:            p.Mode,
-		BaseURL:         p.BaseURL,
-		Concurrency:     p.Concurrency,
-		Enabled:         p.Enabled,
-		APIKeySet:       p.APIKeyEnc != "",
-		HealthStatus:    p.HealthStatus,
-		HealthCheckedAt: formatTimePtr(p.HealthCheckedAt),
-		HealthError:     p.HealthError,
-		CreatedAt:       p.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:       p.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:               p.ID,
+		Name:             p.Name,
+		Provider:         p.Provider,
+		Model:            p.Model,
+		Variant:          p.Variant,
+		Mode:             p.Mode,
+		BaseURL:          p.BaseURL,
+		Concurrency:      p.Concurrency,
+		Enabled:          p.Enabled,
+		APIKeySet:        p.APIKeyEnc != "",
+		HealthStatus:     p.HealthStatus,
+		HealthCheckedAt:  formatTimePtr(p.HealthCheckedAt),
+		HealthError:      p.HealthError,
+		HealthAgeSeconds: health.AgeSeconds,
+		HealthStale:      health.Stale,
+		CreatedAt:        p.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:        p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
+}
+
+// llmProfileDTOs pairs every profile with its verdict age. The staleness window
+// is twice QA_LLM_HEALTH_INTERVAL: one delayed sweep must not mark all profiles
+// stale, while a stopped sweeper still shows up within one cycle.
+func llmProfileDTOs(profiles []store.LLMProfile, now time.Time, staleAfter time.Duration) []llmProfileResponse {
+	health := store.ProfileHealthSince(profiles, now, staleAfter)
+	result := make([]llmProfileResponse, 0, len(profiles))
+	for i, profile := range profiles {
+		result = append(result, llmProfileDTO(profile, health[i]))
+	}
+	return result
+}
+
+func (s *server) healthOf(p store.LLMProfile) store.LLMProfileHealth {
+	return store.ProfileHealthSince([]store.LLMProfile{p}, time.Now(), s.Cfg.LLMHealthStaleAfter())[0]
 }
 
 func parseUintID(w http.ResponseWriter, r *http.Request) (uint, bool) {
@@ -85,10 +107,7 @@ func (s *server) llmProfiles(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "list llm profiles")
 		return
 	}
-	result := make([]llmProfileResponse, 0, len(profiles))
-	for _, profile := range profiles {
-		result = append(result, llmProfileDTO(profile))
-	}
+	result := llmProfileDTOs(profiles, time.Now(), s.Cfg.LLMHealthStaleAfter())
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -151,7 +170,7 @@ func (s *server) createLLMProfile(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "create llm profile")
 		return
 	}
-	writeJSON(w, http.StatusCreated, llmProfileDTO(created))
+	writeJSON(w, http.StatusCreated, llmProfileDTO(created, s.healthOf(created)))
 }
 
 // patchLLMProfile applies only the keys present in the body. An absent or
@@ -267,7 +286,7 @@ func (s *server) patchLLMProfile(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "load llm profile")
 		return
 	}
-	writeJSON(w, http.StatusOK, llmProfileDTO(updated))
+	writeJSON(w, http.StatusOK, llmProfileDTO(updated, s.healthOf(updated)))
 }
 
 func (s *server) deleteLLMProfile(w http.ResponseWriter, r *http.Request) {
@@ -383,6 +402,13 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	confirmed := false
+	if value, present := raw["confirm_unhealthy_profile"]; present {
+		if err := json.Unmarshal(value, &confirmed); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid confirm_unhealthy_profile")
+			return
+		}
+	}
 	policy := store.QAPolicy{TeamID: teamID}
 	if value, present := raw["llm_profile_id"]; present {
 		if err := json.Unmarshal(value, &policy.LLMProfileID); err != nil {
@@ -432,6 +458,25 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusBadRequest, "invalid "+field.key)
 				return
 			}
+		}
+	}
+
+	if !confirmed && policy.LLMProfileID != 0 {
+		profile, err := s.Store.LLMProfile(r.Context(), policy.LLMProfileID)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid llm_profile_id")
+			return
+		}
+		if blocks, reason := store.PolicyProfileBlocks(profile); blocks {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":             "unhealthy_profile",
+				"profile_id":        profile.ID,
+				"reason":            reason,
+				"health_status":     profile.HealthStatus,
+				"health_checked_at": profile.HealthCheckedAt,
+				"hint":              "reenvía con confirm_unhealthy_profile=true para guardar igualmente",
+			})
+			return
 		}
 	}
 

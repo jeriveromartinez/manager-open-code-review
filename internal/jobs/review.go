@@ -22,6 +22,11 @@ const (
 	// from delaying the recovery of orphaned runs for long.
 	watchdogQueue    = "review_watchdog"
 	watchdogInterval = 5 * time.Minute
+	// The sweep feeds the llm_health queue, so it runs on its own queue: it must
+	// not hold the only health worker while it looks up the stale profiles.
+	llmSweepQueue = "llm_health_sweep"
+	// Fallback when the caller does not pass a health interval.
+	defaultHealthSweepInterval = 30 * time.Minute
 )
 
 // ReviewRunner executes one queued review run.
@@ -37,6 +42,11 @@ type HealthChecker interface {
 // StaleRunInterrupter fails runs left running by a vanished worker.
 type StaleRunInterrupter interface {
 	Sweep(ctx context.Context) error
+}
+
+// LLMHealthSweeper enqueues the health checks whose verdict went stale.
+type LLMHealthSweeper interface {
+	Sweep(ctx context.Context) (int, error)
 }
 
 type reviewRunWorker struct {
@@ -87,16 +97,41 @@ func (w *interruptStaleRunsWorker) Work(ctx context.Context, _ *river.Job[Interr
 	return w.watchdog.Sweep(ctx)
 }
 
+// LLMHealthSweepArgs asks the sweeper to enqueue the checks whose verdict
+// went stale, so a profile nobody probes by hand stops looking healthy forever.
+type LLMHealthSweepArgs struct{}
+
+func (LLMHealthSweepArgs) Kind() string { return "llm_health_sweep" }
+
+func (LLMHealthSweepArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{Queue: llmSweepQueue, MaxAttempts: 1}
+}
+
+type llmHealthSweepWorker struct {
+	river.WorkerDefaults[LLMHealthSweepArgs]
+	sweeper LLMHealthSweeper
+}
+
+func (w *llmHealthSweepWorker) Work(ctx context.Context, _ *river.Job[LLMHealthSweepArgs]) error {
+	_, err := w.sweeper.Sweep(ctx)
+	return err
+}
+
 // ReviewDeps are the optional dependencies of the review client.
 type ReviewDeps struct {
 	Watchdog StaleRunInterrupter
+	Health   LLMHealthSweeper
+	// HealthInterval is how often Health is swept. Zero falls back to
+	// defaultHealthSweepInterval.
+	HealthInterval time.Duration
 }
 
 // NewReviewClient registers the review pipeline and the LLM health worker. When
-// a watchdog is supplied it also sweeps orphaned runs on start and every
-// watchdogInterval. The caller starts and stops the returned client; the review
-// process owns all the queues, while the control process only enqueues jobs on
-// them.
+// a sweeper is supplied it also enqueues the stale health checks on start and
+// every HealthInterval, and when a watchdog is supplied it sweeps orphaned runs
+// on start and every watchdogInterval. The caller starts and stops the returned
+// client; the review process owns all the queues, while the control process only
+// enqueues jobs on them.
 func NewReviewClient(pool *pgxpool.Pool, runner *review.Runner, checker *review.ProfileChecker, concurrency int, deps ...ReviewDeps) (*river.Client[pgx.Tx], error) {
 	var d ReviewDeps
 	if len(deps) > 0 {
@@ -111,6 +146,19 @@ func NewReviewClient(pool *pgxpool.Pool, runner *review.Runner, checker *review.
 		llmHealthQueue: {MaxWorkers: healthWorkers},
 	}
 	var periodic []*river.PeriodicJob
+	if d.Health != nil {
+		river.AddWorker[LLMHealthSweepArgs](workers, &llmHealthSweepWorker{sweeper: d.Health})
+		queues[llmSweepQueue] = river.QueueConfig{MaxWorkers: 1}
+		interval := d.HealthInterval
+		if interval <= 0 {
+			interval = defaultHealthSweepInterval
+		}
+		periodic = append(periodic, river.NewPeriodicJob(
+			river.PeriodicInterval(interval),
+			func() (river.JobArgs, *river.InsertOpts) { return LLMHealthSweepArgs{}, nil },
+			&river.PeriodicJobOpts{RunOnStart: true},
+		))
+	}
 	if d.Watchdog != nil {
 		river.AddWorker[InterruptStaleRunsArgs](workers, &interruptStaleRunsWorker{watchdog: d.Watchdog})
 		queues[watchdogQueue] = river.QueueConfig{MaxWorkers: 1}
