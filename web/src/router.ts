@@ -5,6 +5,7 @@ import DashboardView from './views/DashboardView.vue'
 import LoginView from './views/LoginView.vue'
 import PrDetailView from './views/PrDetailView.vue'
 import ReposView from './views/ReposView.vue'
+import SettingsView from './views/SettingsView.vue'
 import SetupView from './views/SetupView.vue'
 import TeamsView from './views/TeamsView.vue'
 
@@ -35,6 +36,7 @@ const router = createRouter({
     { path: '/repos', name: 'repos', component: ReposView },
     { path: '/teams', name: 'teams', component: TeamsView },
     { path: '/agents', name: 'agents', component: AgentsView },
+    { path: '/settings', name: 'settings', component: SettingsView },
     { path: '/prs/:id', name: 'pr-detail', component: PrDetailView },
     { path: '/login', name: 'login', component: LoginView, meta: { layout: 'bare' } },
     { path: '/setup', name: 'setup', component: SetupView, meta: { layout: 'bare' } },

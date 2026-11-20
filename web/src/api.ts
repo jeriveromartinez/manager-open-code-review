@@ -150,6 +150,20 @@ export type RepoPatch = {
   team_id?: number | null
 }
 
+export interface SettingsField {
+  key: string
+  group: 'general' | 'review' | 'worker' | 'alerts' | 'backups'
+  default: string
+  restart: '' | 'app' | 'worker' | 'monitor'
+  secret: boolean
+}
+
+/** `values` es la configuración efectiva, así que las duraciones llegan en formato de Go. */
+export interface SettingsResponse {
+  values: Record<string, string>
+  fields: SettingsField[]
+}
+
 /**
  * Perfil LLM. `api_key_enc` nunca viaja al navegador: el backend expone solo
  * `api_key_set`, y `api_key` es un campo de escritura en los formularios.
@@ -312,6 +326,9 @@ export const api = {
   setupStatus: () => request<SetupStatus>('/api/setup/status'),
   setupManifest: (body: SetupManifestRequest) =>
     request<SetupManifest>('/api/setup/manifest', { method: 'POST', body }),
+  settings: () => request<SettingsResponse>('/api/settings'),
+  saveSettings: (values: Record<string, string>) =>
+    request<SettingsResponse>('/api/settings', { method: 'PUT', body: { values } }),
 }
 
 /**
