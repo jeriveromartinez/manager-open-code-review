@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -85,6 +84,20 @@ func TestAgentParsesTextEvents(t *testing.T) {
 	}
 }
 
+func TestAgentErrorDetailFromEventStream(t *testing.T) {
+	raw := strings.Join([]string{
+		`{"type":"text","text":"ignored"}`,
+		`{"type":"error","error":{"name":"AI_APICallError","data":{"message":"401 Unauthorized"}}}`,
+		`not json`,
+	}, "\n")
+	if got := agentErrorDetail([]byte(raw)); got != "AI_APICallError: 401 Unauthorized" {
+		t.Errorf("agentErrorDetail() = %q", got)
+	}
+	if got := agentErrorDetail([]byte(`{"type":"text","text":"hola"}`)); got != "" {
+		t.Errorf("agentErrorDetail(no error) = %q, want empty", got)
+	}
+}
+
 func TestAgentKillsProcessGroupOnTimeout(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	a := testAgent(t, t.TempDir())
@@ -145,12 +158,12 @@ func TestAgentConfigDeniesTools(t *testing.T) {
 		}
 
 		cfg := readAgentConfig(t, home)
-		provider, ok := cfg.Providers["nvidia"]
+		provider, ok := cfg.Provider["nvidia"]
 		if !ok {
-			t.Fatalf("providers has no nvidia entry: %+v", cfg.Providers)
+			t.Fatalf("provider has no nvidia entry: %+v", cfg.Provider)
 		}
-		if !slices.Contains(provider.Env, "QA_LLM_API_KEY") {
-			t.Fatalf("provider env = %v, want QA_LLM_API_KEY", provider.Env)
+		if provider.Options.APIKey != "{env:QA_LLM_API_KEY}" {
+			t.Fatalf("apiKey = %q, want env placeholder", provider.Options.APIKey)
 		}
 		if provider.Options.BaseURL != "https://llm.example.test/v1" {
 			t.Fatalf("baseURL = %q", provider.Options.BaseURL)
@@ -159,13 +172,20 @@ func TestAgentConfigDeniesTools(t *testing.T) {
 		if !ok {
 			t.Fatalf("agents has no qa-reviewer entry: %+v", cfg.Agent)
 		}
-		for _, action := range []string{"edit", "bash", "webfetch", "external_directory"} {
+		denied := []string{"edit", "bash", "task", "webfetch", "websearch", "external_directory"}
+		for _, action := range denied {
 			if got := agent.Permission[action]; got != "deny" {
-				t.Errorf("permission %q = %q, want deny", action, got)
+				t.Errorf("agent permission %q = %q, want deny", action, got)
+			}
+			if got := cfg.Permission[action]; got != "deny" {
+				t.Errorf("global permission %q = %q, want deny", action, got)
 			}
 		}
 		if got := agent.Permission["read"]; got != "allow" {
-			t.Errorf("permission read = %q, want allow", got)
+			t.Errorf("agent permission read = %q, want allow", got)
+		}
+		if got := cfg.Permission["read"]; got != "allow" {
+			t.Errorf("global permission read = %q, want allow", got)
 		}
 	})
 
@@ -176,7 +196,7 @@ func TestAgentConfigDeniesTools(t *testing.T) {
 			t.Fatalf("Run: %v", err)
 		}
 		cfg := readAgentConfig(t, home)
-		if got := cfg.Providers["nvidia"].Options.BaseURL; got != "" {
+		if got := cfg.Provider["nvidia"].Options.BaseURL; got != "" {
 			t.Fatalf("baseURL = %q, want empty when profile has none", got)
 		}
 	})
@@ -197,13 +217,14 @@ func TestAgentCommandFlags(t *testing.T) {
 }
 
 type generatedConfig struct {
-	Providers map[string]struct {
-		Env     []string `json:"env"`
+	Provider map[string]struct {
 		Options struct {
+			APIKey  string `json:"apiKey"`
 			BaseURL string `json:"baseURL"`
 		} `json:"options"`
-	} `json:"providers"`
-	Agent map[string]struct {
+	} `json:"provider"`
+	Permission map[string]string `json:"permission"`
+	Agent      map[string]struct {
 		Permission map[string]string `json:"permission"`
 	} `json:"agent"`
 }

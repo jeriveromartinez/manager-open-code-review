@@ -209,7 +209,17 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	}
 
 	ocr := &OCR{Bin: r.Cfg.OCRBin, RepoDir: workDir}
-	preview, err := ocr.Preview(ctx, baseRef, headSHA)
+	// El primer run no tiene BaseSHA: usar el nombre de rama no funciona en un
+	// clon shallow porque no existe como ref local. FETCH_HEAD sí tiene el SHA
+	// exacto que se acaba de pedir como base.
+	ocrBase := run.BaseSHA
+	if ocrBase == "" {
+		ocrBase, err = fetchHeadBase(workDir)
+		if err != nil {
+			return out.failed(fmt.Errorf("resolver base del checkout: %w", err), "git_error")
+		}
+	}
+	preview, err := ocr.Preview(ctx, ocrBase, headSHA)
 	if err != nil {
 		return classifyOCR(ctx, out, err)
 	}
@@ -219,7 +229,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	for _, f := range preview.ReviewableFiles {
 		paths = append(paths, f.Path)
 	}
-	groups, err := ocr.Rules(ctx, baseRef, headSHA, paths)
+	groups, err := ocr.Rules(ctx, ocrBase, headSHA, paths)
 	if err != nil {
 		return classifyOCR(ctx, out, err)
 	}

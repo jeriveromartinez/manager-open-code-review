@@ -58,23 +58,37 @@ func git(ctx context.Context, dir, op string, args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// fetchHeadTip devuelve el SHA del segundo ref escrito en FETCH_HEAD, que es
-// headRef (baseRef se pasa primero en el fetch).
-func fetchHeadTip(dir string) (string, error) {
+// fetchHeadRef devuelve el SHA de la línea index de FETCH_HEAD. El fetch de
+// Clone pide primero baseRef y después headRef, así que 0 es la base y 1 la
+// cabeza del PR.
+func fetchHeadRef(dir string, index int) (string, error) {
 	data, err := os.ReadFile(filepath.Join(dir, ".git", "FETCH_HEAD"))
 	if err != nil {
 		return "", fmt.Errorf("leer FETCH_HEAD: %w", err)
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) < 2 {
-		return "", fmt.Errorf("FETCH_HEAD: esperaba 2 refs, obtuve %d", len(lines))
+	if len(lines) <= index {
+		return "", fmt.Errorf("FETCH_HEAD: esperaba %d refs, obtuve %d", index+1, len(lines))
 	}
-	fields := strings.Fields(lines[1])
+	fields := strings.Fields(lines[index])
 	if len(fields) == 0 {
-		return "", fmt.Errorf("FETCH_HEAD: segunda línea sin SHA")
+		return "", fmt.Errorf("FETCH_HEAD: línea %d sin SHA", index)
 	}
 	return fields[0], nil
+}
+
+// fetchHeadBase devuelve el SHA del primer ref escrito en FETCH_HEAD (baseRef).
+// OCR necesita un commit resuelto: el nombre de rama no existe como ref local en
+// un clon shallow.
+func fetchHeadBase(dir string) (string, error) {
+	return fetchHeadRef(dir, 0)
+}
+
+// fetchHeadTip devuelve el SHA del segundo ref escrito en FETCH_HEAD, que es
+// headRef (baseRef se pasa primero en el fetch).
+func fetchHeadTip(dir string) (string, error) {
+	return fetchHeadRef(dir, 1)
 }
 
 // Clone prepara un checkout efímero en dir con baseRef y headRef (en producción

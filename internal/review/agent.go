@@ -22,6 +22,8 @@ import (
 const (
 	reviewerAgent = "qa-reviewer"
 	apiKeyEnvVar  = "QA_LLM_API_KEY"
+	// maxAgentErrorDetail bounds the provider message stored as a health error.
+	maxAgentErrorDetail = 500
 )
 
 // Agent runs one isolated `opencode run` invocation. Home is the temporary HOME
@@ -100,6 +102,9 @@ func (a *Agent) Run(ctx context.Context, prompt string, files []string) (text st
 		}
 		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
+			detail = agentErrorDetail(stdout.Bytes())
+		}
+		if detail == "" {
 			return "", nil, fmt.Errorf("review: opencode: %w", err)
 		}
 		return "", nil, fmt.Errorf("review: opencode: %w: %s", err, detail)
@@ -155,34 +160,46 @@ func childEnv(key, home string) []string {
 
 // writeOpenCodeConfig writes the global config inside the isolated HOME.
 //
-// Schema ruling (verified against https://opencode.ai/config.json for the
-// installed OpenCode 1.19.0): the V2 `agents.<id>.permissions` ruleset uses
-// `shell` rather than `bash`, while the still-supported `agent.<id>.permission`
-// object exposes exactly the action keys required here, including the valid
-// `external_directory` deny. The provider base URL belongs in
-// `providers.<id>.options.baseURL` (the schema has no `settings` object).
+// OpenCode 1.19 drops the V2 `providers` block when it downgrades a config to
+// V1 ("Omitted native setting that cannot be represented in V1"), leaving every
+// provider unauthenticated. The deprecated-but-supported `provider` object with
+// `options.apiKey: "{env:...}"` works in both shapes and keeps the key out of
+// the file.
+//
+// The permissions are declared twice on purpose. Agent rules are resolved
+// correctly (verified with `opencode debug agent qa-reviewer`), but a spawned
+// subagent uses its own agent policy instead of inheriting the parent's, so the
+// reviewer must be unable to spawn one: `task` is the V1 name for that action.
+// The global block keeps every other tool denied even if a future version
+// changes the inheritance rules.
 func writeOpenCodeConfig(home string, profile store.LLMProfile) error {
-	provider := map[string]any{
-		"env": []string{apiKeyEnvVar},
+	options := map[string]string{
+		"apiKey": "{env:" + apiKeyEnvVar + "}",
 	}
 	if profile.BaseURL != nil && *profile.BaseURL != "" {
-		provider["options"] = map[string]string{"baseURL": *profile.BaseURL}
+		options["baseURL"] = *profile.BaseURL
+	}
+	provider := map[string]any{"options": options}
+
+	permission := map[string]string{
+		"read":               "allow",
+		"edit":               "deny",
+		"bash":               "deny",
+		"task":               "deny",
+		"webfetch":           "deny",
+		"websearch":          "deny",
+		"external_directory": "deny",
 	}
 
 	cfg := map[string]any{
-		"$schema":   "https://opencode.ai/config.json",
-		"providers": map[string]any{profile.Provider: provider},
+		"$schema":    "https://opencode.ai/config.json",
+		"provider":   map[string]any{profile.Provider: provider},
+		"permission": permission,
 		"agent": map[string]any{
 			reviewerAgent: map[string]any{
 				"description": "Solo lectura: revisa el diff sin modificar el repo",
 				"mode":        "primary",
-				"permission": map[string]string{
-					"read":               "allow",
-					"edit":               "deny",
-					"bash":               "deny",
-					"webfetch":           "deny",
-					"external_directory": "deny",
-				},
+				"permission":  permission,
 			},
 		},
 	}
@@ -200,6 +217,48 @@ func writeOpenCodeConfig(home string, profile store.LLMProfile) error {
 		return fmt.Errorf("review: write opencode config: %w", err)
 	}
 	return nil
+}
+
+// agentErrorDetail extracts the message of the last error event in an OpenCode
+// JSONL stream. OpenCode reports provider failures there rather than on stderr,
+// so without this the caller only sees "exit status 1".
+func agentErrorDetail(raw []byte) string {
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+
+	detail := ""
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var ev struct {
+			Type  string `json:"type"`
+			Error struct {
+				Name string `json:"name"`
+				Data struct {
+					Message string `json:"message"`
+				} `json:"data"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(line, &ev); err != nil || ev.Type != "error" {
+			continue
+		}
+		name := strings.TrimSpace(ev.Error.Name)
+		message := strings.TrimSpace(ev.Error.Data.Message)
+		switch {
+		case name != "" && message != "":
+			detail = name + ": " + message
+		case message != "":
+			detail = message
+		case name != "":
+			detail = name
+		}
+	}
+	if len(detail) > maxAgentErrorDetail {
+		detail = detail[:maxAgentErrorDetail]
+	}
+	return detail
 }
 
 // parseEvents keeps the last contiguous block of text events and the most

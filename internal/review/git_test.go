@@ -94,6 +94,26 @@ func TestCloneFindsMergeBase(t *testing.T) {
 	}
 }
 
+func TestFetchHeadRefs(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "1111111111111111111111111111111111111111\t\tbranch 'main' of origin\n" +
+		"2222222222222222222222222222222222222222\t\t'refs/pull/1/head' of origin\n"
+	if err := os.WriteFile(filepath.Join(dir, ".git", "FETCH_HEAD"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	base, err := fetchHeadBase(dir)
+	if err != nil || base != "1111111111111111111111111111111111111111" {
+		t.Fatalf("fetchHeadBase() = %q, %v", base, err)
+	}
+	tip, err := fetchHeadTip(dir)
+	if err != nil || tip != "2222222222222222222222222222222222222222" {
+		t.Fatalf("fetchHeadTip() = %q, %v", tip, err)
+	}
+}
+
 func TestCloneURLInjectsTokenOnlyForHTTP(t *testing.T) {
 	tests := []struct {
 		name    string

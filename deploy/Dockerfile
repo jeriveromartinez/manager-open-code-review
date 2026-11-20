@@ -17,7 +17,8 @@ COPY --from=web /app/web/dist ./internal/web/dist
 RUN CGO_ENABLED=0 go build -trimpath -o /out/qa ./cmd/qa
 
 # 3) Worker: Node 24 aporta ocr y opencode; git se usa para los checkouts.
-FROM node:24-bookworm-slim AS worker
+#    Trixie trae git >= 2.41, mínimo que exige ocr.
+FROM node:24-trixie-slim AS worker
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
