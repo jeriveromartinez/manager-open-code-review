@@ -135,6 +135,9 @@ type PullRequest struct {
 	ValidationsPassed int       `gorm:"column:validations_passed"`
 	ValidationsFailed int       `gorm:"column:validations_failed"`
 	ValidationsTotal  int       `gorm:"column:validations_total"`
+	// Maintained by a database trigger whenever qa_status changes, so GORM
+	// must never write it.
+	QAStatusChangedAt time.Time `gorm:"column:qa_status_changed_at;<-:false"`
 }
 
 // AuditLog records an administrative action.
@@ -232,6 +235,11 @@ type Finding struct {
 	GithubThreadID      string    `gorm:"column:github_thread_id"`
 	CreatedAt           time.Time `gorm:"column:created_at"`
 	UpdatedAt           time.Time `gorm:"column:updated_at"`
+	// TriagedBy and TriagedAt record the last person who confirmed the finding
+	// or marked it a false positive from the panel. A review run never writes
+	// them, so the triage survives re-observation of the same fingerprint.
+	TriagedBy string     `gorm:"column:triaged_by"`
+	TriagedAt *time.Time `gorm:"column:triaged_at"`
 }
 
 // FindingEvent records a lifecycle transition of a finding.

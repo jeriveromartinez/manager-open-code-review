@@ -272,7 +272,18 @@ type PRView struct {
 	ReviewState  string
 	ReviewReason string
 	Validations  PRValidations
+	OpenFindings SeverityCounts
+	StatusSince  time.Time
 	UpdatedAt    time.Time
+}
+
+// SeverityCounts counts findings by severity. Severities outside the known
+// four are not counted: the panel has no column for them.
+type SeverityCounts struct {
+	Blocker int
+	Major   int
+	Minor   int
+	Nit     int
 }
 
 // prViewRow mirrors the columns selected from the joined query. Keeping it
@@ -296,6 +307,11 @@ type prViewRow struct {
 	ValidationsPassed int
 	ValidationsFailed int
 	ValidationsTotal  int
+	OpenBlockers      int
+	OpenMajors        int
+	OpenMinors        int
+	OpenNits          int
+	QAStatusChangedAt time.Time
 	UpdatedAt         time.Time
 }
 
@@ -355,19 +371,25 @@ type Stats struct {
 // restricted to the caller's teams for non-admins. Group filters use the same
 // status predicates as GroupOf.
 func (s *Store) visiblePRs(ctx context.Context, u User, f PRFilter) *gorm.DB {
+	q := s.teamScopedPRs(ctx, u).Where("pr.state = ?", stateOpen)
+	if statuses, ok := groupStatuses(f.Group); ok {
+		q = q.Where("pr.qa_status IN ?", statuses)
+	}
+	return q
+}
+
+// teamScopedPRs is every pull request, whatever its state, of the enabled
+// repositories the user can see: all of them for admins, those of the user's
+// teams otherwise. History-based metrics use it so a merged PR still counts.
+func (s *Store) teamScopedPRs(ctx context.Context, u User) *gorm.DB {
 	q := s.DB.WithContext(ctx).Model(&PullRequest{}).Table("pull_requests AS pr").
 		Joins("JOIN repositories r ON r.id = pr.repository_id").
-		Where("pr.state = ?", stateOpen).
 		Where("r.enabled = ?", true)
 
 	if !u.IsAdmin {
 		teams := s.DB.WithContext(ctx).Model(&TeamMember{}).
 			Select("team_id").Where("user_id = ?", u.ID)
 		q = q.Where("r.team_id IN (?)", teams)
-	}
-
-	if statuses, ok := groupStatuses(f.Group); ok {
-		q = q.Where("pr.qa_status IN ?", statuses)
 	}
 	return q
 }
@@ -411,6 +433,11 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 			"pr.validations_passed AS validations_passed",
 			"pr.validations_failed AS validations_failed",
 			"pr.validations_total AS validations_total",
+			openFindingsColumn("blocker", "open_blockers"),
+			openFindingsColumn("major", "open_majors"),
+			openFindingsColumn("minor", "open_minors"),
+			openFindingsColumn("nit", "open_nits"),
+			"pr.qa_status_changed_at AS qa_status_changed_at",
 			"pr.updated_at AS updated_at",
 		}, ", ")).
 		Order("pr.updated_at DESC").
@@ -445,10 +472,25 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 				Failed: row.ValidationsFailed,
 				Total:  row.ValidationsTotal,
 			},
-			UpdatedAt: row.UpdatedAt,
+			OpenFindings: SeverityCounts{
+				Blocker: row.OpenBlockers,
+				Major:   row.OpenMajors,
+				Minor:   row.OpenMinors,
+				Nit:     row.OpenNits,
+			},
+			StatusSince: row.QAStatusChangedAt,
+			UpdatedAt:   row.UpdatedAt,
 		}
 	}
 	return views, nil
+}
+
+// openFindingsColumn selects how many open findings of one severity a pull
+// request has. Severities are fixed literals, never user input.
+func openFindingsColumn(severity, alias string) string {
+	return fmt.Sprintf(
+		"(SELECT COUNT(*) FROM findings f WHERE f.pull_request_id = pr.id AND f.status = '%s' AND f.severity = '%s') AS %s",
+		FindingOpen, severity, alias)
 }
 
 // Stats computes the dashboard KPIs over the same visible set as

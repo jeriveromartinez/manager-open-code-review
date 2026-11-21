@@ -853,29 +853,8 @@ func (s *Store) SetFindingStatusAudited(ctx context.Context, id, status string, 
 			return nil
 		}
 
-		data := map[string]any{"actor": entry.Actor}
-		if entry.CommentID != 0 {
-			data["comment_id"] = entry.CommentID
-		}
-		if entry.Reason != "" {
-			data["reason"] = entry.Reason
-		}
-		if entry.ThreadID != "" {
-			data["thread_id"] = entry.ThreadID
-		}
-		raw, err := json.Marshal(data)
-		if err != nil {
-			return fmt.Errorf("marshal audit data: %w", err)
-		}
-		row := AuditLog{
-			ActorUserID: entry.ActorID,
-			Action:      entry.Action,
-			TargetType:  "finding",
-			TargetID:    id,
-			Data:        datatypes.JSON(raw),
-		}
-		if err := tx.Create(&row).Error; err != nil {
-			return fmt.Errorf("write audit row: %w", err)
+		if err := writeFindingAudit(tx, id, entry); err != nil {
+			return err
 		}
 		changed = true
 		return nil
@@ -884,6 +863,78 @@ func (s *Store) SetFindingStatusAudited(ctx context.Context, id, status string, 
 		return false, err
 	}
 	return changed, nil
+}
+
+// TriageFinding records a panel decision on a finding: status is FindingOpen
+// for "confirmed" and FindingWithdrawn for "false positive". Unlike
+// SetFindingStatusAudited, confirming an already open finding is a real change
+// because it records who vouched for it. It reports whether the status moved,
+// which is what tells the caller to touch the GitHub thread. Repeating the
+// same decision by the same person is a no-op and is not audited twice.
+func (s *Store) TriageFinding(ctx context.Context, id, status string, entry FindingAudit) (statusChanged bool, err error) {
+	err = s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current Finding
+		err := quietDB(tx).Where("id = ?", id).
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Take(&current).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("triage finding %q: %w", id, ErrNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("find finding %q: %w", id, err)
+		}
+		if current.Status == status && current.TriagedBy == entry.Actor && current.TriagedAt != nil {
+			return nil
+		}
+
+		now := time.Now().UTC()
+		err = tx.Model(&Finding{}).Where("id = ?", id).Updates(map[string]any{
+			"status":     status,
+			"triaged_by": entry.Actor,
+			"triaged_at": now,
+			"updated_at": now,
+		}).Error
+		if err != nil {
+			return fmt.Errorf("triage finding %q: %w", id, err)
+		}
+		if err := writeFindingAudit(tx, id, entry); err != nil {
+			return err
+		}
+		statusChanged = current.Status != status
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return statusChanged, nil
+}
+
+func writeFindingAudit(tx *gorm.DB, findingID string, entry FindingAudit) error {
+	data := map[string]any{"actor": entry.Actor}
+	if entry.CommentID != 0 {
+		data["comment_id"] = entry.CommentID
+	}
+	if entry.Reason != "" {
+		data["reason"] = entry.Reason
+	}
+	if entry.ThreadID != "" {
+		data["thread_id"] = entry.ThreadID
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("marshal audit data: %w", err)
+	}
+	row := AuditLog{
+		ActorUserID: entry.ActorID,
+		Action:      entry.Action,
+		TargetType:  "finding",
+		TargetID:    findingID,
+		Data:        datatypes.JSON(raw),
+	}
+	if err := tx.Create(&row).Error; err != nil {
+		return fmt.Errorf("write audit row: %w", err)
+	}
+	return nil
 }
 
 // AuditCommand records a /qa command that is not a finding transition, such as a
