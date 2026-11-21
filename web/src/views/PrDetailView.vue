@@ -296,7 +296,6 @@ onMounted(() => {
           data-finding
         >
           <div class="finding__meta">
-            <span class="badge badge--muted finding__state">Descartado</span>
             <h4 class="finding__title">{{ finding.title }}</h4>
             <p class="finding__location">
               <code>{{ finding.path }}:{{ finding.start_line }}–{{ finding.end_line }}</code>
@@ -635,13 +634,13 @@ onMounted(() => {
 }
 
 .finding__body {
-  max-width: 80ch;
+  max-width: 72ch;
   font-size: 16px;
   overflow-wrap: anywhere;
 }
 
 .finding__suggestion {
-  max-width: 80ch;
+  max-width: 72ch;
   color: var(--text-muted);
   font-size: 16px;
 }
@@ -655,10 +654,6 @@ onMounted(() => {
 .finding__actions {
   display: flex;
   justify-content: flex-end;
-}
-
-.finding__state {
-  align-self: flex-start;
 }
 
 .severity--withdrawn .severity__title {
