@@ -553,10 +553,10 @@ func (out runOutcome) inconclusive(err error, code string) runOutcome {
 	return out
 }
 
-// budgetExhausted ends the run when QA_REVIEW_TIMEOUT ran out before every pass
-// could run. The message has to name the aborted pass and the files left
-// unreviewed: a bare DeadlineExceeded leaves the operator with nothing to act
-// on. Inconclusive (not failed) so the findings of completed passes publish.
+// budgetExhausted ends the run when the review_timeout budget ran out before
+// every pass could run. The message has to name the aborted pass and the files
+// left unreviewed: a bare DeadlineExceeded leaves the operator with nothing to
+// act on. Inconclusive (not failed) so the findings of completed passes publish.
 //
 // pass is 1-based and is also the pass that could not run.
 func (out runOutcome) budgetExhausted(pass, passes int, all []Pass, budget time.Duration) runOutcome {
@@ -564,7 +564,7 @@ func (out runOutcome) budgetExhausted(pass, passes int, all []Pass, budget time.
 	out.coverage = coverageJSON(countCovered(all[:done]), countCovered(all[done:]))
 	err := fmt.Errorf(
 		"presupuesto agotado en la pasada %d de %d: %d archivos sin revisar; "+
-			"aumenta QA_REVIEW_TIMEOUT (actual %s) para completar la revisión",
+			"aumenta review_timeout en Ajustes → Revisión (actual %s) para completar la revisión",
 		pass, passes, countCovered(all[done:]), budget)
 	return out.inconclusive(err, "budget_exhausted")
 }
@@ -574,9 +574,9 @@ func truncatedContext(ctx context.Context, err error) bool {
 		errors.Is(err, context.Canceled) || ctx.Err() != nil
 }
 
-// runBudget is the whole-run time budget from QA_REVIEW_TIMEOUT. Every pass
-// spends from it, so a slow pass leaves less for the passes after it instead of
-// each invocation getting the full figure as an opaque watchdog.
+// runBudget is the whole-run time budget from the review_timeout setting. Every
+// pass spends from it, so a slow pass leaves less for the passes after it
+// instead of each invocation getting the full figure as an opaque watchdog.
 type runBudget struct {
 	total time.Duration
 	now   func() time.Time

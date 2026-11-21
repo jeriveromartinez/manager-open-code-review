@@ -504,6 +504,26 @@ func TestSetupStatusReportsWhetherTheTokenIsRequired(t *testing.T) {
 	}
 }
 
+// TestWebhooksRouteFollowsTheSetting pins that webhooks_enabled is a runtime
+// control: with it off a delivery must not reach the handler, because GitHub
+// keeps sending to a webhook configured on the App.
+func TestWebhooksRouteFollowsTheSetting(t *testing.T) {
+	f := newSecureFixture(t)
+
+	f.deps.Cfg.WebhooksEnabled = false
+	f.rebuildRouter()
+	rec := f.request(http.MethodPost, "/webhooks/github", map[string]any{"action": "opened"}, nil)
+	assertStatus(t, rec, http.StatusOK)
+	if body := rec.Body.String(); body != "spa" {
+		t.Errorf("body = %q, want the SPA fallback while webhooks are disabled", body)
+	}
+
+	f.deps.Cfg.WebhooksEnabled = true
+	f.rebuildRouter()
+	rec = f.request(http.MethodPost, "/webhooks/github", map[string]any{"action": "opened"}, nil)
+	assertStatus(t, rec, http.StatusNoContent)
+}
+
 func TestSetupInstalledEnqueuesSync(t *testing.T) {
 	f := newAPIFixture(t)
 	rec := f.request(http.MethodGet, "/setup/installed?installation_id=4242", nil, nil)

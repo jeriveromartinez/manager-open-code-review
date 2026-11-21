@@ -149,16 +149,17 @@ Los repositorios de una cuenta recién instalada quedan deshabilitados hasta que
 
 ## Modo solo polling (sin URL pública)
 
-Cuando el servicio no se expone a Internet, basta con desactivar los webhooks y ajustar la reconciliación en el panel, en **Ajustes → General**:
+El asistente de `/setup` crea **siempre** la GitHub App con un webhook apuntando a `<public_url>/webhooks/github`, también cuando la instalación vive en `localhost`. Para quedarte solo con polling:
 
-- `webhooks_enabled`: `false`.
-- `reconcile_interval`: `5m` (o lo que convenga).
+1. Abre la App en GitHub (**Settings → Developer settings → GitHub Apps → tu App → Webhook**) y elimina el webhook o desactívalo con «Active» desmarcado.
+2. En **Ajustes → General**, pon `webhooks_enabled` en `false` y ajusta `reconcile_interval` (`5m` o lo que convenga).
+3. Reinicia la app (`docker compose -f deploy/docker-compose.yml restart app`); el panel lo indica junto a la sección.
 
-No hace falta poner nada en `deploy/.env`. `app` sigue sirviendo la interfaz en `localhost:8080`, y el asistente de `/setup` guarda `http://localhost:8080` como URL pública si abres el setup desde ahí. Con `webhooks_enabled` en `false`, el scheduler consulta cada `reconcile_interval` los PRs abiertos de los repos activos, de modo que la sincronización de PRs y las revisiones pendientes siguen funcionando. No hace falta registrar una URL de webhook en la GitHub App.
+Con `webhooks_enabled` en `false` la app no monta `/webhooks/github`, así que el scheduler consulta cada `reconcile_interval` los PRs abiertos de los repos activos: la sincronización de PRs, las instalaciones nuevas y las revisiones pendientes siguen funcionando. No hace falta poner nada en `deploy/.env`, y `app` sigue sirviendo la interfaz en `localhost:8080`; el asistente guarda `http://localhost:8080` como URL pública si abres el setup desde ahí.
 
-Los dos ajustes piden reiniciar la app; el panel lo indica junto a la sección.
+Si dejas el webhook configurado en la App con `webhooks_enabled` en `false`, GitHub sigue enviando cada evento y la app ya no procesa esa ruta: las entregas se acumulan en el historial de la App sin ningún efecto. Bórralo o desactívalo también en GitHub, o vuelve a poner `webhooks_enabled` en `true`.
 
-Las disputas en hilos (`pull_request_review_thread`) y los comandos `/qa` (`issue_comment`) requieren webhooks; la tabla de eventos de la sección anterior detalla el resto. En modo polling, los descartes y las confirmaciones se hacen desde el panel.
+Las disputas en hilos (`pull_request_review_thread`) y los comandos `/qa` (`issue_comment`) requieren webhooks y en modo polling no llegan: los descartes y las confirmaciones se hacen desde el panel. La tabla de eventos de la sección anterior detalla el resto.
 
 ## Túnel público (opcional)
 

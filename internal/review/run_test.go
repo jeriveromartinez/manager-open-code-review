@@ -457,8 +457,11 @@ func TestRunStopsWhenBudgetIsExhausted(t *testing.T) {
 	if !strings.Contains(run.ErrorMessage, "6 archivos sin revisar") {
 		t.Errorf("error_message = %q, want it to count the unreviewed files", run.ErrorMessage)
 	}
-	if !strings.Contains(run.ErrorMessage, "QA_REVIEW_TIMEOUT") {
-		t.Errorf("error_message = %q, want it to mention QA_REVIEW_TIMEOUT", run.ErrorMessage)
+	if !strings.Contains(run.ErrorMessage, "review_timeout en Ajustes → Revisión") {
+		t.Errorf("error_message = %q, want it to point at the review_timeout panel setting", run.ErrorMessage)
+	}
+	if strings.Contains(run.ErrorMessage, "QA_REVIEW_TIMEOUT") {
+		t.Errorf("error_message = %q, want no retired environment variable", run.ErrorMessage)
 	}
 	if got := f.agentCalls(t); got != 0 {
 		t.Errorf("agent calls = %d, want 0 (no pass may start without budget)", got)

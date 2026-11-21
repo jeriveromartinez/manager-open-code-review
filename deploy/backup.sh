@@ -25,8 +25,12 @@ fi
 retencion=$(psql "$QA_DATABASE_URL" -tAc \
     "SELECT value FROM app_settings WHERE key = 'backup_retention'" 2>/dev/null || true)
 retencion=$(printf '%s' "$retencion" | tr -d '[:space:]')
+# Only 1-3 digit positives without a leading zero: a hand-written row such as
+# "00" or "08" is not a count, and passing it to the prune would either delete
+# every dump or abort on an illegal octal number.
 case "$retencion" in
-    ''|0|*[!0-9]*) retencion=7 ;;
+    [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;;
+    *) retencion=7 ;;
 esac
 
 mkdir -p "$destino"

@@ -180,6 +180,8 @@ func TestDefaultsAndFieldsAgree(t *testing.T) {
 
 func TestRestartNamesTheProcessThatReadsTheKey(t *testing.T) {
 	want := map[string]string{
+		KeyPublicURL:            "app",
+		KeyWebhooksEnabled:      "app",
 		KeyWorkerHealthURL:      "monitor",
 		KeyMonitorInterval:      "monitor",
 		KeyMonitorRenotifyAfter: "monitor",
