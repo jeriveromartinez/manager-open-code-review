@@ -36,7 +36,8 @@ const thresholdLabels: Record<Threshold, string> = {
 
 const team = computed(() => teams.value.find((item) => item.id === teamId.value) ?? null)
 const slaSeconds = computed(() => summary.value?.validation_sla_seconds ?? 0)
-const hasPolicy = computed(() => repos.value.some((repo) => repo.has_policy))
+// getPolicy serves the defaults with id 0 when the team never saved a policy.
+const hasPolicy = computed(() => (policy.value?.id ?? 0) !== 0)
 
 const buckets = computed(() => {
   const counts = { ready: 0, ai: 0, problems: 0 }
@@ -75,6 +76,11 @@ const precision = computed(() => {
   return { confirmed, falsePositive, decided, percent: decided === 0 ? 0 : Math.round((confirmed / decided) * 100) }
 })
 
+// Same window as the per-repo rows, not the precision window.
+const confirmedInRepos = computed(() =>
+  (summary.value?.confirmed_by_repo ?? []).reduce((sum, item) => sum + item.count, 0),
+)
+
 const byRepo = computed(() =>
   (summary.value?.confirmed_by_repo ?? []).map((item, index) => ({
     ...item,
@@ -95,9 +101,14 @@ async function loadTeams(): Promise<void> {
   teamId.value = teams.value[0]?.id ?? null
 }
 
+// Each load gets a number; an answer that arrives after a newer load started
+// belongs to a team that is no longer on screen and is dropped.
+let latestLoad = 0
+
 async function loadTeam(): Promise<void> {
   const id = teamId.value
   if (id === null) return
+  const load = ++latestLoad
   loading.value = true
   error.value = null
   try {
@@ -107,16 +118,22 @@ async function loadTeam(): Promise<void> {
       api.getPolicy(id),
       api.repos(),
     ])
+    if (load !== latestLoad) return
     prs.value = allPrs.filter((pr) => pr.team_id === id)
     repos.value = allRepos.filter((repo) => repo.team_id === id)
     summary.value = nextSummary
     policy.value = nextPolicy
   } catch (err) {
+    if (load !== latestLoad) return
+    prs.value = []
+    repos.value = []
+    summary.value = null
+    policy.value = null
     error.value = isForbidden(err)
       ? 'Solo el lead del equipo o un administrador pueden ver este panel'
       : 'No se pudo cargar el equipo'
   } finally {
-    loading.value = false
+    if (load === latestLoad) loading.value = false
   }
 }
 
@@ -126,6 +143,10 @@ async function selectTeam(id: number): Promise<void> {
 }
 
 onMounted(async () => {
+  // Started before any await so onBeforeUnmount always finds it to clear.
+  clock = setInterval(() => {
+    now.value = new Date()
+  }, 60_000)
   try {
     await loadTeams()
   } catch {
@@ -136,9 +157,6 @@ onMounted(async () => {
     return
   }
   await loadTeam()
-  clock = setInterval(() => {
-    now.value = new Date()
-  }, 60_000)
 })
 
 onBeforeUnmount(() => {
@@ -158,15 +176,14 @@ onBeforeUnmount(() => {
       <RoleSwitch />
     </header>
 
-    <div v-if="teams.length > 1" class="filter-tabs" role="tablist" aria-label="Equipo">
+    <div v-if="teams.length > 1" class="filter-tabs" role="group" aria-label="Equipo">
       <button
         v-for="item in teams"
         :key="item.id"
         type="button"
-        role="tab"
         class="filter-tab"
         :class="{ 'filter-tab--active': item.id === teamId }"
-        :aria-selected="item.id === teamId"
+        :aria-pressed="item.id === teamId"
         :data-team="item.id"
         @click="selectTeam(item.id)"
       >
@@ -290,7 +307,7 @@ onBeforeUnmount(() => {
           <h2 class="tile__title">
             <span class="tile__index">05</span>Defectos por repo · {{ summary?.category_window_days ?? 30 }} días
           </h2>
-          <KpiCard label="Confirmados por QA" :value="precision.confirmed" />
+          <KpiCard label="Confirmados por QA" :value="confirmedInRepos" />
           <ul v-if="byRepo.length > 0" class="bars tile__foot">
             <li v-for="row in byRepo" :key="row.repo" class="bars__row">
               <span class="caption">{{ row.repo }}</span>

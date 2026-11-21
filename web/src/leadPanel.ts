@@ -23,6 +23,8 @@ export function blockedAt(prs: PRView[], threshold: Threshold): number {
 export type DecisionRow = { pr: PRView; reason: string; wait: string; minutes: number }
 
 function reasonFor(pr: PRView, slaSeconds: number, now: Date): string | null {
+  // A draft is its author's work in progress, not something a lead unblocks.
+  if (pr.qa_status === 'draft') return null
   if (pr.qa_status === 'pending' && pr.review_state === 'blocked') return pr.review_reason
   switch (qaBucket(pr)) {
     case 'defects':

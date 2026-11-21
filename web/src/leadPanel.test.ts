@@ -61,6 +61,7 @@ describe('decisionRows', () => {
         }),
         pr({ id: 6, qa_status: 'reviewing', status_since: '2026-11-20T00:00:00Z' }),
         pr({ id: 7, qa_status: 'paused', status_since: '2026-11-21T08:00:00Z' }),
+        pr({ id: 8, qa_status: 'draft', status_since: '2026-11-19T00:00:00Z' }),
       ],
       sla,
       now,

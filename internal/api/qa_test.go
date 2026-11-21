@@ -173,11 +173,17 @@ func TestQASummaryNarrowsToOneTeam(t *testing.T) {
 	assertStatus(t, rec, http.StatusOK)
 	var prs []map[string]any
 	decodeJSON(t, rec, &prs)
+	if len(prs) != 3 {
+		t.Fatalf("got %d PRs, want the 3 of both led teams", len(prs))
+	}
 	for _, pr := range prs {
 		if pr["team_id"] == nil {
 			t.Errorf("PR %v has no team_id", pr["id"])
 		}
 	}
 
-	assertStatus(t, f.request(http.MethodGet, "/api/qa/summary?team_id=abc", nil, f.session(lead)), http.StatusBadRequest)
+	for _, bad := range []string{"abc", "0", "-1"} {
+		path := "/api/qa/summary?team_id=" + bad
+		assertStatus(t, f.request(http.MethodGet, path, nil, f.session(lead)), http.StatusBadRequest)
+	}
 }

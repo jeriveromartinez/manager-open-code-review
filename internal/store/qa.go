@@ -173,7 +173,7 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time, f QAFilter
 		Where("f.triaged_at >= ? AND f.triage_verdict = ? AND f.pull_request_id IN (?)",
 			now.Add(-CategoryWindow), VerdictConfirmed, scopedIDs).
 		Select("r.full_name AS repo, COUNT(*) AS count").
-		Group("r.full_name").
+		Group("r.id, r.full_name").
 		Order("count DESC, repo").
 		Scan(&out.ConfirmedByRepo).Error
 	if err != nil {

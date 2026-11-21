@@ -70,7 +70,7 @@ const summary: QASummary = {
   runs_running: 1,
   runs_queued: 0,
   untriaged: { blocker: 0, major: 0, minor: 0, nit: 0 },
-  confirmed: 9,
+  confirmed: 12,
   false_positive: 1,
   precision_window_days: 7,
   categories: [],
@@ -161,7 +161,9 @@ describe('LeadView', () => {
     expect(wrapper.text()).not.toContain('De otro equipo')
     expect(wrapper.get('[data-blocked-count]').text()).toBe('1')
     expect(wrapper.get('[data-late-count]').text()).toBe('1')
-    expect(wrapper.get('[data-precision]').text()).toBe('90%')
+    expect(wrapper.get('[data-precision]').text()).toBe('92%')
+    // The repo tile counts its own 30-day window, not the 7-day precision figure.
+    expect(wrapper.get('[data-tile="repos-defects"] .kpi-card__value').text()).toBe('9')
     expect(wrapper.get('[data-tile="repos-defects"]').text()).toContain('acme/payments-sdk')
     expect(wrapper.get('[data-repo="acme/payments-sdk"]').text()).toContain('Deshabilitado')
     wrapper.unmount()
@@ -171,9 +173,10 @@ describe('LeadView', () => {
     const wrapper = mountLead()
     await flushPromises()
 
-    expect(wrapper.get('[data-threshold="blocker"]').text()).toContain('1')
+    expect(wrapper.get('[data-threshold="blocker"]').text()).toBe('Bloqueante1')
     expect(wrapper.get('[data-threshold="major"]').text()).toBe('Mayor (actual)2')
-    expect(wrapper.get('[data-threshold="minor"]').text()).toContain('2')
+    expect(wrapper.get('[data-threshold="minor"]').text()).toBe('Menor2')
+    expect(wrapper.get('[data-threshold="nit"]').text()).toBe('Nit2')
     expect(wrapper.find('[data-tile="policy"] a').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -216,7 +219,7 @@ describe('LeadView', () => {
   })
 
   it('says so when the team has no policy', async () => {
-    mocks.api.repos.mockResolvedValue(repos.map((item) => ({ ...item, has_policy: false })))
+    mocks.api.getPolicy.mockResolvedValue({ ...policy, id: 0 })
     const wrapper = mountLead()
     await flushPromises()
 
@@ -252,6 +255,63 @@ describe('LeadView', () => {
 
     expect(wrapper.find('[data-no-teams]').exists()).toBe(true)
     expect(mocks.api.qaSummary).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('ignores a slow answer for a team that is no longer selected', async () => {
+    mocks.api.me.mockResolvedValue({
+      id: 7,
+      login: 'lmartin',
+      avatar_url: '',
+      is_admin: false,
+      teams: [
+        { id: 3, name: 'Pagos', role: 'lead' },
+        { id: 4, name: 'Web', role: 'lead' },
+      ],
+    })
+    const wrapper = mountLead()
+    await flushPromises()
+
+    let releasePagos: (value: QASummary) => void = () => {}
+    mocks.api.qaSummary.mockImplementation((id: number) =>
+      id === 3
+        ? new Promise<QASummary>((resolve) => {
+            releasePagos = resolve
+          })
+        : Promise.resolve({ ...summary, confirmed: 1, false_positive: 0 }),
+    )
+
+    await wrapper.get('[data-team="3"]').trigger('click')
+    await wrapper.get('[data-team="4"]').trigger('click')
+    await flushPromises()
+    releasePagos({ ...summary, confirmed: 50, false_positive: 50 })
+    await flushPromises()
+
+    expect(wrapper.get('.page-title').text()).toBe('Equipo Web')
+    expect(wrapper.get('[data-precision]').text()).toBe('100%')
+    wrapper.unmount()
+  })
+
+  it('drops the previous team data when a load fails', async () => {
+    mocks.api.me.mockResolvedValue({
+      id: 7,
+      login: 'lmartin',
+      avatar_url: '',
+      is_admin: false,
+      teams: [
+        { id: 3, name: 'Pagos', role: 'lead' },
+        { id: 4, name: 'Web', role: 'lead' },
+      ],
+    })
+    const wrapper = mountLead()
+    await flushPromises()
+
+    mocks.api.getPolicy.mockRejectedValue(new Error('boom'))
+    await wrapper.get('[data-team="4"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="alert"]').text()).toBe('No se pudo cargar el equipo')
+    expect(wrapper.get('.page-subtitle').text()).toContain('0 PRs abiertos · 0 repositorios')
     wrapper.unmount()
   })
 })
