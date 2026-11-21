@@ -27,11 +27,15 @@ import (
 type recordingJobs struct {
 	mu  sync.Mutex
 	ids []int64
+	err error
 }
 
 func (j *recordingJobs) EnqueueSync(_ context.Context, id int64) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	if j.err != nil {
+		return j.err
+	}
 	j.ids = append(j.ids, id)
 	return nil
 }
@@ -623,6 +627,56 @@ func TestSetupInstalledWithoutInstallationID(t *testing.T) {
 	if ids := f.jobs.snapshot(); len(ids) != 0 {
 		t.Errorf("EnqueueSync calls = %v, want none", ids)
 	}
+}
+
+// The setup callback can enqueue a sync before the installation row exists and
+// webhooks can be lost, so administrators need an explicit reload.
+func TestInstallationSyncQueuesJob(t *testing.T) {
+	f := newAPIFixture(t)
+	admin := f.user("admin", true)
+
+	rec := f.request(http.MethodPost, "/api/installations/991/sync", nil, f.session(admin))
+	assertStatus(t, rec, http.StatusAccepted)
+
+	var body map[string]string
+	decodeJSON(t, rec, &body)
+	if body["status"] != "queued" {
+		t.Errorf("status = %q, want queued", body["status"])
+	}
+	if ids := f.jobs.snapshot(); len(ids) != 1 || ids[0] != 991 {
+		t.Errorf("EnqueueSync calls = %v, want [991]", ids)
+	}
+}
+
+func TestInstallationSyncForbiddenForDeveloper(t *testing.T) {
+	f := newAPIFixture(t)
+	dev := f.user("dev", false)
+
+	rec := f.request(http.MethodPost, "/api/installations/991/sync", nil, f.session(dev))
+	assertStatus(t, rec, http.StatusForbidden)
+	if ids := f.jobs.snapshot(); len(ids) != 0 {
+		t.Errorf("EnqueueSync calls = %v, want none", ids)
+	}
+}
+
+func TestInstallationSyncRejectsInvalidID(t *testing.T) {
+	f := newAPIFixture(t)
+	admin := f.user("admin", true)
+
+	rec := f.request(http.MethodPost, "/api/installations/not-a-number/sync", nil, f.session(admin))
+	assertStatus(t, rec, http.StatusBadRequest)
+	if ids := f.jobs.snapshot(); len(ids) != 0 {
+		t.Errorf("EnqueueSync calls = %v, want none", ids)
+	}
+}
+
+func TestInstallationSyncReportsQueueFailure(t *testing.T) {
+	f := newAPIFixture(t)
+	admin := f.user("admin", true)
+	f.jobs.err = fmt.Errorf("queue unavailable")
+
+	rec := f.request(http.MethodPost, "/api/installations/991/sync", nil, f.session(admin))
+	assertStatus(t, rec, http.StatusInternalServerError)
 }
 
 func TestPRsEndpointFiltersByTeam(t *testing.T) {

@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     teams: vi.fn(),
     patchRepo: vi.fn(),
     installations: vi.fn(),
+    syncInstallation: vi.fn(),
     setupStatus: vi.fn(),
   },
   session: {
@@ -83,6 +84,7 @@ describe('ReposView', () => {
     mocks.api.teams.mockResolvedValue(teams.map((team) => ({ ...team })))
     mocks.api.patchRepo.mockResolvedValue(undefined)
     mocks.api.installations.mockResolvedValue([])
+    mocks.api.syncInstallation.mockResolvedValue({ status: 'queued' })
     mocks.api.setupStatus.mockResolvedValue({ configured: true, install_url: '' })
     mocks.session.load.mockResolvedValue(null)
   })
@@ -268,6 +270,97 @@ describe('ReposView', () => {
     expect(wrapper.get('[data-repo-policy-hint="20"]').text()).toBe(
       'El equipo no tiene política: activar no iniciará revisiones',
     )
+    wrapper.unmount()
+  })
+
+  it('Sincronizar una cuenta llama a syncInstallation con su id y muestra el aviso', async () => {
+    mocks.session.me = admin
+    mocks.api.installations.mockResolvedValue([
+      { id: 1, account_login: 'acme', account_type: 'Organization', suspended_at: null },
+      { id: 2, account_login: 'personal', account_type: 'User', suspended_at: null },
+    ])
+
+    let resolveSync!: (value: { status: string }) => void
+    mocks.api.syncInstallation.mockReturnValue(
+      new Promise<{ status: string }>((resolve) => {
+        resolveSync = resolve
+      }),
+    )
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    const button = wrapper.get('[data-sync-installation="2"]')
+    await button.trigger('click')
+
+    expect(mocks.api.syncInstallation).toHaveBeenCalledWith(2)
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(button.text()).toContain('Sincronizando')
+
+    resolveSync({ status: 'queued' })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(
+      'Sincronización encolada. Los repositorios aparecerán en unos segundos.',
+    )
+    expect(button.attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('Sincronizar todo llama a syncInstallation una vez por instalación', async () => {
+    mocks.session.me = admin
+    mocks.api.installations.mockResolvedValue([
+      { id: 1, account_login: 'acme', account_type: 'Organization', suspended_at: null },
+      { id: 2, account_login: 'personal', account_type: 'User', suspended_at: null },
+    ])
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    await wrapper.get('[data-sync-all]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.syncInstallation).toHaveBeenCalledTimes(2)
+    expect(mocks.api.syncInstallation).toHaveBeenNthCalledWith(1, 1)
+    expect(mocks.api.syncInstallation).toHaveBeenNthCalledWith(2, 2)
+    expect(wrapper.text()).toContain(
+      'Sincronización encolada. Los repositorios aparecerán en unos segundos.',
+    )
+    wrapper.unmount()
+  })
+
+  it('Actualizar recarga los repositorios sin refrescar la página', async () => {
+    mocks.session.me = admin
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(mocks.api.repos).toHaveBeenCalledTimes(1)
+
+    await wrapper.get('[data-refresh-repos]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.repos).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('si falla la sincronización muestra el error y vuelve a habilitar el botón', async () => {
+    mocks.session.me = admin
+    mocks.api.installations.mockResolvedValue([
+      { id: 1, account_login: 'acme', account_type: 'Organization', suspended_at: null },
+    ])
+    mocks.api.syncInstallation.mockRejectedValue(new Error('falló la red'))
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    const button = wrapper.get('[data-sync-installation="1"]')
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('No se pudo encolar la sincronización.')
+    expect(button.attributes('disabled')).toBeUndefined()
+    expect(button.text()).toContain('Sincronizar')
     wrapper.unmount()
   })
 })

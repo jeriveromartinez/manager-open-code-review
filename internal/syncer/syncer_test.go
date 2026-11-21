@@ -84,6 +84,7 @@ type fakeGitHub struct {
 	repos            func(http.ResponseWriter, *http.Request)
 	pulls            func(http.ResponseWriter, *http.Request)
 	appInstallations func(http.ResponseWriter, *http.Request)
+	getInstallation  func(http.ResponseWriter, *http.Request)
 }
 
 func newFakeGitHub(t *testing.T, repos, pulls, appInstallations func(http.ResponseWriter, *http.Request)) *fakeGitHub {
@@ -121,6 +122,16 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"token":"ghs_test_%d","expires_at":%q}`, id, time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
 		return
+	}
+	if raw, ok := strings.CutPrefix(r.URL.Path, "/app/installations/"); ok {
+		if _, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			if f.getInstallation != nil {
+				f.getInstallation(w, r)
+			} else {
+				http.NotFound(w, r)
+			}
+			return
+		}
 	}
 
 	switch {
@@ -577,6 +588,14 @@ func TestReconcileContinuesOnError(t *testing.T) {
 	}
 }
 
+func writeInstallation(t *testing.T, w http.ResponseWriter, inst *gh.Installation) {
+	t.Helper()
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(inst); err != nil {
+		t.Errorf("encode installation: %v", err)
+	}
+}
+
 func writeAppInstallations(t *testing.T, w http.ResponseWriter, r *http.Request, installs []*gh.Installation, nextPage string) {
 	t.Helper()
 	w.Header().Set("Content-Type", "application/json")
@@ -776,6 +795,105 @@ func TestSyncInstallationSkipsSuspended(t *testing.T) {
 	}
 	if got := countRows(t, s, &store.Repository{}, ""); got != 0 {
 		t.Errorf("repositories rows = %d, want 0", got)
+	}
+}
+
+func TestSyncInstallationRecoversMissingRow(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(1, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			t.Error("pulls endpoint should not be called: the recovered repository is disabled")
+			writePulls(t, w, r, nil, time.Time{}, "")
+		}, nil)
+	f.getInstallation = func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/app/installations/7" {
+			t.Errorf("installation path = %q, want /app/installations/7", got)
+		}
+		writeInstallation(t, w, ghInstallation(testInstallationID, "acme", "Organization"))
+	}
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v", err)
+	}
+
+	var inst store.Installation
+	if err := s.DB.WithContext(ctx).Where("id = ?", testInstallationID).Take(&inst).Error; err != nil {
+		t.Fatalf("load installation %d: %v", testInstallationID, err)
+	}
+	if inst.AccountLogin != "acme" || inst.AccountType != "Organization" {
+		t.Errorf("installation = %+v, want acme/Organization", inst)
+	}
+	if got := countRows(t, s, &store.Repository{}, "id = ?", 1); got != 1 {
+		t.Errorf("repo 1 rows = %d, want 1", got)
+	}
+}
+
+func TestSyncInstallationMissingOnGitHubIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			t.Error("repositories endpoint should not be called when the installation is absent on GitHub")
+			writeRepos(t, w, r, nil, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			t.Error("pulls endpoint should not be called when the installation is absent on GitHub")
+			writePulls(t, w, r, nil, time.Time{}, "")
+		}, nil)
+	f.getInstallation = func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v, want nil", err)
+	}
+	if got := countRows(t, s, &store.Installation{}, ""); got != 0 {
+		t.Errorf("installation rows = %d, want 0", got)
+	}
+	if got := f.repoCalls(); got != 0 {
+		t.Errorf("/installation/repositories calls = %d, want 0", got)
+	}
+}
+
+func TestSyncInstallationRecoversSuspendedInstallation(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	suspendedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			t.Error("repositories endpoint should not be called for a suspended installation")
+			writeRepos(t, w, r, nil, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			t.Error("pulls endpoint should not be called for a suspended installation")
+			writePulls(t, w, r, nil, time.Time{}, "")
+		}, nil)
+	f.getInstallation = func(w http.ResponseWriter, r *http.Request) {
+		writeInstallation(t, w, ghSuspendedInstallation(testInstallationID, "acme", "Organization", suspendedAt))
+	}
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v, want nil", err)
+	}
+	var inst store.Installation
+	if err := s.DB.WithContext(ctx).Where("id = ?", testInstallationID).Take(&inst).Error; err != nil {
+		t.Fatalf("load installation %d: %v", testInstallationID, err)
+	}
+	if inst.SuspendedAt == nil || !inst.SuspendedAt.Equal(suspendedAt) {
+		t.Errorf("SuspendedAt = %v, want %v", inst.SuspendedAt, suspendedAt)
+	}
+	if got := len(f.seenInstallations()); got != 0 {
+		t.Errorf("installation token requests = %d, want 0", got)
+	}
+	if got := f.repoCalls(); got != 0 {
+		t.Errorf("/installation/repositories calls = %d, want 0", got)
 	}
 }
 

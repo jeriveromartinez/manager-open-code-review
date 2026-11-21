@@ -11,6 +11,11 @@ const installations = ref<Installation[]>([])
 const setupStatus = ref<SetupStatus | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
+const refreshing = ref(false)
+const syncPending = ref<number[]>([])
+const syncingAll = ref(false)
+const syncMessage = ref<string | null>(null)
+const syncError = ref<string | null>(null)
 
 /** Solo los administradores pueden cambiar la configuración de los repositorios. */
 const canEdit = computed(() => session.me?.is_admin === true)
@@ -45,6 +50,57 @@ async function load(): Promise<void> {
     error.value = 'No se pudieron cargar los repositorios'
   } finally {
     loading.value = false
+  }
+}
+
+function isSyncing(id: number): boolean {
+  return syncPending.value.includes(id)
+}
+
+function clearSyncFeedback(): void {
+  syncMessage.value = null
+  syncError.value = null
+}
+
+async function refresh(): Promise<void> {
+  refreshing.value = true
+  clearSyncFeedback()
+  try {
+    await load()
+  } finally {
+    refreshing.value = false
+  }
+}
+
+async function syncInstallation(id: number): Promise<void> {
+  if (isSyncing(id)) return
+  clearSyncFeedback()
+  syncPending.value = [...syncPending.value, id]
+  try {
+    await api.syncInstallation(id)
+    syncMessage.value = 'Sincronización encolada. Los repositorios aparecerán en unos segundos.'
+  } catch {
+    syncError.value = 'No se pudo encolar la sincronización.'
+  } finally {
+    syncPending.value = syncPending.value.filter((pending) => pending !== id)
+  }
+}
+
+async function syncAll(): Promise<void> {
+  if (syncingAll.value || installations.value.length === 0) return
+  clearSyncFeedback()
+  syncingAll.value = true
+  try {
+    const results = await Promise.allSettled(
+      installations.value.map((installation) => api.syncInstallation(installation.id)),
+    )
+    if (results.some((result) => result.status === 'rejected')) {
+      syncError.value = 'No se pudo encolar la sincronización.'
+    } else {
+      syncMessage.value = 'Sincronización encolada. Los repositorios aparecerán en unos segundos.'
+    }
+  } finally {
+    syncingAll.value = false
   }
 }
 
@@ -90,22 +146,53 @@ onMounted(() => {
     <section v-if="canEdit" class="accounts" aria-label="Cuentas conectadas">
       <div class="accounts__header">
         <h2 class="accounts__title">Cuentas conectadas</h2>
-        <a
-          v-if="setupStatus?.install_url"
-          class="accounts__add"
-          :href="setupStatus.install_url"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Añadir cuenta
-        </a>
+        <div class="accounts__actions">
+          <button
+            type="button"
+            class="button button--ghost"
+            data-refresh-repos
+            :disabled="refreshing"
+            @click="refresh"
+          >
+            {{ refreshing ? 'Actualizando…' : 'Actualizar' }}
+          </button>
+          <button
+            type="button"
+            class="button button--ghost"
+            data-sync-all
+            :disabled="syncingAll || syncPending.length > 0 || installations.length === 0"
+            @click="syncAll"
+          >
+            {{ syncingAll ? 'Sincronizando…' : 'Sincronizar todo' }}
+          </button>
+          <a
+            v-if="setupStatus?.install_url"
+            class="accounts__add"
+            :href="setupStatus.install_url"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Añadir cuenta
+          </a>
+        </div>
       </div>
       <ul v-if="installations.length > 0" class="accounts__list">
         <li v-for="installation in installations" :key="installation.id" class="accounts__item">
-          {{ installation.account_login }}
+          <span>{{ installation.account_login }}</span>
+          <button
+            type="button"
+            class="button button--ghost"
+            :data-sync-installation="installation.id"
+            :disabled="isSyncing(installation.id) || syncingAll"
+            @click="syncInstallation(installation.id)"
+          >
+            {{ isSyncing(installation.id) ? 'Sincronizando…' : 'Sincronizar' }}
+          </button>
         </li>
       </ul>
       <p v-else class="accounts__empty">Todavía no hay cuentas conectadas</p>
+      <p v-if="syncError" class="form-error" role="alert">{{ syncError }}</p>
+      <p v-else-if="syncMessage" class="accounts__message">{{ syncMessage }}</p>
     </section>
 
     <p v-if="error" class="empty-state">{{ error }}</p>
@@ -220,6 +307,12 @@ onMounted(() => {
   font-weight: 600;
 }
 
+.accounts__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
 .accounts__add {
   color: var(--accent, #0969da);
   font-size: 14px;
@@ -237,10 +330,23 @@ onMounted(() => {
   color: var(--text);
 }
 
+.accounts__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
 .accounts__empty {
   margin: 0;
   color: var(--text-muted);
   font-size: 14px;
+}
+
+.accounts__message {
+  margin-top: var(--space-2);
+  color: var(--ok);
+  font-size: 13px;
 }
 
 .table-wrap {
