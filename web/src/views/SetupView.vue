@@ -46,7 +46,8 @@ async function submit(): Promise<void> {
     postManifest(await api.setupManifest(body))
   } catch (err) {
     if (err instanceof ApiError && err.status === 403) {
-      error.value = 'El token de setup del servidor no coincide.'
+      tokenRequired.value = true
+      error.value = 'El servidor requiere el token de setup: escríbelo para crear la App.'
     } else if (err instanceof ApiError && err.status === 409) {
       error.value = 'La instancia ya está configurada.'
     } else {

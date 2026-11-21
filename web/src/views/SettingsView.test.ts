@@ -1,4 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, type SettingsField } from '../api'
 import SettingsView from './SettingsView.vue'
@@ -13,6 +14,8 @@ const fields: SettingsField[] = [
 ]
 
 const stored = { public_url: '', review_timeout: '20m0s', ocr_bin: 'ocr', alert_webhook_url: '' }
+
+const groupsWithFields = new Set(fields.map((field) => field.group)).size
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -100,6 +103,19 @@ describe('SettingsView', () => {
     )
   })
 
+  it('renders only the groups that have fields', async () => {
+    vi.mocked(api.settings).mockResolvedValue({
+      values: { review_timeout: '20m0s' },
+      fields: [{ key: 'review_timeout', group: 'review', default: '20m', restart: 'worker', secret: false }],
+    })
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    const forms = wrapper.findAll('form[data-group]')
+    expect(forms).toHaveLength(1)
+    expect(forms[0].attributes('data-group')).toBe('review')
+  })
+
   it('shows no restart label when no field of the section needs a restart', async () => {
     const wrapper = mount(SettingsView)
     await flushPromises()
@@ -158,7 +174,7 @@ describe('SettingsView', () => {
     await flushPromises()
 
     expect(api.settings).toHaveBeenCalledTimes(2)
-    expect(wrapper.findAll('form[data-group]')).toHaveLength(5)
+    expect(wrapper.findAll('form[data-group]')).toHaveLength(groupsWithFields)
     expect(wrapper.find('[data-retry]').exists()).toBe(false)
   })
 
@@ -180,7 +196,25 @@ describe('SettingsView', () => {
     retry.resolve({ values: { ...stored }, fields })
     await flushPromises()
 
-    expect(wrapper.findAll('form[data-group]')).toHaveLength(5)
+    expect(wrapper.findAll('form[data-group]')).toHaveLength(groupsWithFields)
+    expect(wrapper.find('[data-retry]').exists()).toBe(false)
+  })
+
+  it('shows a disabled loading control before the first response arrives', async () => {
+    const first = deferred<{ values: Record<string, string>; fields: SettingsField[] }>()
+    vi.mocked(api.settings).mockReturnValueOnce(first.promise)
+    const wrapper = mount(SettingsView)
+    await nextTick()
+
+    const button = wrapper.get('[data-retry]')
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(button.text()).toBe('Cargando…')
+    expect(wrapper.findAll('form[data-group]')).toHaveLength(0)
+
+    first.resolve({ values: { ...stored }, fields })
+    await flushPromises()
+
+    expect(wrapper.findAll('form[data-group]')).toHaveLength(groupsWithFields)
     expect(wrapper.find('[data-retry]').exists()).toBe(false)
   })
 

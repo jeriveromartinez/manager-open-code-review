@@ -97,10 +97,9 @@ onMounted(load)
     </button>
     <span v-if="saved" class="badge badge--ok" role="status">{{ saved }}</span>
 
-    <template v-if="fields.length > 0">
+    <template v-for="group in groups" :key="group.id">
       <form
-        v-for="group in groups"
-        :key="group.id"
+        v-if="fieldsOf(group.id).length > 0"
         class="pr-card"
         :data-group="group.id"
         @submit.prevent="save(group.id)"

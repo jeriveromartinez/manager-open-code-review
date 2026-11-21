@@ -106,6 +106,28 @@ describe('SetupView', () => {
     expect(api.setupManifest).toHaveBeenCalledWith({ name: 'Acme QA' })
   })
 
+  it('shows the setup token field when the server rejects the submit with 403', async () => {
+    vi.mocked(api.setupManifest).mockRejectedValueOnce(new ApiError(403, 'setup token required'))
+    const wrapper = mount(SetupView)
+    await flushPromises()
+
+    expect(wrapper.find('input[name="setup_token"]').exists()).toBe(false)
+
+    await wrapper.find('input[name="name"]').setValue('Acme QA')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    const token = wrapper.find('input[name="setup_token"]')
+    expect(token.exists()).toBe(true)
+    expect(wrapper.text()).toContain('requiere el token de setup')
+
+    await token.setValue('s3cret')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(api.setupManifest).toHaveBeenLastCalledWith({ name: 'Acme QA', setup_token: 's3cret' })
+  })
+
   it('explains that the instance is already configured', async () => {
     vi.mocked(api.setupManifest).mockRejectedValue(new ApiError(409, 'already configured'))
     const wrapper = mount(SetupView)
