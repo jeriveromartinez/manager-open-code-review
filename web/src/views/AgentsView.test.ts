@@ -310,6 +310,15 @@ describe('AgentsView', () => {
     wrapper.unmount()
   })
 
+  it('puts the profile register beside the team policy', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    expect(wrapper.get('.split__main').find('[data-profile-row="7"]').exists()).toBe(true)
+    expect(wrapper.get('.split__aside').find('#policy').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('shows the stored key state without rendering the key', async () => {
     const wrapper = mountAgents()
     await flushPromises()

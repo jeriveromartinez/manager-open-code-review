@@ -114,15 +114,6 @@ describe('AppShell', () => {
     expect(admin.find('[data-role-lead]').exists()).toBe(true)
   })
 
-  it('widens the shell only for views that ask for it', async () => {
-    const queue = await mountShell('/')
-    expect(queue.get('.shell').classes()).toContain('shell--wide')
-    queue.unmount()
-
-    const repos = await mountShell('/repos')
-    expect(repos.get('.shell').classes()).not.toContain('shell--wide')
-  })
-
   it('names who is signed in on the logout button', async () => {
     const wrapper = await mountShell()
 

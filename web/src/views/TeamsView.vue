@@ -188,7 +188,7 @@ onMounted(() => {
 
     <p v-if="error" class="empty-state">{{ error }}</p>
     <p v-else-if="!loading && teams.length === 0" class="empty-state">No hay equipos todavía</p>
-    <div v-else class="team-register">
+    <div v-else class="team-register card-grid">
       <article
         v-for="team in teams"
         :key="team.id"
@@ -333,12 +333,6 @@ onMounted(() => {
 
 .create-team__field .field__input {
   width: 100%;
-}
-
-.team-register {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
 }
 
 .team-roster {

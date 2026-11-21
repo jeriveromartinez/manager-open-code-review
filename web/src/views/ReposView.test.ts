@@ -135,6 +135,22 @@ describe('ReposView', () => {
     wrapper.unmount()
   })
 
+  it('puts connected accounts in a side column for admins and the register alone otherwise', async () => {
+    mocks.session.me = admin
+    const asAdmin = mountRepos()
+    await flushPromises()
+    expect(asAdmin.get('.split__aside').find('[aria-label="Cuentas conectadas"]').exists()).toBe(true)
+    expect(asAdmin.get('.split__main').find('.repo-table').exists()).toBe(true)
+    asAdmin.unmount()
+
+    mocks.session.me = developer
+    const asDeveloper = mountRepos()
+    await flushPromises()
+    expect(asDeveloper.find('.split__aside').exists()).toBe(false)
+    expect(asDeveloper.get('.split__main').find('.repo-table').exists()).toBe(true)
+    asDeveloper.unmount()
+  })
+
   it('como developer, el interruptor está deshabilitado (solo lectura)', async () => {
     mocks.session.me = developer
 

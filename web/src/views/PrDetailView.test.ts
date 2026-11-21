@@ -186,6 +186,19 @@ describe('PrDetailView', () => {
     wrapper.unmount()
   })
 
+  it('puts the findings beside the QA checklist and the runs', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const main = wrapper.get('.split__main')
+    const aside = wrapper.get('.split__aside')
+    expect(main.find('.severity-list [data-finding]').exists()).toBe(true)
+    expect(aside.find('[data-qa-check]').exists()).toBe(true)
+    expect(aside.text()).toContain('Ejecuciones')
+    expect(main.find('[data-qa-check]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('shows findings grouped by severity and retries the review', async () => {
     const wrapper = mountDetail()
     await flushPromises()

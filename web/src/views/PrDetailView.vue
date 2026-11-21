@@ -275,185 +275,193 @@ onMounted(() => {
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
     <p v-if="refreshError" class="caption" role="status" data-refresh-error>{{ refreshError }}</p>
 
-    <section class="tile qa-check" aria-labelledby="qa-check-title" data-qa-check>
-      <div class="qa-check__head">
-        <div>
-          <h2 id="qa-check-title" class="tile__title">Validación QA</h2>
-          <p class="qa-check__figure" data-triaged-count>
-            {{ validation.triaged }}/{{ validation.total }} triados
-          </p>
-        </div>
-        <a
-          class="button button--light"
-          :href="`${detail.html_url}/files`"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Revisar y aprobar en GitHub ↗
-        </a>
-      </div>
-      <ul class="qa-check__list">
-        <li :class="validation.ciGreen ? 'is-ok' : validation.ciKnown ? 'is-bad' : 'is-unknown'" data-check="ci">
-          {{ validation.ciKnown ? `CI: ${validation.ciText} checks en verde` : 'CI sin datos para este commit' }}
-        </li>
-        <li :class="validation.aiDone ? 'is-ok' : 'is-bad'" data-check="ai">{{ validation.aiText }}</li>
-        <li :class="validation.openBlockers === 0 ? 'is-ok' : 'is-bad'" data-check="blockers">
-          {{
-            validation.openBlockers === 0
-              ? 'Sin bloqueantes abiertos'
-              : `${validation.openBlockers} bloqueante${validation.openBlockers === 1 ? '' : 's'} abierto${validation.openBlockers === 1 ? '' : 's'}`
-          }}
-        </li>
-        <li :class="validation.untriaged === 0 ? 'is-ok' : 'is-unknown'" data-check="untriaged">
-          {{
-            validation.untriaged === 0
-              ? 'Todos los hallazgos abiertos están triados'
-              : `${validation.untriaged} hallazgo${validation.untriaged === 1 ? '' : 's'} sin triar`
-          }}
-        </li>
-      </ul>
-    </section>
-
-    <section class="pr-section" aria-label="Ejecuciones">
-      <div class="pr-section__head">
-        <h2 class="pr-section__title">Ejecuciones</h2>
-        <span class="pr-section__count">{{ detail.runs.length }} en total</span>
-      </div>
-      <ol v-if="detail.runs.length > 0" class="run-list">
-        <li v-for="run in detail.runs" :key="run.id" class="run" data-run>
-          <div class="run__head">
-            <span class="badge" :class="runTone(run.status)">{{ run.status }}</span>
-            <span class="run__trigger"><code>{{ run.trigger }}</code></span>
-            <span class="run__attempt">intento <code>{{ run.attempt }}</code></span>
-          </div>
-          <dl class="run__times">
-            <div class="run__time">
-              <dt>Inicio</dt>
-              <dd><code>{{ run.started_at ?? '—' }}</code></dd>
+    <div class="split split--end">
+      <div class="split__aside">
+        <section class="tile qa-check" aria-labelledby="qa-check-title" data-qa-check>
+          <div class="qa-check__head">
+            <div>
+              <h2 id="qa-check-title" class="tile__title">Validación QA</h2>
+              <p class="qa-check__figure" data-triaged-count>
+                {{ validation.triaged }}/{{ validation.total }} triados
+              </p>
             </div>
-            <div class="run__time">
-              <dt>Fin</dt>
-              <dd><code>{{ run.finished_at ?? '—' }}</code></dd>
+            <a
+              class="button button--light"
+              :href="`${detail.html_url}/files`"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Revisar y aprobar en GitHub ↗
+            </a>
+          </div>
+          <ul class="qa-check__list">
+            <li :class="validation.ciGreen ? 'is-ok' : validation.ciKnown ? 'is-bad' : 'is-unknown'" data-check="ci">
+              {{ validation.ciKnown ? `CI: ${validation.ciText} checks en verde` : 'CI sin datos para este commit' }}
+            </li>
+            <li :class="validation.aiDone ? 'is-ok' : 'is-bad'" data-check="ai">{{ validation.aiText }}</li>
+            <li :class="validation.openBlockers === 0 ? 'is-ok' : 'is-bad'" data-check="blockers">
+              {{
+                validation.openBlockers === 0
+                  ? 'Sin bloqueantes abiertos'
+                  : `${validation.openBlockers} bloqueante${validation.openBlockers === 1 ? '' : 's'} abierto${validation.openBlockers === 1 ? '' : 's'}`
+              }}
+            </li>
+            <li :class="validation.untriaged === 0 ? 'is-ok' : 'is-unknown'" data-check="untriaged">
+              {{
+                validation.untriaged === 0
+                  ? 'Todos los hallazgos abiertos están triados'
+                  : `${validation.untriaged} hallazgo${validation.untriaged === 1 ? '' : 's'} sin triar`
+              }}
+            </li>
+          </ul>
+        </section>
+
+        <section class="pr-section" aria-label="Ejecuciones">
+          <div class="pr-section__head">
+            <h2 class="pr-section__title">Ejecuciones</h2>
+            <span class="pr-section__count">{{ detail.runs.length }} en total</span>
+          </div>
+          <ol v-if="detail.runs.length > 0" class="run-list">
+            <li v-for="run in detail.runs" :key="run.id" class="run" data-run>
+              <div class="run__head">
+                <span class="badge" :class="runTone(run.status)">{{ run.status }}</span>
+                <span class="run__trigger"><code>{{ run.trigger }}</code></span>
+                <span class="run__attempt">intento <code>{{ run.attempt }}</code></span>
+              </div>
+              <dl class="run__times">
+                <div class="run__time">
+                  <dt>Inicio</dt>
+                  <dd><code>{{ run.started_at ?? '—' }}</code></dd>
+                </div>
+                <div class="run__time">
+                  <dt>Fin</dt>
+                  <dd><code>{{ run.finished_at ?? '—' }}</code></dd>
+                </div>
+              </dl>
+              <p v-if="run.summary" class="run__summary">{{ run.summary }}</p>
+              <p v-if="run.error_message" class="run__error">
+                <code>{{ run.error_code }}</code>: {{ run.error_message }}
+              </p>
+            </li>
+          </ol>
+          <p v-else class="empty-state">Todavía no hay ejecuciones</p>
+
+          <dl class="coverage">
+            <div class="coverage__item" data-coverage-reviewed>
+              <dt>Archivos revisados</dt>
+              <dd><code>{{ coverageCount('reviewed_files') }}</code></dd>
+            </div>
+            <div class="coverage__item" data-coverage-skipped>
+              <dt>Archivos omitidos</dt>
+              <dd><code>{{ coverageCount('skipped_files') }}</code></dd>
             </div>
           </dl>
-          <p v-if="run.summary" class="run__summary">{{ run.summary }}</p>
-          <p v-if="run.error_message" class="run__error">
-            <code>{{ run.error_code }}</code>: {{ run.error_message }}
-          </p>
-        </li>
-      </ol>
-      <p v-else class="empty-state">Todavía no hay ejecuciones</p>
-
-      <dl class="coverage">
-        <div class="coverage__item" data-coverage-reviewed>
-          <dt>Archivos revisados</dt>
-          <dd><code>{{ coverageCount('reviewed_files') }}</code></dd>
-        </div>
-        <div class="coverage__item" data-coverage-skipped>
-          <dt>Archivos omitidos</dt>
-          <dd><code>{{ coverageCount('skipped_files') }}</code></dd>
-        </div>
-      </dl>
-    </section>
-
-    <section class="pr-section" aria-label="Hallazgos">
-      <div class="pr-section__head">
-        <h2 class="pr-section__title">Hallazgos</h2>
-        <span class="pr-section__count">{{ detail.findings.length }} en total</span>
-      </div>
-      <p v-if="detail.findings.length === 0" class="empty-state">No se encontraron hallazgos</p>
-
-      <div
-        v-for="group in groupedFindings"
-        :key="group.key"
-        class="severity"
-        :data-severity="group.key"
-      >
-        <div class="severity__head">
-          <h3 class="severity__title">{{ group.label }}</h3>
-          <span class="severity__count">{{ group.findings.length }}</span>
-        </div>
-        <article v-for="finding in group.findings" :key="finding.id" class="finding" data-finding>
-          <div class="finding__meta">
-            <h4 class="finding__title">{{ finding.title }}</h4>
-            <p class="finding__location">
-              <code>{{ finding.path }}:{{ finding.start_line }}–{{ finding.end_line }}</code>
-            </p>
-          </div>
-          <p class="finding__body">{{ finding.body }}</p>
-          <p v-if="finding.suggestion" class="finding__suggestion">
-            <span class="finding__label">Sugerencia</span>
-            <span>{{ finding.suggestion }}</span>
-          </p>
-          <div class="finding__actions">
-            <span
-              class="finding__triage"
-              :class="{ 'finding__triage--done': finding.triage_verdict === 'confirmed' }"
-              data-triage-note
-            >
-              {{ triageNote(finding) }}
-            </span>
-            <!-- A resolved finding is no longer QA's call: confirming it would
-                 reopen it and block the PR again. -->
-            <button
-              v-if="finding.status === 'open'"
-              class="button button--ghost finding__action"
-              type="button"
-              data-withdraw
-              :data-finding-id="finding.id"
-              :disabled="acting === finding.id"
-              @click="askWithdraw(finding)"
-            >
-              Falso positivo
-            </button>
-            <button
-              v-if="finding.status === 'open' && finding.triage_verdict !== 'confirmed'"
-              class="button button--light finding__action"
-              type="button"
-              data-confirm
-              :data-finding-id="finding.id"
-              :disabled="acting === finding.id"
-              @click="askConfirm(finding)"
-            >
-              Confirmar
-            </button>
-          </div>
-        </article>
+        </section>
       </div>
 
-      <div v-if="withdrawnFindings.length > 0" class="severity severity--withdrawn" data-withdrawn>
-        <div class="severity__head">
-          <h3 class="severity__title">Descartados</h3>
-          <span class="severity__count">{{ withdrawnFindings.length }}</span>
-        </div>
-        <article
-          v-for="finding in withdrawnFindings"
-          :key="finding.id"
-          class="finding finding--muted"
-          data-finding
-        >
-          <div class="finding__meta">
-            <h4 class="finding__title">{{ finding.title }}</h4>
-            <p class="finding__location">
-              <code>{{ finding.path }}:{{ finding.start_line }}–{{ finding.end_line }}</code>
-            </p>
+      <div class="split__main">
+        <section class="pr-section" aria-label="Hallazgos">
+          <div class="pr-section__head">
+            <h2 class="pr-section__title">Hallazgos</h2>
+            <span class="pr-section__count">{{ detail.findings.length }} en total</span>
           </div>
-          <div class="finding__actions">
-            <span class="finding__triage" data-triage-note>{{ triageNote(finding) }}</span>
-            <button
-              class="button button--ghost finding__action"
-              type="button"
-              data-confirm
-              :data-finding-id="finding.id"
-              :disabled="acting === finding.id"
-              @click="askConfirm(finding)"
+          <p v-if="detail.findings.length === 0" class="empty-state">No se encontraron hallazgos</p>
+
+          <div class="severity-list">
+            <div
+              v-for="group in groupedFindings"
+              :key="group.key"
+              class="severity"
+              :data-severity="group.key"
             >
-              Restaurar
-            </button>
+              <div class="severity__head">
+                <h3 class="severity__title">{{ group.label }}</h3>
+                <span class="severity__count">{{ group.findings.length }}</span>
+              </div>
+              <article v-for="finding in group.findings" :key="finding.id" class="finding" data-finding>
+                <div class="finding__meta">
+                  <h4 class="finding__title">{{ finding.title }}</h4>
+                  <p class="finding__location">
+                    <code>{{ finding.path }}:{{ finding.start_line }}–{{ finding.end_line }}</code>
+                  </p>
+                </div>
+                <p class="finding__body">{{ finding.body }}</p>
+                <p v-if="finding.suggestion" class="finding__suggestion">
+                  <span class="finding__label">Sugerencia</span>
+                  <span>{{ finding.suggestion }}</span>
+                </p>
+                <div class="finding__actions">
+                  <span
+                    class="finding__triage"
+                    :class="{ 'finding__triage--done': finding.triage_verdict === 'confirmed' }"
+                    data-triage-note
+                  >
+                    {{ triageNote(finding) }}
+                  </span>
+                  <!-- A resolved finding is no longer QA's call: confirming it would
+                       reopen it and block the PR again. -->
+                  <button
+                    v-if="finding.status === 'open'"
+                    class="button button--ghost finding__action"
+                    type="button"
+                    data-withdraw
+                    :data-finding-id="finding.id"
+                    :disabled="acting === finding.id"
+                    @click="askWithdraw(finding)"
+                  >
+                    Falso positivo
+                  </button>
+                  <button
+                    v-if="finding.status === 'open' && finding.triage_verdict !== 'confirmed'"
+                    class="button button--light finding__action"
+                    type="button"
+                    data-confirm
+                    :data-finding-id="finding.id"
+                    :disabled="acting === finding.id"
+                    @click="askConfirm(finding)"
+                  >
+                    Confirmar
+                  </button>
+                </div>
+              </article>
+            </div>
           </div>
-        </article>
+
+          <div v-if="withdrawnFindings.length > 0" class="severity severity--withdrawn" data-withdrawn>
+            <div class="severity__head">
+              <h3 class="severity__title">Descartados</h3>
+              <span class="severity__count">{{ withdrawnFindings.length }}</span>
+            </div>
+            <article
+              v-for="finding in withdrawnFindings"
+              :key="finding.id"
+              class="finding finding--muted"
+              data-finding
+            >
+              <div class="finding__meta">
+                <h4 class="finding__title">{{ finding.title }}</h4>
+                <p class="finding__location">
+                  <code>{{ finding.path }}:{{ finding.start_line }}–{{ finding.end_line }}</code>
+                </p>
+              </div>
+              <div class="finding__actions">
+                <span class="finding__triage" data-triage-note>{{ triageNote(finding) }}</span>
+                <button
+                  class="button button--ghost finding__action"
+                  type="button"
+                  data-confirm
+                  :data-finding-id="finding.id"
+                  :disabled="acting === finding.id"
+                  @click="askConfirm(finding)"
+                >
+                  Restaurar
+                </button>
+              </div>
+            </article>
+          </div>
+        </section>
       </div>
-    </section>
+    </div>
 
     <div v-if="confirming" class="dialog-backdrop" data-confirm-dialog>
       <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="finding-action-title">
@@ -499,6 +507,20 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
+}
+
+.severity-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+@media (min-width: 2200px) {
+  .severity-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+  }
 }
 
 .pr-detail code {

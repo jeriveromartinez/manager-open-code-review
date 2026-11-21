@@ -497,158 +497,164 @@ onMounted(() => {
       </button>
     </header>
 
-    <section class="register" aria-labelledby="profiles-title">
-      <div class="register__head">
-        <h2 id="profiles-title" class="register__title">Registro de perfiles</h2>
-        <p class="register__count">
-          {{ profiles.length }} {{ profiles.length === 1 ? 'perfil' : 'perfiles' }}
-        </p>
+    <div class="split split--end">
+      <div class="split__main">
+        <section class="register" aria-labelledby="profiles-title">
+          <div class="register__head">
+            <h2 id="profiles-title" class="register__title">Registro de perfiles</h2>
+            <p class="register__count">
+              {{ profiles.length }} {{ profiles.length === 1 ? 'perfil' : 'perfiles' }}
+            </p>
+          </div>
+
+          <p v-if="error" class="form-error">{{ error }}</p>
+          <p v-else-if="!loading && profiles.length === 0" class="empty-state">
+            No hay perfiles LLM configurados
+          </p>
+          <div v-else class="table-wrap">
+            <table class="profile-table">
+              <thead>
+                <tr>
+                  <th scope="col">Nombre</th>
+                  <th scope="col">Proveedor / modelo</th>
+                  <th scope="col">Salud</th>
+                  <th scope="col">Estado</th>
+                  <th scope="col">Clave API</th>
+                  <th scope="col" class="profile-table__actions-head">Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="profile in profiles" :key="profile.id" :data-profile-row="profile.id">
+                  <td class="profile-table__name">{{ profile.name }}</td>
+                  <td class="profile-table__model">
+                    <span class="profile-table__provider">{{ profile.provider }}</span>
+                    <span class="profile-table__separator" aria-hidden="true">/</span>
+                    <span>{{ profile.model }}</span>
+                  </td>
+                  <td class="profile-table__health">
+                    <div class="health" data-health-cell>
+                      <div class="health__verdict">
+                        <span
+                          class="badge"
+                          :class="healthTone(profile.health_status)"
+                          data-health-badge
+                        >
+                          {{ healthLabel(profile.health_status) }}
+                        </span>
+                        <span v-if="profile.health_stale" class="badge badge--bad" data-health-stale>
+                          Desactualizado
+                        </span>
+                      </div>
+                      <span class="health__age">{{ healthAge(profile) }}</span>
+                      <span v-if="profile.health_error" class="health__error">
+                        {{ profile.health_error }}
+                      </span>
+                    </div>
+                  </td>
+                  <td class="profile-table__state">
+                    {{ profile.enabled ? 'Activado' : 'Desactivado' }}
+                  </td>
+                  <td class="profile-table__key">
+                    {{ profile.api_key_set ? 'Clave configurada' : 'Sin clave' }}
+                  </td>
+                  <td class="profile-table__actions">
+                    <div class="profile-table__action-row">
+                      <button
+                        v-if="isAdmin"
+                        class="button button--ghost profile-table__action"
+                        type="button"
+                        data-health-button
+                        :aria-label="`Probar salud de ${profile.name}`"
+                        @click="checkHealth(profile)"
+                      >
+                        Probar
+                      </button>
+                      <button
+                        v-if="isAdmin"
+                        class="button button--ghost profile-table__action"
+                        type="button"
+                        data-edit-profile
+                        :aria-label="`Editar ${profile.name}`"
+                        @click="openEdit(profile)"
+                      >
+                        Editar
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
 
-      <p v-if="error" class="form-error">{{ error }}</p>
-      <p v-else-if="!loading && profiles.length === 0" class="empty-state">
-        No hay perfiles LLM configurados
-      </p>
-      <div v-else class="table-wrap">
-        <table class="profile-table">
-          <thead>
-            <tr>
-              <th scope="col">Nombre</th>
-              <th scope="col">Proveedor / modelo</th>
-              <th scope="col">Salud</th>
-              <th scope="col">Estado</th>
-              <th scope="col">Clave API</th>
-              <th scope="col" class="profile-table__actions-head">Acciones</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="profile in profiles" :key="profile.id" :data-profile-row="profile.id">
-              <td class="profile-table__name">{{ profile.name }}</td>
-              <td class="profile-table__model">
-                <span class="profile-table__provider">{{ profile.provider }}</span>
-                <span class="profile-table__separator" aria-hidden="true">/</span>
-                <span>{{ profile.model }}</span>
-              </td>
-              <td class="profile-table__health">
-                <div class="health" data-health-cell>
-                  <div class="health__verdict">
-                    <span
-                      class="badge"
-                      :class="healthTone(profile.health_status)"
-                      data-health-badge
-                    >
-                      {{ healthLabel(profile.health_status) }}
-                    </span>
-                    <span v-if="profile.health_stale" class="badge badge--bad" data-health-stale>
-                      Desactualizado
-                    </span>
-                  </div>
-                  <span class="health__age">{{ healthAge(profile) }}</span>
-                  <span v-if="profile.health_error" class="health__error">
-                    {{ profile.health_error }}
-                  </span>
-                </div>
-              </td>
-              <td class="profile-table__state">
-                {{ profile.enabled ? 'Activado' : 'Desactivado' }}
-              </td>
-              <td class="profile-table__key">
-                {{ profile.api_key_set ? 'Clave configurada' : 'Sin clave' }}
-              </td>
-              <td class="profile-table__actions">
-                <div class="profile-table__action-row">
-                  <button
-                    v-if="isAdmin"
-                    class="button button--ghost profile-table__action"
-                    type="button"
-                    data-health-button
-                    :aria-label="`Probar salud de ${profile.name}`"
-                    @click="checkHealth(profile)"
-                  >
-                    Probar
-                  </button>
-                  <button
-                    v-if="isAdmin"
-                    class="button button--ghost profile-table__action"
-                    type="button"
-                    data-edit-profile
-                    :aria-label="`Editar ${profile.name}`"
-                    @click="openEdit(profile)"
-                  >
-                    Editar
-                  </button>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <section
-      v-if="isAdmin && teams.length > 0"
-      id="policy"
-      class="policy"
-      aria-labelledby="policy-title"
-    >
-      <header class="policy__head">
-        <h2 id="policy-title" class="policy__title">Política por equipo</h2>
-        <p class="policy__hint">Se guarda por equipo y se aplica a todas sus revisiones.</p>
-      </header>
-
-      <div aria-live="polite">
-        <p v-if="stalePolicy" class="stale-notice" data-stale-policy>
-          Otra persona cambió esta política.
-          <button class="button button--ghost" type="button" @click="loadPolicy">Recargar</button>
-        </p>
-      </div>
-
-      <div class="policy__fields">
-        <label class="field">
-          <span class="field__label">Equipo</span>
-          <select
-            v-model.number="selectedTeamId"
-            class="field__input"
-            data-policy-team
-            @change="loadPolicy"
-          >
-            <option :value="null">Selecciona un equipo</option>
-            <option v-for="team in teams" :key="team.id" :value="team.id">{{ team.name }}</option>
-          </select>
-          <span class="field__hint">Equipo al que se aplica la política.</span>
-        </label>
-        <label class="field">
-          <span class="field__label">Perfil LLM</span>
-          <select v-model.number="policyProfileId" class="field__input" data-policy-profile>
-            <option :value="null">Sin perfil</option>
-            <option v-for="profile in profiles" :key="profile.id" :value="profile.id">
-              {{ profile.name }}
-            </option>
-          </select>
-          <span class="field__hint">Perfil que ejecuta las revisiones del equipo.</span>
-        </label>
-        <button
-          class="button button--primary policy__save"
-          type="button"
-          data-policy-save
-          @click="savePolicy"
+      <div class="split__aside">
+        <section
+          v-if="isAdmin && teams.length > 0"
+          id="policy"
+          class="policy"
+          aria-labelledby="policy-title"
         >
-          Guardar política
-        </button>
-      </div>
+          <header class="policy__head">
+            <h2 id="policy-title" class="policy__title">Política por equipo</h2>
+            <p class="policy__hint">Se guarda por equipo y se aplica a todas sus revisiones.</p>
+          </header>
 
-      <label class="policy-ci">
-        <input v-model="policyRequireGreenCI" type="checkbox" data-policy-require-green-ci />
-        <span class="policy-ci__text">
-          <span class="field__label">Exigir CI en verde</span>
-          <span class="field__hint">
-            Ninguna revisión empieza hasta que el último commit tenga checks y ninguno haya fallado.
-          </span>
-        </span>
-      </label>
-      <p v-if="policyError" class="form-error" role="alert">{{ policyError }}</p>
-      <p v-else-if="policyMessage" class="policy__message" role="status">{{ policyMessage }}</p>
-    </section>
+          <div aria-live="polite">
+            <p v-if="stalePolicy" class="stale-notice" data-stale-policy>
+              Otra persona cambió esta política.
+              <button class="button button--ghost" type="button" @click="loadPolicy">Recargar</button>
+            </p>
+          </div>
+
+          <div class="policy__fields">
+            <label class="field">
+              <span class="field__label">Equipo</span>
+              <select
+                v-model.number="selectedTeamId"
+                class="field__input"
+                data-policy-team
+                @change="loadPolicy"
+              >
+                <option :value="null">Selecciona un equipo</option>
+                <option v-for="team in teams" :key="team.id" :value="team.id">{{ team.name }}</option>
+              </select>
+              <span class="field__hint">Equipo al que se aplica la política.</span>
+            </label>
+            <label class="field">
+              <span class="field__label">Perfil LLM</span>
+              <select v-model.number="policyProfileId" class="field__input" data-policy-profile>
+                <option :value="null">Sin perfil</option>
+                <option v-for="profile in profiles" :key="profile.id" :value="profile.id">
+                  {{ profile.name }}
+                </option>
+              </select>
+              <span class="field__hint">Perfil que ejecuta las revisiones del equipo.</span>
+            </label>
+            <button
+              class="button button--primary policy__save"
+              type="button"
+              data-policy-save
+              @click="savePolicy"
+            >
+              Guardar política
+            </button>
+          </div>
+
+          <label class="policy-ci">
+            <input v-model="policyRequireGreenCI" type="checkbox" data-policy-require-green-ci />
+            <span class="policy-ci__text">
+              <span class="field__label">Exigir CI en verde</span>
+              <span class="field__hint">
+                Ninguna revisión empieza hasta que el último commit tenga checks y ninguno haya fallado.
+              </span>
+            </span>
+          </label>
+          <p v-if="policyError" class="form-error" role="alert">{{ policyError }}</p>
+          <p v-else-if="policyMessage" class="policy__message" role="status">{{ policyMessage }}</p>
+        </section>
+      </div>
+    </div>
 
     <div v-if="modalOpen" class="modal-backdrop" @keydown.esc="closeModal">
       <div

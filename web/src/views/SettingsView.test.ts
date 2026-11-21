@@ -183,6 +183,14 @@ describe('SettingsView live updates', () => {
 })
 
 describe('SettingsView', () => {
+  it('lays the groups out as cards in a grid', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    expect(wrapper.get('.card-grid').findAll('[data-group]')).toHaveLength(groupsWithFields)
+    wrapper.unmount()
+  })
+
   it('renders a section per group with the stored value', async () => {
     const wrapper = mount(SettingsView)
     await flushPromises()
