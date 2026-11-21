@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -17,10 +18,11 @@ type findingActionBody struct {
 	Reason string `json:"reason"`
 }
 
-// withdrawFinding marks a finding dismissed from the panel. The panel is the
-// documented path in polling mode, so it must produce exactly the same state a
-// /qa dismiss does: the finding is withdrawn, the audit row records who did it,
-// the GitHub thread is resolved and the gate is recomputed.
+// withdrawFinding marks a finding a false positive from the panel. The panel is
+// the documented path in polling mode, so the finding ends in the same state a
+// /qa dismiss leaves: withdrawn, audited, its GitHub thread resolved and the
+// gate recomputed. On top of that it records QA's verdict, and unlike /qa
+// (lead only) the team's QA may use it, because triage is QA's job.
 func (s *server) withdrawFinding(w http.ResponseWriter, r *http.Request) {
 	s.findingTransition(w, r, store.FindingWithdrawn)
 }
@@ -81,6 +83,10 @@ func (s *server) findingTransition(w http.ResponseWriter, r *http.Request, statu
 		ActorID: &user.ID,
 		Reason:  body.Reason,
 	})
+	if errors.Is(err, store.ErrFindingResolved) {
+		writeAPIError(w, http.StatusConflict, "finding is resolved")
+		return
+	}
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "update finding")
 		return
@@ -88,7 +94,11 @@ func (s *server) findingTransition(w http.ResponseWriter, r *http.Request, statu
 
 	if s.Findings != nil {
 		if changed {
-			_, _ = s.Findings.SetFindingThread(r.Context(), pr.ID, finding, status == store.FindingWithdrawn)
+			// The decision is already stored; a thread that fails to follow is
+			// reconciled by the next republish, so it must not fail the request.
+			if _, err := s.Findings.SetFindingThread(r.Context(), pr.ID, finding, status == store.FindingWithdrawn); err != nil {
+				slog.Warn("mirror finding triage on GitHub thread", "finding_id", finding.ID, "error", err)
+			}
 		}
 		// Republish even when the status already matched: the gate may have
 		// drifted while the action was repeated.
@@ -115,14 +125,14 @@ func (s *server) authorizedPR(w http.ResponseWriter, r *http.Request, user store
 		writeAPIError(w, http.StatusNotFound, "pull request not found")
 		return store.PullRequest{}, false
 	}
-	if !s.canTriage(w, r, user, pr) {
+	if !s.canActOnPR(w, r, user, pr) {
 		return store.PullRequest{}, false
 	}
 	return pr, true
 }
 
-// canTriage writes the error response itself when it returns false.
-func (s *server) canTriage(w http.ResponseWriter, r *http.Request, user store.User, pr store.PullRequest) bool {
+// canActOnPR writes the error response itself when it returns false.
+func (s *server) canActOnPR(w http.ResponseWriter, r *http.Request, user store.User, pr store.PullRequest) bool {
 	if user.IsAdmin {
 		return true
 	}

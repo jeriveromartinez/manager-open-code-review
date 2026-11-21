@@ -26,6 +26,9 @@ var (
 	// ErrRunNotActive is returned when a run is completed after it stopped being
 	// the running run (for example because a new head superseded it).
 	ErrRunNotActive = errors.New("review run is no longer active")
+	// ErrFindingResolved is returned when triaging a finding the code already
+	// fixed: confirming it would reopen it and re-block the gate.
+	ErrFindingResolved = errors.New("finding is resolved")
 )
 
 // Defaults applied by SaveQAPolicy when an administrator leaves a field at its
@@ -870,8 +873,13 @@ func (s *Store) SetFindingStatusAudited(ctx context.Context, id, status string, 
 // SetFindingStatusAudited, confirming an already open finding is a real change
 // because it records who vouched for it. It reports whether the status moved,
 // which is what tells the caller to touch the GitHub thread. Repeating the
-// same decision by the same person is a no-op and is not audited twice.
+// same decision by the same person is a no-op and is not audited twice. A
+// resolved finding is no longer QA's decision and returns ErrFindingResolved.
 func (s *Store) TriageFinding(ctx context.Context, id, status string, entry FindingAudit) (statusChanged bool, err error) {
+	verdict := VerdictConfirmed
+	if status == FindingWithdrawn {
+		verdict = VerdictFalsePositive
+	}
 	err = s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var current Finding
 		err := quietDB(tx).Where("id = ?", id).
@@ -883,16 +891,20 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 		if err != nil {
 			return fmt.Errorf("find finding %q: %w", id, err)
 		}
-		if current.Status == status && current.TriagedBy == entry.Actor && current.TriagedAt != nil {
+		if current.Status == FindingResolved {
+			return fmt.Errorf("triage finding %q: %w", id, ErrFindingResolved)
+		}
+		if current.Status == status && current.TriageVerdict == verdict && current.TriagedBy == entry.Actor {
 			return nil
 		}
 
 		now := time.Now().UTC()
 		err = tx.Model(&Finding{}).Where("id = ?", id).Updates(map[string]any{
-			"status":     status,
-			"triaged_by": entry.Actor,
-			"triaged_at": now,
-			"updated_at": now,
+			"status":         status,
+			"triage_verdict": verdict,
+			"triaged_by":     entry.Actor,
+			"triaged_at":     now,
+			"updated_at":     now,
 		}).Error
 		if err != nil {
 			return fmt.Errorf("triage finding %q: %w", id, err)

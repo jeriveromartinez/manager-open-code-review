@@ -27,6 +27,9 @@ const (
 	FindingResolved  = "resolved"
 	FindingWithdrawn = "withdrawn"
 
+	VerdictConfirmed     = "confirmed"
+	VerdictFalsePositive = "false_positive"
+
 	ArtifactSummary = "summary_comment"
 	ArtifactReview  = "review"
 	ArtifactCheck   = "check_run"
@@ -235,11 +238,12 @@ type Finding struct {
 	GithubThreadID      string    `gorm:"column:github_thread_id"`
 	CreatedAt           time.Time `gorm:"column:created_at"`
 	UpdatedAt           time.Time `gorm:"column:updated_at"`
-	// TriagedBy and TriagedAt record the last person who confirmed the finding
-	// or marked it a false positive from the panel. A review run never writes
-	// them, so the triage survives re-observation of the same fingerprint.
-	TriagedBy string     `gorm:"column:triaged_by"`
-	TriagedAt *time.Time `gorm:"column:triaged_at"`
+	// TriageVerdict, TriagedBy and TriagedAt record the last panel decision on
+	// the finding. Only TriageFinding writes them: a review run or a /qa command
+	// changes Status but leaves QA's verdict as it was.
+	TriageVerdict string     `gorm:"column:triage_verdict"`
+	TriagedBy     string     `gorm:"column:triaged_by"`
+	TriagedAt     *time.Time `gorm:"column:triaged_at"`
 }
 
 // FindingEvent records a lifecycle transition of a finding.

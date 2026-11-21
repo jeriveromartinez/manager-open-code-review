@@ -18,9 +18,9 @@ const (
 )
 
 // QASummary is the QA engineer's overview of the pull requests they can see.
-// Confirmed and FalsePositive are panel triage decisions inside
-// PrecisionWindow; Categories are the most frequent categories of confirmed
-// findings inside CategoryWindow, most frequent first.
+// Confirmed and FalsePositive count panel verdicts inside PrecisionWindow,
+// whatever the finding's status is now; Categories are the most frequent
+// categories of confirmed findings inside CategoryWindow, most frequent first.
 type QASummary struct {
 	ReadyForHuman int
 	Inconclusive  int
@@ -93,7 +93,7 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time) (QASummary
 		N        int
 	}
 	err = s.DB.WithContext(ctx).Table("findings").
-		Where("status = ? AND triaged_at IS NULL AND pull_request_id IN (?)", FindingOpen, openIDs).
+		Where("status = ? AND triage_verdict = '' AND pull_request_id IN (?)", FindingOpen, openIDs).
 		Select("severity, COUNT(*) AS n").
 		Group("severity").
 		Scan(&severityRows).Error
@@ -121,8 +121,8 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time) (QASummary
 	}
 	err = s.DB.WithContext(ctx).Table("findings").
 		Where("triaged_at >= ? AND pull_request_id IN (?)", now.Add(-PrecisionWindow), scopedIDs).
-		Select("COUNT(*) FILTER (WHERE status <> ?) AS confirmed, COUNT(*) FILTER (WHERE status = ?) AS false_positive",
-			FindingWithdrawn, FindingWithdrawn).
+		Select("COUNT(*) FILTER (WHERE triage_verdict = ?) AS confirmed, COUNT(*) FILTER (WHERE triage_verdict = ?) AS false_positive",
+			VerdictConfirmed, VerdictFalsePositive).
 		Scan(&precision).Error
 	if err != nil {
 		return QASummary{}, fmt.Errorf("count triage decisions: %w", err)
@@ -131,8 +131,8 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time) (QASummary
 	out.FalsePositive = precision.FalsePositive
 
 	err = s.DB.WithContext(ctx).Table("findings").
-		Where("triaged_at >= ? AND status <> ? AND category <> '' AND pull_request_id IN (?)",
-			now.Add(-CategoryWindow), FindingWithdrawn, scopedIDs).
+		Where("triaged_at >= ? AND triage_verdict = ? AND category <> '' AND pull_request_id IN (?)",
+			now.Add(-CategoryWindow), VerdictConfirmed, scopedIDs).
 		Select("category, COUNT(*) AS count").
 		Group("category").
 		Order("count DESC, category").

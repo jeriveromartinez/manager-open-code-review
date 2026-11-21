@@ -1,4 +1,8 @@
 -- +goose Up
+-- The verdict is stored apart from status: a review run can reopen a dismissed
+-- finding and a /qa dismiss can withdraw a confirmed one, and neither should
+-- rewrite what QA decided.
+ALTER TABLE findings ADD COLUMN triage_verdict text NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN triaged_by text NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN triaged_at timestamptz;
 CREATE INDEX idx_findings_triaged_at ON findings (triaged_at) WHERE triaged_at IS NOT NULL;
@@ -31,3 +35,4 @@ ALTER TABLE pull_requests DROP COLUMN IF EXISTS qa_status_changed_at;
 DROP INDEX IF EXISTS idx_findings_triaged_at;
 ALTER TABLE findings DROP COLUMN IF EXISTS triaged_at;
 ALTER TABLE findings DROP COLUMN IF EXISTS triaged_by;
+ALTER TABLE findings DROP COLUMN IF EXISTS triage_verdict;

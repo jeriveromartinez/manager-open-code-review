@@ -20,8 +20,10 @@ func TestQAMemberTriagesFindingsAndTheResponseNamesThem(t *testing.T) {
 
 	var body map[string]any
 	decodeJSON(t, rec, &body)
-	if body["status"] != store.FindingOpen || body["triaged_by"] != qa.Login {
-		t.Fatalf("confirm response status=%v triaged_by=%v, want open by %s", body["status"], body["triaged_by"], qa.Login)
+	if body["status"] != store.FindingOpen || body["triaged_by"] != qa.Login ||
+		body["triage_verdict"] != store.VerdictConfirmed {
+		t.Fatalf("confirm response status=%v verdict=%v triaged_by=%v, want open, confirmed by %s",
+			body["status"], body["triage_verdict"], body["triaged_by"], qa.Login)
 	}
 	if at, _ := body["triaged_at"].(string); at == "" {
 		t.Errorf("triaged_at = %v, want a timestamp", body["triaged_at"])
@@ -33,6 +35,32 @@ func TestQAMemberTriagesFindingsAndTheResponseNamesThem(t *testing.T) {
 	decodeJSON(t, rec, &body)
 	if body["status"] != store.FindingWithdrawn {
 		t.Errorf("withdraw response status = %v, want %s", body["status"], store.FindingWithdrawn)
+	}
+}
+
+func TestConfirmingAResolvedFindingConflicts(t *testing.T) {
+	f, pr, finding := newFindingFixture(t)
+	findings := &recordingFindings{}
+	f.deps.Findings = findings
+	f.rebuildRouter()
+	admin := f.user("resolved-admin", true)
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.Finding{}).
+		Where("id = ?", finding.ID).Update("status", store.FindingResolved).Error; err != nil {
+		t.Fatalf("seed resolved finding: %v", err)
+	}
+
+	confirm := fmt.Sprintf("/api/prs/%d/findings/%s/confirm", pr.ID, finding.ID)
+	assertStatus(t, f.request(http.MethodPost, confirm, nil, f.session(admin)), http.StatusConflict)
+
+	got, err := f.st.Finding(f.ctx, finding.ID)
+	if err != nil {
+		t.Fatalf("reload finding: %v", err)
+	}
+	if got.Status != store.FindingResolved {
+		t.Errorf("status = %q, want it still resolved", got.Status)
+	}
+	if calls := findings.threadCalls(); len(calls) != 0 {
+		t.Errorf("thread calls = %v, want none for a rejected triage", calls)
 	}
 }
 

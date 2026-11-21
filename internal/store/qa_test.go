@@ -117,8 +117,10 @@ func TestTriageFindingRecordsWhoDecided(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Finding: %v", err)
 	}
-	if got.TriagedBy != "mvega" || got.TriagedAt == nil || got.Status != store.FindingOpen {
-		t.Fatalf("after confirm: status %q, triaged by %q at %v", got.Status, got.TriagedBy, got.TriagedAt)
+	if got.TriagedBy != "mvega" || got.TriagedAt == nil || got.Status != store.FindingOpen ||
+		got.TriageVerdict != store.VerdictConfirmed {
+		t.Fatalf("after confirm: status %q, verdict %q, triaged by %q at %v",
+			got.Status, got.TriageVerdict, got.TriagedBy, got.TriagedAt)
 	}
 
 	if _, err := f.s.TriageFinding(f.ctx, "b1", store.FindingOpen, confirm); err != nil {
@@ -146,9 +148,45 @@ func TestTriageFindingRecordsWhoDecided(t *testing.T) {
 		t.Errorf("audit rows after withdraw = %d, want 2", n)
 	}
 
+	// A run reopening the false positive changes its status, not QA's verdict.
+	f.finding(pr, "b1", "blocker", "security", store.FindingOpen)
+	reopened, err := f.s.Finding(f.ctx, "b1")
+	if err != nil {
+		t.Fatalf("Finding(reopened): %v", err)
+	}
+	if reopened.Status != store.FindingOpen || reopened.TriageVerdict != store.VerdictFalsePositive {
+		t.Errorf("reopened finding: status %q verdict %q, want open with the false-positive verdict kept",
+			reopened.Status, reopened.TriageVerdict)
+	}
+
 	_, err = f.s.TriageFinding(f.ctx, "missing", store.FindingOpen, confirm)
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("TriageFinding(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+func TestTriageFindingRejectsAResolvedFinding(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 1, store.StatusReadyForHuman, false)
+	f.finding(pr, "fixed", "blocker", "security", store.FindingResolved)
+
+	confirm := store.FindingAudit{Action: "finding.confirmed", Actor: "mvega"}
+	_, err := f.s.TriageFinding(f.ctx, "fixed", store.FindingOpen, confirm)
+	if !errors.Is(err, store.ErrFindingResolved) {
+		t.Fatalf("TriageFinding(resolved) = %v, want ErrFindingResolved", err)
+	}
+	got, err := f.s.Finding(f.ctx, "fixed")
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.Status != store.FindingResolved || got.TriageVerdict != "" {
+		t.Errorf("resolved finding changed to status %q verdict %q", got.Status, got.TriageVerdict)
+	}
+	if n := f.auditRows("fixed"); n != 0 {
+		t.Errorf("rejected triage left %d audit rows, want 0", n)
 	}
 }
 
@@ -182,18 +220,24 @@ func TestQASummary(t *testing.T) {
 	f.finding(other, "u-hidden", "blocker", "security", store.FindingOpen)
 
 	now := time.Now().UTC()
-	triage := func(pr store.PullRequest, id, category, status string, at time.Time) {
+	triage := func(pr store.PullRequest, id, category, status, verdict string, at time.Time) {
 		f.finding(pr, id, "major", category, status)
-		f.exec("UPDATE findings SET triaged_by = 'mvega', triaged_at = ? WHERE id = ?", at, id)
+		f.exec("UPDATE findings SET triage_verdict = ?, triaged_by = 'mvega', triaged_at = ? WHERE id = ?",
+			verdict, at, id)
 	}
+	confirmed, falsePositive := store.VerdictConfirmed, store.VerdictFalsePositive
 	for i := 0; i < 3; i++ {
-		triage(ready, fmt.Sprintf("c-tests-%d", i), "tests", store.FindingOpen, now.Add(-time.Hour))
+		triage(ready, fmt.Sprintf("c-tests-%d", i), "tests", store.FindingOpen, confirmed, now.Add(-time.Hour))
 	}
-	triage(merged, "c-merged", "security", store.FindingResolved, now.Add(-2*time.Hour))
-	triage(ready, "fp-style", "style", store.FindingWithdrawn, now.Add(-time.Hour))
-	triage(ready, "c-old", "security", store.FindingOpen, now.Add(-10*24*time.Hour))
-	triage(ready, "c-ancient", "docs", store.FindingOpen, now.Add(-40*24*time.Hour))
-	triage(other, "c-hidden", "tests", store.FindingOpen, now.Add(-time.Hour))
+	triage(merged, "c-merged", "security", store.FindingResolved, confirmed, now.Add(-2*time.Hour))
+	triage(ready, "fp-style", "style", store.FindingWithdrawn, falsePositive, now.Add(-time.Hour))
+	// Status moved after triage: a run reopened a false positive and a developer
+	// dismissed a confirmed finding. The verdict is what counts.
+	triage(ready, "fp-reopened", "style", store.FindingOpen, falsePositive, now.Add(-time.Hour))
+	triage(ready, "c-disputed", "tests", store.FindingWithdrawn, confirmed, now.Add(-time.Hour))
+	triage(ready, "c-old", "security", store.FindingOpen, confirmed, now.Add(-10*24*time.Hour))
+	triage(ready, "c-ancient", "docs", store.FindingOpen, confirmed, now.Add(-40*24*time.Hour))
+	triage(other, "c-hidden", "tests", store.FindingOpen, confirmed, now.Add(-time.Hour))
 
 	got, err := f.s.QASummary(f.ctx, qa, now)
 	if err != nil {
@@ -209,10 +253,10 @@ func TestQASummary(t *testing.T) {
 	if want := (store.SeverityCounts{Blocker: 1, Major: 1}); got.Untriaged != want {
 		t.Errorf("Untriaged = %+v, want %+v", got.Untriaged, want)
 	}
-	if got.Confirmed != 4 || got.FalsePositive != 1 {
-		t.Errorf("precision = %d confirmed / %d false positive, want 4 / 1", got.Confirmed, got.FalsePositive)
+	if got.Confirmed != 5 || got.FalsePositive != 2 {
+		t.Errorf("precision = %d confirmed / %d false positive, want 5 / 2", got.Confirmed, got.FalsePositive)
 	}
-	wantCategories := []store.CategoryCount{{Category: "tests", Count: 3}, {Category: "security", Count: 2}}
+	wantCategories := []store.CategoryCount{{Category: "tests", Count: 4}, {Category: "security", Count: 2}}
 	if fmt.Sprint(got.Categories) != fmt.Sprint(wantCategories) {
 		t.Errorf("Categories = %v, want %v", got.Categories, wantCategories)
 	}

@@ -66,6 +66,7 @@ type findingDTO struct {
 	Status         string  `json:"status"`
 	FirstSeenRunID uint    `json:"first_seen_run_id"`
 	LastSeenRunID  uint    `json:"last_seen_run_id"`
+	TriageVerdict  string  `json:"triage_verdict"`
 	TriagedBy      string  `json:"triaged_by"`
 	TriagedAt      *string `json:"triaged_at"`
 	CreatedAt      string  `json:"created_at"`
@@ -79,7 +80,7 @@ func findingDTOOf(f store.Finding) findingDTO {
 		Category: f.Category, Title: f.Title, Body: f.Body,
 		Suggestion: f.Suggestion, Confidence: f.Confidence, Status: f.Status,
 		FirstSeenRunID: f.FirstSeenRunID, LastSeenRunID: f.LastSeenRunID,
-		TriagedBy: f.TriagedBy, TriagedAt: formatTimePtr(f.TriagedAt),
+		TriageVerdict: f.TriageVerdict, TriagedBy: f.TriagedBy, TriagedAt: formatTimePtr(f.TriagedAt),
 		CreatedAt: f.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt: f.UpdatedAt.UTC().Format(time.RFC3339),
 	}
@@ -158,7 +159,7 @@ func (s *server) retryPR(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "pull request not found")
 		return
 	}
-	if !s.canTriage(w, r, user, pr) {
+	if !s.canActOnPR(w, r, user, pr) {
 		return
 	}
 	if s.Reviews == nil {
