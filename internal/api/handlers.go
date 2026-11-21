@@ -387,6 +387,28 @@ func (s *server) installations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// syncInstallation enqueues a fresh synchronization of one installation. The
+// setup callback can enqueue before the installation row exists and webhooks
+// can be lost, so administrators need an explicit reload; the job recovers a
+// missing row from GitHub on its own.
+func (s *server) syncInstallation(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid installation id")
+		return
+	}
+	if s.Jobs == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "job queue unavailable")
+		return
+	}
+	if err := s.Jobs.EnqueueSync(r.Context(), id); err != nil {
+		slog.Error("enqueue installation sync", "installation_id", id, "error", err)
+		writeAPIError(w, http.StatusInternalServerError, "enqueue sync")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
+}
+
 func (s *server) teams(w http.ResponseWriter, r *http.Request) {
 	teams, err := s.Store.ListTeams(r.Context())
 	if err != nil {
