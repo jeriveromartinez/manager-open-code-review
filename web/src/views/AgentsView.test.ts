@@ -763,4 +763,28 @@ describe('AgentsView', () => {
     expect(values).toEqual(['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-5.4-nano', '__custom__'])
     wrapper.unmount()
   })
+
+  it('keeps the visible selection in sync when the key changes', async () => {
+    mocks.api.llmModels.mockResolvedValue({ models: [{ id: 'remote-only', name: 'Remote Only' }] })
+    const wrapper = mountAgents()
+    await flushPromises()
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-ant')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+    await flushPromises()
+    expect((wrapper.get('[data-profile-model]').element as HTMLSelectElement).value).toBe(
+      'remote-only',
+    )
+
+    await wrapper.get('[data-profile-api-key]').setValue('sk-ant-2')
+
+    expect((wrapper.get('[data-profile-model]').element as HTMLSelectElement).value).toBe(
+      '__custom__',
+    )
+    expect((wrapper.get('[data-profile-model-custom]').element as HTMLInputElement).value).toBe(
+      'remote-only',
+    )
+    wrapper.unmount()
+  })
 })

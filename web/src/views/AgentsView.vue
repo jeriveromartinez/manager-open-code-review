@@ -189,6 +189,9 @@ function resetRemoteModels(): void {
 
 function onAPIKeyInput(): void {
   resetRemoteModels()
+  // The remote list may have offered the current model; when it disappears
+  // the select must still show it instead of going blank.
+  syncPlatformFromForm()
 }
 
 async function loadPlatformModels(): Promise<void> {
