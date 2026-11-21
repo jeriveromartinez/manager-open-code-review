@@ -78,10 +78,11 @@ func (w *recordingWatchdog) Sweep(context.Context) error {
 	return nil
 }
 
-// TestReviewClientSweepsStaleRunsOnStart verifies the watchdog is wired as a
-// periodic job that runs when the worker starts: a redeploy or crash must not
-// leave orphaned runs "running" until the first interval elapses.
-func TestReviewClientSweepsStaleRunsOnStart(t *testing.T) {
+// TestReviewClientRunsEnqueuedWatchdog verifies the watchdog worker is wired.
+// The worker process enqueues its sweeps from a process-local schedule now:
+// River runs periodic jobs only on the database leader, so the previous
+// periodic job stopped sweeping whenever the worker lost leadership (#35).
+func TestReviewClientRunsEnqueuedWatchdog(t *testing.T) {
 	s := testutil.NewStore(t)
 	box, err := crypto.NewBox(bytes.Repeat([]byte{7}, 32))
 	if err != nil {
@@ -107,10 +108,14 @@ func TestReviewClientSweepsStaleRunsOnStart(t *testing.T) {
 		}
 	}()
 
+	if err := jobs.NewEnqueuer(client).EnqueueWatchdog(ctx); err != nil {
+		t.Fatalf("EnqueueWatchdog() error = %v", err)
+	}
+
 	select {
 	case <-watchdog.done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("watchdog did not sweep when the review client started")
+		t.Fatal("watchdog did not sweep after EnqueueWatchdog")
 	}
 }
 
@@ -141,9 +146,10 @@ func TestLLMHealthSweepJobArgs(t *testing.T) {
 	}
 }
 
-// TestReviewClientSweepsLLMHealthOnStart verifies the sweeper runs with the
-// worker: a profile nobody probes by hand must not stay "healthy" forever.
-func TestReviewClientSweepsLLMHealthOnStart(t *testing.T) {
+// TestReviewClientRunsEnqueuedHealthSweep verifies the sweeper worker is
+// wired: the worker process enqueues the sweep locally because River runs
+// periodic jobs only on the database leader (#35).
+func TestReviewClientRunsEnqueuedHealthSweep(t *testing.T) {
 	s := testutil.NewStore(t)
 	box, err := crypto.NewBox(bytes.Repeat([]byte{7}, 32))
 	if err != nil {
@@ -152,7 +158,7 @@ func TestReviewClientSweepsLLMHealthOnStart(t *testing.T) {
 	sweeper := &recordingSweeper{done: make(chan struct{})}
 	client, err := jobs.NewReviewClient(s.Pool, &review.Runner{Store: s, Box: box},
 		&review.ProfileChecker{Store: s, Box: box}, 1,
-		jobs.ReviewDeps{Health: sweeper, HealthInterval: time.Minute})
+		jobs.ReviewDeps{Health: sweeper})
 	if err != nil {
 		t.Fatalf("NewReviewClient() error = %v", err)
 	}
@@ -170,10 +176,14 @@ func TestReviewClientSweepsLLMHealthOnStart(t *testing.T) {
 		}
 	}()
 
+	if err := jobs.NewEnqueuer(client).EnqueueHealthSweep(ctx); err != nil {
+		t.Fatalf("EnqueueHealthSweep() error = %v", err)
+	}
+
 	select {
 	case <-sweeper.done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("the health sweeper did not run when the review client started")
+		t.Fatal("the health sweeper did not run after EnqueueHealthSweep")
 	}
 }
 

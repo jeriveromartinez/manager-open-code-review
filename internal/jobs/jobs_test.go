@@ -78,7 +78,7 @@ func TestControlClientRunsSyncJob(t *testing.T) {
 			APIURL: srv.URL,
 		}},
 	}
-	c, err := jobs.NewControlClient(s.Pool, sy, time.Hour)
+	c, err := jobs.NewControlClient(s.Pool, sy)
 	if err != nil {
 		t.Fatalf("NewControlClient() error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestControlClientRunsSyncJob(t *testing.T) {
 // check made health checks, reviews and therefore publication impossible.
 func TestControlClientEnqueuesWorkerOwnedKinds(t *testing.T) {
 	s := testutil.NewStore(t)
-	client, err := jobs.NewControlClient(s.Pool, &syncer.Syncer{Store: s}, time.Hour)
+	client, err := jobs.NewControlClient(s.Pool, &syncer.Syncer{Store: s})
 	if err != nil {
 		t.Fatalf("NewControlClient() error = %v", err)
 	}

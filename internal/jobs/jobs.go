@@ -154,13 +154,17 @@ type Enqueuer interface {
 	EnqueueSync(ctx context.Context, installationID int64) error
 }
 
-// FullEnqueuer adds the review queues to the narrow sync contract. It still
-// satisfies Enqueuer, github.SyncEnqueuer and review.Enqueuer.
+// FullEnqueuer adds the review queues and the process-local periodic tasks to
+// the narrow sync contract. It still satisfies Enqueuer, github.SyncEnqueuer
+// and review.Enqueuer.
 type FullEnqueuer interface {
 	Enqueuer
 	EnqueueReview(ctx context.Context, runID uint) error
 	EnqueuePublish(ctx context.Context, runID uint) error
 	EnqueueLLMHealth(ctx context.Context, profileID uint) error
+	EnqueueReconcile(ctx context.Context) error
+	EnqueueWatchdog(ctx context.Context) error
+	EnqueueHealthSweep(ctx context.Context) error
 }
 
 type clientEnqueuer struct {
@@ -195,15 +199,37 @@ func (e clientEnqueuer) EnqueueLLMHealth(ctx context.Context, profileID uint) er
 	return nil
 }
 
+func (e clientEnqueuer) EnqueueReconcile(ctx context.Context) error {
+	if _, err := e.client.Insert(ctx, ReconcileArgs{}, nil); err != nil {
+		return fmt.Errorf("enqueue reconcile: %w", err)
+	}
+	return nil
+}
+
+func (e clientEnqueuer) EnqueueWatchdog(ctx context.Context) error {
+	if _, err := e.client.Insert(ctx, InterruptStaleRunsArgs{}, nil); err != nil {
+		return fmt.Errorf("enqueue stale run watchdog: %w", err)
+	}
+	return nil
+}
+
+func (e clientEnqueuer) EnqueueHealthSweep(ctx context.Context) error {
+	if _, err := e.client.Insert(ctx, LLMHealthSweepArgs{}, nil); err != nil {
+		return fmt.Errorf("enqueue llm health sweep: %w", err)
+	}
+	return nil
+}
+
 var (
 	_ github.SyncEnqueuer = clientEnqueuer{}
 	_ FullEnqueuer        = clientEnqueuer{}
 )
 
-// NewControlClient registers the sync workers, the periodic reconciliation and
-// (when supplied) the publish worker. The caller is responsible for starting
-// and stopping the returned client.
-func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, interval time.Duration, deps ...ControlDeps) (*river.Client[pgx.Tx], error) {
+// NewControlClient registers the sync workers and (when supplied) the publish
+// worker. The caller is responsible for starting and stopping the returned
+// client and for scheduling reconciliation with Schedule, because River runs
+// periodic jobs only on the database leader.
+func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, deps ...ControlDeps) (*river.Client[pgx.Tx], error) {
 	var d ControlDeps
 	if len(deps) > 0 {
 		d = deps[0]
@@ -220,7 +246,18 @@ func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, interval time.Durati
 		queues[publishQueue] = river.QueueConfig{MaxWorkers: publishWorkers}
 	}
 
-	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
+	client, err := river.NewClient(riverpgxv5.New(pool), controlClientConfig(workers, queues))
+	if err != nil {
+		return nil, fmt.Errorf("create River control client: %w", err)
+	}
+	return client, nil
+}
+
+// controlClientConfig is separate from NewControlClient so a test can assert
+// that no periodic job is registered: River runs those only on the database
+// leader, and the control process may lose leadership to the worker (#35).
+func controlClientConfig(workers *river.Workers, queues map[string]river.QueueConfig) *river.Config {
+	return &river.Config{
 		Queues:  queues,
 		Workers: workers,
 		// Publish and sync do external HTTP calls; River's 1-minute default is
@@ -229,18 +266,7 @@ func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, interval time.Durati
 		// The control process enqueues review and llm_health jobs that only the
 		// worker process registers. Without this, River rejects those inserts.
 		SkipUnknownJobCheck: true,
-		PeriodicJobs: []*river.PeriodicJob{
-			river.NewPeriodicJob(
-				river.PeriodicInterval(interval),
-				func() (river.JobArgs, *river.InsertOpts) { return ReconcileArgs{}, nil },
-				&river.PeriodicJobOpts{RunOnStart: true},
-			),
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create River control client: %w", err)
 	}
-	return client, nil
 }
 
 // NewEnqueuer returns a FullEnqueuer backed by a started or insert-only client.

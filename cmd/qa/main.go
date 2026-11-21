@@ -29,6 +29,8 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/worker"
 )
 
+const leadershipPollInterval = 30 * time.Second
+
 func usage() string {
 	return "usage: qa <serve|worker|migrate|monitor|healthcheck>"
 }
@@ -119,14 +121,14 @@ func runServe() error {
 	trigger := &review.Trigger{
 		Store: st, Apps: apps, Box: workerBox, Events: publisher, Checks: publisherWorker,
 	}
-	client, err := jobs.NewControlClient(st.Pool, s, cfg.ReconcileInterval, jobs.ControlDeps{
+	client, err := jobs.NewControlClient(st.Pool, s, jobs.ControlDeps{
 		Trigger: trigger, Publisher: publisherWorker,
 	})
 	if err != nil {
 		return fmt.Errorf("create control client: %w", err)
 	}
-	// Attach the enqueuer before Start: the reconcile job runs on start and
-	// must never observe a trigger with a nil Jobs field.
+	// Attach the enqueuer before Start: the first reconcile runs immediately
+	// after start and must never observe a trigger with a nil Jobs field.
 	enqueuer := jobs.NewEnqueuer(client)
 	trigger.Jobs = enqueuer
 
@@ -140,6 +142,11 @@ func runServe() error {
 			slog.Error("stop control client", "error", err)
 		}
 	}()
+
+	// River runs periodic jobs only on the database leader. Keep the reconcile
+	// cadence in this process so it continues when the worker holds leadership.
+	go jobs.Schedule(ctx, "reconcile", cfg.ReconcileInterval, enqueuer.EnqueueReconcile)
+	go jobs.WatchLeadership(ctx, st.Pool, "app", leadershipPollInterval)
 
 	// A fresh instance has no App credentials. The setup window is open: the
 	// form asks only for the App name, and QA_SETUP_TOKEN locks it down when
@@ -278,9 +285,8 @@ func runWorker() error {
 	healthStaleAfter := cfg.LLMHealthStaleAfter()
 	sweeper := &review.HealthSweeper{Store: st, StaleAfter: healthStaleAfter}
 	client, err := jobs.NewReviewClient(st.Pool, runner, checker, cfg.ReviewConcurrency, jobs.ReviewDeps{
-		Watchdog:       watchdog,
-		Health:         sweeper,
-		HealthInterval: cfg.LLMHealthInterval,
+		Watchdog: watchdog,
+		Health:   sweeper,
 	})
 	if err != nil {
 		return fmt.Errorf("create review client: %w", err)
@@ -303,6 +309,17 @@ func runWorker() error {
 			slog.Error("stop review client", "error", err)
 		}
 	}()
+
+	// River runs periodic jobs only on the database leader. Schedule the
+	// sweeps locally so they keep running when the control process holds
+	// leadership; otherwise stale runs and health verdicts would go unnoticed.
+	healthInterval := cfg.LLMHealthInterval
+	if healthInterval <= 0 {
+		healthInterval = jobs.DefaultHealthSweepInterval
+	}
+	go jobs.Schedule(ctx, "review_runs_interrupt_stale", jobs.WatchdogInterval, enqueuer.EnqueueWatchdog)
+	go jobs.Schedule(ctx, "llm_health_sweep", healthInterval, enqueuer.EnqueueHealthSweep)
+	go jobs.WatchLeadership(ctx, st.Pool, "worker", leadershipPollInterval)
 
 	slog.Info("review worker started", "concurrency", cfg.ReviewConcurrency)
 
