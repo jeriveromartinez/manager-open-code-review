@@ -387,4 +387,26 @@ func readAgentConfigRaw(t *testing.T, home string) []byte {
 	return raw
 }
 
+func TestAgentConfigDeclaresSelectedModel(t *testing.T) {
+	home := t.TempDir()
+	a := testAgent(t, home)
+	if _, _, err := a.Run(context.Background(), "__FAKE_ARGS__", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var cfg struct {
+		Provider map[string]struct {
+			Models map[string]struct {
+				Name string `json:"name"`
+			} `json:"models"`
+		} `json:"provider"`
+	}
+	if err := json.Unmarshal(readAgentConfigRaw(t, home), &cfg); err != nil {
+		t.Fatalf("decode generated config: %v", err)
+	}
+	model, ok := cfg.Provider["nvidia"].Models["nemotron"]
+	if !ok || model.Name != "nemotron" {
+		t.Fatalf("provider.nvidia.models = %#v, want nemotron", cfg.Provider["nvidia"].Models)
+	}
+}
+
 func stringPtr(s string) *string { return &s }
