@@ -81,6 +81,39 @@ func TestPublishReachesSubscriber(t *testing.T) {
 	}
 }
 
+// TestServeSSEOpensImmediately guards the proxy-facing behaviour: a reverse
+// proxy such as Cloudflare does not forward the response headers until the first
+// body byte arrives. Without an opening comment the browser's EventSource stays
+// CONNECTING until the first 25 s ping, so the panel shows "Reconectando…".
+func TestServeSSEOpensImmediately(t *testing.T) {
+	broker := NewBroker(nil)
+	srv := httptest.NewServer(http.HandlerFunc(broker.ServeSSE))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("open SSE stream: %v (no body byte arrived before the deadline)", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read opening line: %v", err)
+	}
+	if !strings.HasPrefix(line, ":") {
+		t.Fatalf("first line = %q, want an SSE comment", line)
+	}
+}
+
 func TestServeSSEStreamsEvent(t *testing.T) {
 	s := testutil.NewStore(t)
 	broker := NewBroker(s.Pool)

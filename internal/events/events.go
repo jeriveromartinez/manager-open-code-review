@@ -191,6 +191,13 @@ func (b *Broker) ServeSSE(w http.ResponseWriter, r *http.Request) {
 	header.Set("Connection", "keep-alive")
 	header.Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
+	// Write a body byte before waiting for the first event. Proxies buffer the
+	// response until then, and the browser's EventSource does not fire onopen
+	// until it has received the headers, so without this the stream appears
+	// stuck connecting for a full ping interval.
+	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
+		return
+	}
 	flusher.Flush()
 
 	eventsCh, unsubscribe := b.Subscribe()
