@@ -988,7 +988,12 @@ func testE2ESuperseded(t *testing.T) {
 		t.Errorf("cancelled check carried annotations: %+v", check.Output.Annotations)
 	}
 
-	f.events.wait(t, events.Event{Type: "run.updated", ID: strconv.FormatUint(uint64(runID), 10)})
+	// The claim announces the PR before the head check; the superseded ending
+	// must not announce it a second time.
+	f.events.wait(t,
+		events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)},
+		events.Event{Type: "run.updated", ID: strconv.FormatUint(uint64(runID), 10)},
+	)
 	f.events.absent(t, events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)})
 
 	retryID := f.enqueue(t, false)

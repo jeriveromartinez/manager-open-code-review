@@ -5,10 +5,12 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/auth"
+	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
@@ -91,6 +93,8 @@ func (s *server) findingTransition(w http.ResponseWriter, r *http.Request, statu
 		writeAPIError(w, http.StatusInternalServerError, "update finding")
 		return
 	}
+	// Notify even when the status already matched: the PR verdict may change.
+	s.notify(r.Context(), events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)})
 
 	if s.Findings != nil {
 		if changed {

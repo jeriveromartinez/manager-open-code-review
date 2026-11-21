@@ -6,6 +6,7 @@ import (
 
 	"github.com/jeriveromartinez/qa-control-center/internal/auth"
 	"github.com/jeriveromartinez/qa-control-center/internal/config"
+	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/settings"
 )
 
@@ -55,6 +56,7 @@ func (s *server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, status, message)
 		return
 	}
+	s.notify(r.Context(), events.Event{Type: "settings.updated"})
 	// s.Cfg is not mutated: concurrent handlers read it.
 	s.writeSettings(w, stored, saving)
 }

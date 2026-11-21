@@ -11,12 +11,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
+	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
@@ -111,13 +114,13 @@ type triggerFixture struct {
 }
 
 type seedOpts struct {
-	draft           bool
-	fork            bool
-	repoEnabled     bool
-	withPolicy      bool
-	profileEnabled  bool
-	headSHA         string
-	requireGreenCI  bool
+	draft          bool
+	fork           bool
+	repoEnabled    bool
+	withPolicy     bool
+	profileEnabled bool
+	headSHA        string
+	requireGreenCI bool
 }
 
 func newTriggerFixture(t *testing.T) *triggerFixture {
@@ -606,5 +609,52 @@ func TestTriggerConcurrentSamePRSha(t *testing.T) {
 		if id != runs[0].ID {
 			t.Errorf("StartCheck call for %d, want %d", id, runs[0].ID)
 		}
+	}
+}
+
+// Only a newly queued run changes what the panel shows; a redelivery that just
+// repairs the existing run stays silent.
+func TestEnqueueNotifiesThePR(t *testing.T) {
+	f := newTriggerFixture(t)
+	pub := &runTestEvents{}
+	f.trigger.Events = pub
+	pr := f.seed("app", eligibleOpts())
+	want := []events.Event{{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)}}
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	if got := pub.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("events after a new run = %+v, want %+v", got, want)
+	}
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("redelivered OnPullRequest() error = %v", err)
+	}
+	if err := f.trigger.Retry(f.ctx, pr.ID); err != nil {
+		t.Fatalf("Retry() over the active run error = %v", err)
+	}
+	if got := pub.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("events after repairs = %+v, want unchanged %+v", got, want)
+	}
+	if len(f.jobs.reviews) != 3 {
+		t.Errorf("EnqueueReview calls = %v, want the run repaired twice", f.jobs.reviews)
+	}
+}
+
+func TestEnqueueWithFailedNotificationStillQueues(t *testing.T) {
+	f := newTriggerFixture(t)
+	f.trigger.Events = failingRunEvents{}
+	pr := f.seed("app", eligibleOpts())
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 || len(f.jobs.reviews) != 1 {
+		t.Errorf("runs = %d, EnqueueReview calls = %v; want one queued run", len(runs), f.jobs.reviews)
 	}
 }

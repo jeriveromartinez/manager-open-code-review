@@ -574,6 +574,7 @@ func (s *server) createTeam(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "create team")
 		return
 	}
+	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(uint64(team.ID), 10)})
 	actor, _ := auth.UserFrom(r.Context())
 	if err := s.Store.Audit(r.Context(), &actor.ID, "team.created", "team", strconv.FormatUint(uint64(team.ID), 10), map[string]any{"name": team.Name}); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "write audit log")
@@ -634,6 +635,7 @@ func (s *server) setTeamMember(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "invalid team role")
 		return
 	}
+	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(uint64(teamID), 10)})
 	if err := s.auditTeamMember(r, "team.member.added", teamID, userID, map[string]any{"role": body.Role}); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "write audit log")
 		return
@@ -658,6 +660,7 @@ func (s *server) removeTeamMember(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "remove team member")
 		return
 	}
+	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(uint64(teamID), 10)})
 	if err := s.auditTeamMember(r, "team.member.removed", teamID, userID, map[string]any{}); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "write audit log")
 		return

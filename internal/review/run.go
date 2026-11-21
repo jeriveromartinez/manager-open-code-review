@@ -119,12 +119,13 @@ func (r *Runner) CheckProfile(ctx context.Context, profileID uint) error {
 		Box:     r.Box,
 		Bin:     r.Cfg.OpencodeBin,
 		Timeout: r.Cfg.Timeout,
+		Events:  r.Events,
 	}).Check(ctx, profileID)
 }
 
-// Run claims a queued run, executes the pipeline and records a terminal state.
-// An unclaimed run (already taken, superseded or terminal) is a no-op: no
-// event, no enqueue and no notification. When no profile slot is free the run
+// Run claims a queued run, announces the claim, executes the pipeline and
+// records a terminal state. An unclaimed run (already taken, superseded or
+// terminal) is a no-op: no event, no enqueue and no notification. When no profile slot is free the run
 // goes back to the queue and the returned ProfileCapacityError asks the caller
 // to reschedule; once the waiter budget is spent it ends as a capacity failure.
 func (r *Runner) Run(ctx context.Context, runID uint) error {
@@ -134,6 +135,12 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	}
 	if !claimed {
 		return nil
+	}
+	if r.Events != nil {
+		ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(run.PullRequestID), 10)}
+		if err := r.Events.Publish(ctx, ev); err != nil {
+			slog.Warn("publish event", "type", ev.Type, "id", ev.ID, "run_id", run.ID, "error", err)
+		}
 	}
 
 	var cfg store.ReviewConfig

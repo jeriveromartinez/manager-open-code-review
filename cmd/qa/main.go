@@ -169,6 +169,7 @@ func runServe() error {
 		APIURL:    cfg.GitHubAPIURL,
 		PublicURL: cfg.PublicURL,
 		HTTP:      &http.Client{Timeout: 15 * time.Second},
+		Events:    publisher,
 	}
 	webhooks := &github.WebhookHandler{
 		Store: st, Apps: apps, Events: publisher, Jobs: enqueuer, Reviews: trigger,
@@ -278,6 +279,7 @@ func runWorker() error {
 	}
 	checker := &review.ProfileChecker{
 		Store: st, Box: workerBox, Bin: cfg.OpencodeBin, Timeout: cfg.ReviewTimeout,
+		Events: eventsPublisher,
 	}
 	watchdog := &review.Watchdog{
 		Store: st, Events: eventsPublisher, StaleAfter: cfg.ReviewStaleAfter,
