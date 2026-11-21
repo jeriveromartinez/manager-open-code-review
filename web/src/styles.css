@@ -468,8 +468,9 @@ img {
 .pr-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 0;
-  border: var(--rule-hair) solid var(--border);
+  gap: var(--rule-hair);
+  background: var(--border);
+  border: var(--rule-hair) solid var(--border-strong);
 }
 
 .pr-card {
@@ -479,8 +480,6 @@ img {
   padding: var(--space-4);
   background: var(--surface);
   color: var(--text);
-  border-right: var(--rule-hair) solid var(--border);
-  border-bottom: var(--rule-hair) solid var(--border);
   transition: background-color var(--dur-micro) ease;
 }
 
@@ -555,7 +554,7 @@ img {
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  min-height: 36px;
+  min-height: 40px;
   border: var(--rule-hair) solid var(--border-strong);
   border-radius: 0;
   background: transparent;
@@ -883,7 +882,7 @@ tbody tr:hover {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .kpi-card:nth-child(2) {
+  .kpi-card:nth-child(2n) {
     border-right: 0;
   }
 
