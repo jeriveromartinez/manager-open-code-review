@@ -1,17 +1,17 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { api, subscribeEvents, type PRGroup, type PRView, type Stats } from '../api'
+import { api, subscribeEvents, type PRView, type QASummary } from '../api'
+import { qaBucket, sortForQueue, type QaBucket } from '../qaQueue'
 
 const REFRESH_DELAY = 300
 
-function emptyStats(): Stats {
-  return { open: 0, awaiting_human: 0, in_evaluation: 0, with_problems: 0 }
-}
+export type BucketFilter = QaBucket | ''
 
 export const usePrsStore = defineStore('prs', () => {
-  const stats = ref<Stats>(emptyStats())
+  const summary = ref<QASummary | null>(null)
   const prs = ref<PRView[]>([])
-  const group = ref<PRGroup>('')
+  // QA opens the panel to validate, so that is the view it starts on.
+  const bucket = ref<BucketFilter>('ready')
   const loading = ref(false)
   const connected = ref(false)
   const error = ref<string | null>(null)
@@ -19,21 +19,31 @@ export const usePrsStore = defineStore('prs', () => {
   let refreshTimer: ReturnType<typeof setTimeout> | null = null
   let unsubscribe: (() => void) | null = null
 
+  const queue = computed(() => sortForQueue(prs.value))
+  const visible = computed(() =>
+    bucket.value === '' ? queue.value : queue.value.filter((pr) => qaBucket(pr) === bucket.value),
+  )
+  const counts = computed(() => {
+    const result: Record<BucketFilter, number> = {
+      '': prs.value.length,
+      ready: 0,
+      defects: 0,
+      inconclusive: 0,
+      ai: 0,
+      other: 0,
+    }
+    for (const pr of prs.value) result[qaBucket(pr)]++
+    return result
+  })
   const repoCount = computed(() => new Set(prs.value.map((pr) => pr.repo)).size)
-
-  async function loadStats(): Promise<void> {
-    stats.value = await api.stats()
-  }
-
-  async function loadPrs(): Promise<void> {
-    prs.value = await api.prs(group.value === '' ? undefined : group.value)
-  }
 
   async function refresh(): Promise<void> {
     loading.value = true
     error.value = null
     try {
-      await Promise.all([loadStats(), loadPrs()])
+      const [nextSummary, nextPrs] = await Promise.all([api.qaSummary(), api.prs()])
+      summary.value = nextSummary
+      prs.value = nextPrs
     } catch (err) {
       error.value = err instanceof Error ? err.message : 'No se pudieron cargar los PRs'
     } finally {
@@ -41,17 +51,8 @@ export const usePrsStore = defineStore('prs', () => {
     }
   }
 
-  async function setGroup(next: PRGroup): Promise<void> {
-    group.value = next
-    loading.value = true
-    error.value = null
-    try {
-      await loadPrs()
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : 'No se pudieron cargar los PRs'
-    } finally {
-      loading.value = false
-    }
+  function setBucket(next: BucketFilter): void {
+    bucket.value = next
   }
 
   /** Debounce de 300 ms para ráfagas de eventos SSE. */
@@ -94,15 +95,18 @@ export const usePrsStore = defineStore('prs', () => {
   }
 
   return {
-    stats,
+    summary,
     prs,
-    group,
+    queue,
+    visible,
+    counts,
+    bucket,
     loading,
     connected,
     error,
     repoCount,
     refresh,
-    setGroup,
+    setBucket,
     scheduleRefresh,
     start,
     stop,

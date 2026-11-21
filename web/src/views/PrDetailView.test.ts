@@ -27,6 +27,8 @@ const detail: PRDetail = {
   review_state: 'running',
   review_reason: '',
   validations: { passed: 3, total: 5 },
+  open_findings: { blocker: 1, major: 1, minor: 1, nit: 0 },
+  status_since: '2026-11-19T10:00:00Z',
   updated_at: '2026-11-19T10:00:00Z',
   runs: [
     {
@@ -64,6 +66,9 @@ const detail: PRDetail = {
       status: 'open',
       first_seen_run_id: 9,
       last_seen_run_id: 9,
+      triage_verdict: '',
+      triaged_by: '',
+      triaged_at: null,
       created_at: '2026-11-19T10:00:00Z',
       updated_at: '2026-11-19T10:00:00Z',
     },
@@ -82,6 +87,9 @@ const detail: PRDetail = {
       status: 'open',
       first_seen_run_id: 9,
       last_seen_run_id: 9,
+      triage_verdict: '',
+      triaged_by: '',
+      triaged_at: null,
       created_at: '2026-11-19T10:00:00Z',
       updated_at: '2026-11-19T10:00:00Z',
     },
@@ -100,6 +108,9 @@ const detail: PRDetail = {
       status: 'open',
       first_seen_run_id: 9,
       last_seen_run_id: 9,
+      triage_verdict: '',
+      triaged_by: '',
+      triaged_at: null,
       created_at: '2026-11-19T10:00:00Z',
       updated_at: '2026-11-19T10:00:00Z',
     },
@@ -238,6 +249,104 @@ describe('PrDetailView', () => {
 
     expect(wrapper.text()).toContain('No se pudo descartar el hallazgo')
     expect(wrapper.get('[data-severity="blocker"]').text()).toContain('Fallo bloqueante')
+
+    wrapper.unmount()
+  })
+
+  it('confirms an untriaged finding and names who triaged the others', async () => {
+    const triaged = {
+      ...detail.findings[1],
+      triage_verdict: 'confirmed' as const,
+      triaged_by: 'mvega',
+      triaged_at: '2026-11-19T11:00:00Z',
+    }
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      findings: [detail.findings[0], triaged, detail.findings[2]],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const major = wrapper.get('[data-severity="major"]')
+    expect(major.get('[data-triage-note]').text()).toBe('Confirmado por mvega')
+    expect(major.find('[data-confirm]').exists()).toBe(false)
+    expect(wrapper.get('[data-severity="blocker"] [data-triage-note]').text()).toBe('Sin triar')
+
+    await wrapper.get('[data-confirm][data-finding-id="f1"]').trigger('click')
+    await wrapper.get('[data-apply]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.confirmFinding).toHaveBeenCalledWith(42, 'f1')
+
+    wrapper.unmount()
+  })
+
+  it('summarises what QA must check before approving', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const check = wrapper.get('[data-qa-check]')
+    expect(check.get('[data-triaged-count]').text()).toBe('0/3 triados')
+    expect(check.get('[data-check="ci"]').text()).toBe('CI: 3/5 checks en verde')
+    expect(check.get('[data-check="ci"]').classes()).toContain('is-bad')
+    expect(check.get('[data-check="ai"]').text()).toBe('Última revisión IA: fallida')
+    expect(check.get('[data-check="blockers"]').text()).toBe('1 bloqueante abierto')
+    expect(check.get('[data-check="untriaged"]').text()).toBe('3 hallazgos sin triar')
+    expect(check.get('a').attributes('href')).toBe(`${detail.html_url}/files`)
+
+    wrapper.unmount()
+  })
+
+  it('explains a forbidden triage instead of a generic error', async () => {
+    mocks.api.withdrawFinding.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }))
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    await wrapper.get('[data-withdraw][data-finding-id="f1"]').trigger('click')
+    await wrapper.get('[data-apply]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="alert"]').text()).toBe('Solo QA o el lead del equipo pueden triar hallazgos')
+
+    wrapper.unmount()
+  })
+
+  it('offers no triage on a resolved finding and keeps a reopened false positive labelled', async () => {
+    const resolved = { ...detail.findings[0], status: 'resolved' }
+    const reopened = {
+      ...detail.findings[1],
+      triage_verdict: 'false_positive' as const,
+      triaged_by: 'mvega',
+      triaged_at: '2026-11-19T11:00:00Z',
+    }
+    mocks.api.prDetail.mockResolvedValue({ ...detail, findings: [resolved, reopened, detail.findings[2]] })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const blocker = wrapper.get('[data-severity="blocker"]')
+    expect(blocker.get('[data-triage-note]').text()).toBe('Resuelto en el código')
+    expect(blocker.find('[data-withdraw]').exists()).toBe(false)
+    expect(blocker.find('[data-confirm]').exists()).toBe(false)
+
+    const major = wrapper.get('[data-severity="major"]')
+    expect(major.get('[data-triage-note]').text()).toBe('Falso positivo según mvega')
+    expect(major.find('[data-confirm]').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('explains that a resolved finding cannot be triaged', async () => {
+    mocks.api.confirmFinding.mockRejectedValue(Object.assign(new Error('conflict'), { status: 409 }))
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    await wrapper.get('[data-confirm][data-finding-id="f1"]').trigger('click')
+    await wrapper.get('[data-apply]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[role="alert"]').text()).toBe('El hallazgo ya está resuelto en el código')
 
     wrapper.unmount()
   })
