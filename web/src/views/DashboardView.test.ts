@@ -53,6 +53,7 @@ const summary: QASummary = {
     { category: 'tests', count: 5 },
     { category: 'security', count: 3 },
   ],
+  confirmed_by_repo: [],
   category_window_days: 30,
   validation_sla_seconds: 4 * 3600,
 }
@@ -72,6 +73,7 @@ function pr(overrides: Partial<PRView>): PRView {
     validations: { passed: 9, total: 9 },
     open_findings: { blocker: 0, major: 0, minor: 0, nit: 0 },
     status_since: new Date(Date.now() - 30 * 60_000).toISOString(),
+    team_id: 3,
     updated_at: '2026-11-18T10:00:00Z',
     ...overrides,
   }
@@ -85,6 +87,7 @@ const prs: PRView[] = [
     number: 77,
     title: 'Corrige el carrito',
     status_since: new Date(Date.now() - 5 * 3600_000).toISOString(),
+    team_id: 3,
   }),
   pr({
     id: 3,
@@ -306,5 +309,24 @@ describe('DashboardView', () => {
     expect(wrapper.findAll('.pr-card')).toHaveLength(1)
     expect(wrapper.text()).toContain('payments #12')
     wrapper.unmount()
+  })
+
+  it('offers the team lead view only to leads and admins', async () => {
+    const admin = mountDashboard()
+    await flushPromises()
+    expect(admin.find('[data-role-lead]').exists()).toBe(true)
+    admin.unmount()
+
+    mocks.api.me.mockResolvedValue({
+      id: 2,
+      login: 'mvega',
+      avatar_url: '',
+      is_admin: false,
+      teams: [{ id: 3, name: 'Pagos', role: 'qa' }],
+    })
+    const qaOnly = mountDashboard()
+    await flushPromises()
+    expect(qaOnly.find('[data-role-lead]').exists()).toBe(false)
+    qaOnly.unmount()
   })
 })

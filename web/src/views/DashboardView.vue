@@ -6,6 +6,7 @@ import DotRing from '../components/DotRing.vue'
 import FilterTabs from '../components/FilterTabs.vue'
 import KpiCard from '../components/KpiCard.vue'
 import PrCard from '../components/PrCard.vue'
+import RoleSwitch from '../components/RoleSwitch.vue'
 import { api, type Readiness } from '../api'
 import type { DotTone } from '../dots'
 import { isForbidden } from '../errors'
@@ -168,14 +169,17 @@ onBeforeUnmount(() => {
           {{ greeting }}<template v-if="slaSeconds > 0"> · plazo de validación {{ slaLabel }}</template>
         </p>
       </div>
-      <span
-        class="badge"
-        :class="prsStore.connected ? 'badge--ok' : 'badge--muted'"
-        data-service-badge
-        :title="prsStore.connected ? 'Eventos en vivo conectados' : 'Sin conexión con el servicio de eventos'"
-      >
-        {{ prsStore.connected ? 'En vivo' : 'Reconectando…' }}
-      </span>
+      <div class="dashboard__aside">
+        <RoleSwitch />
+        <span
+          class="badge"
+          :class="prsStore.connected ? 'badge--ok' : 'badge--muted'"
+          data-service-badge
+          :title="prsStore.connected ? 'Eventos en vivo conectados' : 'Sin conexión con el servicio de eventos'"
+        >
+          {{ prsStore.connected ? 'En vivo' : 'Reconectando…' }}
+        </span>
+      </div>
     </header>
 
     <section
@@ -365,6 +369,13 @@ onBeforeUnmount(() => {
 
 .dashboard__title {
   min-width: 0;
+}
+
+.dashboard__aside {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
 }
 
 .readiness {

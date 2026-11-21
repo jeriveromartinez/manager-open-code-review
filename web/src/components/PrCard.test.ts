@@ -32,6 +32,7 @@ const base: PRView = {
   validations: { passed: 9, total: 9 },
   open_findings: { blocker: 0, major: 0, minor: 2, nit: 0 },
   status_since: '2026-11-18T10:50:00Z',
+  team_id: 3,
   updated_at: '2026-11-18T10:00:00Z',
 }
 

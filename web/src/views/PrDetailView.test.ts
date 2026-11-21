@@ -29,6 +29,7 @@ const detail: PRDetail = {
   validations: { passed: 3, total: 5 },
   open_findings: { blocker: 1, major: 1, minor: 1, nit: 0 },
   status_since: '2026-11-19T10:00:00Z',
+  team_id: 3,
   updated_at: '2026-11-19T10:00:00Z',
   runs: [
     {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 const (
@@ -30,6 +32,9 @@ type QASummary struct {
 	Confirmed     int
 	FalsePositive int
 	Categories    []CategoryCount
+	// ConfirmedByRepo counts confirmed findings per repository inside
+	// CategoryWindow, most first: where a lead's team keeps shipping defects.
+	ConfirmedByRepo []RepoCount
 }
 
 // CategoryCount is how many confirmed findings share a category.
@@ -38,17 +43,37 @@ type CategoryCount struct {
 	Count    int
 }
 
+// RepoCount is how many confirmed findings a repository has.
+type RepoCount struct {
+	Repo  string
+	Count int
+}
+
+// QAFilter narrows the summary to one team. A team the user cannot see yields
+// an empty summary rather than an error, the same as an empty team.
+type QAFilter struct {
+	TeamID *uint
+}
+
 // QASummary computes the QA overview at now. Queue figures use the open pull
 // requests of ListVisiblePullRequests; triage history also includes pull
 // requests merged or closed since, so shipping a PR does not erase its triage.
-func (s *Store) QASummary(ctx context.Context, u User, now time.Time) (QASummary, error) {
+func (s *Store) QASummary(ctx context.Context, u User, now time.Time, f QAFilter) (QASummary, error) {
 	var out QASummary
+
+	narrow := func(q *gorm.DB) *gorm.DB {
+		if f.TeamID != nil {
+			q = q.Where("r.team_id = ?", *f.TeamID)
+		}
+		return q
+	}
+	openPRs := func() *gorm.DB { return narrow(s.visiblePRs(ctx, u, PRFilter{})) }
 
 	var statusRows []struct {
 		QAStatus string
 		N        int
 	}
-	err := s.visiblePRs(ctx, u, PRFilter{}).
+	err := openPRs().
 		Where("pr.qa_status IN ?", []string{StatusReadyForHuman, StatusInconclusive}).
 		Select("pr.qa_status AS qa_status, COUNT(*) AS n").
 		Group("pr.qa_status").
@@ -65,7 +90,7 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time) (QASummary
 		}
 	}
 
-	openIDs := s.visiblePRs(ctx, u, PRFilter{}).Select("pr.id")
+	openIDs := openPRs().Select("pr.id")
 
 	var runRows []struct {
 		Status string
@@ -113,7 +138,7 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time) (QASummary
 		}
 	}
 
-	scopedIDs := s.teamScopedPRs(ctx, u).Select("pr.id")
+	scopedIDs := narrow(s.teamScopedPRs(ctx, u)).Select("pr.id")
 
 	var precision struct {
 		Confirmed     int
@@ -140,6 +165,19 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time) (QASummary
 		Scan(&out.Categories).Error
 	if err != nil {
 		return QASummary{}, fmt.Errorf("count confirmed categories: %w", err)
+	}
+
+	err = s.DB.WithContext(ctx).Table("findings f").
+		Joins("JOIN pull_requests pr ON pr.id = f.pull_request_id").
+		Joins("JOIN repositories r ON r.id = pr.repository_id").
+		Where("f.triaged_at >= ? AND f.triage_verdict = ? AND f.pull_request_id IN (?)",
+			now.Add(-CategoryWindow), VerdictConfirmed, scopedIDs).
+		Select("r.full_name AS repo, COUNT(*) AS count").
+		Group("r.id, r.full_name").
+		Order("count DESC, repo").
+		Scan(&out.ConfirmedByRepo).Error
+	if err != nil {
+		return QASummary{}, fmt.Errorf("count confirmed findings by repository: %w", err)
 	}
 	return out, nil
 }

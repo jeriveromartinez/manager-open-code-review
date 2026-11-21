@@ -38,6 +38,7 @@ type prResponse struct {
 		Total  int `json:"total"`
 	} `json:"validations"`
 	OpenFindings severityCountsResponse `json:"open_findings"`
+	TeamID       *uint                  `json:"team_id"`
 	StatusSince  string                 `json:"status_since"`
 	UpdatedAt    string                 `json:"updated_at"`
 }
@@ -66,6 +67,7 @@ func prDTO(v store.PRView) prResponse {
 		ReviewState:  v.ReviewState,
 		ReviewReason: v.ReviewReason,
 		OpenFindings: severityCountsDTO(v.OpenFindings),
+		TeamID:       v.TeamID,
 		StatusSince:  v.StatusSince.UTC().Format(time.RFC3339),
 		UpdatedAt:    v.UpdatedAt.UTC().Format(time.RFC3339),
 	}
