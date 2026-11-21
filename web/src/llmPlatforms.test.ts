@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { llmPlatforms } from './llmPlatforms'
 
 describe('llmPlatforms', () => {
-  it('lists ten platforms with unique provider ids', () => {
-    expect(llmPlatforms).toHaveLength(10)
+  it('lists fourteen platforms with unique provider ids', () => {
+    expect(llmPlatforms).toHaveLength(14)
     const ids = llmPlatforms.map((platform) => platform.id)
     expect(new Set(ids).size).toBe(ids.length)
     for (const platform of llmPlatforms) {

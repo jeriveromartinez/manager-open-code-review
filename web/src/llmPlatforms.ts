@@ -31,6 +31,15 @@ export const llmPlatforms: LLMPlatform[] = [
     ],
   },
   {
+    id: 'opencode',
+    name: 'OpenCode',
+    models: [
+      { id: 'gpt-6.2-sol', label: 'GPT-6.2 Sol' },
+      { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5' },
+      { id: 'gemini-3.7-flash', label: 'Gemini 3.7 Flash' },
+    ],
+  },
+  {
     id: 'google',
     name: 'Google Gemini',
     models: [
@@ -46,6 +55,15 @@ export const llmPlatforms: LLMPlatform[] = [
       { id: 'openrouter/auto', label: 'Automático (OpenRouter elige)' },
       { id: 'anthropic/claude-sonnet-5.5', label: 'Claude Sonnet 5.5' },
       { id: 'google/gemini-3.7-flash', label: 'Gemini 3.7 Flash' },
+    ],
+  },
+  {
+    id: 'commandcode',
+    name: 'CommandCode',
+    models: [
+      { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
+      { id: 'moonshotai/Kimi-K3.1-Pro', label: 'Kimi K3.1 Pro' },
+      { id: 'google/gemini-4-argon', label: 'Gemini 4 Argon' },
     ],
   },
   {
@@ -72,6 +90,24 @@ export const llmPlatforms: LLMPlatform[] = [
     models: [
       { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
       { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
+    ],
+  },
+  {
+    id: 'moonshotai',
+    name: 'Kimi',
+    models: [
+      { id: 'kimi-k3.1-pro', label: 'Kimi K3.1 Pro' },
+      { id: 'kimi-k3', label: 'Kimi K3' },
+      { id: 'kimi-k2.7-code', label: 'Kimi K2.7 Code' },
+    ],
+  },
+  {
+    id: 'zai',
+    name: 'GLM',
+    models: [
+      { id: 'glm-5.3', label: 'GLM-5.3' },
+      { id: 'glm-5.2', label: 'GLM-5.2' },
+      { id: 'glm-5.3-flash', label: 'GLM-5.3 Flash' },
     ],
   },
   {
