@@ -255,6 +255,23 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestHealthzReportsDatabaseFailure(t *testing.T) {
+	f := newAPIFixture(t)
+	// The health endpoint must fail when PostgreSQL is unreachable: otherwise a
+	// destroyed database leaves the container healthy and the orchestrator never
+	// notices.
+	f.st.Close()
+
+	rec := f.request(http.MethodGet, "/healthz", nil, nil)
+	assertStatus(t, rec, http.StatusServiceUnavailable)
+
+	var body map[string]string
+	decodeJSON(t, rec, &body)
+	if body["status"] == "ok" {
+		t.Errorf("healthz status = %q with a closed database, want degraded", body["status"])
+	}
+}
+
 func TestUnauthenticated401(t *testing.T) {
 	f := newAPIFixture(t)
 	for _, path := range []string{"/api/me", "/api/prs", "/api/events"} {
@@ -983,10 +1000,13 @@ func TestReposIncludeAccountLogin(t *testing.T) {
 	}
 	byName := map[string]string{}
 	for _, r := range body {
-		assertKeys(t, r, "account_login")
+		assertKeys(t, r, "account_login", "has_policy")
 		name, _ := r["full_name"].(string)
 		login, _ := r["account_login"].(string)
 		byName[name] = login
+		if r["has_policy"] != false {
+			t.Errorf("%s has_policy = %v, want false without a team", name, r["has_policy"])
+		}
 	}
 	if byName["acme/app"] != "acme" {
 		t.Errorf("acme/app account_login = %q, want acme", byName["acme/app"])
@@ -1019,8 +1039,180 @@ func TestReposAccountLoginTeamScoped(t *testing.T) {
 	if len(body) != 1 {
 		t.Fatalf("repos = %v, want 1", body)
 	}
-	assertKeys(t, body[0], "account_login")
+	assertKeys(t, body[0], "account_login", "has_policy")
 	if body[0]["full_name"] != "acme/visible" || body[0]["account_login"] != "acme" {
 		t.Errorf("visible repo = %v, want acme/visible with account_login acme", body[0])
+	}
+	if body[0]["has_policy"] != false {
+		t.Errorf("visible repo has_policy = %v, want false without a policy", body[0]["has_policy"])
+	}
+}
+
+func TestReposReportTeamPolicy(t *testing.T) {
+	f := newAPIFixture(t)
+	admin := f.user("admin", true)
+	withPolicy := f.team("With Policy")
+	withoutPolicy := f.team("Without Policy")
+	profile := f.seedHealthyProfile("policy-profile")
+	f.seedPolicy(withPolicy.ID, profile.ID)
+	f.installation(9501)
+	f.repo(9601, 9501, "acme/with-policy", &withPolicy.ID, true)
+	f.repo(9602, 9501, "acme/without-policy", &withoutPolicy.ID, true)
+	f.repo(9603, 9501, "acme/no-team", nil, true)
+
+	rec := f.request(http.MethodGet, "/api/repos", nil, f.session(admin))
+	assertStatus(t, rec, http.StatusOK)
+
+	var body []map[string]any
+	decodeJSON(t, rec, &body)
+	byName := make(map[string]map[string]any, len(body))
+	for _, repo := range body {
+		name, _ := repo["full_name"].(string)
+		byName[name] = repo
+	}
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"acme/with-policy", true},
+		{"acme/without-policy", false},
+		{"acme/no-team", false},
+	} {
+		if byName[tc.name]["has_policy"] != tc.want {
+			t.Errorf("%s has_policy = %v, want %v", tc.name, byName[tc.name]["has_policy"], tc.want)
+		}
+	}
+}
+
+type readinessItemBody struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	Count int    `json:"count"`
+	Link  string `json:"link"`
+}
+
+type readinessBody struct {
+	Ready bool                `json:"ready"`
+	Items []readinessItemBody `json:"items"`
+}
+
+func (f *apiFixture) readiness() readinessBody {
+	f.t.Helper()
+	rec := f.request(http.MethodGet, "/api/readiness", nil, f.session(f.user("admin", true)))
+	assertStatus(f.t, rec, http.StatusOK)
+	var body readinessBody
+	decodeJSON(f.t, rec, &body)
+	return body
+}
+
+func (f *apiFixture) seedHealthyProfile(name string) store.LLMProfile {
+	f.t.Helper()
+	checkedAt := time.Now().UTC()
+	profile := store.LLMProfile{
+		Name: name, Provider: "anthropic", Model: "claude-sonnet",
+		Mode: "api_key", Enabled: true, HealthStatus: store.HealthOK,
+		HealthCheckedAt: &checkedAt,
+	}
+	if err := f.st.DB.WithContext(f.ctx).Create(&profile).Error; err != nil {
+		f.t.Fatalf("seed llm profile %q: %v", name, err)
+	}
+	return profile
+}
+
+func (f *apiFixture) seedPolicy(teamID, profileID uint) {
+	f.t.Helper()
+	if err := f.st.DB.WithContext(f.ctx).Create(&store.QAPolicy{
+		TeamID: teamID, LLMProfileID: profileID,
+	}).Error; err != nil {
+		f.t.Fatalf("seed qa policy: %v", err)
+	}
+}
+
+func TestReadinessAdminOnly(t *testing.T) {
+	f := newAPIFixture(t)
+	dev := f.user("dev", false)
+	admin := f.user("admin", true)
+
+	assertStatus(t, f.request(http.MethodGet, "/api/readiness", nil, nil), http.StatusUnauthorized)
+	assertStatus(t, f.request(http.MethodGet, "/api/readiness", nil, f.session(dev)), http.StatusForbidden)
+
+	rec := f.request(http.MethodGet, "/api/readiness", nil, f.session(admin))
+	assertStatus(t, rec, http.StatusOK)
+
+	var body readinessBody
+	decodeJSON(t, rec, &body)
+	if body.Ready {
+		t.Error("empty instance reported ready, want the missing team and profile links")
+	}
+	if len(body.Items) != 2 {
+		t.Fatalf("items = %+v, want no_teams and no_profiles", body.Items)
+	}
+	assertKeys(t, map[string]any{"key": body.Items[0].Key, "label": body.Items[0].Label, "count": body.Items[0].Count, "link": body.Items[0].Link}, "key", "label", "count", "link")
+	if body.Items[0].Key != "no_teams" || body.Items[0].Link != "/teams" {
+		t.Errorf("first item = %+v, want no_teams linking to /teams", body.Items[0])
+	}
+	if body.Items[1].Key != "no_profiles" || body.Items[1].Link != "/agents" {
+		t.Errorf("second item = %+v, want no_profiles linking to /agents", body.Items[1])
+	}
+}
+
+func TestReadinessReadyWhenEngineConfigured(t *testing.T) {
+	f := newAPIFixture(t)
+	team := f.team("QA")
+	profile := f.seedHealthyProfile("healthy")
+	f.seedPolicy(team.ID, profile.ID)
+	f.installation(7001)
+	f.repo(7101, 7001, "acme/ready", &team.ID, true)
+
+	body := f.readiness()
+	if !body.Ready {
+		t.Errorf("ready = false with every link complete: %+v", body.Items)
+	}
+	if len(body.Items) != 0 {
+		t.Errorf("items = %+v, want empty when ready", body.Items)
+	}
+}
+
+func TestReadinessNamesEachMissingLink(t *testing.T) {
+	f := newAPIFixture(t)
+	f.team("QA")
+	checkedAt := time.Now().UTC()
+	profile := store.LLMProfile{
+		Name: "broken", Provider: "anthropic", Model: "claude-sonnet",
+		Mode: "api_key", Enabled: true, HealthStatus: store.HealthError,
+		HealthCheckedAt: &checkedAt,
+	}
+	if err := f.st.DB.WithContext(f.ctx).Create(&profile).Error; err != nil {
+		t.Fatalf("seed unhealthy profile: %v", err)
+	}
+	f.installation(7002)
+	f.repo(7102, 7002, "acme/orphan", nil, true)
+
+	body := f.readiness()
+	if body.Ready {
+		t.Fatal("ready = true with three gaps")
+	}
+	byKey := make(map[string]readinessItemBody, len(body.Items))
+	for _, item := range body.Items {
+		byKey[item.Key] = item
+	}
+	if len(byKey) != 3 {
+		t.Fatalf("items = %+v, want the three missing links", body.Items)
+	}
+	cases := []struct {
+		key, link, label string
+	}{
+		{"repos_without_team", "/repos", "repositorio habilitado sin equipo asignado"},
+		{"teams_without_policy", "/teams", "equipo sin política de revisión"},
+		{"unhealthy_profiles", "/agents", "perfil LLM habilitado sin estado saludable"},
+	}
+	for _, tc := range cases {
+		item, ok := byKey[tc.key]
+		if !ok {
+			t.Fatalf("missing item %q in %+v", tc.key, body.Items)
+		}
+		if item.Count != 1 || item.Link != tc.link || item.Label != "1 "+tc.label {
+			t.Errorf("%s item = %+v, want count 1, link %s, label %q", tc.key, item, tc.link, "1 "+tc.label)
+		}
 	}
 }

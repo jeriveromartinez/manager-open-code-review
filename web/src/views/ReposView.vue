@@ -141,6 +141,34 @@ onMounted(() => {
                 />
                 <span>{{ repo.enabled ? 'Activada' : 'Desactivada' }}</span>
               </label>
+              <p
+                v-if="repo.enabled && repo.team_id === null"
+                class="repo-table__warning"
+                :data-repo-warning="repo.id"
+              >
+                Habilitado sin equipo: no se revisará
+              </p>
+              <p
+                v-else-if="repo.enabled && repo.team_id !== null && !repo.has_policy"
+                class="repo-table__warning"
+                :data-repo-policy-warning="repo.id"
+              >
+                El equipo no tiene política: no se revisará
+              </p>
+              <p
+                v-else-if="canEdit && repo.team_id === null"
+                class="repo-table__hint"
+                :data-repo-hint="repo.id"
+              >
+                Sin equipo: activar no iniciará revisiones
+              </p>
+              <p
+                v-else-if="canEdit && repo.team_id !== null && !repo.has_policy"
+                class="repo-table__hint"
+                :data-repo-policy-hint="repo.id"
+              >
+                El equipo no tiene política: activar no iniciará revisiones
+              </p>
             </td>
             <td>
               <select
@@ -273,5 +301,17 @@ onMounted(() => {
 .switch input:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+.repo-table__warning {
+  margin-top: var(--space-1);
+  color: var(--bad);
+  font-size: 12.5px;
+}
+
+.repo-table__hint {
+  margin-top: var(--space-1);
+  color: var(--text-muted);
+  font-size: 12.5px;
 }
 </style>

@@ -810,6 +810,133 @@ func TestPRValidationsResetOnNewHead(t *testing.T) {
 	}
 }
 
+// markFork flips the fork flag through the database so tests can cover the
+// eligibility rule without going through a GitHub payload.
+func (f *fixture) markFork(pr store.PullRequest) store.PullRequest {
+	f.t.Helper()
+
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).
+		Where("id = ?", pr.ID).Update("is_fork", true).Error; err != nil {
+		f.t.Fatalf("mark pull request #%d as fork: %v", pr.Number, err)
+	}
+	return pr
+}
+
+func TestReviewStateScenarios(t *testing.T) {
+	f := newFixture(t)
+	inst := f.installation(1016)
+
+	enabledProfile := f.llmProfile("enabled", true)
+	disabledProfile := f.llmProfile("disabled", false)
+
+	configuredTeam := f.team("configured")
+	if _, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: configuredTeam.ID, LLMProfileID: enabledProfile.ID,
+	}); err != nil {
+		t.Fatalf("SaveQAPolicy(configured): %v", err)
+	}
+	brokenTeam := f.team("broken")
+	if _, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: brokenTeam.ID, LLMProfileID: disabledProfile.ID,
+	}); err != nil {
+		t.Fatalf("SaveQAPolicy(broken): %v", err)
+	}
+	noPolicyTeam := f.team("no-policy")
+
+	forkRepo := f.repo(6201, inst.ID, "acme/fork", &configuredTeam.ID, true)
+	draftRepo := f.repo(6202, inst.ID, "acme/draft", &configuredTeam.ID, true)
+	noTeamRepo := f.repo(6203, inst.ID, "acme/no-team", nil, true)
+	noPolicyRepo := f.repo(6204, inst.ID, "acme/no-policy", &noPolicyTeam.ID, true)
+	disabledRepo := f.repo(6205, inst.ID, "acme/disabled-profile", &brokenTeam.ID, true)
+	readyRepo := f.repo(6206, inst.ID, "acme/ready", &configuredTeam.ID, true)
+	runningRepo := f.repo(6207, inst.ID, "acme/running", nil, true)
+
+	prFork := f.markFork(f.openPR(forkRepo.ID, 1, store.StatusPending, false))
+	prDraft := f.openPR(draftRepo.ID, 1, store.StatusPending, true)
+	prNoTeam := f.openPR(noTeamRepo.ID, 1, store.StatusPending, false)
+	prNoPolicy := f.openPR(noPolicyRepo.ID, 1, store.StatusPending, false)
+	prDisabled := f.openPR(disabledRepo.ID, 1, store.StatusPending, false)
+	prScheduled := f.openPR(readyRepo.ID, 1, store.StatusPending, false)
+	prRunning := f.openPR(runningRepo.ID, 1, store.StatusPending, false)
+
+	// The active run must win even though this repository has no configuration
+	// at all, so a queued review is never hidden as blocked.
+	if _, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: prRunning.ID, ProfileID: enabledProfile.ID,
+		HeadSHA: prRunning.HeadSHA, Status: store.RunQueued,
+	}); err != nil {
+		t.Fatalf("CreateReviewRun: %v", err)
+	}
+
+	admin := f.user("admin", true)
+	views, err := f.s.ListVisiblePullRequests(f.ctx, admin, store.PRFilter{})
+	if err != nil {
+		t.Fatalf("ListVisiblePullRequests() returned error: %v", err)
+	}
+	byID := make(map[uint]store.PRView, len(views))
+	for _, v := range views {
+		byID[v.ID] = v
+	}
+
+	cases := []struct {
+		name   string
+		id     uint
+		state  string
+		reason string
+	}{
+		{"fork", prFork.ID, "blocked", "PR de fork: no se revisa en esta fase"},
+		{"draft", prDraft.ID, "blocked", "Borrador: se revisará cuando pase a listo"},
+		{"no team", prNoTeam.ID, "blocked", "Repositorio sin equipo asignado"},
+		{"no policy", prNoPolicy.ID, "blocked", "El equipo no tiene política QA"},
+		{"disabled profile", prDisabled.ID, "blocked", "La política apunta a un perfil LLM deshabilitado"},
+		{"scheduled", prScheduled.ID, "scheduled", ""},
+		{"active run", prRunning.ID, "running", ""},
+	}
+	for _, tc := range cases {
+		view, ok := byID[tc.id]
+		if !ok {
+			t.Errorf("%s: PR %d is missing from the visible list", tc.name, tc.id)
+			continue
+		}
+		if view.ReviewState != tc.state || view.ReviewReason != tc.reason {
+			t.Errorf("%s: ReviewState/ReviewReason = %q/%q, want %q/%q",
+				tc.name, view.ReviewState, view.ReviewReason, tc.state, tc.reason)
+		}
+	}
+}
+
+func TestReviewStateFor(t *testing.T) {
+	full := store.ReviewSignals{TeamAssigned: true, HasPolicy: true, ProfileEnabled: true}
+	with := func(base store.ReviewSignals, change func(*store.ReviewSignals)) store.ReviewSignals {
+		change(&base)
+		return base
+	}
+
+	cases := []struct {
+		name   string
+		in     store.ReviewSignals
+		state  string
+		reason string
+	}{
+		{"active run ignores config", store.ReviewSignals{ActiveRun: true}, "running", ""},
+		{"draft", with(full, func(s *store.ReviewSignals) { s.Draft = true }), "blocked", "Borrador: se revisará cuando pase a listo"},
+		{"fork", with(full, func(s *store.ReviewSignals) { s.Fork = true }), "blocked", "PR de fork: no se revisa en esta fase"},
+		{"draft beats fork", store.ReviewSignals{Draft: true, Fork: true}, "blocked", "Borrador: se revisará cuando pase a listo"},
+		{"no team", store.ReviewSignals{HasPolicy: true, ProfileEnabled: true}, "blocked", "Repositorio sin equipo asignado"},
+		{"no policy", store.ReviewSignals{TeamAssigned: true, ProfileEnabled: true}, "blocked", "El equipo no tiene política QA"},
+		{"no profile", store.ReviewSignals{TeamAssigned: true, HasPolicy: true}, "blocked", "La política apunta a un perfil LLM deshabilitado"},
+		{"disabled profile", with(full, func(s *store.ReviewSignals) { s.ProfileEnabled = false }), "blocked", "La política apunta a un perfil LLM deshabilitado"},
+		{"eligible", full, "scheduled", ""},
+	}
+	for _, tc := range cases {
+		state, reason := store.ReviewStateFor(tc.in)
+		if state != tc.state || reason != tc.reason {
+			t.Errorf("%s: ReviewStateFor() = %q/%q, want %q/%q",
+				tc.name, state, reason, tc.state, tc.reason)
+		}
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

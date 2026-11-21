@@ -31,6 +31,7 @@ const repos = [
     default_branch: 'main',
     enabled: false,
     team_id: null,
+    has_policy: false,
     account_login: 'acme',
   },
   {
@@ -41,6 +42,7 @@ const repos = [
     default_branch: 'main',
     enabled: true,
     team_id: 1,
+    has_policy: true,
     account_login: 'personal',
   },
 ] as Repository[]
@@ -208,6 +210,64 @@ describe('ReposView', () => {
     expect(wrapper.text()).toContain('Cuenta')
     expect(wrapper.text()).toContain('acme')
     expect(wrapper.text()).toContain('personal')
+    wrapper.unmount()
+  })
+
+  it('avisa en la fila cuando un repositorio habilitado no tiene equipo', async () => {
+    mocks.session.me = developer
+    mocks.api.repos.mockResolvedValue([{ ...repos[0], enabled: true, team_id: null }])
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(wrapper.get('[data-repo-warning="10"]').text()).toBe(
+      'Habilitado sin equipo: no se revisará',
+    )
+    wrapper.unmount()
+  })
+
+  it('al activar un repositorio sin equipo muestra el aviso de que no se revisará', async () => {
+    mocks.session.me = admin
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(wrapper.get('[data-repo-hint="10"]').text()).toContain('Sin equipo')
+
+    const control = wrapper.get('input[data-repo-enabled="10"]')
+    await control.setValue(true)
+    await flushPromises()
+
+    expect(mocks.api.patchRepo).toHaveBeenCalledWith(10, { enabled: true })
+    expect(wrapper.get('[data-repo-row="10"]').text()).toContain(
+      'Habilitado sin equipo: no se revisará',
+    )
+    wrapper.unmount()
+  })
+
+  it('avisa en la fila cuando el equipo del repositorio no tiene política', async () => {
+    mocks.session.me = developer
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy: false }])
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(wrapper.get('[data-repo-policy-warning="20"]').text()).toBe(
+      'El equipo no tiene política: no se revisará',
+    )
+    wrapper.unmount()
+  })
+
+  it('avisa antes de activar un repositorio cuyo equipo no tiene política', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], enabled: false, has_policy: false }])
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(wrapper.get('[data-repo-policy-hint="20"]').text()).toBe(
+      'El equipo no tiene política: activar no iniciará revisiones',
+    )
     wrapper.unmount()
   })
 })

@@ -131,6 +131,7 @@ func NewRouter(d Deps) http.Handler {
 				r.Use(auth.RequireAdmin)
 
 				r.Get("/installations", s.installations)
+				r.Get("/readiness", s.readiness)
 				r.Patch("/repos/{id}", s.patchRepo)
 				r.Post("/teams", s.createTeam)
 

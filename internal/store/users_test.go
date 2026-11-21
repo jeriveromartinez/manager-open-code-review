@@ -364,6 +364,64 @@ func TestRepositorySettingsAndVisibility(t *testing.T) {
 	}
 }
 
+func TestListRepositoriesWithPolicy(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+
+	admin, err := s.UpsertUserFromGitHub(ctx, 6001, "admin", "")
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	withPolicy, err := s.CreateTeam(ctx, "With Policy")
+	if err != nil {
+		t.Fatalf("create team with policy: %v", err)
+	}
+	withoutPolicy, err := s.CreateTeam(ctx, "Without Policy")
+	if err != nil {
+		t.Fatalf("create team without policy: %v", err)
+	}
+	profile, err := s.CreateLLMProfile(ctx, store.LLMProfile{Name: "profile", Provider: "anthropic", Model: "claude"})
+	if err != nil {
+		t.Fatalf("create llm profile: %v", err)
+	}
+	if _, err := s.SaveQAPolicy(ctx, store.QAPolicy{TeamID: withPolicy.ID, LLMProfileID: profile.ID}); err != nil {
+		t.Fatalf("save qa policy: %v", err)
+	}
+	if err := s.UpsertInstallation(ctx, store.Installation{ID: 89, AccountLogin: "acme", AccountType: "Organization"}); err != nil {
+		t.Fatalf("create installation: %v", err)
+	}
+	for _, r := range []store.Repository{
+		{ID: 701, InstallationID: 89, FullName: "acme/with-policy", DefaultBranch: "main", TeamID: &withPolicy.ID},
+		{ID: 702, InstallationID: 89, FullName: "acme/without-policy", DefaultBranch: "main", TeamID: &withoutPolicy.ID},
+		{ID: 703, InstallationID: 89, FullName: "acme/no-team", DefaultBranch: "main"},
+	} {
+		if err := s.UpsertRepository(ctx, r); err != nil {
+			t.Fatalf("create repository %d: %v", r.ID, err)
+		}
+	}
+
+	repos, err := s.ListRepositoriesWithPolicy(ctx, admin)
+	if err != nil {
+		t.Fatalf("ListRepositoriesWithPolicy: %v", err)
+	}
+	if len(repos) != 3 {
+		t.Fatalf("repositories = %d, want 3", len(repos))
+	}
+	byID := make(map[int64]store.RepositoryWithPolicy, len(repos))
+	for _, repo := range repos {
+		byID[repo.ID] = repo
+	}
+	if !byID[701].TeamHasPolicy {
+		t.Error("repo 701 TeamHasPolicy = false, want true")
+	}
+	if byID[702].TeamHasPolicy {
+		t.Error("repo 702 TeamHasPolicy = true, want false")
+	}
+	if byID[703].TeamHasPolicy {
+		t.Error("repo 703 TeamHasPolicy = true, want false without a team")
+	}
+}
+
 // TestAppConfigNotConfigured guards the bootstrap error and the single-row
 // upsert of the GitHub App configuration.
 func TestAppConfigNotConfigured(t *testing.T) {

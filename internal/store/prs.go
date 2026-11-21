@@ -257,22 +257,27 @@ type PRFilter struct{ Group string }
 
 // PRView is the dashboard representation of a pull request. Validations are the
 // stored counters of the current head; they stay 0/0 until the check state of
-// that head has been read from GitHub.
+// that head has been read from GitHub. ReviewState tells the panel whether a
+// review is actually running, can be scheduled, or never will be, and
+// ReviewReason explains the blocked cases.
 type PRView struct {
-	ID          uint
-	Repo        string
-	Number      int
-	Title       string
-	AuthorLogin string
-	HTMLURL     string
-	QAStatus    string
-	Group       string
-	Validations PRValidations
-	UpdatedAt   time.Time
+	ID           uint
+	Repo         string
+	Number       int
+	Title        string
+	AuthorLogin  string
+	HTMLURL      string
+	QAStatus     string
+	Group        string
+	ReviewState  string
+	ReviewReason string
+	Validations  PRValidations
+	UpdatedAt    time.Time
 }
 
 // prViewRow mirrors the columns selected from the joined query. Keeping it
-// separate from PRView avoids GORM trying to map the computed fields.
+// separate from PRView avoids GORM trying to map the computed fields. The
+// pointer fields are the ones a LEFT JOIN can leave NULL.
 type prViewRow struct {
 	ID                uint
 	Repo              string
@@ -281,10 +286,61 @@ type prViewRow struct {
 	AuthorLogin       string
 	HTMLURL           string
 	QAStatus          string
+	TeamID            *uint
+	Draft             bool
+	IsFork            bool
+	PolicyID          *uint
+	ProfileID         *uint
+	ProfileEnabled    *bool
+	ActiveRun         string
 	ValidationsPassed int
 	ValidationsFailed int
 	ValidationsTotal  int
 	UpdatedAt         time.Time
+}
+
+// Review states reported to the panel.
+const (
+	ReviewStateRunning   = "running"
+	ReviewStateScheduled = "scheduled"
+	ReviewStateBlocked   = "blocked"
+)
+
+// ReviewSignals are the facts that decide whether a pull request can be
+// reviewed. ActiveRun means the current head already has a queued or running
+// run.
+type ReviewSignals struct {
+	ActiveRun      bool
+	Draft          bool
+	Fork           bool
+	TeamAssigned   bool
+	HasPolicy      bool
+	ProfileEnabled bool
+}
+
+// ReviewStateFor mirrors the eligibility rules of ReviewConfigForPR, which are
+// the same ones the reconciler applies before enqueueing a run. Keeping the
+// decision pure lets tests cover it without a database.
+func ReviewStateFor(s ReviewSignals) (state, reason string) {
+	// A run in flight is the truth, even if the configuration was removed or
+	// disabled after it was queued.
+	if s.ActiveRun {
+		return ReviewStateRunning, ""
+	}
+	switch {
+	case s.Draft:
+		return ReviewStateBlocked, "Borrador: se revisará cuando pase a listo"
+	case s.Fork:
+		return ReviewStateBlocked, "PR de fork: no se revisa en esta fase"
+	case !s.TeamAssigned:
+		return ReviewStateBlocked, "Repositorio sin equipo asignado"
+	case !s.HasPolicy:
+		return ReviewStateBlocked, "El equipo no tiene política QA"
+	case !s.ProfileEnabled:
+		return ReviewStateBlocked, "La política apunta a un perfil LLM deshabilitado"
+	default:
+		return ReviewStateScheduled, ""
+	}
 }
 
 // Stats holds the dashboard KPIs for a user's visible pull requests.
@@ -335,6 +391,8 @@ func groupStatuses(group string) ([]string, bool) {
 func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter) ([]PRView, error) {
 	var rows []prViewRow
 	err := s.visiblePRs(ctx, u, f).
+		Joins("LEFT JOIN qa_policies pol ON pol.team_id = r.team_id").
+		Joins("LEFT JOIN llm_profiles prof ON prof.id = pol.llm_profile_id").
 		Select(strings.Join([]string{
 			"pr.id AS id",
 			"r.full_name AS repo",
@@ -343,6 +401,13 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 			"pr.author_login AS author_login",
 			"pr.html_url AS html_url",
 			"pr.qa_status AS qa_status",
+			"r.team_id AS team_id",
+			"pr.draft AS draft",
+			"pr.is_fork AS is_fork",
+			"pol.id AS policy_id",
+			"prof.id AS profile_id",
+			"prof.enabled AS profile_enabled",
+			"COALESCE((SELECT rr.status FROM review_runs rr WHERE rr.pull_request_id = pr.id AND rr.head_sha = pr.head_sha AND rr.status IN ('queued','running') ORDER BY rr.id DESC LIMIT 1), '') AS active_run",
 			"pr.validations_passed AS validations_passed",
 			"pr.validations_failed AS validations_failed",
 			"pr.validations_total AS validations_total",
@@ -356,15 +421,25 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 
 	views := make([]PRView, len(rows))
 	for i, row := range rows {
+		state, reason := ReviewStateFor(ReviewSignals{
+			ActiveRun:      row.ActiveRun != "",
+			Draft:          row.Draft,
+			Fork:           row.IsFork,
+			TeamAssigned:   row.TeamID != nil,
+			HasPolicy:      row.PolicyID != nil,
+			ProfileEnabled: row.ProfileID != nil && row.ProfileEnabled != nil && *row.ProfileEnabled,
+		})
 		views[i] = PRView{
-			ID:          row.ID,
-			Repo:        row.Repo,
-			Number:      row.Number,
-			Title:       row.Title,
-			AuthorLogin: row.AuthorLogin,
-			HTMLURL:     row.HTMLURL,
-			QAStatus:    row.QAStatus,
-			Group:       GroupOf(row.QAStatus),
+			ID:           row.ID,
+			Repo:         row.Repo,
+			Number:       row.Number,
+			Title:        row.Title,
+			AuthorLogin:  row.AuthorLogin,
+			HTMLURL:      row.HTMLURL,
+			QAStatus:     row.QAStatus,
+			Group:        GroupOf(row.QAStatus),
+			ReviewState:  state,
+			ReviewReason: reason,
 			Validations: PRValidations{
 				Passed: row.ValidationsPassed,
 				Failed: row.ValidationsFailed,

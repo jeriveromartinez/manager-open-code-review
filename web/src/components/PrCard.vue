@@ -2,13 +2,13 @@
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import type { PRView } from '../api'
-import { statusLabel } from '../status'
+import { prStatusLabel } from '../status'
 
 const props = defineProps<{
   pr: PRView
 }>()
 
-const status = computed(() => statusLabel(props.pr.qa_status))
+const status = computed(() => prStatusLabel(props.pr))
 </script>
 
 <template>
