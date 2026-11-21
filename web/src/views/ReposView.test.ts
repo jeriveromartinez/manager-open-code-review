@@ -19,6 +19,14 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../api', () => ({ api: mocks.api }))
+type LiveRegistration = { types: string[]; reload: () => unknown; filter?: (event: { type: string; id: string }) => boolean }
+const live = vi.hoisted(() => ({ registrations: [] as LiveRegistration[] }))
+vi.mock('../composables/useLiveRefresh', () => ({
+  useLiveRefresh: (types: string[], reload: () => unknown, filter?: LiveRegistration['filter']) => {
+    live.registrations.push({ types, reload, filter })
+  },
+}))
+
 vi.mock('../stores/session', () => ({
   useSessionStore: () => mocks.session,
 }))
@@ -87,6 +95,22 @@ describe('ReposView', () => {
     mocks.api.syncInstallation.mockResolvedValue({ status: 'queued' })
     mocks.api.setupStatus.mockResolvedValue({ configured: true, install_url: '' })
     mocks.session.load.mockResolvedValue(null)
+    live.registrations.length = 0
+  })
+
+  it('refreshes the registry quietly when a repo or a team changes', async () => {
+    mocks.session.me = admin
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    const [registration] = live.registrations
+    expect(registration.types).toEqual(['repo.updated', 'team.updated'])
+    mocks.api.repos.mockResolvedValue([{ ...repos[0], full_name: 'acme/renamed' }])
+    await registration.reload()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('acme/renamed')
+    wrapper.unmount()
   })
 
   it('como admin, activar el interruptor llama a patchRepo(id, {enabled:true}) y refleja el cambio', async () => {

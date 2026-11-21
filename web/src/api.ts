@@ -391,13 +391,25 @@ export const api = {
     request<SettingsResponse>('/api/settings', { method: 'PUT', body: { values } }),
 }
 
+// SSE delivers named events only to listeners registered for that name, so
+// every type the backend emits has to be listed here.
+export const LIVE_EVENT_TYPES = [
+  'pr.updated',
+  'repo.updated',
+  'run.updated',
+  'team.updated',
+  'llm_profile.updated',
+  'settings.updated',
+  'user.updated',
+] as const
+
 /**
  * Abre la conexión SSE con el backend. La reconexión la gestiona EventSource de
- * forma nativa; aquí solo se propaga el estado para la insignia del Dashboard.
+ * forma nativa; aquí solo se propaga el estado de la conexión.
  */
-export function subscribeEvents(
+export function openEventStream(
   onEvent: (event: ReviewEvent) => void,
-  onState?: (connected: boolean) => void,
+  onState: (connected: boolean) => void,
 ): () => void {
   const source = new EventSource('/api/events')
 
@@ -412,14 +424,16 @@ export function subscribeEvents(
     }
   }
 
-  source.addEventListener('pr.updated', handle as EventListener)
-  source.addEventListener('repo.updated', handle as EventListener)
-  source.onopen = () => onState?.(true)
-  source.onerror = () => onState?.(false)
+  for (const type of LIVE_EVENT_TYPES) {
+    source.addEventListener(type, handle as EventListener)
+  }
+  source.onopen = () => onState(true)
+  source.onerror = () => onState(false)
 
   return () => {
-    source.removeEventListener('pr.updated', handle as EventListener)
-    source.removeEventListener('repo.updated', handle as EventListener)
+    for (const type of LIVE_EVENT_TYPES) {
+      source.removeEventListener(type, handle as EventListener)
+    }
     source.close()
   }
 }

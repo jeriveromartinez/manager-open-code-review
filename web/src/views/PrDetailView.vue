@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, type Finding, type PRDetail } from '../api'
+import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { isConflict, isForbidden } from '../errors'
 import { prStatusLabel, statusLabel } from '../status'
 
@@ -12,6 +13,7 @@ const detail = ref<PRDetail | null>(null)
 const loading = ref(true)
 const retrying = ref(false)
 const error = ref<string | null>(null)
+const refreshError = ref<string | null>(null)
 const acting = ref<string | null>(null)
 const confirming = ref<{ finding: Finding; action: 'withdraw' | 'confirm' } | null>(null)
 const reason = ref('')
@@ -112,15 +114,28 @@ function runTone(status: string): string {
   return 'badge--muted'
 }
 
-async function load(): Promise<void> {
-  loading.value = true
-  error.value = null
+// Loads are numbered so an older answer cannot overwrite a newer one.
+let latestLoad = 0
+
+// A silent load keeps what is on screen, including an open triage dialog and
+// any triage error; if it fails, the last detail stays with a note.
+async function load({ silent = false } = {}): Promise<void> {
+  const current = ++latestLoad
+  if (!silent) {
+    loading.value = true
+    error.value = null
+  }
   try {
-    detail.value = await api.prDetail(prId.value)
+    const next = await api.prDetail(prId.value)
+    if (current !== latestLoad) return
+    detail.value = next
+    refreshError.value = null
   } catch {
-    error.value = 'No se pudo cargar el detalle del PR'
+    if (current !== latestLoad) return
+    if (silent) refreshError.value = 'No se pudo actualizar; se muestran los últimos datos.'
+    else error.value = 'No se pudo cargar el detalle del PR'
   } finally {
-    loading.value = false
+    if (current === latestLoad) loading.value = false
   }
 }
 
@@ -202,6 +217,12 @@ async function applyAction(): Promise<void> {
   }
 }
 
+useLiveRefresh(
+  ['pr.updated'],
+  () => load({ silent: true }),
+  (event) => event.id === String(prId.value),
+)
+
 onMounted(() => {
   void load()
 })
@@ -252,6 +273,7 @@ onMounted(() => {
     </dl>
 
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
+    <p v-if="refreshError" class="caption" role="status" data-refresh-error>{{ refreshError }}</p>
 
     <section class="tile qa-check" aria-labelledby="qa-check-title" data-qa-check>
       <div class="qa-check__head">

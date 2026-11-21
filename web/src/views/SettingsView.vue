@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { api, type SettingsField } from '../api'
+import { useLiveRefresh } from '../composables/useLiveRefresh'
 
 type DurationUnit = 's' | 'm' | 'h'
 type DurationPart = { amount: string; unit: DurationUnit }
@@ -19,6 +20,8 @@ const loading = ref(false)
 const loadFailed = ref(false)
 const error = ref('')
 const saved = ref('')
+// Groups someone else changed while they had unsaved edits here.
+const staleGroups = ref<SettingsField['group'][]>([])
 
 const groups: Array<{ id: SettingsField['group']; title: string; hint: string }> = [
   { id: 'general', title: 'General', hint: 'Dirección pública, webhooks y reconciliación.' },
@@ -137,6 +140,53 @@ async function load(): Promise<void> {
   }
 }
 
+function applyGroup(group: SettingsField['group'], server: Record<string, string>): void {
+  for (const field of fieldsOf(group)) {
+    values.value[field.key] = server[field.key] ?? ''
+    if (field.kind === 'duration') {
+      durations.value[field.key] = splitDuration(values.value[field.key], field.unit)
+    }
+    savedSnapshot.value[field.key] = fieldValue(field)
+  }
+  staleGroups.value = staleGroups.value.filter((item) => item !== group)
+}
+
+// Compared in the snapshot's shape, so "20m0s" from the server and "20m" in
+// the form count as the same value.
+function changedOnServer(group: SettingsField['group'], server: Record<string, string>): boolean {
+  return fieldsOf(group).some((field) => {
+    const raw = server[field.key] ?? ''
+    if (field.kind !== 'duration') return raw !== savedSnapshot.value[field.key]
+    const part = splitDuration(raw, field.unit)
+    return `${part.amount.trim()}${part.unit}` !== savedSnapshot.value[field.key]
+  })
+}
+
+async function onLiveChanges(): Promise<void> {
+  try {
+    const response = await api.settings()
+    for (const group of groups) {
+      if (!isDirty(group.id)) {
+        applyGroup(group.id, response.values)
+      } else if (changedOnServer(group.id, response.values) && !staleGroups.value.includes(group.id)) {
+        staleGroups.value = [...staleGroups.value, group.id]
+      }
+    }
+  } catch {
+    error.value = 'No se pudieron actualizar los ajustes.'
+  }
+}
+
+async function reloadGroup(group: SettingsField['group']): Promise<void> {
+  try {
+    applyGroup(group, (await api.settings()).values)
+  } catch {
+    error.value = 'No se pudieron cargar los ajustes.'
+  }
+}
+
+useLiveRefresh(['settings.updated'], onLiveChanges)
+
 async function save(group: SettingsField['group']): Promise<void> {
   saving.value = group
   error.value = ''
@@ -154,6 +204,7 @@ async function save(group: SettingsField['group']): Promise<void> {
     for (const field of fieldsOf(group)) {
       savedSnapshot.value[field.key] = fieldValue(field)
     }
+    staleGroups.value = staleGroups.value.filter((item) => item !== group)
     saved.value = 'Cambios guardados.'
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'No se pudieron guardar los ajustes.'
@@ -199,6 +250,12 @@ onMounted(load)
         :data-group="group.id"
         @submit.prevent="save(group.id)"
       >
+        <div aria-live="polite">
+          <p v-if="staleGroups.includes(group.id)" class="stale-notice" data-stale-group>
+            Otra persona cambió estos ajustes.
+            <button class="button button--ghost" type="button" @click="reloadGroup(group.id)">Recargar</button>
+          </p>
+        </div>
         <header class="settings-group__head">
           <h2 class="settings-group__title">{{ group.title }}</h2>
           <span v-if="restartLabel(group.id)" class="badge badge--busy">

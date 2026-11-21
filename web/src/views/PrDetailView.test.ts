@@ -13,6 +13,14 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../api', () => ({ api: mocks.api }))
+type LiveRegistration = { types: string[]; reload: () => unknown; filter?: (event: { type: string; id: string }) => boolean }
+const live = vi.hoisted(() => ({ registrations: [] as LiveRegistration[] }))
+vi.mock('../composables/useLiveRefresh', () => ({
+  useLiveRefresh: (types: string[], reload: () => unknown, filter?: LiveRegistration['filter']) => {
+    live.registrations.push({ types, reload, filter })
+  },
+}))
+
 vi.mock('vue-router', () => ({ useRoute: () => ({ params: { id: '42' } }) }))
 
 const detail: PRDetail = {
@@ -125,10 +133,57 @@ function mountDetail(): VueWrapper {
 describe('PrDetailView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    live.registrations.length = 0
     mocks.api.prDetail.mockResolvedValue(detail)
     mocks.api.retryPR.mockResolvedValue({ status: 'queued' })
     mocks.api.withdrawFinding.mockResolvedValue({ ...detail.findings[0], status: 'withdrawn' })
     mocks.api.confirmFinding.mockResolvedValue({ ...detail.findings[0], status: 'open' })
+  })
+
+  it('refreshes on events for this PR only and keeps an open dialog', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const [registration] = live.registrations
+    expect(registration.types).toEqual(['pr.updated'])
+    expect(registration.filter!({ type: 'pr.updated', id: '42' })).toBe(true)
+    expect(registration.filter!({ type: 'pr.updated', id: '43' })).toBe(false)
+
+    await wrapper.get('[data-withdraw][data-finding-id="f1"]').trigger('click')
+    await wrapper.get('[data-finding-reason]').setValue('falso positivo')
+    mocks.api.prDetail.mockClear()
+    const pending = registration.reload()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).not.toContain('Cargando el detalle')
+    await pending
+    await flushPromises()
+
+    expect(mocks.api.prDetail).toHaveBeenCalledTimes(1)
+    expect((wrapper.get('[data-finding-reason]').element as HTMLInputElement).value).toBe('falso positivo')
+    wrapper.unmount()
+  })
+
+  it('lets the newest load win over an older quiet one', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    let releaseOld: (value: typeof detail) => void = () => {}
+    mocks.api.prDetail.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseOld = resolve
+        }),
+    )
+    const old = live.registrations[0].reload()
+    mocks.api.prDetail.mockResolvedValueOnce({ ...detail, title: 'Título nuevo' })
+    await live.registrations[0].reload()
+    releaseOld({ ...detail, title: 'Título viejo' })
+    await old
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Título nuevo')
+    expect(wrapper.text()).not.toContain('Título viejo')
+    wrapper.unmount()
   })
 
   it('shows findings grouped by severity and retries the review', async () => {

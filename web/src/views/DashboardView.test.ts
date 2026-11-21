@@ -3,6 +3,7 @@ import { createPinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import DashboardView from './DashboardView.vue'
+import { useLiveStore } from '../stores/live'
 import type { PRView, QASummary } from '../api'
 
 type EventPayload = { type: string; id: string }
@@ -22,22 +23,20 @@ const mocks = vi.hoisted(() => {
       readiness: vi.fn(),
       retryPR: vi.fn(),
     },
-    subscribeEvents: vi.fn(
-      (onEvent: (event: EventPayload) => void, onState?: (connected: boolean) => void) => {
-        handlers.onEvent = onEvent
-        handlers.onState = onState ?? null
-        return () => {
-          handlers.onEvent = null
-          handlers.onState = null
-        }
-      },
-    ),
+    openEventStream: vi.fn((onEvent: (event: EventPayload) => void, onState: (connected: boolean) => void) => {
+      handlers.onEvent = onEvent
+      handlers.onState = onState
+      return () => {
+        handlers.onEvent = null
+        handlers.onState = null
+      }
+    }),
   }
 })
 
 vi.mock('../api', () => ({
   api: mocks.api,
-  subscribeEvents: mocks.subscribeEvents,
+  openEventStream: mocks.openEventStream,
 }))
 
 const summary: QASummary = {
@@ -101,6 +100,8 @@ const prs: PRView[] = [
   pr({ id: 4, repo: 'infra', number: 9, title: 'Sube el pool', qa_status: 'inconclusive', group: 'blocked' }),
 ]
 
+let pinia = createPinia()
+
 function mountDashboard(): VueWrapper {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -113,7 +114,8 @@ function mountDashboard(): VueWrapper {
       { path: '/:pathMatch(.*)*', component: { template: '<div />' } },
     ],
   })
-  return mount(DashboardView, { global: { plugins: [createPinia(), router] } })
+  pinia = createPinia()
+  return mount(DashboardView, { global: { plugins: [pinia, router] } })
 }
 
 function tile(wrapper: VueWrapper, key: string) {
@@ -218,8 +220,9 @@ describe('DashboardView', () => {
   it('un evento SSE pr.updated provoca un refetch con debounce', async () => {
     const wrapper = mountDashboard()
     await flushPromises()
+    // The shell owns the stream; here it is started by hand.
+    useLiveStore(pinia).start()
 
-    expect(mocks.subscribeEvents).toHaveBeenCalledTimes(1)
     mocks.api.qaSummary.mockClear()
     mocks.api.prs.mockClear()
 
@@ -397,16 +400,4 @@ describe('DashboardView', () => {
     idle.unmount()
   })
 
-  it('shows the live connection next to the greeting', async () => {
-    const wrapper = mountDashboard()
-    await flushPromises()
-
-    const live = wrapper.get('[data-service-badge]')
-    expect(live.text()).toBe('Reconectando…')
-    mocks.handlers.onState!(true)
-    await flushPromises()
-    expect(live.text()).toBe('En vivo')
-    expect(live.classes()).toContain('live--on')
-    wrapper.unmount()
-  })
 })

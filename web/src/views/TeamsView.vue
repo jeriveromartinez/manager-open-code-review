@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { api, type Team, type TeamMember, type TeamRole, type User } from '../api'
+import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { useSessionStore } from '../stores/session'
 
 const session = useSessionStore()
@@ -48,8 +49,8 @@ function ensureDraft(teamId: number): void {
   }
 }
 
-async function loadUsers(): Promise<void> {
-  if (!needsUsers.value || usersLoaded.value || usersLoading.value) return
+async function loadUsers({ force = false } = {}): Promise<void> {
+  if (!needsUsers.value || usersLoading.value || (usersLoaded.value && !force)) return
   usersLoading.value = true
   usersError.value = null
   try {
@@ -63,8 +64,8 @@ async function loadUsers(): Promise<void> {
   }
 }
 
-async function load(): Promise<void> {
-  loading.value = true
+async function load({ silent = false } = {}): Promise<void> {
+  if (!silent) loading.value = true
   error.value = null
   try {
     teams.value = await api.teams()
@@ -74,8 +75,12 @@ async function load(): Promise<void> {
   } finally {
     loading.value = false
   }
-  await loadUsers()
+  await loadUsers({ force: silent })
 }
+
+// Drafts live in their own ref keyed by team, so a refetch leaves a
+// half-filled "add member" form alone.
+useLiveRefresh(['team.updated', 'user.updated'], () => load({ silent: true }))
 
 // La sesión se carga en paralelo; cuando llega, habilitamos el listado si el
 // usuario es admin o lead de algún equipo.

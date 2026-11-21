@@ -6,9 +6,14 @@ import AppShell from './AppShell.vue'
 
 const mocks = vi.hoisted(() => ({
   api: { me: vi.fn() },
+  stream: {
+    onState: null as ((connected: boolean) => void) | null,
+    close: vi.fn(),
+  },
+  openEventStream: vi.fn(),
 }))
 
-vi.mock('../api', () => ({ api: mocks.api }))
+vi.mock('../api', () => ({ api: mocks.api, openEventStream: mocks.openEventStream }))
 
 function me(overrides: Record<string, unknown> = {}) {
   return {
@@ -48,6 +53,32 @@ describe('AppShell', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.api.me.mockResolvedValue(me())
+    mocks.openEventStream.mockImplementation((_onEvent: unknown, onState: (connected: boolean) => void) => {
+      mocks.stream.onState = onState
+      return mocks.stream.close
+    })
+  })
+
+  it('opens the live stream once signed in and shows whether it is connected', async () => {
+    const wrapper = await mountShell()
+
+    expect(mocks.openEventStream).toHaveBeenCalledTimes(1)
+    const live = wrapper.get('[data-service-badge]')
+    expect(live.text()).toBe('Reconectando…')
+    mocks.stream.onState!(true)
+    await flushPromises()
+    expect(live.text()).toBe('En vivo')
+    expect(live.classes()).toContain('live--on')
+
+    wrapper.unmount()
+    expect(mocks.stream.close).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not open the stream without a session', async () => {
+    mocks.api.me.mockResolvedValue(null)
+    await mountShell()
+
+    expect(mocks.openEventStream).not.toHaveBeenCalled()
   })
 
   it('loads the session itself so the navigation shows on every page', async () => {

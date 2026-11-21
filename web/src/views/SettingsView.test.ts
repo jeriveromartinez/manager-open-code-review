@@ -5,6 +5,15 @@ import { api, type SettingsField } from '../api'
 import SettingsView from './SettingsView.vue'
 
 vi.mock('../api', () => ({ api: { settings: vi.fn(), saveSettings: vi.fn() } }))
+type LiveEvent = { type: string; id: string }
+const live = vi.hoisted(() => ({ reload: null as ((events: LiveEvent[]) => unknown) | null, types: [] as string[] }))
+vi.mock('../composables/useLiveRefresh', () => ({
+  useLiveRefresh: (types: string[], reload: (events: LiveEvent[]) => unknown) => {
+    live.types = types
+    live.reload = reload
+  },
+}))
+
 
 function field(
   overrides: Partial<SettingsField> & Pick<SettingsField, 'key' | 'group'>,
@@ -96,12 +105,80 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  live.reload = null
   vi.mocked(api.settings).mockReset()
   vi.mocked(api.settings).mockResolvedValue({ values: { ...stored }, fields })
   vi.mocked(api.saveSettings).mockReset()
   vi.mocked(api.saveSettings).mockResolvedValue({
     values: { ...stored, review_timeout: '30m0s' },
     fields,
+  })
+})
+
+describe('SettingsView live updates', () => {
+  it('takes new values into groups without unsaved changes', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    expect(live.types).toEqual(['settings.updated'])
+    vi.mocked(api.settings).mockResolvedValue({ values: { ...stored, ocr_bin: 'ocr2' }, fields })
+    await live.reload!([{ type: 'settings.updated', id: '' }])
+    await flushPromises()
+
+    expect((wrapper.find('input[name="ocr_bin"]').element as HTMLInputElement).value).toBe('ocr2')
+    expect(wrapper.find('[data-stale-group]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps unsaved edits, warns, and applies the server values on reload', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    await wrapper.find('input[name="ocr_bin"]').setValue('mine')
+    vi.mocked(api.settings).mockResolvedValue({ values: { ...stored, ocr_bin: 'theirs' }, fields })
+    await live.reload!([{ type: 'settings.updated', id: '' }])
+    await flushPromises()
+
+    expect((wrapper.find('input[name="ocr_bin"]').element as HTMLInputElement).value).toBe('mine')
+    const notice = wrapper.get('[data-group="worker"] [data-stale-group]')
+    expect(notice.text()).toContain('Otra persona cambió estos ajustes')
+
+    await notice.get('button').trigger('click')
+    await flushPromises()
+    expect((wrapper.find('input[name="ocr_bin"]').element as HTMLInputElement).value).toBe('theirs')
+    expect(wrapper.find('[data-stale-group]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('clears the notice once the group is saved', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    await wrapper.find('input[name="ocr_bin"]').setValue('mine')
+    vi.mocked(api.settings).mockResolvedValue({ values: { ...stored, ocr_bin: 'theirs' }, fields })
+    await live.reload!([{ type: 'settings.updated', id: '' }])
+    await flushPromises()
+    expect(wrapper.find('[data-group="worker"] [data-stale-group]').exists()).toBe(true)
+
+    vi.mocked(api.saveSettings).mockResolvedValue({ values: { ...stored, ocr_bin: 'mine' }, fields })
+    await wrapper.get('[data-group="worker"]').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.find('[data-stale-group]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('does not warn about a group whose server values did not change', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    await wrapper.find('input[name="ocr_bin"]').setValue('mine')
+    await live.reload!([{ type: 'settings.updated', id: '' }])
+    await flushPromises()
+
+    expect(wrapper.find('[data-stale-group]').exists()).toBe(false)
+    expect((wrapper.find('input[name="ocr_bin"]').element as HTMLInputElement).value).toBe('mine')
+    wrapper.unmount()
   })
 })
 
