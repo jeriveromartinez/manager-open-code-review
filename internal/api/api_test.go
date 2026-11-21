@@ -570,6 +570,13 @@ func TestSetupInstalledRequestPendingApproval(t *testing.T) {
 	if !strings.Contains(body, `href="/"`) || !strings.Contains(body, "Volver al panel") {
 		t.Errorf("body = %q, want a link back to the panel", body)
 	}
+	// GitHub sends the browser here before any account exists, so the page
+	// cannot lean on the SPA's stylesheet.
+	for _, want := range []string{"<style>", `name="description"`, "<title>"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body is missing %q: the page must be self-contained", want)
+		}
+	}
 	if ids := f.jobs.snapshot(); len(ids) != 0 {
 		t.Errorf("EnqueueSync calls = %v, want none", ids)
 	}

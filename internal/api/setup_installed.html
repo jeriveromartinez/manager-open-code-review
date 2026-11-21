@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QA Control Center. Instalación pendiente</title>
+    <meta
+      name="description"
+      content="La solicitud de instalación está pendiente de aprobación por un administrador de la organización."
+    />
+    <style>
+      /* Hallmark · shape: app screen · genre: modern-minimal · theme: brand
+       * paper: oklch(97.2% 0.004 250) with a derived dark block · accent: oklch(50% 0.13 158) · display: Inter · body: Inter
+       * nav: none, the screen is a single docket card · signature: the request set as a docket, mark over a hairline over one action · states: pending approval (this), approved (redirects)
+       * axes: light/grotesk-sans/cool · posture: Restrained · contrast: pass · v2.0.0 */
+      /* Hallmark · pre-emit critique: P4 H4 E5 S4 R4 V3 · weakest: V, no prior Hallmark build exists to differ from; kept the card to the project's own auth family rather than inventing a family of one */
+      :root {
+        color-scheme: light dark;
+
+        --font-sans:
+          'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+          Arial, sans-serif;
+
+        --page: oklch(97.2% 0.004 250);
+        --surface: oklch(99.6% 0.002 250);
+        --hairline: oklch(87% 0.008 250);
+        --ink: oklch(24% 0.014 250);
+        --ink-muted: oklch(48% 0.014 250);
+        --ink-faint: oklch(54% 0.012 250);
+        --accent: oklch(50% 0.13 158);
+        --accent-hover: oklch(44% 0.13 158);
+        --accent-ink: oklch(99% 0.002 158);
+        --focus: oklch(52% 0.16 158);
+        --scrollbar: oklch(78% 0.01 250);
+
+        --radius-card: 16px;
+        --radius-mark: 12px;
+        --shadow-card: 0 1px 2px oklch(24% 0.02 250 / 6%);
+
+        --space-1: 4px;
+        --space-2: 8px;
+        --space-3: 12px;
+        --space-4: 16px;
+        --space-5: 24px;
+        --space-6: 32px;
+
+        --text-title: 27px;
+        --text-body: 15px;
+        --text-lead: 15.5px;
+        --text-note: 13.5px;
+        --text-action: 14px;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --page: oklch(15% 0.012 240);
+          --surface: oklch(20% 0.014 242);
+          --hairline: oklch(32% 0.014 242);
+          --ink: oklch(93% 0.008 240);
+          --ink-muted: oklch(74% 0.014 240);
+          --ink-faint: oklch(64% 0.014 240);
+          --accent: oklch(76% 0.14 158);
+          --accent-hover: oklch(82% 0.14 158);
+          --accent-ink: oklch(18% 0.03 158);
+          --focus: oklch(78% 0.16 158);
+          --scrollbar: oklch(38% 0.014 242);
+
+          --shadow-card: 0 1px 2px oklch(0% 0 0 / 40%);
+        }
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        overflow-x: clip;
+      }
+
+      html {
+        -webkit-text-size-adjust: 100%;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        padding: var(--space-5);
+        background: var(--page);
+        color: var(--ink);
+        font-family: var(--font-sans);
+        font-size: var(--text-body);
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      ::selection {
+        background: var(--accent);
+        color: var(--accent-ink);
+      }
+
+      html {
+        scrollbar-color: var(--scrollbar) transparent;
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 3px;
+      }
+
+      .docket {
+        width: 100%;
+        max-width: 480px;
+        padding: var(--space-6) var(--space-6) var(--space-5);
+        background: var(--surface);
+        border: 1px solid var(--hairline);
+        border-radius: var(--radius-card);
+        box-shadow: var(--shadow-card);
+      }
+
+      .docket__mark {
+        display: inline-grid;
+        place-items: center;
+        width: 40px;
+        height: 40px;
+        border-radius: var(--radius-mark);
+        background: var(--accent);
+        color: var(--accent-ink);
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+
+      .docket__identity {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-3);
+      }
+
+      .docket__name {
+        font-size: 14px;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+        color: var(--ink);
+      }
+
+      .docket__title {
+        margin: var(--space-5) 0 0;
+        font-size: var(--text-title);
+        font-weight: 650;
+        line-height: 1.2;
+        letter-spacing: -0.02em;
+        overflow-wrap: break-word;
+        min-width: 0;
+        text-wrap: balance;
+      }
+
+      .docket__lead {
+        margin: var(--space-3) 0 0;
+        max-width: 46ch;
+        font-size: var(--text-lead);
+        color: var(--ink-muted);
+        text-wrap: pretty;
+      }
+
+      .docket__note {
+        margin: var(--space-3) 0 0;
+        max-width: 46ch;
+        font-size: var(--text-note);
+        color: var(--ink-faint);
+        text-wrap: pretty;
+      }
+
+      .docket__foot {
+        margin-top: var(--space-5);
+        padding-top: var(--space-4);
+        border-top: 1px solid var(--hairline);
+      }
+
+      .docket__action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        padding: var(--space-2) var(--space-4);
+        border-radius: 8px;
+        background: var(--accent);
+        color: var(--accent-ink);
+        font-size: var(--text-action);
+        font-weight: 600;
+        text-decoration: none;
+        white-space: nowrap;
+        transition:
+          background-color 120ms ease,
+          opacity 120ms ease;
+      }
+
+      .docket__action:hover {
+        background: var(--accent-hover);
+      }
+
+      .docket__action:active {
+        opacity: 0.78;
+      }
+
+      .docket__action:visited {
+        color: var(--accent-ink);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .docket__action {
+          transition-duration: 0.01ms;
+        }
+      }
+
+      @media (max-width: 520px) {
+        .docket {
+          padding: var(--space-5) var(--space-4) var(--space-4);
+        }
+
+        .docket__action {
+          min-height: 44px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="docket">
+      <span class="docket__identity">
+        <span class="docket__mark" aria-hidden="true">QA</span>
+        <span class="docket__name">QA Control Center</span>
+      </span>
+      <h1 class="docket__title">Solicitud de instalación pendiente</h1>
+      <p class="docket__lead">
+        Tu solicitud de instalación está pendiente de aprobación por un administrador de la
+        organización.
+      </p>
+      <p class="docket__note">La cuenta aparecerá en el panel cuando la solicitud sea aprobada.</p>
+      <div class="docket__foot">
+        <a class="docket__action" href="/">Volver al panel</a>
+      </div>
+    </main>
+  </body>
+</html>
