@@ -249,6 +249,10 @@ async function submitProfile(): Promise<void> {
   const current = form.value
   const provider = current.provider.trim()
   const model = current.model.trim()
+  if (tab.value === 'platform' && selectedPlatform.value === null) {
+    formError.value = 'Elige una plataforma'
+    return
+  }
   if (!provider || !model) {
     formError.value = 'Selecciona una plataforma y un modelo'
     return

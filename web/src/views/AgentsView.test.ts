@@ -273,6 +273,66 @@ describe('AgentsView', () => {
     wrapper.unmount()
   })
 
+  it('refuses to create without choosing a platform', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('plataforma')
+
+    wrapper.unmount()
+  })
+
+  it('refuses to submit hidden custom values from the platform tab', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-profile-tab-custom]').trigger('click')
+    await wrapper.get('[data-profile-provider]').setValue('ollama')
+    await wrapper.get('[data-profile-model]').setValue('llama3')
+    await wrapper.get('[data-profile-api-key]').setValue('local-key')
+    await wrapper.get('[data-profile-base-url]').setValue('http://localhost:11434')
+    await wrapper.get('[data-profile-tab-platform]').trigger('click')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('plataforma')
+
+    wrapper.unmount()
+  })
+
+  it('does not send a custom base URL from the platform tab', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-profile-tab-custom]').trigger('click')
+    await wrapper.get('[data-profile-provider]').setValue('openai')
+    await wrapper.get('[data-profile-model]').setValue('gpt-5')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-test')
+    await wrapper.get('[data-profile-base-url]').setValue('http://proxy.local')
+    await wrapper.get('[data-profile-tab-platform]').trigger('click')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).toHaveBeenCalledWith({
+      name: 'OpenAI gpt-5',
+      provider: 'openai',
+      model: 'gpt-5',
+      concurrency: 1,
+      enabled: true,
+      api_key: 'sk-test',
+    })
+
+    wrapper.unmount()
+  })
+
   it('creates a profile through the custom connection tab', async () => {
     const wrapper = mountAgents()
     await flushPromises()
@@ -350,6 +410,9 @@ describe('AgentsView', () => {
     expect(mocks.api.updateLLMProfile).toHaveBeenCalledTimes(1)
     expect(mocks.api.updateLLMProfile.mock.calls[0][0]).toBe(11)
     expect(mocks.api.updateLLMProfile.mock.calls[0][1]).not.toHaveProperty('api_key')
+    expect(mocks.api.updateLLMProfile.mock.calls[0][1]).toMatchObject({
+      base_url: 'http://localhost:11434',
+    })
 
     wrapper.unmount()
   })
