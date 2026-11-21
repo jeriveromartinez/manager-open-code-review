@@ -9,11 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -36,6 +39,7 @@ type Auth struct {
 	APIURL    string
 	PublicURL string
 	HTTP      *http.Client
+	Events    events.Publisher
 }
 
 type userContextKey struct{}
@@ -158,6 +162,14 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "save user", http.StatusInternalServerError)
 		return
+	}
+	// The upsert does not say whether the user is new, so every login notifies;
+	// a lost notification must never block a sign-in.
+	if a.Events != nil {
+		ev := events.Event{Type: "user.updated", ID: strconv.FormatUint(uint64(user.ID), 10)}
+		if err := a.Events.Publish(r.Context(), ev); err != nil {
+			slog.Warn("publish event", "type", ev.Type, "id", ev.ID, "error", err)
+		}
 	}
 	session, err := a.Store.CreateSession(r.Context(), user.ID, sessionTTL)
 	if err != nil {

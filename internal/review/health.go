@@ -3,12 +3,15 @@ package review
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
+	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
@@ -25,6 +28,7 @@ type ProfileChecker struct {
 	Box     *crypto.Box
 	Bin     string
 	Timeout time.Duration
+	Events  events.Publisher
 }
 
 // Check decrypts the profile key, runs a minimal prompt in an isolated agent and
@@ -73,6 +77,7 @@ func (c *ProfileChecker) Check(ctx context.Context, profileID uint) error {
 		if saveErr := c.Store.SetLLMHealth(ctx, profileID, store.HealthError, message); saveErr != nil {
 			return fmt.Errorf("review: health check profile %d: %v; record failure: %w", profileID, err, saveErr)
 		}
+		c.notify(ctx, profileID)
 		return fmt.Errorf("review: health check profile %d: %w", profileID, err)
 	}
 	if strings.TrimSpace(text) == "" {
@@ -80,13 +85,27 @@ func (c *ProfileChecker) Check(ctx context.Context, profileID uint) error {
 		if saveErr := c.Store.SetLLMHealth(ctx, profileID, store.HealthError, message); saveErr != nil {
 			return fmt.Errorf("review: empty answer, record failure: %w", saveErr)
 		}
+		c.notify(ctx, profileID)
 		return fmt.Errorf("%s", message)
 	}
 
 	if err := c.Store.SetLLMHealth(ctx, profileID, store.HealthOK, ""); err != nil {
 		return fmt.Errorf("review: record ok health for profile %d: %w", profileID, err)
 	}
+	c.notify(ctx, profileID)
 	return nil
+}
+
+// notify announces a stored verdict. The verdict is the check's result, so a
+// lost notification is only logged.
+func (c *ProfileChecker) notify(ctx context.Context, profileID uint) {
+	if c.Events == nil {
+		return
+	}
+	ev := events.Event{Type: "llm_profile.updated", ID: strconv.FormatUint(uint64(profileID), 10)}
+	if err := c.Events.Publish(ctx, ev); err != nil {
+		slog.Warn("publish event", "type", ev.Type, "id", ev.ID, "error", err)
+	}
 }
 
 // healthFailureMessage persists the endpoint alongside the cause. OpenCode can

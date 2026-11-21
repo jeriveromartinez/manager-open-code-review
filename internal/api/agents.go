@@ -10,8 +10,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
+
+func llmProfileUpdated(id uint) events.Event {
+	return events.Event{Type: "llm_profile.updated", ID: strconv.FormatUint(uint64(id), 10)}
+}
 
 // llmProfileResponse is the public shape of an LLM profile. The sealed API key
 // is deliberately replaced by a boolean: neither the ciphertext nor the
@@ -178,6 +183,7 @@ func (s *server) createLLMProfile(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "create llm profile")
 		return
 	}
+	s.notify(r.Context(), llmProfileUpdated(created.ID))
 	// A new profile is unproven; queue its first check so the panel does not
 	// wait for the periodic sweep. A queue failure must not lose the profile.
 	if s.Health != nil {
@@ -297,6 +303,7 @@ func (s *server) patchLLMProfile(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "update llm profile")
 		return
 	}
+	s.notify(r.Context(), llmProfileUpdated(id))
 	updated, err := s.Store.LLMProfile(r.Context(), id)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "load llm profile")
@@ -323,6 +330,7 @@ func (s *server) deleteLLMProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	switch err := s.Store.DeleteLLMProfile(r.Context(), id); {
 	case err == nil:
+		s.notify(r.Context(), llmProfileUpdated(id))
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, store.ErrProfileInUse):
 		writeAPIError(w, http.StatusConflict, "llm profile is in use by a policy")
@@ -353,6 +361,7 @@ func (s *server) enqueueLLMHealth(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "enqueue llm health check")
 		return
 	}
+	s.notify(r.Context(), llmProfileUpdated(id))
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "queued"})
 }
 
@@ -521,5 +530,6 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "save qa policy")
 		return
 	}
+	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(uint64(teamID), 10)})
 	writeJSON(w, http.StatusOK, qaPolicyDTO(saved))
 }

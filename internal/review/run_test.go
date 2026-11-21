@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,12 @@ func (p *runTestEvents) len() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.items)
+}
+
+func (p *runTestEvents) snapshot() []events.Event {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]events.Event(nil), p.items...)
 }
 
 type runTestJobs struct {
@@ -990,8 +997,12 @@ func TestRunSaturatedProfileIsRequeued(t *testing.T) {
 	if got := f.jobs.published(); len(got) != 0 {
 		t.Errorf("EnqueuePublish calls = %v, want none for a requeued run", got)
 	}
-	if got := f.events.len(); got != 0 {
-		t.Errorf("published %d events, want none for a requeued run", got)
+	// The claim and the return to the queue are both announced, so the panel
+	// stops showing the run as started; there is no terminal event.
+	prEvent := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
+	want := []events.Event{prEvent, prEvent}
+	if got := f.events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("events = %+v, want the claim and the requeue %+v", got, want)
 	}
 
 	// Releasing the slot lets the retried run go through.
@@ -1049,13 +1060,60 @@ func TestRunDuplicateDeliveryIsNoop(t *testing.T) {
 	if got := f.jobs.published(); len(got) != 1 {
 		t.Errorf("EnqueuePublish calls = %v, want one", got)
 	}
-	if got := f.events.len(); got != 2 {
-		t.Errorf("events = %d, want run.updated and pr.updated", got)
+	if got := f.events.len(); got != 3 {
+		t.Errorf("events = %d, want the claim pr.updated, run.updated and pr.updated", got)
 	}
 	wantPR := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
 	if !f.events.has(wantPR) {
 		t.Errorf("missing event %+v; got %+v", wantPR, f.events.items)
 	}
+}
+
+// The panel must show a run as started as soon as a worker takes it, not only
+// when it ends.
+func TestClaimNotifiesThePR(t *testing.T) {
+	f := newRunTestFixture(t)
+	// Move the run id away from the PR id so an event carrying the run id
+	// instead of the PR id fails.
+	if err := f.s.DB.WithContext(f.ctx).Exec("UPDATE review_runs SET id = id + 1000 WHERE id = ?", f.runID).Error; err != nil {
+		t.Fatalf("shift run id: %v", err)
+	}
+	f.runID += 1000
+	r := f.runner()
+	if err := r.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	prEvent := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
+	runEvent := events.Event{Type: "run.updated", ID: strconv.FormatUint(uint64(f.runID), 10)}
+	want := []events.Event{prEvent, runEvent, prEvent}
+	if got := f.events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("events = %+v, want the claim first: %+v", got, want)
+	}
+
+	// The run is terminal now, so a redelivery is not claimed and stays silent.
+	if err := r.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("unclaimed Run() error = %v", err)
+	}
+	if got := f.events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("events after an unclaimed run = %+v, want unchanged %+v", got, want)
+	}
+}
+
+func TestClaimWithFailedNotificationStillRuns(t *testing.T) {
+	f := newRunTestFixture(t)
+	r := f.runner()
+	r.Events = failingRunEvents{}
+	if err := r.Run(f.ctx, f.runID); err == nil {
+		t.Fatal("Run() error = nil, want the terminal notification failure reported")
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+}
+
+type failingRunEvents struct{}
+
+func (failingRunEvents) Publish(context.Context, events.Event) error {
+	return errors.New("notify unavailable")
 }
 
 func TestRunnerCheckProfileDelegates(t *testing.T) {

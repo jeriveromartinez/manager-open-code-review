@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strconv"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -21,8 +23,8 @@ type CheckStarter interface {
 }
 
 // Trigger turns webhook deliveries and the periodic reconciliation into queued
-// review runs. It never publishes browser events: the runner does that once the
-// run reaches a terminal state.
+// review runs. It notifies browsers only when it creates a run; the runner
+// reports the claim and the terminal state.
 type Trigger struct {
 	Store  *store.Store
 	Apps   github.AppProvider
@@ -219,6 +221,14 @@ func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ig
 			return false, nil
 		}
 		return false, fmt.Errorf("create review run for pull request %d: %w", prID, err)
+	}
+	// Notify before repair: the queued run is stored even if starting it fails,
+	// and the redelivery that heals it stays silent.
+	if t.Events != nil {
+		ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(prID), 10)}
+		if err := t.Events.Publish(ctx, ev); err != nil {
+			slog.Warn("publish event", "type", ev.Type, "id", ev.ID, "error", err)
+		}
 	}
 	if err := t.repair(ctx, run); err != nil {
 		return false, err
