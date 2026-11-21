@@ -311,6 +311,18 @@ describe('DashboardView', () => {
     wrapper.unmount()
   })
 
+  it('puts the summary and the queue side by side so a wide screen shows both', async () => {
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    const aside = wrapper.get('.split__aside')
+    const main = wrapper.get('.split__main')
+    expect(aside.find('[data-tile="ready"]').exists()).toBe(true)
+    expect(aside.find('#queue-title').exists()).toBe(false)
+    expect(main.find('#queue-title').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('names the teams in the queue heading instead of counting repos', async () => {
     mocks.api.me.mockResolvedValue({
       id: 2,

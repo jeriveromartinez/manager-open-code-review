@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import RoleSwitch from './RoleSwitch.vue'
 import { useSessionStore } from '../stores/session'
 
 const session = useSessionStore()
+const route = useRoute()
 
 const links = computed(() => {
   const base = [
@@ -32,7 +33,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :class="{ 'shell--wide': route.meta.wide }">
     <header class="shell__bar">
       <RouterLink to="/" class="shell__brand" data-brand>QA Control Center</RouterLink>
 

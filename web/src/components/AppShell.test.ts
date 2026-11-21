@@ -25,7 +25,11 @@ async function mountShell(path = '/'): Promise<VueWrapper> {
   const page = { template: '<div />' }
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: ['/', '/lead', '/repos', '/teams', '/agents', '/settings'].map((p) => ({ path: p, component: page })),
+    routes: ['/', '/lead', '/repos', '/teams', '/agents', '/settings'].map((p) => ({
+      path: p,
+      component: page,
+      meta: { wide: p === '/' || p === '/lead' },
+    })),
   })
   await router.push(path)
   const wrapper = mount(AppShell, {
@@ -77,6 +81,15 @@ describe('AppShell', () => {
     mocks.api.me.mockResolvedValue(me({ is_admin: true }))
     const admin = await mountShell()
     expect(admin.find('[data-role-lead]').exists()).toBe(true)
+  })
+
+  it('widens the shell only for views that ask for it', async () => {
+    const queue = await mountShell('/')
+    expect(queue.get('.shell').classes()).toContain('shell--wide')
+    queue.unmount()
+
+    const repos = await mountShell('/repos')
+    expect(repos.get('.shell').classes()).not.toContain('shell--wide')
   })
 
   it('names who is signed in on the logout button', async () => {
