@@ -27,6 +27,8 @@ docker compose -f deploy/docker-compose.yml up -d --build
 
 Abre `http://localhost:8080/setup`, escribe el **nombre de la App** y crea la GitHub App; se registra en tu cuenta personal, y después puedes instalarla en cualquier organización donde tengas permiso. En el mismo paso se detecta la URL pública desde la petición y se guarda en la base. Tras instalar la App en los repositorios, habilítalos desde el panel. La guía completa está en [docs/install.md](docs/install.md).
 
+Si una cuenta nueva no aparece al instante, en **Repositorios** los administradores tienen **Sincronizar** por cuenta, **Sincronizar todo** y **Actualizar**. La sincronización recupera la instalación desde GitHub aunque el webhook `installation.created` llegue tarde o se pierda, así que no hace falta esperar al siguiente ciclo de reconciliación.
+
 `QA_SETUP_TOKEN` es un endurecimiento opcional: si lo defines en `deploy/.env`, el setup exige ese valor; si no, el formulario solo pide el nombre. Termina el setup antes de exponer la instancia a internet: hasta que exista configuración, la ventana de setup sigue abierta. Si la URL detectada no es la correcta, corrígela en **Ajustes → General** (eso arregla los enlaces del panel y los redirects de OAuth del panel) y actualiza también `redirect_url`, `callback_urls` y `setup_url` en la GitHub App desde GitHub, o repite el setup desde la URL correcta antes de configurarla.
 
 Si no tienes una URL pública, consulta la sección [modo solo polling](docs/install.md#modo-solo-polling-sin-url-pública).
@@ -158,7 +160,7 @@ El binario admite `qa serve`, `qa worker`, `qa migrate`, `qa monitor` y `qa heal
 
 ## Rutas principales
 
-`GET /healthz` · `GET /api/setup/status` · `POST /api/setup/manifest` · `/setup` · `/auth/login` · `/auth/callback` · `/api/me` · `/api/stats` · `/api/prs` · `GET /api/prs/{id}` · `POST /api/prs/{id}/retry` · `/api/teams` · `GET|PUT /api/teams/{id}/policy` · `GET|POST /api/llm-profiles` · `POST /api/llm-profiles/{id}/health` · `/agents` · `/prs/:id` · `GET /api/events` (SSE) · `POST /webhooks/github`. Cualquier otra ruta sirve la SPA.
+`GET /healthz` · `GET /api/setup/status` · `POST /api/setup/manifest` · `/setup` · `/auth/login` · `/auth/callback` · `/api/me` · `/api/stats` · `/api/prs` · `GET /api/prs/{id}` · `POST /api/prs/{id}/retry` · `/api/teams` · `GET|PUT /api/teams/{id}/policy` · `GET|POST /api/llm-profiles` · `POST /api/llm-profiles/{id}/health` · `GET /api/installations` · `POST /api/installations/{id}/sync` · `/agents` · `/prs/:id` · `GET /api/events` (SSE) · `POST /webhooks/github`. Cualquier otra ruta sirve la SPA.
 
 ## Hojas de ruta
 
