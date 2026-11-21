@@ -21,6 +21,7 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/jobs"
+	"github.com/jeriveromartinez/qa-control-center/internal/llmmodels"
 	"github.com/jeriveromartinez/qa-control-center/internal/publish"
 	"github.com/jeriveromartinez/qa-control-center/internal/review"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
@@ -187,6 +188,7 @@ func runServe() error {
 		Health:     enqueuer,
 		Reviews:    trigger,
 		Findings:   publisherWorker,
+		Models:     llmmodels.New(&http.Client{Timeout: 15 * time.Second}),
 		SetupToken: setupToken,
 		Static:     web.Handler(),
 	})

@@ -52,6 +52,7 @@ type Deps struct {
 	Health     HealthEnqueuer
 	Reviews    ReviewRetrier
 	Findings   FindingsPublisher
+	Models     LLMModelLister
 	SetupToken string
 	Static     http.Handler
 }
@@ -138,6 +139,7 @@ func NewRouter(d Deps) http.Handler {
 
 				r.Get("/llm-profiles", s.llmProfiles)
 				r.Post("/llm-profiles", s.createLLMProfile)
+				r.Post("/llm-profiles/models", s.llmModels)
 				r.Patch("/llm-profiles/{id}", s.patchLLMProfile)
 				r.Delete("/llm-profiles/{id}", s.deleteLLMProfile)
 				r.Post("/llm-profiles/{id}/health", s.enqueueLLMHealth)
