@@ -24,6 +24,7 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 		{"garbage duration", KeyReconcileInterval, "pronto", KeyReconcileInterval},
 		{"negative int", KeyReviewConcurrency, "-1", KeyReviewConcurrency},
 		{"garbage int", KeyFetchDepthMax, "muchos", KeyFetchDepthMax},
+		{"retention above the backup script's range", KeyBackupRetention, "1000", KeyBackupRetention},
 		{"bad bool", KeyWebhooksEnabled, "si", KeyWebhooksEnabled},
 		{"relative url", KeyPublicURL, "/solo-ruta", KeyPublicURL},
 		{"relative worker health url", KeyWorkerHealthURL, "worker:9090", KeyWorkerHealthURL},
@@ -45,6 +46,18 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 				t.Errorf("KeyError.Key = %q, want %q", keyErr.Key, tc.want)
 			}
 		})
+	}
+}
+
+// backup.sh honours 1..999 and falls back to 7 for anything else, so the panel
+// must not store a value the nightly job would silently replace.
+func TestApplyAcceptsTheBackupRetentionBoundary(t *testing.T) {
+	cfg := config.Default()
+	if err := Apply(&cfg, map[string]string{KeyBackupRetention: "999"}); err != nil {
+		t.Fatalf("Apply(backup_retention=999) = %v, want it accepted", err)
+	}
+	if cfg.BackupRetention != 999 {
+		t.Errorf("BackupRetention = %d, want 999", cfg.BackupRetention)
 	}
 }
 

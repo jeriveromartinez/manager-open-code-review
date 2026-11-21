@@ -84,7 +84,7 @@ func applyOne(cfg *config.Config, key, raw string) error {
 	case KeyFetchDepthMax:
 		return setInt(&cfg.FetchDepthMax, key, raw)
 	case KeyBackupRetention:
-		return setInt(&cfg.BackupRetention, key, raw)
+		return setIntAtMost(&cfg.BackupRetention, key, raw, 999)
 	default:
 		return &KeyError{key, "unknown setting"}
 	}
@@ -139,6 +139,18 @@ func setInt(dst *int, key, raw string) error {
 		return &KeyError{key, "must be greater than zero"}
 	}
 	*dst = n
+	return nil
+}
+
+// setIntAtMost shares the integer rules and adds the upper bound a consumer
+// really enforces; an out-of-range value would otherwise be stored and ignored.
+func setIntAtMost(dst *int, key, raw string, max int) error {
+	if err := setInt(dst, key, raw); err != nil {
+		return err
+	}
+	if *dst > max {
+		return &KeyError{key, fmt.Sprintf("must be between 1 and %d", max)}
+	}
 	return nil
 }
 
