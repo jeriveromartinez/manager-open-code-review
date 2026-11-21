@@ -120,6 +120,7 @@ describe('SetupView', () => {
     const token = wrapper.find('input[name="setup_token"]')
     expect(token.exists()).toBe(true)
     expect(wrapper.text()).toContain('requiere el token de setup')
+    expect(wrapper.text()).toContain('falta o no coincide')
 
     await token.setValue('s3cret')
     await wrapper.find('form').trigger('submit')

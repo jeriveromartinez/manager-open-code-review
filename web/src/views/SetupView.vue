@@ -47,7 +47,7 @@ async function submit(): Promise<void> {
   } catch (err) {
     if (err instanceof ApiError && err.status === 403) {
       tokenRequired.value = true
-      error.value = 'El servidor requiere el token de setup: escríbelo para crear la App.'
+      error.value = 'El servidor requiere el token de setup: el valor enviado falta o no coincide.'
     } else if (err instanceof ApiError && err.status === 409) {
       error.value = 'La instancia ya está configurada.'
     } else {
