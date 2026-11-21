@@ -239,7 +239,7 @@ func TestQASummary(t *testing.T) {
 	triage(ready, "c-ancient", "docs", store.FindingOpen, confirmed, now.Add(-40*24*time.Hour))
 	triage(other, "c-hidden", "tests", store.FindingOpen, confirmed, now.Add(-time.Hour))
 
-	got, err := f.s.QASummary(f.ctx, qa, now)
+	got, err := f.s.QASummary(f.ctx, qa, now, store.QAFilter{})
 	if err != nil {
 		t.Fatalf("QASummary: %v", err)
 	}
@@ -259,5 +259,92 @@ func TestQASummary(t *testing.T) {
 	wantCategories := []store.CategoryCount{{Category: "tests", Count: 4}, {Category: "security", Count: 2}}
 	if fmt.Sprint(got.Categories) != fmt.Sprint(wantCategories) {
 		t.Errorf("Categories = %v, want %v", got.Categories, wantCategories)
+	}
+}
+
+func TestQASummaryForOneTeam(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+
+	payments := f.team("Payments")
+	web := f.team("Web")
+	lead := f.user("lmartin", false)
+	f.member(payments, lead, "lead")
+	f.member(web, lead, "lead")
+
+	api := f.repo(installID, installID, "acme/payments-api", &payments.ID, true)
+	sdk := f.repo(f.nextID(), installID, "acme/payments-sdk", &payments.ID, true)
+	portal := f.repo(f.nextID(), installID, "acme/web-portal", &web.ID, true)
+
+	apiPR := f.openPR(api.ID, 1, store.StatusReadyForHuman, false)
+	sdkPR := f.openPR(sdk.ID, 2, store.StatusChangesRequested, false)
+	portalPR := f.openPR(portal.ID, 3, store.StatusReadyForHuman, false)
+
+	now := time.Now().UTC()
+	confirm := func(pr store.PullRequest, id string) {
+		f.finding(pr, id, "major", "tests", store.FindingOpen)
+		f.exec("UPDATE findings SET triage_verdict = ?, triaged_by = 'mvega', triaged_at = ? WHERE id = ?",
+			store.VerdictConfirmed, now.Add(-time.Hour), id)
+	}
+	confirm(apiPR, "api-1")
+	confirm(apiPR, "api-2")
+	confirm(sdkPR, "sdk-1")
+	confirm(portalPR, "portal-1")
+
+	got, err := f.s.QASummary(f.ctx, lead, now, store.QAFilter{TeamID: &payments.ID})
+	if err != nil {
+		t.Fatalf("QASummary(Payments): %v", err)
+	}
+	if got.ReadyForHuman != 1 || got.Confirmed != 3 {
+		t.Errorf("Payments: %d ready / %d confirmed, want 1 / 3", got.ReadyForHuman, got.Confirmed)
+	}
+	wantRepos := []store.RepoCount{{Repo: "acme/payments-api", Count: 2}, {Repo: "acme/payments-sdk", Count: 1}}
+	if fmt.Sprint(got.ConfirmedByRepo) != fmt.Sprint(wantRepos) {
+		t.Errorf("ConfirmedByRepo = %v, want %v", got.ConfirmedByRepo, wantRepos)
+	}
+
+	all, err := f.s.QASummary(f.ctx, lead, now, store.QAFilter{})
+	if err != nil {
+		t.Fatalf("QASummary(all): %v", err)
+	}
+	if all.ReadyForHuman != 2 || all.Confirmed != 4 {
+		t.Errorf("all teams: %d ready / %d confirmed, want 2 / 4", all.ReadyForHuman, all.Confirmed)
+	}
+
+	// A team the user is not in stays out of reach even when asked for by id.
+	outsider := f.team("Search")
+	hidden, err := f.s.QASummary(f.ctx, lead, now, store.QAFilter{TeamID: &outsider.ID})
+	if err != nil {
+		t.Fatalf("QASummary(outsider): %v", err)
+	}
+	if hidden.ReadyForHuman != 0 || hidden.Confirmed != 0 || len(hidden.ConfirmedByRepo) != 0 {
+		t.Errorf("foreign team leaked: %+v", hidden)
+	}
+}
+
+func TestListVisiblePullRequestsReportsTheTeam(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	team := f.team("Payments")
+	assigned := f.repo(installID, installID, "acme/app", &team.ID, true)
+	orphan := f.repo(f.nextID(), installID, "acme/orphan", nil, true)
+	f.openPR(assigned.ID, 1, store.StatusPending, false)
+	f.openPR(orphan.ID, 2, store.StatusPending, false)
+
+	views, err := f.s.ListVisiblePullRequests(f.ctx, f.user("admin", true), store.PRFilter{})
+	if err != nil {
+		t.Fatalf("ListVisiblePullRequests: %v", err)
+	}
+	byRepo := map[string]*uint{}
+	for _, v := range views {
+		byRepo[v.Repo] = v.TeamID
+	}
+	if got := byRepo["acme/app"]; got == nil || *got != team.ID {
+		t.Errorf("acme/app team = %v, want %d", got, team.ID)
+	}
+	if got := byRepo["acme/orphan"]; got != nil {
+		t.Errorf("acme/orphan team = %d, want none", *got)
 	}
 }

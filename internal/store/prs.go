@@ -274,6 +274,7 @@ type PRView struct {
 	Validations  PRValidations
 	OpenFindings SeverityCounts
 	StatusSince  time.Time
+	TeamID       *uint
 	UpdatedAt    time.Time
 }
 
@@ -479,6 +480,7 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 				Nit:     row.OpenNits,
 			},
 			StatusSince: row.QAStatusChangedAt,
+			TeamID:      row.TeamID,
 			UpdatedAt:   row.UpdatedAt,
 		}
 	}

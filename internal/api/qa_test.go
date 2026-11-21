@@ -143,3 +143,41 @@ func TestQASummaryEndpoint(t *testing.T) {
 
 	assertStatus(t, f.request(http.MethodGet, "/api/qa/summary", nil, nil), http.StatusUnauthorized)
 }
+
+func TestQASummaryNarrowsToOneTeam(t *testing.T) {
+	f := newSecureFixture(t)
+	inst := f.installation(1601)
+	payments := f.team("lead-payments")
+	web := f.team("lead-web")
+	lead := f.user("summary-lead", false)
+	f.member(payments.ID, lead.ID, "lead")
+	f.member(web.ID, lead.ID, "lead")
+	paymentsRepo := f.repo(7601, inst.ID, "acme/lead-payments", &payments.ID, true)
+	webRepo := f.repo(7602, inst.ID, "acme/lead-web", &web.ID, true)
+	f.pr(paymentsRepo.ID, 1, store.StatusReadyForHuman)
+	f.pr(webRepo.ID, 2, store.StatusReadyForHuman)
+	f.pr(webRepo.ID, 3, store.StatusReadyForHuman)
+
+	var raw map[string]any
+	rec := f.request(http.MethodGet, fmt.Sprintf("/api/qa/summary?team_id=%d", payments.ID), nil, f.session(lead))
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &raw)
+	if raw["ready_for_human"] != float64(1) {
+		t.Errorf("Payments ready_for_human = %v, want 1", raw["ready_for_human"])
+	}
+	if _, ok := raw["confirmed_by_repo"].([]any); !ok {
+		t.Errorf("confirmed_by_repo = %v, want a list", raw["confirmed_by_repo"])
+	}
+
+	rec = f.request(http.MethodGet, "/api/prs", nil, f.session(lead))
+	assertStatus(t, rec, http.StatusOK)
+	var prs []map[string]any
+	decodeJSON(t, rec, &prs)
+	for _, pr := range prs {
+		if pr["team_id"] == nil {
+			t.Errorf("PR %v has no team_id", pr["id"])
+		}
+	}
+
+	assertStatus(t, f.request(http.MethodGet, "/api/qa/summary?team_id=abc", nil, f.session(lead)), http.StatusBadRequest)
+}
