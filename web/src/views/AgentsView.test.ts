@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     createLLMProfile: vi.fn(),
     updateLLMProfile: vi.fn(),
     checkLLMHealth: vi.fn(),
+    llmModels: vi.fn(),
     teams: vi.fn(),
     getPolicy: vi.fn(),
     savePolicy: vi.fn(),
@@ -162,6 +163,12 @@ describe('AgentsView', () => {
     mocks.api.createLLMProfile.mockResolvedValue({ ...profiles[0] })
     mocks.api.updateLLMProfile.mockResolvedValue({ ...profiles[1] })
     mocks.api.checkLLMHealth.mockResolvedValue({ status: 'queued' })
+    mocks.api.llmModels.mockResolvedValue({
+      models: [
+        { id: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5' },
+        { id: 'claude-new-7', name: 'Claude New 7' },
+      ],
+    })
     mocks.api.teams.mockResolvedValue(teams.map((team) => ({ ...team })))
     mocks.api.getPolicy.mockResolvedValue({ ...policy })
     mocks.api.savePolicy.mockResolvedValue({ ...policy })
@@ -606,6 +613,178 @@ describe('AgentsView', () => {
       expect.objectContaining({ require_green_ci: false }),
     )
 
+    wrapper.unmount()
+  })
+
+  it('loads platform models on key blur with curated ids first', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-ant')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+    await flushPromises()
+
+    expect(mocks.api.llmModels).toHaveBeenCalledWith('anthropic', 'sk-ant')
+    const values = wrapper
+      .findAll('[data-profile-model] option')
+      .map((option) => (option.element as HTMLOptionElement).value)
+    expect(values).toEqual(['claude-sonnet-5-5', 'claude-new-7', '__custom__'])
+    wrapper.unmount()
+  })
+
+  it('keeps curated models and shows a notice when the platform call fails', async () => {
+    mocks.api.llmModels.mockRejectedValue(new Error('upstream'))
+    const wrapper = mountAgents()
+    await flushPromises()
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-ant')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+    await flushPromises()
+
+    expect(wrapper.get('[data-profile-models-notice]').text()).toContain(
+      'se muestran los recomendados',
+    )
+    const values = wrapper
+      .findAll('[data-profile-model] option')
+      .map((option) => (option.element as HTMLOptionElement).value)
+    expect(values).toContain('claude-opus-5-5')
+    wrapper.unmount()
+  })
+
+  it('treats an empty model list as a failure', async () => {
+    mocks.api.llmModels.mockResolvedValue({ models: [] })
+    const wrapper = mountAgents()
+    await flushPromises()
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-ant')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+    await flushPromises()
+
+    expect(wrapper.find('[data-profile-models-notice]').exists()).toBe(true)
+    expect(wrapper.findAll('[data-profile-model] option')).toHaveLength(4)
+    wrapper.unmount()
+  })
+
+  it('ignores a late response for a previous provider and key', async () => {
+    let resolveFirst: (value: { models: { id: string; name: string }[] }) => void = () => {}
+    mocks.api.llmModels
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveFirst = resolve
+          }),
+      )
+      .mockResolvedValueOnce({ models: [{ id: 'fresh-model', name: 'Fresh' }] })
+
+    const wrapper = mountAgents()
+    await flushPromises()
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-ant')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+
+    await wrapper.get('[data-platform="openai"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-openai')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+    await flushPromises()
+
+    resolveFirst({ models: [{ id: 'claude-old', name: 'Claude Old' }] })
+    await flushPromises()
+
+    const values = wrapper
+      .findAll('[data-profile-model] option')
+      .map((option) => (option.element as HTMLOptionElement).value)
+    expect(values).toEqual(['fresh-model', '__custom__'])
+    wrapper.unmount()
+  })
+
+  it('saves while the model list is still loading', async () => {
+    mocks.api.llmModels.mockImplementation(() => new Promise(() => {}))
+    const wrapper = mountAgents()
+    await flushPromises()
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-ant')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'anthropic', api_key: 'sk-ant' }),
+    )
+    wrapper.unmount()
+  })
+
+  it('does not query models when editing with an empty key', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+    await wrapper.get('[data-profile-row="13"] [data-edit-profile]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+    await flushPromises()
+
+    expect(mocks.api.llmModels).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('keeps the stored model in the custom option when the platform no longer lists it', async () => {
+    mocks.api.llmModels.mockResolvedValue({ models: [{ id: 'other-model', name: 'Other' }] })
+    const wrapper = mountAgents()
+    await flushPromises()
+    await wrapper.get('[data-profile-row="13"] [data-edit-profile]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-new')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+    await flushPromises()
+
+    expect((wrapper.get('[data-profile-model]').element as HTMLSelectElement).value).toBe(
+      '__custom__',
+    )
+    expect((wrapper.get('[data-profile-model-custom]').element as HTMLInputElement).value).toBe(
+      'claude-sonnet-5-5',
+    )
+    wrapper.unmount()
+  })
+
+  it('resets to the curated list when the platform changes', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-ant')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+    await flushPromises()
+
+    await wrapper.get('[data-platform="openai"]').trigger('click')
+    const values = wrapper
+      .findAll('[data-profile-model] option')
+      .map((option) => (option.element as HTMLOptionElement).value)
+    expect(values).toEqual(['gpt-6.2-sol', 'gpt-6.2-astra', 'gpt-5.4-nano', '__custom__'])
+    wrapper.unmount()
+  })
+
+  it('keeps the visible selection in sync when the key changes', async () => {
+    mocks.api.llmModels.mockResolvedValue({ models: [{ id: 'remote-only', name: 'Remote Only' }] })
+    const wrapper = mountAgents()
+    await flushPromises()
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-ant')
+    await wrapper.get('[data-profile-api-key]').trigger('blur')
+    await flushPromises()
+    expect((wrapper.get('[data-profile-model]').element as HTMLSelectElement).value).toBe(
+      'remote-only',
+    )
+
+    await wrapper.get('[data-profile-api-key]').setValue('sk-ant-2')
+
+    expect((wrapper.get('[data-profile-model]').element as HTMLSelectElement).value).toBe(
+      '__custom__',
+    )
+    expect((wrapper.get('[data-profile-model-custom]').element as HTMLInputElement).value).toBe(
+      'remote-only',
+    )
     wrapper.unmount()
   })
 })

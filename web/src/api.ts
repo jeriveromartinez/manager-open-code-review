@@ -225,6 +225,10 @@ export type LLMProfileInput = {
 
 export type LLMProfilePatch = Partial<LLMProfileInput>
 
+export type LLMModelOption = { id: string; name: string }
+
+export type LLMModelsResponse = { models: LLMModelOption[] }
+
 export type QAPolicy = {
   id: number
   team_id: number
@@ -333,6 +337,11 @@ export const api = {
     request<LLMProfile>(`/api/llm-profiles/${id}`, { method: 'PATCH', body: patch }),
   checkLLMHealth: (id: number) =>
     request<{ status: string }>(`/api/llm-profiles/${id}/health`, { method: 'POST' }),
+  llmModels: (provider: string, api_key: string) =>
+    request<LLMModelsResponse>('/api/llm-profiles/models', {
+      method: 'POST',
+      body: { provider, api_key },
+    }),
   getPolicy: (teamId: number) => request<QAPolicy>(`/api/teams/${teamId}/policy`),
   savePolicy: (teamId: number, body: QAPolicyInput) =>
     request<QAPolicy>(`/api/teams/${teamId}/policy`, { method: 'PUT', body }),

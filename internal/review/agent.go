@@ -176,7 +176,15 @@ func writeOpenCodeConfig(home string, profile store.LLMProfile, steps int) error
 	if profile.BaseURL != nil && *profile.BaseURL != "" {
 		options["baseURL"] = *profile.BaseURL
 	}
-	provider := map[string]any{"options": options}
+	provider := map[string]any{
+		"options": options,
+		// OpenCode 1.19 only runs model ids present in its catalog; declaring
+		// the selected one keeps provider-api models usable before models.dev
+		// catches up.
+		"models": map[string]any{
+			profile.Model: map[string]string{"name": profile.Model},
+		},
+	}
 
 	permission := map[string]string{
 		"read":               "allow",
