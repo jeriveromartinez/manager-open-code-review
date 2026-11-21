@@ -21,6 +21,7 @@ import (
 	ghapp "github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
+	"github.com/jeriveromartinez/qa-control-center/internal/web"
 )
 
 type recordingJobs struct {
@@ -60,15 +61,23 @@ func (p *recordingPublisher) snapshot() []events.Event {
 }
 
 type apiFixture struct {
-	t      *testing.T
-	ctx    context.Context
-	st     *store.Store
-	box    *crypto.Box
-	cfg    config.Config
-	router http.Handler
-	jobs   *recordingJobs
-	pub    *recordingPublisher
-	seq    int64
+	t        *testing.T
+	ctx      context.Context
+	st       *store.Store
+	box      *crypto.Box
+	cfg      config.Config
+	router   http.Handler
+	jobs     *recordingJobs
+	pub      *recordingPublisher
+	webhooks *recordingWebhook
+	seq      int64
+}
+
+type recordingWebhook struct{ hits int }
+
+func (h *recordingWebhook) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	h.hits++
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
@@ -87,6 +96,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	}
 	jobs := &recordingJobs{}
 	pub := &recordingPublisher{}
+	webhooks := &recordingWebhook{}
 	provider := ghapp.NewStoreAppProvider(st, box, cfg.GitHubAPIURL)
 	a := &auth.Auth{
 		Store:     st,
@@ -102,16 +112,13 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		Box:      box,
 		Apps:     provider,
 		Auth:     a,
-		Webhooks: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+		Webhooks: webhooks,
 		Broker:   events.NewBroker(st.Pool),
 		Events:   pub,
 		Jobs:     jobs,
-		Static: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("spa"))
-		}),
+		Static:   web.Handler(),
 	})
-	return &apiFixture{t: t, ctx: context.Background(), st: st, box: box, cfg: cfg, router: router, jobs: jobs, pub: pub}
+	return &apiFixture{t: t, ctx: context.Background(), st: st, box: box, cfg: cfg, router: router, jobs: jobs, pub: pub, webhooks: webhooks}
 }
 
 func (f *apiFixture) nextID() int64 {
@@ -513,15 +520,26 @@ func TestWebhooksRouteFollowsTheSetting(t *testing.T) {
 	f.deps.Cfg.WebhooksEnabled = false
 	f.rebuildRouter()
 	rec := f.request(http.MethodPost, "/webhooks/github", map[string]any{"action": "opened"}, nil)
-	assertStatus(t, rec, http.StatusOK)
-	if body := rec.Body.String(); body != "spa" {
-		t.Errorf("body = %q, want the SPA fallback while webhooks are disabled", body)
+	if rec.Code == http.StatusNoContent {
+		t.Error("POST reached the webhook handler while webhooks are disabled")
+	}
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want %d: the static fallback rejects the method", rec.Code, http.StatusMethodNotAllowed)
+	}
+	if allow := rec.Header().Get("Allow"); allow != "GET, HEAD" {
+		t.Errorf("Allow = %q, want %q", allow, "GET, HEAD")
+	}
+	if f.webhooks.hits != 0 {
+		t.Errorf("webhook handler served %d request(s) while webhooks are disabled", f.webhooks.hits)
 	}
 
 	f.deps.Cfg.WebhooksEnabled = true
 	f.rebuildRouter()
 	rec = f.request(http.MethodPost, "/webhooks/github", map[string]any{"action": "opened"}, nil)
 	assertStatus(t, rec, http.StatusNoContent)
+	if f.webhooks.hits != 1 {
+		t.Errorf("webhook handler served %d request(s) while enabled, want 1", f.webhooks.hits)
+	}
 }
 
 func TestSetupInstalledEnqueuesSync(t *testing.T) {

@@ -68,7 +68,7 @@ func llmProfileDTO(p store.LLMProfile, health store.LLMProfileHealth) llmProfile
 }
 
 // llmProfileDTOs pairs every profile with its verdict age. The staleness window
-// is twice QA_LLM_HEALTH_INTERVAL: one delayed sweep must not mark all profiles
+// is twice llm_health_interval: one delayed sweep must not mark all profiles
 // stale, while a stopped sweeper still shows up within one cycle.
 func llmProfileDTOs(profiles []store.LLMProfile, now time.Time, staleAfter time.Duration) []llmProfileResponse {
 	health := store.ProfileHealthSince(profiles, now, staleAfter)

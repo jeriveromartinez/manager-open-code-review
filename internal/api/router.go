@@ -89,9 +89,10 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/auth/callback", d.Auth.Callback)
 	r.Post("/auth/logout", d.Auth.Logout)
 
-	// The setting is read at startup because the route table is built here: a
-	// disabled webhook is answered by the SPA fallback, so a delivery GitHub
-	// still sends finds nothing to process.
+	// The setting is read at startup because the route table is built here: with
+	// the webhook disabled the request falls through to the static fallback,
+	// which rejects the POST method, so a delivery GitHub still sends finds
+	// nothing to process.
 	if d.Webhooks != nil && d.Cfg.WebhooksEnabled {
 		r.Post("/webhooks/github", d.Webhooks.ServeHTTP)
 	}
