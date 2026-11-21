@@ -63,22 +63,25 @@ async function logout(): Promise<void> {
 
 <style scoped>
 .nav-link {
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  border-bottom: var(--rule-heavy) solid transparent;
   color: var(--text-muted);
   font-size: 14px;
-  font-weight: 550;
+  font-weight: 500;
   text-decoration: none;
   white-space: nowrap;
+  transition:
+    color var(--dur-micro) ease,
+    border-color var(--dur-micro) ease;
 }
 
 .nav-link:hover {
   color: var(--text);
-  background: var(--surface-2);
+  border-bottom-color: var(--border);
 }
 
 .nav-link.router-link-active {
-  color: var(--accent);
-  background: var(--accent-soft);
+  color: var(--text);
+  border-bottom-color: var(--text);
 }
 </style>
