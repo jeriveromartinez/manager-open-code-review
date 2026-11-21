@@ -14,6 +14,23 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
 )
 
+// TestHealthFailureMessageNamesProfile pins the persisted failure text: even a
+// generic OpenCode error must tell the operator which endpoint was checked.
+// This is pure on purpose; the .sh fakes cannot run on Windows.
+func TestHealthFailureMessageNamesProfile(t *testing.T) {
+	profile := store.LLMProfile{Provider: "nvidia", Model: "nemotron"}
+
+	message := healthFailureMessage(42, profile, "review: opencode: exit status 1: UnknownError")
+	for _, fragment := range []string{"profile 42", "nvidia/nemotron", "UnknownError"} {
+		if !strings.Contains(message, fragment) {
+			t.Errorf("healthFailureMessage() = %q, want it to contain %q", message, fragment)
+		}
+	}
+	if len(message) > maxHealthMessage {
+		t.Errorf("healthFailureMessage() has %d chars, want at most %d", len(message), maxHealthMessage)
+	}
+}
+
 func TestCheckProfileUpdatesHealth(t *testing.T) {
 	s := testutil.NewStore(t)
 	ctx := context.Background()

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -35,6 +36,13 @@ type llmProfileResponse struct {
 	HealthStale      bool   `json:"health_stale"`
 	CreatedAt        string `json:"created_at"`
 	UpdatedAt        string `json:"updated_at"`
+}
+
+func derefString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 func formatTimePtr(v *time.Time) *string {
@@ -170,6 +178,13 @@ func (s *server) createLLMProfile(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "create llm profile")
 		return
 	}
+	// A new profile is unproven; queue its first check so the panel does not
+	// wait for the periodic sweep. A queue failure must not lose the profile.
+	if s.Health != nil {
+		if err := s.Health.EnqueueLLMHealth(r.Context(), created.ID); err != nil {
+			slog.Error("enqueue llm health after create", "profile_id", created.ID, "error", err)
+		}
+	}
 	writeJSON(w, http.StatusCreated, llmProfileDTO(created, s.healthOf(created)))
 }
 
@@ -194,6 +209,7 @@ func (s *server) patchLLMProfile(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "load llm profile")
 		return
 	}
+	previous := current
 
 	applyString := func(key string, dst *string) bool {
 		value, present := raw[key]
@@ -285,6 +301,17 @@ func (s *server) patchLLMProfile(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "load llm profile")
 		return
+	}
+	// Any endpoint change invalidates the stored verdict; recheck it now
+	// instead of letting the panel show a stale "healthy" until the sweep.
+	endpointChanged := updated.Provider != previous.Provider ||
+		updated.Model != previous.Model ||
+		updated.APIKeyEnc != previous.APIKeyEnc ||
+		derefString(updated.BaseURL) != derefString(previous.BaseURL)
+	if s.Health != nil && endpointChanged {
+		if err := s.Health.EnqueueLLMHealth(r.Context(), id); err != nil {
+			slog.Error("enqueue llm health after update", "profile_id", id, "error", err)
+		}
 	}
 	writeJSON(w, http.StatusOK, llmProfileDTO(updated, s.healthOf(updated)))
 }
