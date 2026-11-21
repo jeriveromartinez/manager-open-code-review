@@ -10,7 +10,7 @@ import {
   type Team,
 } from '../api'
 import { useSessionStore } from '../stores/session'
-import { llmPlatforms, type LLMPlatform } from '../llmPlatforms'
+import { llmPlatforms, type LLMPlatform, type LLMPlatformModel } from '../llmPlatforms'
 
 type ProfileTab = 'platform' | 'custom'
 
@@ -53,6 +53,10 @@ const formError = ref<string | null>(null)
 const tab = ref<ProfileTab>('platform')
 const modelSelect = ref('')
 const modelOther = ref('')
+const remoteModels = ref<LLMPlatformModel[]>([])
+const modelsLoading = ref(false)
+const modelsNotice = ref<string | null>(null)
+let modelsTag = ''
 
 function platformFor(provider: string): LLMPlatform | undefined {
   return llmPlatforms.find((platform) => platform.id === provider)
@@ -62,7 +66,18 @@ const selectedPlatform = computed<LLMPlatform | null>(
   () => platformFor(form.value.provider) ?? null,
 )
 const modelIsCustom = computed(() => modelSelect.value === CUSTOM_MODEL)
-const platformModelOptions = computed(() => selectedPlatform.value?.models ?? [])
+const platformModelOptions = computed<LLMPlatformModel[]>(() => {
+  const platform = selectedPlatform.value
+  if (platform === null) return []
+  if (remoteModels.value.length === 0) return platform.models
+  const curated = platform.models.filter((model) =>
+    remoteModels.value.some((remote) => remote.id === model.id),
+  )
+  const extra = remoteModels.value.filter(
+    (remote) => !platform.models.some((model) => model.id === remote.id),
+  )
+  return [...curated, ...extra]
+})
 
 const selectedTeamId = ref<number | null>(null)
 const policy = ref<QAPolicy | null>(null)
@@ -157,11 +172,69 @@ async function load(): Promise<void> {
 }
 
 function selectPlatform(platform: LLMPlatform): void {
+  resetRemoteModels()
   form.value.provider = platform.id
   const model = platform.models[0]
   form.value.model = model.id
   modelSelect.value = model.id
   modelOther.value = ''
+}
+
+function resetRemoteModels(): void {
+  remoteModels.value = []
+  modelsLoading.value = false
+  modelsNotice.value = null
+  modelsTag = ''
+}
+
+function onAPIKeyInput(): void {
+  resetRemoteModels()
+}
+
+async function loadPlatformModels(): Promise<void> {
+  if (tab.value !== 'platform') return
+  const platform = selectedPlatform.value
+  if (platform === null) return
+  const key = form.value.api_key.trim()
+  if (key === '') return
+
+  const tag = `${platform.id}\n${key}`
+  modelsTag = tag
+  modelsLoading.value = true
+  modelsNotice.value = null
+  try {
+    const response = await api.llmModels(platform.id, key)
+    if (modelsTag !== tag) return
+    const models = response.models
+      .map((model) => ({
+        id: model.id.trim(),
+        label: (model.name || model.id).trim(),
+      }))
+      .filter((model) => model.id !== '' && model.label !== '')
+    if (models.length === 0) {
+      throw new Error('empty model list')
+    }
+    remoteModels.value = models
+    const current = form.value.model
+    if (models.some((model) => model.id === current)) {
+      modelSelect.value = current
+    } else if (editingId.value === null) {
+      form.value.model = models[0].id
+      modelSelect.value = models[0].id
+    } else {
+      modelSelect.value = CUSTOM_MODEL
+      modelOther.value = current
+    }
+  } catch {
+    if (modelsTag !== tag) return
+    remoteModels.value = []
+    modelsNotice.value =
+      'No se pudieron cargar los modelos de la plataforma; se muestran los recomendados'
+  } finally {
+    if (modelsTag === tag) {
+      modelsLoading.value = false
+    }
+  }
 }
 
 function syncPlatformFromForm(): void {
@@ -194,7 +267,7 @@ function onModelOtherInput(event: Event): void {
 function defaultProfileName(): string {
   if (tab.value === 'platform' && selectedPlatform.value !== null) {
     const platform = selectedPlatform.value
-    const label = platform.models.find((model) => model.id === form.value.model)?.label
+    const label = platformModelOptions.value.find((model) => model.id === form.value.model)?.label
     return `${platform.name} ${label ?? form.value.model}`.trim()
   }
   return `${form.value.provider} ${form.value.model}`.trim()
@@ -207,6 +280,7 @@ function openCreate(): void {
   tab.value = 'platform'
   modelSelect.value = ''
   modelOther.value = ''
+  resetRemoteModels()
   modalOpen.value = true
 }
 
@@ -225,6 +299,7 @@ function openEdit(profile: LLMProfile): void {
   formError.value = null
   modelSelect.value = ''
   modelOther.value = ''
+  resetRemoteModels()
   const platform = platformFor(profile.provider)
   if (platform && !profile.base_url) {
     tab.value = 'platform'
@@ -242,6 +317,7 @@ function closeModal(): void {
   tab.value = 'platform'
   modelSelect.value = ''
   modelOther.value = ''
+  resetRemoteModels()
 }
 
 async function submitProfile(): Promise<void> {
@@ -558,6 +634,8 @@ onMounted(() => {
                     type="password"
                     autocomplete="new-password"
                     data-profile-api-key
+                    @input="onAPIKeyInput"
+                    @blur="loadPlatformModels"
                   />
                   <span class="field__hint">
                     Se guarda cifrada, se comprueba al guardar y no vuelve a mostrarse.
@@ -591,6 +669,22 @@ onMounted(() => {
                     @input="onModelOtherInput"
                   />
                 </label>
+                <p
+                  v-if="modelsLoading"
+                  class="field__hint"
+                  role="status"
+                  data-profile-models-loading
+                >
+                  Cargando modelos…
+                </p>
+                <p
+                  v-else-if="modelsNotice"
+                  class="field__hint"
+                  role="status"
+                  data-profile-models-notice
+                >
+                  {{ modelsNotice }}
+                </p>
               </div>
               <p v-else class="modal__platform-hint">
                 Elige una plataforma para añadir su clave API.
