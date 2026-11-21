@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -39,17 +40,17 @@ type ChecksRefresher interface {
 
 // SyncInstallation reconciles the repositories visible to an installation and,
 // for every enabled repository, its open pull requests. It is a no-op when the
-// installation row is missing or suspended.
+// installation is suspended or no longer exists on GitHub.
+//
+// A job can run before the installation.created webhook has stored the row
+// (setup enqueues it right after the App is installed), so a missing row is
+// recovered from GitHub instead of being skipped.
 func (s *Syncer) SyncInstallation(ctx context.Context, installationID int64) error {
-	var inst store.Installation
-	err := s.Store.DB.WithContext(ctx).Where("id = ?", installationID).Take(&inst).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil
-	}
+	inst, err := s.loadInstallation(ctx, installationID)
 	if err != nil {
-		return fmt.Errorf("load installation %d: %w", installationID, err)
+		return err
 	}
-	if inst.SuspendedAt != nil {
+	if inst == nil || inst.SuspendedAt != nil {
 		return nil
 	}
 
@@ -70,6 +71,47 @@ func (s *Syncer) SyncInstallation(ctx context.Context, installationID int64) err
 		return err
 	}
 	return s.syncPullRequests(ctx, client, installationID)
+}
+
+// loadInstallation returns the stored row, recovering it from GitHub when the
+// installation webhook has not inserted it yet. A nil result means GitHub does
+// not know the installation.
+func (s *Syncer) loadInstallation(ctx context.Context, installationID int64) (*store.Installation, error) {
+	var inst store.Installation
+	err := s.Store.DB.WithContext(ctx).Where("id = ?", installationID).Take(&inst).Error
+	if err == nil {
+		return &inst, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("load installation %d: %w", installationID, err)
+	}
+	return s.fetchInstallation(ctx, installationID)
+}
+
+func (s *Syncer) fetchInstallation(ctx context.Context, installationID int64) (*store.Installation, error) {
+	app, err := s.Apps.App(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load GitHub App: %w", err)
+	}
+	client, err := app.AppClient()
+	if err != nil {
+		return nil, fmt.Errorf("create GitHub App client: %w", err)
+	}
+	remote, _, err := client.Apps.GetInstallation(ctx, installationID)
+	if err != nil {
+		// A 404 means the installation was removed (or never existed), so there
+		// is nothing to sync; retrying would never succeed.
+		var respErr *gh.ErrorResponse
+		if errors.As(err, &respErr) && respErr.Response != nil && respErr.Response.StatusCode == http.StatusNotFound {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get installation %d from GitHub: %w", installationID, err)
+	}
+	inst := github.InstallationFromGitHub(remote)
+	if err := s.Store.UpsertInstallation(ctx, inst); err != nil {
+		return nil, err
+	}
+	return &inst, nil
 }
 
 // ReconcileAll discovers installations from the GitHub App, prunes rows for
