@@ -236,70 +236,105 @@ onMounted(() => {
       </button>
     </header>
 
-    <p v-if="error" class="form-error">{{ error }}</p>
-    <p v-else-if="!loading && profiles.length === 0" class="empty-state">
-      No hay perfiles LLM configurados
-    </p>
-    <div v-else class="table-wrap">
-      <table class="profile-table">
-        <thead>
-          <tr>
-            <th scope="col">Nombre</th>
-            <th scope="col">Proveedor / modelo</th>
-            <th scope="col">Salud</th>
-            <th scope="col">Estado</th>
-            <th scope="col">Clave API</th>
-            <th scope="col">Acciones</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="profile in profiles" :key="profile.id" :data-profile-row="profile.id">
-            <td class="profile-table__name">{{ profile.name }}</td>
-            <td>{{ profile.provider }} / {{ profile.model }}</td>
-            <td>
-              <div class="health" data-health-cell>
-                <span class="badge" :class="healthTone(profile.health_status)" data-health-badge>
-                  {{ healthLabel(profile.health_status) }}
-                </span>
-                <span v-if="profile.health_stale" class="badge badge--bad" data-health-stale>
-                  Desactualizado
-                </span>
-                <span class="health__age">{{ healthAge(profile) }}</span>
-              </div>
-              <span v-if="profile.health_error" class="profile-table__health-error">
-                {{ profile.health_error }}
-              </span>
-            </td>
-            <td>{{ profile.enabled ? 'Activado' : 'Desactivado' }}</td>
-            <td>{{ profile.api_key_set ? 'Clave configurada' : 'Sin clave' }}</td>
-            <td>
-              <button
-                v-if="isAdmin"
-                class="button button--ghost profile-table__action"
-                type="button"
-                data-health-button
-                @click="checkHealth(profile)"
-              >
-                Probar
-              </button>
-              <button
-                v-if="isAdmin"
-                class="button button--ghost profile-table__action"
-                type="button"
-                data-edit-profile
-                @click="openEdit(profile)"
-              >
-                Editar
-              </button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <section class="register" aria-labelledby="profiles-title">
+      <div class="register__head">
+        <h2 id="profiles-title" class="register__title">Registro de perfiles</h2>
+        <p class="register__count">
+          {{ profiles.length }} {{ profiles.length === 1 ? 'perfil' : 'perfiles' }}
+        </p>
+      </div>
 
-    <section v-if="isAdmin && teams.length > 0" class="policy-card" aria-label="Política por equipo">
-      <h2 class="policy-card__title">Política por equipo</h2>
-      <div class="policy-card__fields">
+      <p v-if="error" class="form-error">{{ error }}</p>
+      <p v-else-if="!loading && profiles.length === 0" class="empty-state">
+        No hay perfiles LLM configurados
+      </p>
+      <div v-else class="table-wrap">
+        <table class="profile-table">
+          <thead>
+            <tr>
+              <th scope="col">Nombre</th>
+              <th scope="col">Proveedor / modelo</th>
+              <th scope="col">Salud</th>
+              <th scope="col">Estado</th>
+              <th scope="col">Clave API</th>
+              <th scope="col" class="profile-table__actions-head">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="profile in profiles" :key="profile.id" :data-profile-row="profile.id">
+              <td class="profile-table__name">{{ profile.name }}</td>
+              <td class="profile-table__model">
+                <span class="profile-table__provider">{{ profile.provider }}</span>
+                <span class="profile-table__separator" aria-hidden="true">/</span>
+                <span>{{ profile.model }}</span>
+              </td>
+              <td class="profile-table__health">
+                <div class="health" data-health-cell>
+                  <div class="health__verdict">
+                    <span
+                      class="badge"
+                      :class="healthTone(profile.health_status)"
+                      data-health-badge
+                    >
+                      {{ healthLabel(profile.health_status) }}
+                    </span>
+                    <span v-if="profile.health_stale" class="badge badge--bad" data-health-stale>
+                      Desactualizado
+                    </span>
+                  </div>
+                  <span class="health__age">{{ healthAge(profile) }}</span>
+                  <span v-if="profile.health_error" class="health__error">
+                    {{ profile.health_error }}
+                  </span>
+                </div>
+              </td>
+              <td class="profile-table__state">
+                {{ profile.enabled ? 'Activado' : 'Desactivado' }}
+              </td>
+              <td class="profile-table__key">
+                {{ profile.api_key_set ? 'Clave configurada' : 'Sin clave' }}
+              </td>
+              <td class="profile-table__actions">
+                <div class="profile-table__action-row">
+                  <button
+                    v-if="isAdmin"
+                    class="button button--ghost profile-table__action"
+                    type="button"
+                    data-health-button
+                    :aria-label="`Probar salud de ${profile.name}`"
+                    @click="checkHealth(profile)"
+                  >
+                    Probar
+                  </button>
+                  <button
+                    v-if="isAdmin"
+                    class="button button--ghost profile-table__action"
+                    type="button"
+                    data-edit-profile
+                    :aria-label="`Editar ${profile.name}`"
+                    @click="openEdit(profile)"
+                  >
+                    Editar
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section
+      v-if="isAdmin && teams.length > 0"
+      class="policy"
+      aria-labelledby="policy-title"
+    >
+      <header class="policy__head">
+        <h2 id="policy-title" class="policy__title">Política por equipo</h2>
+        <p class="policy__hint">Se guarda por equipo y se aplica a todas sus revisiones.</p>
+      </header>
+
+      <div class="policy__fields">
         <label class="field">
           <span class="field__label">Equipo</span>
           <select
@@ -311,6 +346,7 @@ onMounted(() => {
             <option :value="null">Selecciona un equipo</option>
             <option v-for="team in teams" :key="team.id" :value="team.id">{{ team.name }}</option>
           </select>
+          <span class="field__hint">Equipo al que se aplica la política.</span>
         </label>
         <label class="field">
           <span class="field__label">Perfil LLM</span>
@@ -320,11 +356,18 @@ onMounted(() => {
               {{ profile.name }}
             </option>
           </select>
+          <span class="field__hint">Perfil que ejecuta las revisiones del equipo.</span>
         </label>
-        <button class="button button--primary" type="button" data-policy-save @click="savePolicy">
+        <button
+          class="button button--primary policy__save"
+          type="button"
+          data-policy-save
+          @click="savePolicy"
+        >
           Guardar política
         </button>
       </div>
+
       <label class="policy-ci">
         <input v-model="policyRequireGreenCI" type="checkbox" data-policy-require-green-ci />
         <span class="policy-ci__text">
@@ -334,77 +377,129 @@ onMounted(() => {
           </span>
         </span>
       </label>
-      <p v-if="policyError" class="form-error">{{ policyError }}</p>
-      <p v-else-if="policyMessage" class="policy-card__message">{{ policyMessage }}</p>
+      <p v-if="policyError" class="form-error" role="alert">{{ policyError }}</p>
+      <p v-else-if="policyMessage" class="policy__message" role="status">{{ policyMessage }}</p>
     </section>
 
-    <div v-if="modalOpen" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Perfil LLM">
-      <form class="modal" @submit.prevent="submitProfile">
-        <h2 class="modal__title">{{ editingId === null ? 'Nuevo perfil LLM' : 'Editar perfil LLM' }}</h2>
-        <p class="field__hint">
-          La clave se guarda cifrada y nunca se muestra. Déjala vacía para conservar la actual.
-        </p>
+    <div v-if="modalOpen" class="modal-backdrop" @keydown.esc="closeModal">
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="profile-dialog-title"
+        aria-describedby="profile-dialog-hint"
+      >
+        <form class="modal__form" @submit.prevent="submitProfile">
+          <header class="modal__head">
+            <h2 id="profile-dialog-title" class="modal__title">
+              {{ editingId === null ? 'Nuevo perfil LLM' : 'Editar perfil LLM' }}
+            </h2>
+            <p id="profile-dialog-hint" class="field__hint modal__hint">
+              La clave se guarda cifrada y nunca se muestra. Déjala vacía para conservar la actual.
+            </p>
+          </header>
 
-        <label class="field">
-          <span class="field__label">Nombre</span>
-          <input v-model="form.name" class="field__input" type="text" data-profile-name />
-        </label>
-        <label class="field">
-          <span class="field__label">Proveedor</span>
-          <input v-model="form.provider" class="field__input" type="text" data-profile-provider />
-        </label>
-        <label class="field">
-          <span class="field__label">Modelo</span>
-          <input v-model="form.model" class="field__input" type="text" data-profile-model />
-        </label>
-        <label class="field">
-          <span class="field__label">Clave API</span>
-          <input
-            v-model="form.api_key"
-            class="field__input"
-            type="password"
-            autocomplete="new-password"
-            data-profile-api-key
-          />
-        </label>
-        <label class="field">
-          <span class="field__label">Modo</span>
-          <input v-model="form.mode" class="field__input" type="text" data-profile-mode />
-        </label>
-        <label class="field">
-          <span class="field__label">URL base (opcional)</span>
-          <input v-model="form.base_url" class="field__input" type="text" data-profile-base-url />
-        </label>
-        <label class="field">
-          <span class="field__label">Concurrencia</span>
-          <input
-            v-model.number="form.concurrency"
-            class="field__input"
-            type="number"
-            min="1"
-            data-profile-concurrency
-          />
-        </label>
-        <label class="switch">
-          <input v-model="form.enabled" type="checkbox" data-profile-enabled />
-          <span>Perfil activado</span>
-        </label>
+          <div class="modal__body">
+            <div class="modal__fields">
+              <label class="field modal__field--wide">
+                <span class="field__label">Nombre</span>
+                <input
+                  v-model="form.name"
+                  class="field__input"
+                  type="text"
+                  autofocus
+                  data-profile-name
+                />
+                <span class="field__hint">Nombre visible en el registro.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">Proveedor</span>
+                <input
+                  v-model="form.provider"
+                  class="field__input"
+                  type="text"
+                  data-profile-provider
+                />
+                <span class="field__hint">Identificador del proveedor; por ejemplo openai.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">Modelo</span>
+                <input
+                  v-model="form.model"
+                  class="field__input"
+                  type="text"
+                  data-profile-model
+                />
+                <span class="field__hint">Identificador del modelo; por ejemplo gpt-5.</span>
+              </label>
+              <label class="field modal__field--wide">
+                <span class="field__label">Clave API</span>
+                <input
+                  v-model="form.api_key"
+                  class="field__input"
+                  type="password"
+                  autocomplete="new-password"
+                  data-profile-api-key
+                />
+                <span class="field__hint">Cifrada; no vuelve a mostrarse después de guardar.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">Modo</span>
+                <input v-model="form.mode" class="field__input" type="text" data-profile-mode />
+                <span class="field__hint">Tipo de conexión: api o local.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">URL base (opcional)</span>
+                <input
+                  v-model="form.base_url"
+                  class="field__input"
+                  type="text"
+                  data-profile-base-url
+                />
+                <span class="field__hint">Endpoint compatible; opcional.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">Concurrencia</span>
+                <input
+                  v-model.number="form.concurrency"
+                  class="field__input"
+                  type="number"
+                  min="1"
+                  data-profile-concurrency
+                />
+                <span class="field__hint">Solicitudes simultáneas (mínimo 1).</span>
+              </label>
+              <label class="modal__enabled">
+                <input v-model="form.enabled" type="checkbox" data-profile-enabled />
+                <span class="modal__enabled-text">
+                  <span class="field__label">Perfil activado</span>
+                  <span class="field__hint">Si se desactiva, no se usa para revisiones.</span>
+                </span>
+              </label>
+            </div>
+          </div>
 
-        <p v-if="formError" class="form-error">{{ formError }}</p>
-        <div class="modal__actions">
-          <button class="button button--ghost" type="button" data-profile-cancel @click="closeModal">
-            Cancelar
-          </button>
-          <button
-            class="button button--primary"
-            type="button"
-            data-profile-submit
-            @click="submitProfile"
-          >
-            {{ editingId === null ? 'Crear perfil' : 'Guardar cambios' }}
-          </button>
-        </div>
-      </form>
+          <p v-if="formError" class="form-error modal__error" role="alert">{{ formError }}</p>
+          <footer class="modal__actions">
+            <button
+              class="button button--ghost"
+              type="button"
+              data-profile-cancel
+              @click="closeModal"
+            >
+              Cancelar
+            </button>
+            <button
+              class="button button--primary"
+              type="button"
+              data-profile-submit
+              @click="submitProfile"
+            >
+              {{ editingId === null ? 'Crear perfil' : 'Guardar cambios' }}
+            </button>
+          </footer>
+        </form>
+      </div>
     </div>
   </section>
 </template>
@@ -416,97 +511,186 @@ onMounted(() => {
   gap: var(--space-5);
 }
 
+.agents .button {
+  min-height: 40px;
+}
+
+.register {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.register__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: var(--rule-hair) solid var(--border-strong);
+}
+
+.register__title {
+  font-size: 17px;
+}
+
+.register__count {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .profile-table {
   width: 100%;
+  min-width: 820px;
   border-collapse: collapse;
-  font-size: 14px;
 }
 
 .profile-table th,
 .profile-table td {
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-3);
   text-align: left;
-  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  border-bottom: var(--rule-hair) solid var(--border);
 }
 
 .profile-table th {
   color: var(--text-muted);
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.profile-table tbody tr:last-child td {
-  border-bottom: 0;
+  font-size: 13px;
+  font-weight: 500;
+  border-bottom: var(--rule-heavy) solid var(--text);
 }
 
 .profile-table__name {
   font-weight: 600;
 }
 
-.profile-table__health-error {
-  display: block;
-  margin-top: var(--space-1);
+.profile-table__model {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.profile-table__provider {
+  color: var(--text);
+}
+
+.profile-table__separator {
   color: var(--text-faint);
-  font-size: 12px;
+}
+
+.profile-table__health {
+  min-width: 220px;
 }
 
 .health {
   display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.health__verdict {
+  display: flex;
   align-items: center;
-  gap: var(--space-2);
   flex-wrap: wrap;
+  gap: var(--space-1);
 }
 
 .health__age {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.health__error {
   color: var(--text-faint);
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.profile-table__state,
+.profile-table__key {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.profile-table__actions-head,
+.profile-table__actions {
+  text-align: right;
+}
+
+.profile-table__action-row {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
 }
 
 .profile-table__action {
-  padding: 5px 9px;
-  font-size: 12.5px;
-}
-
-.policy-card {
-  padding: var(--space-4);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-}
-
-.policy-card__title {
-  margin: 0 0 var(--space-3);
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.policy-card__fields {
-  display: flex;
-  align-items: end;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-
-.policy-card__message {
-  margin-top: var(--space-2);
-  color: var(--ok);
+  padding: var(--space-1) var(--space-3);
   font-size: 13px;
+}
+
+.policy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  color: var(--text);
+  background: var(--surface);
+  border: var(--rule-hair) solid var(--border-strong);
+}
+
+.policy__head {
+  padding-bottom: var(--space-3);
+  border-bottom: var(--rule-heavy) solid var(--text);
+}
+
+.policy__title {
+  font-size: 18px;
+}
+
+.policy__hint {
+  margin-top: var(--space-1);
+  max-width: 70ch;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.policy__fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-4);
+}
+
+.policy__fields .field__input {
+  width: 100%;
+  min-width: 0;
+}
+
+.policy__save {
+  white-space: nowrap;
 }
 
 .policy-ci {
   display: flex;
-  align-items: start;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-height: 40px;
   padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
+  border-top: var(--rule-hair) solid var(--border);
   cursor: pointer;
 }
 
 .policy-ci input {
-  width: 18px;
-  height: 18px;
+  flex: none;
+  width: 20px;
+  height: 20px;
   margin: 0;
   accent-color: var(--accent);
   cursor: pointer;
@@ -518,44 +702,222 @@ onMounted(() => {
   gap: var(--space-1);
 }
 
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+.policy__message {
+  color: var(--ok);
+  font-size: 13px;
 }
 
 .modal-backdrop {
   position: fixed;
   inset: 0;
   z-index: 50;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: var(--space-4);
-  background: rgb(0 0 0 / 55%);
+  background: var(--scrim);
+  overflow-y: auto;
 }
 
 .modal {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  width: min(480px, 100%);
-  max-height: 90vh;
-  overflow-y: auto;
-  padding: var(--space-5);
+  width: min(640px, 100%);
+  max-height: calc(100dvh - var(--space-6));
+  color: var(--text);
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md);
+  border: var(--rule-hair) solid var(--border-strong);
+  overflow: hidden;
+}
+
+.modal::after {
+  content: '';
+  position: absolute;
+  inset: var(--space-1);
+  border: var(--rule-hair) solid var(--border);
+  pointer-events: none;
+}
+
+.modal__form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: inherit;
+}
+
+.modal__head {
+  flex: none;
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  border-bottom: var(--rule-heavy) solid var(--text);
 }
 
 .modal__title {
+  font-size: 22px;
+}
+
+.modal__hint {
+  margin-top: var(--space-2);
+  max-width: 60ch;
+}
+
+.modal__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--space-4) var(--space-5);
+  overflow-y: auto;
+}
+
+.modal__fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
+.modal__field--wide {
+  grid-column: 1 / -1;
+}
+
+.modal__fields .field__input {
+  width: 100%;
+  min-width: 0;
+}
+
+.modal__fields input[type='number'] {
+  max-width: 160px;
+  font-family: var(--font-mono);
+}
+
+.modal__enabled {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: flex-start;
+  gap: var(--space-3);
+  min-height: 40px;
+  cursor: pointer;
+}
+
+.modal__enabled input {
+  flex: none;
+  width: 20px;
+  height: 20px;
   margin: 0;
-  font-size: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.modal__enabled-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.modal__error {
+  flex: none;
+  padding: 0 var(--space-5) var(--space-4);
 }
 
 .modal__actions {
+  flex: none;
   display: flex;
   justify-content: flex-end;
-  gap: var(--space-2);
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5) var(--space-5);
+  border-top: var(--rule-hair) solid var(--border);
+}
+
+.field__input:hover {
+  border-color: var(--text-muted);
+}
+
+.field__input:active {
+  border-color: var(--text);
+}
+
+.field__input:focus-visible {
+  outline: var(--rule-heavy) solid var(--focus);
+  outline-offset: var(--rule-hair);
+}
+
+.policy-ci input:focus-visible,
+.modal__enabled input:focus-visible {
+  outline: var(--rule-heavy) solid var(--focus);
+  outline-offset: var(--rule-hair);
+}
+
+@media (max-width: 880px) {
+  .policy__fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .policy__save {
+    width: 100%;
+  }
+
+  .modal__fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .modal__field--wide {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 560px) {
+  .policy {
+    padding: var(--space-4);
+  }
+
+  .modal-backdrop {
+    padding: var(--space-2);
+  }
+
+  .modal {
+    max-height: calc(100dvh - var(--space-4));
+  }
+
+  .modal__head {
+    padding: var(--space-4);
+  }
+
+  .modal__body {
+    padding: var(--space-4);
+  }
+
+  .modal__error {
+    padding: 0 var(--space-4) var(--space-4);
+  }
+
+  .modal__actions {
+    flex-wrap: wrap;
+    padding: var(--space-3) var(--space-4) var(--space-4);
+  }
+
+  .modal__actions .button {
+    flex: 1 1 auto;
+  }
+
+  .profile-table {
+    min-width: 760px;
+  }
+}
+
+@media (max-width: 420px) {
+  .modal__actions {
+    flex-direction: column;
+  }
+
+  .modal__actions .button {
+    width: 100%;
+  }
+}
+
+@media (pointer: coarse) {
+  .agents .button,
+  .agents .field__input,
+  .policy-ci,
+  .modal__enabled {
+    min-height: 44px;
+  }
 }
 </style>

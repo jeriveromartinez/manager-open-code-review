@@ -158,96 +158,136 @@ onMounted(() => {
         <p class="page-subtitle">Equipos, miembros y responsabilidades</p>
       </div>
       <form v-if="isAdmin" class="create-team" @submit.prevent="createTeam">
-        <input
-          v-model="newTeamName"
-          class="field__input"
-          type="text"
-          placeholder="Nombre del equipo"
-          aria-label="Nombre del equipo"
-          data-create-team-name
-        />
+        <label class="field create-team__field">
+          <span class="field__label">Nombre del equipo</span>
+          <input
+            v-model="newTeamName"
+            class="field__input"
+            type="text"
+            placeholder="Nombre del equipo"
+            aria-label="Nombre del equipo"
+            data-create-team-name
+          />
+        </label>
         <button class="button button--primary" type="button" data-create-team @click="createTeam">
           Crear equipo
         </button>
       </form>
     </header>
 
-    <p v-if="formError" class="form-error">{{ formError }}</p>
+    <p v-if="formError" class="form-error" role="alert">{{ formError }}</p>
 
     <p v-if="error" class="empty-state">{{ error }}</p>
     <p v-else-if="!loading && teams.length === 0" class="empty-state">No hay equipos todavía</p>
-    <div v-else class="team-grid">
+    <div v-else class="team-register">
       <article
         v-for="team in teams"
         :key="team.id"
-        class="team-card"
+        class="team-roster"
         :data-team-id="team.id"
         :data-team-name="team.name"
       >
-        <header class="team-card__head">
-          <h2 class="team-card__title">{{ team.name }}</h2>
-          <span class="team-card__count">
+        <header class="team-roster__header">
+          <div class="team-roster__identity">
+            <h2 class="team-roster__title">{{ team.name }}</h2>
+            <p class="team-roster__slug">{{ team.slug }}</p>
+          </div>
+          <p class="team-roster__count">
             {{ team.members.length }} miembro{{ team.members.length === 1 ? '' : 's' }}
-          </span>
+          </p>
         </header>
 
-        <ul v-if="team.members.length > 0" class="member-list">
-          <li v-for="member in team.members" :key="member.user_id" class="member-row">
-            <span class="member-row__login">{{ member.login }}</span>
+        <div class="table-wrap team-roster__table">
+          <table :aria-label="`Miembros de ${team.name}`">
+            <thead>
+              <tr>
+                <th scope="col">Miembro</th>
+                <th scope="col">Rol</th>
+                <th v-if="canManage(team)" scope="col">Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="member in team.members" :key="member.user_id">
+                <td class="team-roster__member">{{ member.login }}</td>
+                <td class="team-roster__role-cell">
+                  <select
+                    v-if="canManage(team)"
+                    class="field__input team-roster__role"
+                    :value="member.role"
+                    :aria-label="`Rol de ${member.login}`"
+                    data-change-role
+                    @change="changeRole(team, member, $event)"
+                  >
+                    <option value="lead">Lead</option>
+                    <option value="qa">QA</option>
+                    <option value="developer">Desarrollador</option>
+                  </select>
+                  <span v-else class="team-roster__role-read">{{ roleLabels[member.role] }}</span>
+                </td>
+                <td v-if="canManage(team)" class="team-roster__actions">
+                  <button
+                    class="button button--ghost team-roster__remove"
+                    type="button"
+                    :aria-label="`Quitar a ${member.login}`"
+                    data-remove-member
+                    @click="removeMember(team, member)"
+                  >
+                    Quitar
+                  </button>
+                </td>
+              </tr>
+              <tr v-if="team.members.length === 0">
+                <td :colspan="canManage(team) ? 3 : 2" class="team-roster__empty">
+                  Este equipo no tiene miembros todavía
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
 
+        <form
+          v-if="canManage(team)"
+          class="member-add"
+          data-add-member
+          @submit.prevent="addMember(team)"
+        >
+          <label class="field member-add__field">
+            <span class="field__label">Usuario</span>
             <select
-              v-if="canManage(team)"
-              class="field__input member-row__role"
-              :value="member.role"
-              :aria-label="`Rol de ${member.login}`"
-              data-change-role
-              @change="changeRole(team, member, $event)"
+              v-model.number="drafts[team.id].userId"
+              class="field__input"
+              aria-label="Selecciona un usuario para añadir"
+              data-add-member-user
+            >
+              <option :value="null">Selecciona un usuario</option>
+              <option v-for="user in users" :key="user.id" :value="user.id">{{ user.login }}</option>
+            </select>
+          </label>
+          <label class="field member-add__field">
+            <span class="field__label">Rol</span>
+            <select
+              v-model="drafts[team.id].role"
+              class="field__input"
+              aria-label="Rol del nuevo miembro"
+              data-add-member-role
             >
               <option value="lead">Lead</option>
               <option value="qa">QA</option>
               <option value="developer">Desarrollador</option>
             </select>
-            <span v-else class="member-row__role">{{ roleLabels[member.role] }}</span>
-
-            <button
-              v-if="canManage(team)"
-              class="button button--ghost member-row__remove"
-              type="button"
-              :aria-label="`Quitar a ${member.login}`"
-              data-remove-member
-              @click="removeMember(team, member)"
-            >
-              Quitar
-            </button>
-          </li>
-        </ul>
-        <p v-else class="member-list__empty">Este equipo no tiene miembros todavía</p>
-
-        <div v-if="canManage(team)" class="team-card__add" data-add-member>
-          <p v-if="usersError" class="form-error" data-users-error>{{ usersError }}</p>
-          <select
-            v-model.number="drafts[team.id].userId"
-            class="field__input"
-            aria-label="Selecciona un usuario para añadir"
-            data-add-member-user
+          </label>
+          <button
+            class="button button--primary member-add__submit"
+            type="button"
+            data-add-member-submit
+            @click="addMember(team)"
           >
-            <option :value="null">Selecciona un usuario</option>
-            <option v-for="user in users" :key="user.id" :value="user.id">{{ user.login }}</option>
-          </select>
-          <select
-            v-model="drafts[team.id].role"
-            class="field__input"
-            aria-label="Rol del nuevo miembro"
-            data-add-member-role
-          >
-            <option value="lead">Lead</option>
-            <option value="qa">QA</option>
-            <option value="developer">Desarrollador</option>
-          </select>
-          <button class="button button--primary" type="button" data-add-member-submit @click="addMember(team)">
             Añadir miembro
           </button>
-        </div>
+          <p v-if="usersError" class="form-error member-add__error" data-users-error>
+            {{ usersError }}
+          </p>
+        </form>
       </article>
     </div>
   </section>
@@ -262,99 +302,212 @@ onMounted(() => {
 
 .create-team {
   display: flex;
-  gap: var(--space-2);
+  align-items: flex-end;
   flex-wrap: wrap;
+  gap: var(--space-2);
 }
 
-.team-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: var(--space-3);
+.create-team__field {
+  flex: 1 1 220px;
+  min-width: 0;
 }
 
-.team-card {
+.create-team__field .field__input {
+  width: 100%;
+}
+
+.team-register {
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
+  gap: var(--space-5);
 }
 
-.team-card__head {
+.team-roster {
+  display: flex;
+  flex-direction: column;
+  border-top: var(--rule-heavy) solid var(--text);
+  border-bottom: var(--rule-hair) solid var(--border-strong);
+}
+
+.team-roster__header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  padding: var(--space-3) 0;
+}
+
+.team-roster__identity {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.team-card__title {
-  font-size: 18px;
-  letter-spacing: -0.01em;
-}
-
-.team-card__count {
-  color: var(--text-faint);
-  font-size: 13px;
-}
-
-.member-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.member-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding-bottom: var(--space-2);
-  border-bottom: 1px dashed var(--border);
-}
-
-.member-row__login {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-weight: 600;
-}
-
-.member-row__role {
-  min-width: 110px;
-  padding: 5px 8px;
-  font-size: 13px;
-}
-
-.member-row__remove {
-  padding: 5px 9px;
-  font-size: 12.5px;
-}
-
-.member-list__empty {
-  color: var(--text-faint);
-  font-size: 13px;
-}
-
-.team-card__add {
-  display: flex;
-  gap: var(--space-2);
   flex-wrap: wrap;
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
 }
 
-.team-card__add .field__input {
-  padding: 5px 8px;
+.team-roster__title {
+  font-size: 20px;
+}
+
+.team-roster__slug {
+  overflow-wrap: anywhere;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.team-roster__count {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.team-roster__table {
+  border: 0;
+  border-top: var(--rule-hair) solid var(--border-strong);
+}
+
+.team-roster__table th {
+  color: var(--text-muted);
+}
+
+.team-roster__table th,
+.team-roster__table td {
+  padding: var(--space-2) var(--space-3);
+  vertical-align: middle;
+}
+
+.team-roster__member {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.team-roster__role {
+  width: 100%;
+  max-width: 220px;
+  padding: var(--space-1) var(--space-2);
+  font-size: 14px;
+}
+
+.team-roster__role-read {
+  display: inline-block;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.team-roster__actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.team-roster__remove {
+  min-height: 40px;
+  padding: var(--space-1) var(--space-2);
   font-size: 13px;
 }
 
-.team-card__add [data-users-error] {
-  flex-basis: 100%;
+.team-roster__empty {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.member-add {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: var(--rule-hair) solid var(--border);
+}
+
+.member-add__field {
+  min-width: 0;
+}
+
+.member-add__submit {
+  min-height: 40px;
+  white-space: nowrap;
+}
+
+.member-add__error {
+  grid-column: 1 / -1;
+}
+
+.teams .field__input {
+  transition:
+    border-color var(--dur-micro) ease,
+    background-color var(--dur-micro) ease;
+}
+
+.teams select.field__input {
+  cursor: pointer;
+}
+
+.teams .field__input:hover {
+  border-color: var(--text-muted);
+}
+
+.teams .field__input:active {
+  border-color: var(--text);
+}
+
+.teams .field__input:focus-visible {
+  border-color: var(--text);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.teams .button {
+  min-height: 40px;
+}
+
+.teams .button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+@media (max-width: 760px) {
+  .member-add {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .member-add__submit {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .create-team {
+    width: 100%;
+  }
+
+  .create-team__field {
+    flex-basis: 100%;
+  }
+
+  .create-team .button {
+    width: 100%;
+  }
+
+  .member-add {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .team-roster__title {
+    font-size: 18px;
+  }
+}
+
+@media (pointer: coarse) {
+  .teams .field__input,
+  .teams .button {
+    min-height: 44px;
+  }
 }
 </style>

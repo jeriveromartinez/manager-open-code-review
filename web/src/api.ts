@@ -167,9 +167,15 @@ export type RepoPatch = {
   team_id?: number | null
 }
 
+export type SettingsKind = 'duration' | 'int' | 'bool' | 'url' | 'text' | 'path' | 'secret'
+
 export interface SettingsField {
   key: string
   group: 'general' | 'review' | 'worker' | 'alerts' | 'backups'
+  label: string
+  help: string
+  kind: SettingsKind
+  unit: '' | 's' | 'm' | 'h'
   default: string
   restart: '' | 'app' | 'worker' | 'monitor'
   secret: boolean

@@ -6,16 +6,86 @@ import SettingsView from './SettingsView.vue'
 
 vi.mock('../api', () => ({ api: { settings: vi.fn(), saveSettings: vi.fn() } }))
 
+function field(
+  overrides: Partial<SettingsField> & Pick<SettingsField, 'key' | 'group'>,
+): SettingsField {
+  return {
+    label: overrides.key,
+    help: 'Ayuda del ajuste.',
+    kind: 'text',
+    unit: '',
+    default: '',
+    restart: '',
+    secret: false,
+    ...overrides,
+  }
+}
+
 const fields: SettingsField[] = [
-  { key: 'public_url', group: 'general', default: '', restart: '', secret: false },
-  { key: 'review_timeout', group: 'review', default: '20m', restart: 'worker', secret: false },
-  { key: 'ocr_bin', group: 'worker', default: 'ocr', restart: 'worker', secret: false },
-  { key: 'alert_webhook_url', group: 'alerts', default: '', restart: 'monitor', secret: true },
+  field({
+    key: 'public_url',
+    group: 'general',
+    label: 'URL pública',
+    help: 'Dirección con la que GitHub entrega los webhooks.',
+    kind: 'url',
+  }),
+  field({
+    key: 'webhooks_enabled',
+    group: 'general',
+    label: 'Recibir webhooks',
+    help: 'Desactivado, el panel solo descubre cambios en cada reconciliación.',
+    kind: 'bool',
+    default: 'true',
+    restart: 'app',
+  }),
+  field({
+    key: 'review_timeout',
+    group: 'review',
+    label: 'Tiempo máximo por revisión',
+    help: 'Al superarlo, el run falla y el PR queda inconcluso.',
+    kind: 'duration',
+    unit: 'm',
+    default: '20m',
+    restart: 'worker',
+  }),
+  field({
+    key: 'ocr_bin',
+    group: 'worker',
+    label: 'Binario ocr',
+    help: 'Nombre o ruta del ejecutable ocr dentro del worker.',
+    default: 'ocr',
+    restart: 'worker',
+  }),
+  field({
+    key: 'fetch_depth_max',
+    group: 'worker',
+    label: 'Profundidad de fetch',
+    help: 'Commits que se descargan del repositorio para calcular el diff.',
+    kind: 'int',
+    default: '500',
+    restart: 'worker',
+  }),
+  field({
+    key: 'alert_webhook_url',
+    group: 'alerts',
+    label: 'Webhook de alertas',
+    help: 'POST opcional para las alertas.',
+    kind: 'url',
+    restart: 'monitor',
+    secret: true,
+  }),
 ]
 
-const stored = { public_url: '', review_timeout: '20m0s', ocr_bin: 'ocr', alert_webhook_url: '' }
+const stored = {
+  public_url: '',
+  webhooks_enabled: 'true',
+  review_timeout: '20m0s',
+  ocr_bin: 'ocr',
+  fetch_depth_max: '500',
+  alert_webhook_url: '',
+}
 
-const groupsWithFields = new Set(fields.map((field) => field.group)).size
+const groupsWithFields = new Set(fields.map((item) => item.group)).size
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -41,16 +111,70 @@ describe('SettingsView', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('Revisión')
-    expect((wrapper.find('input[name="review_timeout"]').element as HTMLInputElement).value).toBe(
-      '20m0s',
-    )
+    expect(
+      (wrapper.find('input[name="review_timeout"]').element as HTMLInputElement).value,
+    ).toBe('20')
+  })
+
+  it('shows the human label and help instead of the raw key', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    const timeout = wrapper.find('[data-field="review_timeout"]')
+    expect(timeout.text()).toContain('Tiempo máximo por revisión')
+    expect(timeout.text()).toContain('Al superarlo, el run falla')
+    expect(timeout.text()).toContain('Predeterminado: 20m')
+    expect(timeout.text()).not.toContain('review_timeout')
+  })
+
+  it('renders a duration as amount plus unit and saves a Go duration string', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    const amount = wrapper.find('[data-field="review_timeout"] input[name="review_timeout"]')
+    const unit = wrapper.find('[data-field="review_timeout"] select')
+    expect(amount.attributes('type')).toBe('number')
+    expect((amount.element as HTMLInputElement).value).toBe('20')
+    expect((unit.element as HTMLSelectElement).value).toBe('m')
+
+    await amount.setValue('30')
+    await wrapper.find('form[data-group="review"]').trigger('submit')
+    await flushPromises()
+
+    expect(api.saveSettings).toHaveBeenCalledWith({ review_timeout: '30m' })
+  })
+
+  it('saves a boolean as true or false', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    const box = wrapper.find('[data-field="webhooks_enabled"] input[type="checkbox"]')
+    expect((box.element as HTMLInputElement).checked).toBe(true)
+
+    await box.setValue(false)
+    await wrapper.find('form[data-group="general"]').trigger('submit')
+    await flushPromises()
+
+    expect(api.saveSettings).toHaveBeenCalledWith({
+      public_url: '',
+      webhooks_enabled: 'false',
+    })
+  })
+
+  it('renders an integer field as a number input', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    const depth = wrapper.find('[data-field="fetch_depth_max"] input')
+    expect(depth.attributes('type')).toBe('number')
+    expect((depth.element as HTMLInputElement).value).toBe('500')
   })
 
   it('saves only the edited section', async () => {
     const wrapper = mount(SettingsView)
     await flushPromises()
 
-    await wrapper.find('input[name="review_timeout"]').setValue('30m')
+    await wrapper.find('input[name="review_timeout"]').setValue('30')
     await wrapper.find('form[data-group="review"]').trigger('submit')
     await flushPromises()
 
@@ -62,14 +186,14 @@ describe('SettingsView', () => {
     await flushPromises()
 
     await wrapper.find('input[name="public_url"]').setValue('https://qa.example.com')
-    await wrapper.find('input[name="review_timeout"]').setValue('30m')
+    await wrapper.find('input[name="review_timeout"]').setValue('30')
     await wrapper.find('form[data-group="review"]').trigger('submit')
     await flushPromises()
 
     expect(api.saveSettings).toHaveBeenCalledWith({ review_timeout: '30m' })
-    expect((wrapper.find('input[name="public_url"]').element as HTMLInputElement).value).toBe(
-      'https://qa.example.com',
-    )
+    expect(
+      (wrapper.find('input[name="public_url"]').element as HTMLInputElement).value,
+    ).toBe('https://qa.example.com')
   })
 
   it('shows which process has to restart', async () => {
@@ -90,9 +214,9 @@ describe('SettingsView', () => {
     vi.mocked(api.settings).mockResolvedValue({
       values: {},
       fields: [
-        { key: 'app_value', group: 'worker', default: '', restart: 'app', secret: false },
-        { key: 'worker_value', group: 'worker', default: '', restart: 'worker', secret: false },
-        { key: 'monitor_value', group: 'worker', default: '', restart: 'monitor', secret: false },
+        field({ key: 'app_value', group: 'worker', restart: 'app' }),
+        field({ key: 'worker_value', group: 'worker', restart: 'worker' }),
+        field({ key: 'monitor_value', group: 'worker', restart: 'monitor' }),
       ],
     })
     const wrapper = mount(SettingsView)
@@ -106,7 +230,7 @@ describe('SettingsView', () => {
   it('renders only the groups that have fields', async () => {
     vi.mocked(api.settings).mockResolvedValue({
       values: { review_timeout: '20m0s' },
-      fields: [{ key: 'review_timeout', group: 'review', default: '20m', restart: 'worker', secret: false }],
+      fields: [field({ key: 'review_timeout', group: 'review', kind: 'duration', unit: 'm' })],
     })
     const wrapper = mount(SettingsView)
     await flushPromises()
@@ -117,6 +241,10 @@ describe('SettingsView', () => {
   })
 
   it('shows no restart label when no field of the section needs a restart', async () => {
+    vi.mocked(api.settings).mockResolvedValue({
+      values: {},
+      fields: [field({ key: 'public_url', group: 'general', kind: 'url' })],
+    })
     const wrapper = mount(SettingsView)
     await flushPromises()
 
@@ -133,8 +261,19 @@ describe('SettingsView', () => {
     const plain = wrapper.find('input[name="review_timeout"]')
     expect(secret.attributes('type')).toBe('password')
     expect(secret.attributes('autocomplete')).toBe('new-password')
-    expect(plain.attributes('type')).toBe('text')
+    expect(plain.attributes('type')).toBe('number')
     expect(plain.attributes('autocomplete')).toBe('off')
+  })
+
+  it('reveals a secret only when asked', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    await wrapper.find('[data-field="alert_webhook_url"] .field__reveal').trigger('click')
+
+    const secret = wrapper.find('input[name="alert_webhook_url"]')
+    expect(secret.attributes('type')).toBe('text')
+    expect(wrapper.find('[data-field="alert_webhook_url"] .field__reveal').text()).toBe('Ocultar')
   })
 
   it('offers a retry when the settings fail to load', async () => {
@@ -149,9 +288,9 @@ describe('SettingsView', () => {
     await flushPromises()
 
     expect(api.settings).toHaveBeenCalledTimes(2)
-    expect((wrapper.find('input[name="review_timeout"]').element as HTMLInputElement).value).toBe(
-      '20m0s',
-    )
+    expect(
+      (wrapper.find('input[name="review_timeout"]').element as HTMLInputElement).value,
+    ).toBe('20')
   })
 
   it('renders only the error and one retry control when the load fails', async () => {
@@ -222,7 +361,7 @@ describe('SettingsView', () => {
     const wrapper = mount(SettingsView)
     await flushPromises()
 
-    await wrapper.find('input[name="review_timeout"]').setValue('30m')
+    await wrapper.find('input[name="review_timeout"]').setValue('30')
     await wrapper.find('form[data-group="review"]').trigger('submit')
     await flushPromises()
     expect(wrapper.text()).toContain('Cambios guardados.')
@@ -238,13 +377,13 @@ describe('SettingsView', () => {
     const wrapper = mount(SettingsView)
     await flushPromises()
 
-    await wrapper.find('input[name="review_timeout"]').setValue('30m')
+    await wrapper.find('input[name="review_timeout"]').setValue('30')
     await wrapper.find('form[data-group="review"]').trigger('submit')
     await flushPromises()
 
     expect(wrapper.text()).toContain('review_stale_after')
-    expect((wrapper.find('input[name="review_timeout"]').element as HTMLInputElement).value).toBe(
-      '30m',
-    )
+    expect(
+      (wrapper.find('input[name="review_timeout"]').element as HTMLInputElement).value,
+    ).toBe('30')
   })
 })
