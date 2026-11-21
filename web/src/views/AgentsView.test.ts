@@ -1,5 +1,5 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AgentsView from './AgentsView.vue'
 import type { LLMProfile, Me, QAPolicy, Team } from '../api'
 
@@ -127,6 +127,20 @@ describe('AgentsView', () => {
     mocks.api.teams.mockResolvedValue(teams.map((team) => ({ ...team })))
     mocks.api.getPolicy.mockResolvedValue({ ...policy })
     mocks.api.savePolicy.mockResolvedValue({ ...policy })
+  })
+
+  afterEach(() => {
+    window.history.replaceState({}, '', '/')
+  })
+
+  it('preselecciona el equipo indicado en la URL y carga su política', async () => {
+    window.history.replaceState({}, '', '/agents?team=2#policy')
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    expect(mocks.api.getPolicy).toHaveBeenCalledWith(2)
+    expect((wrapper.get('[data-policy-team]').element as HTMLSelectElement).value).toBe('2')
+    wrapper.unmount()
   })
 
   it('creates a profile, never renders the api key and shows api_key_set', async () => {

@@ -206,4 +206,26 @@ describe('TeamsView', () => {
     expect(wrapper.text()).toContain('No se pudieron cargar los equipos')
     wrapper.unmount()
   })
+
+  it('como admin, cada equipo enlaza a su política con el equipo preseleccionado', async () => {
+    mocks.session.me = admin
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    const link = card(wrapper, 2).get('[data-team-policy]')
+    expect(link.attributes('href')).toBe('/agents?team=2#policy')
+    expect(link.text()).toContain('Política')
+    wrapper.unmount()
+  })
+
+  it('un lead no ve el enlace a la política', async () => {
+    mocks.session.me = leadT1
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    expect(card(wrapper, 1).find('[data-team-policy]').exists()).toBe(false)
+    wrapper.unmount()
+  })
 })
