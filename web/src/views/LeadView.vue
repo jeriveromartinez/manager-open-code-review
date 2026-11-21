@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
-import DotMeter from '../components/DotMeter.vue'
+import DotBar from '../components/DotBar.vue'
+import DotLoader from '../components/DotLoader.vue'
 import DotRing from '../components/DotRing.vue'
 import KpiCard from '../components/KpiCard.vue'
-import RoleSwitch from '../components/RoleSwitch.vue'
 import { api, type PRView, type QAPolicy, type QASummary, type Repository } from '../api'
 import type { DotTone } from '../dots'
 import { isForbidden } from '../errors'
@@ -24,8 +24,6 @@ const loading = ref(true)
 const error = ref<string | null>(null)
 const now = ref(new Date())
 let clock: ReturnType<typeof setInterval> | null = null
-
-const MAX_BAR_DOTS = 40
 
 const thresholdLabels: Record<Threshold, string> = {
   blocker: 'Bloqueante',
@@ -84,7 +82,7 @@ const confirmedInRepos = computed(() =>
 const byRepo = computed(() =>
   (summary.value?.confirmed_by_repo ?? []).map((item, index) => ({
     ...item,
-    segments: [{ count: Math.min(item.count, MAX_BAR_DOTS), tone: (index === 0 ? 'bad' : 'on') as DotTone }],
+    tone: (index === 0 ? 'bad' : 'on') as DotTone,
   })),
 )
 
@@ -173,7 +171,6 @@ onBeforeUnmount(() => {
           Hola, {{ session.me.login }} · {{ prs.length }} PRs abiertos · {{ repos.length }} repositorio{{ repos.length === 1 ? '' : 's' }}
         </p>
       </div>
-      <RoleSwitch />
     </header>
 
     <div v-if="teams.length > 1" class="filter-tabs" role="group" aria-label="Equipo">
@@ -192,11 +189,12 @@ onBeforeUnmount(() => {
     </div>
 
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
-    <p v-else-if="!loading && teams.length === 0" class="empty-state" data-no-teams>
+    <DotLoader v-else-if="loading" />
+    <p v-else-if="teams.length === 0" class="empty-state" data-no-teams>
       No lideras ningún equipo. Un administrador puede asignarte como lead en Equipos.
     </p>
 
-    <template v-else-if="!loading && team">
+    <template v-else-if="team">
       <section class="tile-grid" aria-label="Resumen del equipo">
         <article class="tile" data-tile="state">
           <h2 class="tile__title"><span class="tile__index">01</span>Estado del equipo</h2>
@@ -278,15 +276,20 @@ onBeforeUnmount(() => {
           <h2 class="tile__title">
             <span class="tile__index">04</span>Precisión de la IA · {{ summary?.precision_window_days ?? 7 }} días
           </h2>
-          <div v-if="precision.decided > 0" class="ring-row">
+          <div class="ring-row">
             <DotRing
               :segments="[
                 { value: precision.confirmed, tone: 'on' },
                 { value: precision.falsePositive, tone: 'bad' },
               ]"
-              :label="`${precision.percent}% de hallazgos confirmados en el equipo`"
+              :label="
+                precision.decided > 0
+                  ? `${precision.percent}% de hallazgos confirmados en el equipo`
+                  : 'Acierto sin datos'
+              "
             >
-              <span class="ring-row__figure" data-precision>{{ precision.percent }}%</span>
+              <span v-if="precision.decided > 0" class="ring-row__figure" data-precision>{{ precision.percent }}%</span>
+              <span v-else class="ring-row__figure" aria-hidden="true">—</span>
               <span class="caption">Acierto</span>
             </DotRing>
             <dl class="legend">
@@ -296,11 +299,11 @@ onBeforeUnmount(() => {
               </div>
               <div>
                 <dt class="caption"><span class="dot dot--bad" />Falsos positivos</dt>
-                <dd class="is-late">{{ precision.falsePositive }}</dd>
+                <dd :class="{ 'is-late': precision.falsePositive > 0 }">{{ precision.falsePositive }}</dd>
               </div>
             </dl>
           </div>
-          <p v-else class="tile__empty">Aún no hay hallazgos triados en este periodo.</p>
+          <p v-if="precision.decided === 0" class="tile__empty">Aún no hay hallazgos triados en este periodo.</p>
         </article>
 
         <article class="tile" data-tile="repos-defects">
@@ -311,11 +314,14 @@ onBeforeUnmount(() => {
           <ul v-if="byRepo.length > 0" class="bars tile__foot">
             <li v-for="row in byRepo" :key="row.repo" class="bars__row">
               <span class="caption">{{ row.repo }}</span>
-              <DotMeter :segments="row.segments" :label="`${row.count} defectos confirmados en ${row.repo}`" />
+              <DotBar :count="row.count" :tone="row.tone" :label="`${row.count} defectos confirmados en ${row.repo}`" />
               <span class="bars__count">{{ row.count }}</span>
             </li>
           </ul>
-          <p v-else class="tile__empty">Sin defectos confirmados todavía.</p>
+          <div v-else class="empty-bar tile__foot">
+            <p class="tile__empty">Sin defectos confirmados todavía.</p>
+            <DotBar :count="0" tone="on" />
+          </div>
         </article>
 
         <article class="tile" data-tile="coverage">
@@ -408,8 +414,9 @@ onBeforeUnmount(() => {
 }
 
 .ring-row__figure {
+  font-family: var(--font-display);
   font-size: 40px;
-  font-weight: 800;
+  font-weight: 900;
   line-height: 1;
 }
 
@@ -432,7 +439,8 @@ onBeforeUnmount(() => {
 .legend dd,
 .stats dd {
   margin-top: var(--space-1);
-  font-size: 24px;
+  font-family: var(--font-display);
+  font-size: 26px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
 }
@@ -449,8 +457,9 @@ onBeforeUnmount(() => {
 }
 
 .policy__headline {
-  font-size: 26px;
-  font-weight: 800;
+  font-family: var(--font-display);
+  font-size: 28px;
+  font-weight: 900;
   line-height: 1.1;
   text-transform: uppercase;
 }
@@ -498,11 +507,6 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.bars__row .dots {
-  flex-wrap: nowrap;
-  overflow: hidden;
 }
 
 .bars__count {

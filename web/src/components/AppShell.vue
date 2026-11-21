@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
+import RoleSwitch from './RoleSwitch.vue'
 import { useSessionStore } from '../stores/session'
 
 const session = useSessionStore()
 
-const initial = computed(() => (session.me?.login ?? '?').slice(0, 1).toUpperCase())
+const links = computed(() => {
+  const base = [
+    { to: '/', label: 'Mi cola' },
+    { to: '/repos', label: 'Repositorios' },
+    { to: '/teams', label: 'Equipos' },
+  ]
+  if (!session.me?.is_admin) return base
+  return [...base, { to: '/agents', label: 'Agentes LLM' }, { to: '/settings', label: 'Ajustes' }]
+})
 
 async function logout(): Promise<void> {
   try {
@@ -15,43 +24,40 @@ async function logout(): Promise<void> {
     window.location.assign('/login')
   }
 }
+
+// Every page needs the session for the navigation, not only the ones that read it.
+onMounted(() => {
+  void session.load()
+})
 </script>
 
 <template>
   <div class="shell">
-    <header class="topbar">
-      <RouterLink to="/" class="brand" aria-label="QA Control Center">
-        <span class="brand__mark" aria-hidden="true">QA</span>
-        <span class="brand__name">QA Control Center</span>
-      </RouterLink>
+    <header class="shell__bar">
+      <RouterLink to="/" class="shell__brand" data-brand>QA Control Center</RouterLink>
 
-      <nav class="topbar__nav" aria-label="Principal">
-        <template v-if="session.me">
-          <RouterLink to="/" class="nav-link">Panel</RouterLink>
-          <RouterLink to="/repos" class="nav-link">Repositorios</RouterLink>
-          <RouterLink to="/teams" class="nav-link">Equipos</RouterLink>
-          <RouterLink v-if="session.me?.is_admin" to="/agents" class="nav-link">
-            Agentes LLM
+      <div v-if="session.me" class="shell__aside">
+        <RoleSwitch />
+        <nav class="shell__nav" aria-label="Principal">
+          <RouterLink
+            v-for="link in links"
+            :key="link.to"
+            :to="link.to"
+            class="pill-link"
+            :data-nav="link.to"
+          >
+            {{ link.label }}
           </RouterLink>
-          <RouterLink v-if="session.me?.is_admin" to="/settings" class="nav-link">
-            Ajustes
-          </RouterLink>
-        </template>
-        <slot name="nav" />
-      </nav>
-
-      <div class="topbar__user">
-        <img
-          v-if="session.me?.avatar_url"
-          class="avatar"
-          :src="session.me.avatar_url"
-          :alt="session.me.login"
-          width="28"
-          height="28"
-        />
-        <span v-else-if="session.me" class="avatar avatar--fallback" aria-hidden="true">{{ initial }}</span>
-        <span v-if="session.me" class="topbar__login">{{ session.me.login }}</span>
-        <button v-if="session.me" type="button" class="button button--ghost" @click="logout">Salir</button>
+          <button
+            type="button"
+            class="pill-link"
+            data-logout
+            :aria-label="`Salir (${session.me.login})`"
+            @click="logout"
+          >
+            Salir
+          </button>
+        </nav>
       </div>
     </header>
 
@@ -60,28 +66,3 @@ async function logout(): Promise<void> {
     </main>
   </div>
 </template>
-
-<style scoped>
-.nav-link {
-  padding: 7px 10px;
-  border-bottom: var(--rule-heavy) solid transparent;
-  color: var(--text-muted);
-  font-size: 14px;
-  font-weight: 500;
-  text-decoration: none;
-  white-space: nowrap;
-  transition:
-    color var(--dur-micro) ease,
-    border-color var(--dur-micro) ease;
-}
-
-.nav-link:hover {
-  color: var(--text);
-  border-bottom-color: var(--border);
-}
-
-.nav-link.router-link-active {
-  color: var(--text);
-  border-bottom-color: var(--text);
-}
-</style>

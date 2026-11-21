@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
+import DotBar from '../components/DotBar.vue'
 import DotMeter from '../components/DotMeter.vue'
 import DotRing from '../components/DotRing.vue'
 import FilterTabs from '../components/FilterTabs.vue'
 import KpiCard from '../components/KpiCard.vue'
 import PrCard from '../components/PrCard.vue'
-import RoleSwitch from '../components/RoleSwitch.vue'
 import { api, type Readiness } from '../api'
 import type { DotTone } from '../dots'
 import { isForbidden } from '../errors'
@@ -24,7 +24,6 @@ const retryError = ref<string | null>(null)
 let clock: ReturnType<typeof setInterval> | null = null
 
 const SLA_DOTS = 8
-const MAX_BAR_DOTS = 40
 
 const readinessLinkLabels: Record<string, string> = {
   '/repos': 'Ir a repositorios',
@@ -84,8 +83,17 @@ const waitingRows = computed(() =>
 )
 
 function bar(label: string, count: number, tone: DotTone) {
-  return { label, count, tone, segments: [{ count: Math.min(count, MAX_BAR_DOTS), tone }] }
+  return { label, count, tone }
 }
+
+const queueSummary = computed(() => {
+  const names = (session.me?.teams ?? []).map((team) => team.name)
+  const own = names.length > 1 ? `${names.slice(0, -1).join(', ')} y ${names[names.length - 1]}` : names[0]
+  const teams = session.me?.is_admin ? 'Todos los equipos' : own
+  const count = prsStore.prs.length
+  const open = `${count} ${count === 1 ? 'PR abierto' : 'PRs abiertos'}`
+  return [teams, open, 'ordenados por tiempo de espera'].filter(Boolean).join(' · ')
+})
 
 const untriaged = computed(() => {
   const counts = prsStore.summary?.untriaged
@@ -166,19 +174,14 @@ onBeforeUnmount(() => {
       <div class="dashboard__title">
         <h1 class="page-title">Mi cola de QA</h1>
         <p class="page-subtitle">
-          {{ greeting }}<template v-if="slaSeconds > 0"> · plazo de validación {{ slaLabel }}</template>
+          <span
+            class="live"
+            :class="{ 'live--on': prsStore.connected }"
+            data-service-badge
+            :title="prsStore.connected ? 'Eventos en vivo conectados' : 'Sin conexión con el servicio de eventos'"
+          ><span class="visually-hidden">{{ prsStore.connected ? 'En vivo' : 'Reconectando…' }}</span></span>
+          <span>{{ greeting }}<template v-if="slaSeconds > 0"> · plazo de validación {{ slaLabel }}</template></span>
         </p>
-      </div>
-      <div class="dashboard__aside">
-        <RoleSwitch />
-        <span
-          class="badge"
-          :class="prsStore.connected ? 'badge--ok' : 'badge--muted'"
-          data-service-badge
-          :title="prsStore.connected ? 'Eventos en vivo conectados' : 'Sin conexión con el servicio de eventos'"
-        >
-          {{ prsStore.connected ? 'En vivo' : 'Reconectando…' }}
-        </span>
       </div>
     </header>
 
@@ -226,7 +229,10 @@ onBeforeUnmount(() => {
             />
           </li>
         </ul>
-        <p v-else class="tile__empty">Nada esperando validación.</p>
+        <div v-else class="empty-bar">
+          <p class="tile__empty">Nada esperando validación.</p>
+          <DotBar :count="0" tone="on" />
+        </div>
         <RouterLink
           v-if="oldestReady.length > 0"
           class="button button--light tile__foot"
@@ -244,7 +250,7 @@ onBeforeUnmount(() => {
         <ul class="bars tile__foot">
           <li v-for="row in untriaged.rows" :key="row.label" class="bars__row">
             <span class="caption">{{ row.label }}</span>
-            <DotMeter :segments="row.segments" :label="`${row.count} ${row.label.toLowerCase()} sin triar`" />
+            <DotBar :count="row.count" :tone="row.tone" :label="`${row.count} ${row.label.toLowerCase()} sin triar`" />
             <span class="bars__count" :class="{ 'is-late': row.tone === 'bad' && row.count > 0 }">{{ row.count }}</span>
           </li>
         </ul>
@@ -255,15 +261,20 @@ onBeforeUnmount(() => {
           <span class="tile__index">03</span>Precisión de la IA ·
           {{ prsStore.summary?.precision_window_days ?? 7 }} días
         </h2>
-        <div v-if="precision.decided > 0" class="ring-row">
+        <div class="ring-row">
           <DotRing
             :segments="[
               { value: precision.confirmed, tone: 'on' },
               { value: precision.falsePositive, tone: 'bad' },
             ]"
-            :label="`${precision.percent}% de hallazgos confirmados: ${precision.confirmed} confirmados, ${precision.falsePositive} falsos positivos`"
+            :label="
+              precision.decided > 0
+                ? `${precision.percent}% de hallazgos confirmados: ${precision.confirmed} confirmados, ${precision.falsePositive} falsos positivos`
+                : 'Acierto sin datos'
+            "
           >
-            <span class="ring-row__figure" data-precision>{{ precision.percent }}%</span>
+            <span v-if="precision.decided > 0" class="ring-row__figure" data-precision>{{ precision.percent }}%</span>
+            <span v-else class="ring-row__figure" aria-hidden="true">—</span>
             <span class="caption">Acierto</span>
           </DotRing>
           <dl class="legend">
@@ -273,11 +284,11 @@ onBeforeUnmount(() => {
             </div>
             <div>
               <dt class="caption"><span class="dot dot--bad" />Falsos positivos</dt>
-              <dd class="is-late">{{ precision.falsePositive }}</dd>
+              <dd :class="{ 'is-late': precision.falsePositive > 0 }">{{ precision.falsePositive }}</dd>
             </div>
           </dl>
         </div>
-        <p v-else class="tile__empty">Aún no hay hallazgos triados en este periodo.</p>
+        <p v-if="precision.decided === 0" class="tile__empty">Aún no hay hallazgos triados en este periodo.</p>
       </article>
 
       <article
@@ -286,7 +297,11 @@ onBeforeUnmount(() => {
         data-tile="inconclusive"
       >
         <h2 class="tile__title"><span class="tile__index">04</span>Inconclusos</h2>
-        <KpiCard label="La IA no terminó" tone="bad" :value="prsStore.summary?.inconclusive ?? 0" />
+        <KpiCard
+          label="La IA no terminó"
+          :tone="(prsStore.summary?.inconclusive ?? 0) > 0 ? 'bad' : 'default'"
+          :value="prsStore.summary?.inconclusive ?? 0"
+        />
         <ul v-if="inconclusive.length > 0" class="rows tile__foot">
           <li v-for="pr in inconclusive" :key="pr.id" class="rows__item">
             <RouterLink :to="`/prs/${pr.id}`" class="rows__link">{{ pr.repo }} #{{ pr.number }}</RouterLink>
@@ -312,6 +327,16 @@ onBeforeUnmount(() => {
           <line x1="34" y1="46" x2="40" y2="46" class="agent__eye" stroke-width="4" stroke-linecap="round" />
           <line x1="56" y1="46" x2="62" y2="46" class="agent__eye" stroke-width="4" stroke-linecap="round" />
         </svg>
+        <svg class="agent__pulse" width="100%" height="36" viewBox="0 0 280 40" aria-hidden="true" data-agent-pulse>
+          <template v-if="running > 0">
+            <polyline
+              points="0,20 64,20 70,15 76,25 82,8 88,32 94,4 100,36 106,10 112,29 118,17 124,22 176,20 182,13 188,27 194,20 280,20"
+              class="agent__pulse-track"
+            />
+            <polyline points="76,25 82,8 88,32 94,4 100,36 106,10 112,29" class="agent__pulse-live" />
+          </template>
+          <polyline v-else points="0,20 280,20" class="agent__pulse-track" />
+        </svg>
         <dl class="stats tile__foot">
           <div>
             <dt class="caption">En curso</dt>
@@ -332,11 +357,14 @@ onBeforeUnmount(() => {
         <ul v-if="categories.length > 0" class="bars tile__foot">
           <li v-for="row in categories" :key="row.label" class="bars__row">
             <span class="caption">{{ row.label }}</span>
-            <DotMeter :segments="row.segments" :label="`${row.count} defectos de ${row.label}`" />
+            <DotBar :count="row.count" :tone="row.tone" :label="`${row.count} defectos de ${row.label}`" />
             <span class="bars__count">{{ row.count }}</span>
           </li>
         </ul>
-        <p v-else class="tile__empty">Sin defectos confirmados todavía.</p>
+        <div v-else class="empty-bar tile__foot">
+          <p class="tile__empty">Sin defectos confirmados todavía.</p>
+          <DotBar :count="0" tone="on" />
+        </div>
       </article>
     </section>
 
@@ -344,9 +372,7 @@ onBeforeUnmount(() => {
       <div class="pr-section__head queue__head">
         <div>
           <h2 id="queue-title" class="pr-section__title">PRs de mis equipos</h2>
-          <p class="page-subtitle">
-            {{ prsStore.prs.length }} PRs abiertos · {{ prsStore.repoCount }} repositorio{{ prsStore.repoCount === 1 ? '' : 's' }}
-          </p>
+          <p class="page-subtitle" data-queue-summary>{{ queueSummary }}</p>
         </div>
         <FilterTabs :model-value="prsStore.bucket" :counts="prsStore.counts" @update:model-value="changeBucket" />
       </div>
@@ -369,13 +395,6 @@ onBeforeUnmount(() => {
 
 .dashboard__title {
   min-width: 0;
-}
-
-.dashboard__aside {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
 }
 
 .readiness {
@@ -468,11 +487,6 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.bars__row .dots {
-  flex-wrap: nowrap;
-  overflow: hidden;
-}
-
 .bars__count {
   text-align: right;
   font-size: 12px;
@@ -509,8 +523,9 @@ onBeforeUnmount(() => {
 }
 
 .ring-row__figure {
+  font-family: var(--font-display);
   font-size: 40px;
-  font-weight: 800;
+  font-weight: 900;
   line-height: 1;
 }
 
@@ -528,14 +543,16 @@ onBeforeUnmount(() => {
 .legend dd,
 .stats dd {
   margin-top: var(--space-1);
-  font-size: 24px;
+  font-family: var(--font-display);
+  font-size: 26px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
 }
 
 .agent__state {
-  font-size: 30px;
-  font-weight: 800;
+  font-family: var(--font-display);
+  font-size: 34px;
+  font-weight: 900;
   line-height: 1;
   text-transform: uppercase;
 }
@@ -546,6 +563,21 @@ onBeforeUnmount(() => {
 }
 
 .agent__eye {
+  stroke: var(--accent);
+}
+
+.agent__pulse polyline {
+  fill: none;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 0 6;
+}
+
+.agent__pulse-track {
+  stroke: var(--dot-dim);
+}
+
+.agent__pulse-live {
   stroke: var(--accent);
 }
 

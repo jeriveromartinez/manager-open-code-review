@@ -311,22 +311,90 @@ describe('DashboardView', () => {
     wrapper.unmount()
   })
 
-  it('offers the team lead view only to leads and admins', async () => {
-    const admin = mountDashboard()
-    await flushPromises()
-    expect(admin.find('[data-role-lead]').exists()).toBe(true)
-    admin.unmount()
-
+  it('names the teams in the queue heading instead of counting repos', async () => {
     mocks.api.me.mockResolvedValue({
       id: 2,
       login: 'mvega',
       avatar_url: '',
       is_admin: false,
-      teams: [{ id: 3, name: 'Pagos', role: 'qa' }],
+      teams: [
+        { id: 3, name: 'Pagos', role: 'qa' },
+        { id: 4, name: 'Web', role: 'qa' },
+      ],
     })
-    const qaOnly = mountDashboard()
+    const wrapper = mountDashboard()
     await flushPromises()
-    expect(qaOnly.find('[data-role-lead]').exists()).toBe(false)
-    qaOnly.unmount()
+
+    expect(wrapper.get('[data-queue-summary]').text()).toBe('Pagos y Web · 4 PRs abiertos · ordenados por tiempo de espera')
+    wrapper.unmount()
+  })
+
+  it('does not narrow the heading to an admin own teams, since an admin sees every team', async () => {
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    expect(wrapper.get('[data-queue-summary]').text()).toBe(
+      'Todos los equipos · 4 PRs abiertos · ordenados por tiempo de espera',
+    )
+    wrapper.unmount()
+  })
+
+  it('keeps the dot figures on screen when there is nothing to count', async () => {
+    mocks.api.qaSummary.mockResolvedValue({
+      ...summary,
+      ready_for_human: 0,
+      untriaged: { blocker: 0, major: 0, minor: 0, nit: 0 },
+      confirmed: 0,
+      false_positive: 0,
+      categories: [],
+      runs_running: 0,
+    })
+    mocks.api.prs.mockResolvedValue([])
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    const ring = tile(wrapper, 'precision').get('.dot-ring')
+    const dots = ring.findAll('.dot')
+    expect(dots.length).toBeGreaterThan(0)
+    expect(dots.every((dot) => dot.classes().includes('dot--off'))).toBe(true)
+    expect(tile(wrapper, 'triage').findAll('.dot-bar')).toHaveLength(4)
+    expect(tile(wrapper, 'ready').find('.dot-bar').exists()).toBe(true)
+    expect(tile(wrapper, 'categories').find('.dot-bar').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('only paints the inconclusive figure orange when there is something to look at', async () => {
+    mocks.api.qaSummary.mockResolvedValue({ ...summary, inconclusive: 0 })
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    expect(tile(wrapper, 'inconclusive').get('.kpi-card').classes()).toContain('kpi-card--default')
+    wrapper.unmount()
+  })
+
+  it('draws the agent pulse only while a review runs', async () => {
+    const busy = mountDashboard()
+    await flushPromises()
+    expect(busy.get('[data-agent-pulse]').find('.agent__pulse-live').exists()).toBe(true)
+    busy.unmount()
+
+    mocks.api.qaSummary.mockResolvedValue({ ...summary, runs_running: 0 })
+    const idle = mountDashboard()
+    await flushPromises()
+    expect(idle.get('[data-agent-pulse]').find('.agent__pulse-live').exists()).toBe(false)
+    idle.unmount()
+  })
+
+  it('shows the live connection next to the greeting', async () => {
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    const live = wrapper.get('[data-service-badge]')
+    expect(live.text()).toBe('Reconectando…')
+    mocks.handlers.onState!(true)
+    await flushPromises()
+    expect(live.text()).toBe('En vivo')
+    expect(live.classes()).toContain('live--on')
+    wrapper.unmount()
   })
 })
