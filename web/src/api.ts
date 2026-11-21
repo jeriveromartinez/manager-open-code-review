@@ -341,6 +341,8 @@ export const api = {
     request<void>(`/api/teams/${teamId}/members/${userId}`, { method: 'DELETE' }),
   users: () => request<User[]>('/api/users'),
   installations: () => request<Installation[]>('/api/installations'),
+  syncInstallation: (id: number) =>
+    request<{ status: string }>(`/api/installations/${id}/sync`, { method: 'POST' }),
   setupStatus: () => request<SetupStatus>('/api/setup/status'),
   setupManifest: (body: SetupManifestRequest) =>
     request<SetupManifest>('/api/setup/manifest', { method: 'POST', body }),
