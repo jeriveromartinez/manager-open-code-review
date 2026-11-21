@@ -135,7 +135,7 @@ func TestAgentErrorDetailStructured(t *testing.T) {
 			name: "unknown error with ref",
 			raw: `{"type":"error","error":{"name":"UnknownError","data":` +
 				`{"message":"Unexpected server error. Check server logs for details.","ref":"err_abc123"}}}`,
-			want: []string{"UnknownError", "no expuso", "ref", "err_abc123", "API key"},
+			want: []string{"UnknownError", "Unexpected server error", "ref", "err_abc123", "API key"},
 		},
 		{
 			name: "network dns failure",
@@ -277,6 +277,46 @@ func TestAgentConfigDeniesTools(t *testing.T) {
 		cfg := readAgentConfig(t, home)
 		if got := cfg.Provider["nvidia"].Options.BaseURL; got != "" {
 			t.Fatalf("baseURL = %q, want empty when profile has none", got)
+		}
+	})
+}
+
+// TestAgentConfigPlatformBaseURL covers providers that OpenCode 1.19 does not
+// know from its catalog (CommandCode, for example). Without options.baseURL the
+// engine builds "undefined/chat/completions" and the health check only reports a
+// generic UnknownError, so the fixed platform endpoint must be written.
+func TestAgentConfigPlatformBaseURL(t *testing.T) {
+	t.Run("platform provider gets its fixed endpoint", func(t *testing.T) {
+		home := t.TempDir()
+		a := testAgent(t, home)
+		a.Profile.Provider = "commandcode"
+		a.Profile.Model = "deepseek/deepseek-v4.1-flash"
+
+		if _, _, err := a.Run(context.Background(), "__FAKE_EVENTS__", nil); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		cfg := readAgentConfig(t, home)
+		want := "https://api.commandcode.ai/provider/v1"
+		if got := cfg.Provider["commandcode"].Options.BaseURL; got != want {
+			t.Fatalf("baseURL = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("explicit profile base URL wins", func(t *testing.T) {
+		home := t.TempDir()
+		a := testAgent(t, home)
+		a.Profile.Provider = "commandcode"
+		a.Profile.Model = "deepseek/deepseek-v4.1-flash"
+		a.Profile.BaseURL = stringPtr("https://gateway.example.test/v1")
+
+		if _, _, err := a.Run(context.Background(), "__FAKE_EVENTS__", nil); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+
+		cfg := readAgentConfig(t, home)
+		if got := cfg.Provider["commandcode"].Options.BaseURL; got != "https://gateway.example.test/v1" {
+			t.Fatalf("baseURL = %q, want the profile override", got)
 		}
 	})
 }
