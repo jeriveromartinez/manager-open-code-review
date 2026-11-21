@@ -54,8 +54,12 @@ const tab = ref<ProfileTab>('platform')
 const modelSelect = ref('')
 const modelOther = ref('')
 
+function platformFor(provider: string): LLMPlatform | undefined {
+  return llmPlatforms.find((platform) => platform.id === provider)
+}
+
 const selectedPlatform = computed<LLMPlatform | null>(
-  () => llmPlatforms.find((platform) => platform.id === form.value.provider) ?? null,
+  () => platformFor(form.value.provider) ?? null,
 )
 const modelIsCustom = computed(() => modelSelect.value === CUSTOM_MODEL)
 const platformModelOptions = computed(() => selectedPlatform.value?.models ?? [])
@@ -160,14 +164,17 @@ function selectPlatform(platform: LLMPlatform): void {
   modelOther.value = ''
 }
 
-function setTab(next: ProfileTab): void {
-  tab.value = next
-  if (next !== 'platform') return
+function syncPlatformFromForm(): void {
   const platform = selectedPlatform.value
   if (platform === null) return
   const known = platform.models.some((model) => model.id === form.value.model)
   modelSelect.value = known ? form.value.model : CUSTOM_MODEL
   modelOther.value = known ? '' : form.value.model
+}
+
+function setTab(next: ProfileTab): void {
+  tab.value = next
+  if (next === 'platform') syncPlatformFromForm()
 }
 
 function onModelSelectChange(event: Event): void {
@@ -216,9 +223,15 @@ function openEdit(profile: LLMProfile): void {
     enabled: profile.enabled,
   }
   formError.value = null
-  tab.value = 'custom'
   modelSelect.value = ''
   modelOther.value = ''
+  const platform = platformFor(profile.provider)
+  if (platform && !profile.base_url) {
+    tab.value = 'platform'
+    syncPlatformFromForm()
+  } else {
+    tab.value = 'custom'
+  }
   modalOpen.value = true
 }
 
