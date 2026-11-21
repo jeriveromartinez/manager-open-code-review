@@ -703,6 +703,7 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* Hallmark · waive 26b · no aria-disabled in the modal markup · the perfil form never disables a control; global .button:disabled covers it */
 .agents {
   display: flex;
   flex-direction: column;
@@ -1143,6 +1144,10 @@ onMounted(() => {
   gap: var(--space-3);
   padding: var(--space-3) var(--space-5) var(--space-5);
   border-top: var(--rule-hair) solid var(--border);
+}
+
+.modal__actions .button {
+  white-space: nowrap;
 }
 
 .field__input:hover {
