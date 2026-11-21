@@ -112,11 +112,15 @@ El cuerpo del webhook es un JSON pequeño y estable, sin envoltorio de ningún p
 
 `app` y `worker` tienen `healthcheck` en compose, de modo que `docker compose ps` refleja la realidad. La imagen del worker es `node:24-trixie-slim` (sin `curl` ni `wget`), así que usa `node -e 'fetch(...)'`; la de `app` es `debian:bookworm-slim` con solo `ca-certificates` y `git`, así que el propio binario hace de cliente con `qa healthcheck` (0 si `/healthz` responde 200, 1 en cualquier otro caso).
 
+`GET /healthz` de la app refleja el estado de PostgreSQL: devuelve 200 con `{"status":"ok"}` solo si la base responde, y 503 con `{"status":"degraded"}` cuando no. Si el contenedor de PostgreSQL desaparece (no solo se para), los datos siguen en el volumen y el procedimiento de recuperación está en [Si PostgreSQL desaparece](docs/install.md#si-postgresql-desaparece).
+
 El check `QA Control Center` en `in_progress` más de `review_stale_after` lo cubre el watchdog, no este monitor; conviene vigilarlo desde fuera.
 
 ## Revisión automática (Fase 2)
 
 Se revisa un PR cuando no es borrador ni de un fork, su repositorio está habilitado y tiene equipo asignado, y la política de ese equipo apunta a un perfil LLM activo. Los eventos `opened`, `synchronize`, `reopened` y `ready_for_review` y la reconciliación encolan la revisión del SHA actual; un push nuevo marca `superseded` el run anterior.
+
+El Dashboard avisa a los administradores de los eslabones que faltan para que se ejecute una revisión —sin equipos, sin perfiles LLM, repositorios habilitados sin equipo, equipos sin política y perfiles sin salud reciente— y cada aviso enlaza con la pantalla donde se resuelve. Un PR en `pending` indica además si la revisión está programada o bloqueada, y en ese caso el motivo concreto (borrador, fork, sin equipo, sin política o perfil deshabilitado).
 
 ### Perfiles LLM
 

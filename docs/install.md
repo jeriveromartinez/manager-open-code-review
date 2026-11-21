@@ -200,6 +200,54 @@ Dos comprobaciones externas (o el monitor que ya uses) cubren el issue:
 
 `docker compose ps` distingue cuál de las dos piezas falla cuando alguna alerta salta.
 
+## Si PostgreSQL desaparece
+
+`restart: unless-stopped` reinicia un contenedor **parado**, pero no recrea uno **eliminado**. Tras un `docker rm -f deploy-postgres-1`, un `docker compose down` o una limpieza externa, el volumen `deploy_postgres-data` sigue intacto pero el contenedor ya no existe. El stack puede parecer «arriba» (la app y el worker siguen corriendo) mientras solo se puede llegar al login, y `restart` no lo arregla porque no hay nada que reiniciar.
+
+Contenedor y datos son cosas distintas: el **volumen sobrevive**, el **contenedor no**. No ejecutes `down -v` durante esta recuperación.
+
+### Diagnóstico
+
+```sh
+# postgres no aparece, o aparece exited/created
+docker compose -f deploy/docker-compose.yml ps
+
+# histórico del contenedor: muestra el stop/destroy si se eliminó
+docker events --filter container=deploy-postgres-1
+
+# «lookup postgres ... no such host»: el DNS del servicio ya no existe
+docker compose -f deploy/docker-compose.yml logs app | grep -i "lookup postgres"
+
+# 503 = la app está viva pero la base no responde (degradada)
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/healthz
+```
+
+### Recuperación
+
+```sh
+# Recrea solo el contenedor; monta el mismo volumen con los datos.
+docker compose -f deploy/docker-compose.yml up -d postgres
+
+# Espera a que el healthcheck lo marque healthy.
+docker compose -f deploy/docker-compose.yml ps postgres
+
+# Debe volver a 200 con {"status":"ok"}.
+curl -s localhost:8080/healthz
+```
+
+PostgreSQL ejecuta la recuperación automática sobre el volumen al arrancar (`pg_wal`/crash recovery) y queda operativo sin restaurar el backup. `app` y `worker` usan un pool de pgx que reintenta la conexión, así que se reconectan solos en cuanto la base está healthy, sin reiniciarlos. Si tras unos minutos siguen dando error, reinícialos:
+
+```sh
+docker compose -f deploy/docker-compose.yml restart app worker
+```
+
+### Prevención
+
+- Vigila el stack desde **fuera**: `/healthz` cada minuto (503 = base caída, 502 = app caída) y `docker compose ps` para ver qué pieza falta.
+- No coloques PostgreSQL en un host compartido con contenedores pesados sin límite: un OOM del kernel puede matar el proceso de la base. No pongas un `mem_limit` arbitrario a `postgres` para «protegerlo», porque el propio límite puede causar el OOM; aplica la protección en el host y reserva memoria para la base.
+- Recuerda que `restart: unless-stopped` no recrea un contenedor destruido: solo reinicia uno que todavía existe.
+- El `worker` declara `depends_on: app: service_healthy`, y ese healthcheck ahora falla cuando PostgreSQL no responde. Un `up` en frío espera a una base operativa y a las migraciones, no solo a que el proceso de la app escuche.
+
 ## Comandos útiles
 
 ```sh
