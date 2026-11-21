@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, type Finding, type PRDetail } from '../api'
+import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { isConflict, isForbidden } from '../errors'
 import { prStatusLabel, statusLabel } from '../status'
 
@@ -112,8 +113,9 @@ function runTone(status: string): string {
   return 'badge--muted'
 }
 
-async function load(): Promise<void> {
-  loading.value = true
+// A silent load keeps what is on screen, including an open triage dialog.
+async function load({ silent = false } = {}): Promise<void> {
+  if (!silent) loading.value = true
   error.value = null
   try {
     detail.value = await api.prDetail(prId.value)
@@ -201,6 +203,12 @@ async function applyAction(): Promise<void> {
     reason.value = ''
   }
 }
+
+useLiveRefresh(
+  ['pr.updated'],
+  () => load({ silent: true }),
+  (event) => event.id === String(prId.value),
+)
 
 onMounted(() => {
   void load()

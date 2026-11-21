@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api, type Installation, type Repository, type SetupStatus, type Team } from '../api'
+import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { useSessionStore } from '../stores/session'
 
 const session = useSessionStore()
@@ -25,8 +26,8 @@ function teamName(id: number | null): string {
   return teams.value.find((team) => team.id === id)?.name ?? 'Sin equipo'
 }
 
-async function load(): Promise<void> {
-  loading.value = true
+async function load({ silent = false } = {}): Promise<void> {
+  if (!silent) loading.value = true
   error.value = null
   try {
     await session.load()
@@ -128,6 +129,8 @@ async function setTeam(repo: Repository, event: Event): Promise<void> {
     error.value = 'No se pudo asignar el equipo'
   }
 }
+
+useLiveRefresh(['repo.updated', 'team.updated'], () => load({ silent: true }))
 
 onMounted(() => {
   void load()

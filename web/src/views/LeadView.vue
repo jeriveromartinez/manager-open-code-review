@@ -5,6 +5,7 @@ import DotBar from '../components/DotBar.vue'
 import DotLoader from '../components/DotLoader.vue'
 import DotRing from '../components/DotRing.vue'
 import KpiCard from '../components/KpiCard.vue'
+import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { api, type PRView, type QAPolicy, type QASummary, type Repository } from '../api'
 import type { DotTone } from '../dots'
 import { isForbidden } from '../errors'
@@ -103,11 +104,11 @@ async function loadTeams(): Promise<void> {
 // belongs to a team that is no longer on screen and is dropped.
 let latestLoad = 0
 
-async function loadTeam(): Promise<void> {
+async function loadTeam({ silent = false } = {}): Promise<void> {
   const id = teamId.value
   if (id === null) return
   const load = ++latestLoad
-  loading.value = true
+  if (!silent) loading.value = true
   error.value = null
   try {
     const [allPrs, nextSummary, nextPolicy, allRepos] = await Promise.all([
@@ -134,6 +135,8 @@ async function loadTeam(): Promise<void> {
     if (load === latestLoad) loading.value = false
   }
 }
+
+useLiveRefresh(['pr.updated', 'repo.updated', 'team.updated'], () => loadTeam({ silent: true }))
 
 async function selectTeam(id: number): Promise<void> {
   teamId.value = id

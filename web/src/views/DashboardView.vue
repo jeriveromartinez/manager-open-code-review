@@ -6,6 +6,7 @@ import DotMeter from '../components/DotMeter.vue'
 import DotRing from '../components/DotRing.vue'
 import FilterTabs from '../components/FilterTabs.vue'
 import KpiCard from '../components/KpiCard.vue'
+import { useLiveRefresh } from '../composables/useLiveRefresh'
 import PrCard from '../components/PrCard.vue'
 import { api, type Readiness } from '../api'
 import type { DotTone } from '../dots'
@@ -153,17 +154,17 @@ function changeBucket(next: BucketFilter): void {
   prsStore.setBucket(next)
 }
 
+useLiveRefresh(['pr.updated', 'repo.updated'], () => prsStore.refresh())
+
 onMounted(() => {
   void loadReadiness()
   void prsStore.refresh()
-  prsStore.start()
   clock = setInterval(() => {
     now.value = new Date()
   }, 60_000)
 })
 
 onBeforeUnmount(() => {
-  prsStore.stop()
   if (clock !== null) clearInterval(clock)
 })
 </script>
@@ -174,12 +175,6 @@ onBeforeUnmount(() => {
       <div class="dashboard__title">
         <h1 class="page-title">Mi cola de QA</h1>
         <p class="page-subtitle">
-          <span
-            class="live"
-            :class="{ 'live--on': prsStore.connected }"
-            data-service-badge
-            :title="prsStore.connected ? 'Eventos en vivo conectados' : 'Sin conexión con el servicio de eventos'"
-          ><span class="visually-hidden">{{ prsStore.connected ? 'En vivo' : 'Reconectando…' }}</span></span>
           <span>{{ greeting }}<template v-if="slaSeconds > 0"> · plazo de validación {{ slaLabel }}</template></span>
         </p>
       </div>

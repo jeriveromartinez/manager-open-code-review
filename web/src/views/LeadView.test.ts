@@ -17,6 +17,14 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../api', () => ({ api: mocks.api }))
+type LiveRegistration = { types: string[]; reload: () => unknown; filter?: (event: { type: string; id: string }) => boolean }
+const live = vi.hoisted(() => ({ registrations: [] as LiveRegistration[] }))
+vi.mock('../composables/useLiveRefresh', () => ({
+  useLiveRefresh: (types: string[], reload: () => unknown, filter?: LiveRegistration['filter']) => {
+    live.registrations.push({ types, reload, filter })
+  },
+}))
+
 
 const hoursAgo = (hours: number) => new Date(Date.now() - hours * 3600_000).toISOString()
 
@@ -134,6 +142,7 @@ function mountLead(): VueWrapper {
 describe('LeadView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    live.registrations.length = 0
     mocks.api.me.mockResolvedValue({
       id: 7,
       login: 'lmartin',
@@ -255,6 +264,23 @@ describe('LeadView', () => {
 
     expect(wrapper.find('[data-no-teams]').exists()).toBe(true)
     expect(mocks.api.qaSummary).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('refreshes the team quietly when its PRs, repos or team change', async () => {
+    const wrapper = mountLead()
+    await flushPromises()
+
+    const [registration] = live.registrations
+    expect(registration.types).toEqual(['pr.updated', 'repo.updated', 'team.updated'])
+    mocks.api.qaSummary.mockClear()
+    const pending = registration.reload()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    await pending
+    await flushPromises()
+
+    expect(mocks.api.qaSummary).toHaveBeenCalledWith(3)
     wrapper.unmount()
   })
 

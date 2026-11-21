@@ -21,6 +21,15 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../api', () => ({ api: mocks.api }))
+type LiveEvent = { type: string; id: string }
+const live = vi.hoisted(() => ({ reload: null as ((events: LiveEvent[]) => unknown) | null, types: [] as string[] }))
+vi.mock('../composables/useLiveRefresh', () => ({
+  useLiveRefresh: (types: string[], reload: (events: LiveEvent[]) => unknown) => {
+    live.types = types
+    live.reload = reload
+  },
+}))
+
 vi.mock('../stores/session', () => ({
   useSessionStore: () => mocks.session,
 }))
@@ -185,6 +194,59 @@ describe('AgentsView', () => {
 
     expect(mocks.api.getPolicy).toHaveBeenCalledWith(2)
     expect((wrapper.get('[data-policy-team]').element as HTMLSelectElement).value).toBe('2')
+    wrapper.unmount()
+  })
+
+  it('refreshes the profile list when a profile changes elsewhere', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    expect(live.types).toEqual(['llm_profile.updated', 'team.updated'])
+    mocks.api.llmProfiles.mockResolvedValue(profiles.map((profile) => ({ ...profile, name: `${profile.name} v2` })))
+    await live.reload!([{ type: 'llm_profile.updated', id: '7' }])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(`${profiles[0].name} v2`)
+    wrapper.unmount()
+  })
+
+  it('warns inside the dialog when the profile being edited changes elsewhere', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-profile-row="11"] [data-edit-profile]').trigger('click')
+    expect(wrapper.find('[data-stale-profile]').exists()).toBe(false)
+    await live.reload!([{ type: 'llm_profile.updated', id: '7' }])
+    await flushPromises()
+    expect(wrapper.find('[data-stale-profile]').exists()).toBe(false)
+
+    await live.reload!([{ type: 'llm_profile.updated', id: '11' }])
+    await flushPromises()
+    expect(wrapper.get('[data-stale-profile]').text()).toContain('Otra persona cambió este perfil')
+    wrapper.unmount()
+  })
+
+  it('reloads a clean policy and protects one with unsaved changes', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+    const checkbox = () => wrapper.get('[data-policy-require-green-ci]').element as HTMLInputElement
+
+    mocks.api.getPolicy.mockResolvedValue({ ...policy, require_green_ci: true })
+    await live.reload!([{ type: 'team.updated', id: '1' }])
+    await flushPromises()
+    expect(checkbox().checked).toBe(true)
+
+    await wrapper.get('[data-policy-require-green-ci]').setValue(false)
+    mocks.api.getPolicy.mockResolvedValue({ ...policy, require_green_ci: true, max_passes: 2 })
+    await live.reload!([{ type: 'team.updated', id: '1' }])
+    await flushPromises()
+    expect(checkbox().checked).toBe(false)
+    expect(wrapper.get('[data-stale-policy]').text()).toContain('Otra persona cambió esta política')
+
+    await wrapper.get('[data-stale-policy] button').trigger('click')
+    await flushPromises()
+    expect(checkbox().checked).toBe(true)
+    expect(wrapper.find('[data-stale-policy]').exists()).toBe(false)
     wrapper.unmount()
   })
 

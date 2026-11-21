@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import RoleSwitch from './RoleSwitch.vue'
+import { useLiveStore } from '../stores/live'
 import { useSessionStore } from '../stores/session'
 
 const session = useSessionStore()
+const live = useLiveStore()
 
 const links = computed(() => {
   const base = [
@@ -17,6 +19,7 @@ const links = computed(() => {
 })
 
 async function logout(): Promise<void> {
+  live.stop()
   try {
     await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' })
   } finally {
@@ -29,12 +32,32 @@ async function logout(): Promise<void> {
 onMounted(() => {
   void session.load()
 })
+
+// One stream per tab, open only while someone is signed in.
+watch(
+  () => session.me,
+  (me) => (me ? live.start() : live.stop()),
+  { immediate: true },
+)
+
+onBeforeUnmount(() => {
+  live.stop()
+})
 </script>
 
 <template>
   <div class="shell">
     <header class="shell__bar">
-      <RouterLink to="/" class="shell__brand" data-brand>QA Control Center</RouterLink>
+      <div class="shell__identity">
+        <span
+          v-if="session.me"
+          class="live"
+          :class="{ 'live--on': live.connected }"
+          data-service-badge
+          :title="live.connected ? 'Eventos en vivo conectados' : 'Sin conexión con el servicio de eventos'"
+        ><span class="visually-hidden">{{ live.connected ? 'En vivo' : 'Reconectando…' }}</span></span>
+        <RouterLink to="/" class="shell__brand" data-brand>QA Control Center</RouterLink>
+      </div>
 
       <div v-if="session.me" class="shell__aside">
         <RoleSwitch />

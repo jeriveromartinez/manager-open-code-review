@@ -18,6 +18,14 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('../api', () => ({ api: mocks.api }))
+type LiveRegistration = { types: string[]; reload: () => unknown; filter?: (event: { type: string; id: string }) => boolean }
+const live = vi.hoisted(() => ({ registrations: [] as LiveRegistration[] }))
+vi.mock('../composables/useLiveRefresh', () => ({
+  useLiveRefresh: (types: string[], reload: () => unknown, filter?: LiveRegistration['filter']) => {
+    live.registrations.push({ types, reload, filter })
+  },
+}))
+
 vi.mock('../stores/session', () => ({
   useSessionStore: () => mocks.session,
 }))
@@ -82,6 +90,26 @@ describe('TeamsView', () => {
     mocks.api.setMember.mockResolvedValue(undefined)
     mocks.api.removeMember.mockResolvedValue(undefined)
     mocks.session.load.mockResolvedValue(null)
+    live.registrations.length = 0
+  })
+
+  it('refreshes teams and people on events and keeps a half-filled new member', async () => {
+    mocks.session.me = leadT1
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    const [registration] = live.registrations
+    expect(registration.types).toEqual(['team.updated', 'user.updated'])
+    await card(wrapper, 1).get('select[data-add-member-role]').setValue('developer')
+    mocks.api.teams.mockClear()
+    mocks.api.users.mockClear()
+    await registration.reload()
+    await flushPromises()
+
+    expect(mocks.api.teams).toHaveBeenCalledTimes(1)
+    expect(mocks.api.users).toHaveBeenCalledTimes(1)
+    expect((card(wrapper, 1).get('select[data-add-member-role]').element as HTMLSelectElement).value).toBe('developer')
+    wrapper.unmount()
   })
 
   it('como lead de T1 ve controles en T1 y no en T2', async () => {
