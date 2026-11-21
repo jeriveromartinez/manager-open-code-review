@@ -90,6 +90,44 @@ const profiles: LLMProfile[] = [
     created_at: '2026-11-03T10:00:00Z',
     updated_at: '2026-11-03T10:00:00Z',
   },
+  {
+    id: 13,
+    name: 'Claude QA',
+    provider: 'anthropic',
+    model: 'claude-sonnet-5-5',
+    variant: null,
+    mode: 'api',
+    base_url: null,
+    concurrency: 1,
+    enabled: true,
+    api_key_set: true,
+    health_status: 'unknown',
+    health_checked_at: null,
+    health_error: '',
+    health_age_seconds: 0,
+    health_stale: true,
+    created_at: '2026-11-04T10:00:00Z',
+    updated_at: '2026-11-04T10:00:00Z',
+  },
+  {
+    id: 14,
+    name: 'Azure fallback',
+    provider: 'azure',
+    model: 'gpt-4o',
+    variant: null,
+    mode: 'api',
+    base_url: null,
+    concurrency: 1,
+    enabled: true,
+    api_key_set: true,
+    health_status: 'unknown',
+    health_checked_at: null,
+    health_error: '',
+    health_age_seconds: 0,
+    health_stale: true,
+    created_at: '2026-11-05T10:00:00Z',
+    updated_at: '2026-11-05T10:00:00Z',
+  },
 ]
 
 const teams: Team[] = [
@@ -143,34 +181,181 @@ describe('AgentsView', () => {
     wrapper.unmount()
   })
 
-  it('creates a profile, never renders the api key and shows api_key_set', async () => {
-    const secret = 'sk-super-secret-123'
+  it('shows the stored key state without rendering the key', async () => {
     const wrapper = mountAgents()
     await flushPromises()
 
     expect(wrapper.text()).toContain('Clave configurada')
     expect(wrapper.text()).toContain('Sin clave')
 
+    wrapper.unmount()
+  })
+
+  it('creates a profile from a platform with only the api key', async () => {
+    const secret = 'sk-ant-super-secret-456'
+    const wrapper = mountAgents()
+    await flushPromises()
+
     await wrapper.get('[data-open-profile]').trigger('click')
-    await wrapper.get('[data-profile-name]').setValue('Nuevo perfil')
-    await wrapper.get('[data-profile-provider]').setValue('anthropic')
-    await wrapper.get('[data-profile-model]').setValue('claude-3')
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
     await wrapper.get('[data-profile-api-key]').setValue(secret)
     expect(wrapper.html()).not.toContain(secret)
+
     await wrapper.get('[data-profile-submit]').trigger('click')
     await flushPromises()
 
-    expect(mocks.api.createLLMProfile).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: 'Nuevo perfil',
-        provider: 'anthropic',
-        model: 'claude-3',
-        api_key: secret,
-      }),
-    )
-    expect(wrapper.text()).not.toContain(secret)
+    expect(mocks.api.createLLMProfile).toHaveBeenCalledWith({
+      name: 'Anthropic Claude Sonnet 5.5',
+      provider: 'anthropic',
+      model: 'claude-sonnet-5-5',
+      concurrency: 1,
+      enabled: true,
+      api_key: secret,
+    })
     expect(wrapper.html()).not.toContain(secret)
     expect(wrapper.find('[data-profile-api-key]').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('refuses to create a platform profile without an api key', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="openai"]').trigger('click')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('clave API')
+
+    wrapper.unmount()
+  })
+
+  it('resets the model when the platform changes', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="openai"]').trigger('click')
+    expect((wrapper.get('[data-profile-model]').element as HTMLSelectElement).value).toBe(
+      'gpt-6.2-sol',
+    )
+
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
+    expect((wrapper.get('[data-profile-model]').element as HTMLSelectElement).value).toBe(
+      'claude-sonnet-5-5',
+    )
+
+    wrapper.unmount()
+  })
+
+  it('keeps the typed api key and platform when switching tabs', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="anthropic"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-keep-me')
+
+    await wrapper.get('[data-profile-tab-custom]').trigger('click')
+    expect((wrapper.get('[data-profile-api-key]').element as HTMLInputElement).value).toBe(
+      'sk-keep-me',
+    )
+
+    await wrapper.get('[data-profile-tab-platform]').trigger('click')
+    expect(wrapper.get('[data-platform="anthropic"]').attributes('aria-pressed')).toBe('true')
+    expect((wrapper.get('[data-profile-api-key]').element as HTMLInputElement).value).toBe(
+      'sk-keep-me',
+    )
+
+    wrapper.unmount()
+  })
+
+  it('refuses to create without choosing a platform', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('plataforma')
+
+    wrapper.unmount()
+  })
+
+  it('refuses to submit hidden custom values from the platform tab', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-profile-tab-custom]').trigger('click')
+    await wrapper.get('[data-profile-provider]').setValue('ollama')
+    await wrapper.get('[data-profile-model]').setValue('llama3')
+    await wrapper.get('[data-profile-api-key]').setValue('local-key')
+    await wrapper.get('[data-profile-base-url]').setValue('http://localhost:11434')
+    await wrapper.get('[data-profile-tab-platform]').trigger('click')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('plataforma')
+
+    wrapper.unmount()
+  })
+
+  it('does not send a custom base URL from the platform tab', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-profile-tab-custom]').trigger('click')
+    await wrapper.get('[data-profile-provider]').setValue('openai')
+    await wrapper.get('[data-profile-model]').setValue('gpt-5')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-test')
+    await wrapper.get('[data-profile-base-url]').setValue('http://proxy.local')
+    await wrapper.get('[data-profile-tab-platform]').trigger('click')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).toHaveBeenCalledWith({
+      name: 'OpenAI gpt-5',
+      provider: 'openai',
+      model: 'gpt-5',
+      concurrency: 1,
+      enabled: true,
+      api_key: 'sk-test',
+    })
+
+    wrapper.unmount()
+  })
+
+  it('creates a profile through the custom connection tab', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-profile-tab-custom]').trigger('click')
+    await wrapper.get('[data-profile-name]').setValue('Local llama')
+    await wrapper.get('[data-profile-provider]').setValue('ollama')
+    await wrapper.get('[data-profile-model]').setValue('llama3')
+    await wrapper.get('[data-profile-api-key]').setValue('local-key')
+    await wrapper.get('[data-profile-base-url]').setValue('http://localhost:11434')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).toHaveBeenCalledWith({
+      name: 'Local llama',
+      provider: 'ollama',
+      model: 'llama3',
+      concurrency: 1,
+      enabled: true,
+      api_key: 'local-key',
+      base_url: 'http://localhost:11434',
+    })
 
     wrapper.unmount()
   })
@@ -225,6 +410,111 @@ describe('AgentsView', () => {
     expect(mocks.api.updateLLMProfile).toHaveBeenCalledTimes(1)
     expect(mocks.api.updateLLMProfile.mock.calls[0][0]).toBe(11)
     expect(mocks.api.updateLLMProfile.mock.calls[0][1]).not.toHaveProperty('api_key')
+    expect(mocks.api.updateLLMProfile.mock.calls[0][1]).toMatchObject({
+      base_url: 'http://localhost:11434',
+    })
+
+    wrapper.unmount()
+  })
+
+  it('sends the model chosen from the catalog select', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="openai"]').trigger('click')
+    await wrapper.get('[data-profile-model]').setValue('gpt-6.2-astra')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-test')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'openai', model: 'gpt-6.2-astra' }),
+    )
+
+    wrapper.unmount()
+  })
+
+  it('sends a model typed through the other-model option', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="openai"]').trigger('click')
+    await wrapper.get('[data-profile-model]').setValue('__custom__')
+    await wrapper.get('[data-profile-model-custom]').setValue('gpt-preview-x')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-test')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'openai', model: 'gpt-preview-x' }),
+    )
+
+    wrapper.unmount()
+  })
+
+  it('edits a catalog profile keeping its model and omitting the api key', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-profile-row="13"] [data-edit-profile]').trigger('click')
+    expect(wrapper.get('[data-platform="anthropic"]').attributes('aria-pressed')).toBe('true')
+    expect((wrapper.get('[data-profile-model]').element as HTMLSelectElement).value).toBe(
+      'claude-sonnet-5-5',
+    )
+
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.updateLLMProfile).toHaveBeenCalledWith(
+      13,
+      expect.objectContaining({ provider: 'anthropic', model: 'claude-sonnet-5-5' }),
+    )
+    expect(mocks.api.updateLLMProfile.mock.calls[0][1]).not.toHaveProperty('api_key')
+    expect(mocks.api.updateLLMProfile.mock.calls[0][1]).not.toHaveProperty('base_url')
+
+    wrapper.unmount()
+  })
+
+  it('edits a catalog profile with an unknown model through the other-model field', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-profile-row="7"] [data-edit-profile]').trigger('click')
+    expect((wrapper.get('[data-profile-model]').element as HTMLSelectElement).value).toBe(
+      '__custom__',
+    )
+    expect((wrapper.get('[data-profile-model-custom]').element as HTMLInputElement).value).toBe(
+      'gpt-5',
+    )
+
+    wrapper.unmount()
+  })
+
+  it('opens a profile with a base URL in the custom tab', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-profile-row="11"] [data-edit-profile]').trigger('click')
+    expect((wrapper.get('[data-profile-provider]').element as HTMLInputElement).value).toBe(
+      'ollama',
+    )
+    expect((wrapper.get('[data-profile-base-url]').element as HTMLInputElement).value).toBe(
+      'http://localhost:11434',
+    )
+
+    wrapper.unmount()
+  })
+
+  it('opens a profile with an unknown provider in the custom tab', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-profile-row="14"] [data-edit-profile]').trigger('click')
+    expect((wrapper.get('[data-profile-provider]').element as HTMLInputElement).value).toBe(
+      'azure',
+    )
 
     wrapper.unmount()
   })
