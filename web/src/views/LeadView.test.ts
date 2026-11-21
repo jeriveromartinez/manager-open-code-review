@@ -258,6 +258,15 @@ describe('LeadView', () => {
     wrapper.unmount()
   })
 
+  it('puts the team figures and the decisions side by side so a wide screen shows both', async () => {
+    const wrapper = mountLead()
+    await flushPromises()
+
+    expect(wrapper.get('.split__aside').find('[data-tile="state"]').exists()).toBe(true)
+    expect(wrapper.get('.split__main').find('#decisions-title').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('shows that it is loading instead of a blank page', async () => {
     let release: (value: QAPolicy) => void = () => {}
     mocks.api.getPolicy.mockImplementation(

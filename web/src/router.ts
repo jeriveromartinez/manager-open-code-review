@@ -34,8 +34,8 @@ export function setConfigured(value: boolean): void {
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', name: 'dashboard', component: DashboardView },
-    { path: '/lead', name: 'lead', component: LeadView },
+    { path: '/', name: 'dashboard', component: DashboardView, meta: { wide: true } },
+    { path: '/lead', name: 'lead', component: LeadView, meta: { wide: true } },
     { path: '/repos', name: 'repos', component: ReposView },
     { path: '/teams', name: 'teams', component: TeamsView },
     { path: '/agents', name: 'agents', component: AgentsView },
