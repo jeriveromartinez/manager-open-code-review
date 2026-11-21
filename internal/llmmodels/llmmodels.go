@@ -64,6 +64,13 @@ var DefaultProviders = map[string]Provider{
 // ErrUnknownProvider means the caller asked for a provider outside the table.
 var ErrUnknownProvider = errors.New("unknown provider")
 
+// ProviderBaseURL returns the fixed endpoint of a platform in the closed table.
+// The review agent uses it for providers OpenCode does not know by name.
+func ProviderBaseURL(providerID string) (string, bool) {
+	provider, ok := DefaultProviders[providerID]
+	return provider.BaseURL, ok
+}
+
 // UpstreamError reports a provider that failed or did not answer. Error() is
 // safe to log and return: it never includes the key, the URL or the body.
 type UpstreamError struct {
