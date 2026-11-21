@@ -54,6 +54,7 @@ onBeforeUnmount(() => {
           class="live"
           :class="{ 'live--on': live.connected }"
           data-service-badge
+          aria-live="polite"
           :title="live.connected ? 'Eventos en vivo conectados' : 'Sin conexión con el servicio de eventos'"
         ><span class="visually-hidden">{{ live.connected ? 'En vivo' : 'Reconectando…' }}</span></span>
         <RouterLink to="/" class="shell__brand" data-brand>QA Control Center</RouterLink>

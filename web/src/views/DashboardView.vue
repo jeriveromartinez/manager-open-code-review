@@ -154,7 +154,7 @@ function changeBucket(next: BucketFilter): void {
   prsStore.setBucket(next)
 }
 
-useLiveRefresh(['pr.updated', 'repo.updated'], () => prsStore.refresh())
+useLiveRefresh(['pr.updated', 'repo.updated'], () => prsStore.refresh({ silent: true }))
 
 onMounted(() => {
   void loadReadiness()

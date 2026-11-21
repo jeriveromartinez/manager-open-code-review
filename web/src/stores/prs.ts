@@ -30,8 +30,10 @@ export const usePrsStore = defineStore('prs', () => {
     return result
   })
 
-  async function refresh(): Promise<void> {
-    loading.value = true
+  // A silent refresh (live events) leaves loading alone so the empty state
+  // does not flicker while the list is fetched again.
+  async function refresh({ silent = false } = {}): Promise<void> {
+    if (!silent) loading.value = true
     error.value = null
     try {
       const [nextSummary, nextPrs] = await Promise.all([api.qaSummary(), api.prs()])

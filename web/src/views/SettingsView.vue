@@ -204,6 +204,7 @@ async function save(group: SettingsField['group']): Promise<void> {
     for (const field of fieldsOf(group)) {
       savedSnapshot.value[field.key] = fieldValue(field)
     }
+    staleGroups.value = staleGroups.value.filter((item) => item !== group)
     saved.value = 'Cambios guardados.'
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'No se pudieron guardar los ajustes.'
@@ -249,10 +250,12 @@ onMounted(load)
         :data-group="group.id"
         @submit.prevent="save(group.id)"
       >
-        <p v-if="staleGroups.includes(group.id)" class="stale-notice" role="status" data-stale-group>
-          Otra persona cambió estos ajustes.
-          <button class="button button--ghost" type="button" @click="reloadGroup(group.id)">Recargar</button>
-        </p>
+        <div aria-live="polite">
+          <p v-if="staleGroups.includes(group.id)" class="stale-notice" data-stale-group>
+            Otra persona cambió estos ajustes.
+            <button class="button button--ghost" type="button" @click="reloadGroup(group.id)">Recargar</button>
+          </p>
+        </div>
         <header class="settings-group__head">
           <h2 class="settings-group__title">{{ group.title }}</h2>
           <span v-if="restartLabel(group.id)" class="badge badge--busy">

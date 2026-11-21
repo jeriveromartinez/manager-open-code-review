@@ -23,6 +23,7 @@ const summary = ref<QASummary | null>(null)
 const policy = ref<QAPolicy | null>(null)
 const loading = ref(true)
 const error = ref<string | null>(null)
+const refreshError = ref<string | null>(null)
 const now = ref(new Date())
 let clock: ReturnType<typeof setInterval> | null = null
 
@@ -108,8 +109,10 @@ async function loadTeam({ silent = false } = {}): Promise<void> {
   const id = teamId.value
   if (id === null) return
   const load = ++latestLoad
-  if (!silent) loading.value = true
-  error.value = null
+  if (!silent) {
+    loading.value = true
+    error.value = null
+  }
   try {
     const [allPrs, nextSummary, nextPolicy, allRepos] = await Promise.all([
       api.prs(),
@@ -122,8 +125,15 @@ async function loadTeam({ silent = false } = {}): Promise<void> {
     repos.value = allRepos.filter((repo) => repo.team_id === id)
     summary.value = nextSummary
     policy.value = nextPolicy
+    refreshError.value = null
   } catch (err) {
     if (load !== latestLoad) return
+    // A failed background refresh keeps the last figures instead of blanking
+    // the panel; the next event retries.
+    if (silent) {
+      refreshError.value = 'No se pudo actualizar; se muestran los últimos datos.'
+      return
+    }
     prs.value = []
     repos.value = []
     summary.value = null
@@ -191,6 +201,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
+    <p v-if="refreshError && !error" class="caption" role="status" data-refresh-error>{{ refreshError }}</p>
     <p v-if="error" class="form-error" role="alert">{{ error }}</p>
     <DotLoader v-else-if="loading" />
     <p v-else-if="teams.length === 0" class="empty-state" data-no-teams>

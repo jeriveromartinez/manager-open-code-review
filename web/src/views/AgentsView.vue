@@ -88,8 +88,11 @@ const policyRequireGreenCI = ref(false)
 const policyError = ref<string | null>(null)
 const policyMessage = ref<string | null>(null)
 // Set when someone else changed what is on screen while it had unsaved edits.
-const staleProfile = ref(false)
+const staleProfile = ref<'' | 'changed' | 'deleted'>('')
 const stalePolicy = ref(false)
+// The profile as it was when its dialog opened, to tell a real edit elsewhere
+// from a health check.
+const editingProfile = ref<LLMProfile | null>(null)
 
 function healthLabel(status: string): string {
   if (status === 'ok') return 'Saludable'
@@ -144,38 +147,51 @@ const policyDirty = computed(
       policyRequireGreenCI.value !== policy.value.require_green_ci),
 )
 
+// Health checks also announce a profile; only these fields are someone's edit.
+function editableOf(profile: LLMProfile): string {
+  const { name, provider, model, base_url, concurrency, enabled, api_key_set } = profile
+  return JSON.stringify({ name, provider, model, base_url, concurrency, enabled, api_key_set })
+}
+
 async function onLiveChanges(events: ReviewEvent[]): Promise<void> {
   const touched = (type: string, id: number | null) =>
     id !== null && events.some((event) => event.type === type && Number(event.id) === id)
 
+  const editing = editingProfile.value
   try {
     profiles.value = await api.llmProfiles()
   } catch {
     error.value = 'No se pudieron actualizar los perfiles LLM'
   }
-  if (modalOpen.value && touched('llm_profile.updated', editingId.value)) {
-    staleProfile.value = true
+  if (modalOpen.value && editing && editingId.value === editing.id && touched('llm_profile.updated', editing.id)) {
+    const fresh = profiles.value.find((profile) => profile.id === editing.id)
+    if (!fresh) staleProfile.value = 'deleted'
+    else if (editableOf(fresh) !== editableOf(editing)) staleProfile.value = 'changed'
   }
 
+  const team = selectedTeamId.value
   const resync = events.some((event) => event.type === 'resync')
-  if (selectedTeamId.value === null || !(resync || touched('team.updated', selectedTeamId.value))) return
-  if (!policyDirty.value) {
-    await loadPolicy()
-    return
-  }
+  if (team === null || !(resync || touched('team.updated', team))) return
+  let server: QAPolicy
   try {
-    const server = await api.getPolicy(selectedTeamId.value)
-    // Our own save notifies too; only a policy that differs is someone else's.
-    if (JSON.stringify(server) !== JSON.stringify(policy.value)) stalePolicy.value = true
+    server = await api.getPolicy(team)
   } catch {
     policyError.value = 'No se pudo comprobar la política del equipo'
+    return
+  }
+  if (selectedTeamId.value !== team) return
+  // Checked after the request, so edits made while it was in flight count.
+  if (!policyDirty.value) {
+    applyPolicy(server)
+  } else if (JSON.stringify(server) !== JSON.stringify(policy.value)) {
+    // Our own save notifies too; only a policy that differs is someone else's.
+    stalePolicy.value = true
   }
 }
 
 function reloadProfile(): void {
   const fresh = profiles.value.find((profile) => profile.id === editingId.value)
   if (fresh) openEdit(fresh)
-  else closeModal()
 }
 
 useLiveRefresh(['llm_profile.updated', 'team.updated'], onLiveChanges)
@@ -340,7 +356,8 @@ function openCreate(): void {
 }
 
 function openEdit(profile: LLMProfile): void {
-  staleProfile.value = false
+  staleProfile.value = ''
+  editingProfile.value = { ...profile }
   editingId.value = profile.id
   form.value = {
     name: profile.name,
@@ -367,7 +384,8 @@ function openEdit(profile: LLMProfile): void {
 }
 
 function closeModal(): void {
-  staleProfile.value = false
+  staleProfile.value = ''
+  editingProfile.value = null
   modalOpen.value = false
   editingId.value = null
   form.value = emptyForm()
@@ -578,10 +596,12 @@ onMounted(() => {
         <p class="policy__hint">Se guarda por equipo y se aplica a todas sus revisiones.</p>
       </header>
 
-      <p v-if="stalePolicy" class="stale-notice" role="status" data-stale-policy>
-        Otra persona cambió esta política.
-        <button class="button button--ghost" type="button" @click="loadPolicy">Recargar</button>
-      </p>
+      <div aria-live="polite">
+        <p v-if="stalePolicy" class="stale-notice" data-stale-policy>
+          Otra persona cambió esta política.
+          <button class="button button--ghost" type="button" @click="loadPolicy">Recargar</button>
+        </p>
+      </div>
 
       <div class="policy__fields">
         <label class="field">
@@ -649,10 +669,15 @@ onMounted(() => {
           </header>
 
           <div class="modal__body">
-            <p v-if="staleProfile" class="stale-notice" role="status" data-stale-profile>
-              Otra persona cambió este perfil.
-              <button class="button button--ghost" type="button" @click="reloadProfile">Recargar</button>
-            </p>
+            <div aria-live="polite">
+              <p v-if="staleProfile === 'changed'" class="stale-notice" data-stale-profile>
+                Otra persona cambió este perfil.
+                <button class="button button--ghost" type="button" @click="reloadProfile">Recargar</button>
+              </p>
+              <p v-else-if="staleProfile === 'deleted'" class="stale-notice" data-stale-profile>
+                Otra persona eliminó este perfil. Guardar no lo recuperará.
+              </p>
+            </div>
             <div class="profile-tabs" role="tablist" aria-label="Tipo de conexión">
               <button
                 class="profile-tabs__tab"

@@ -284,6 +284,19 @@ describe('LeadView', () => {
     wrapper.unmount()
   })
 
+  it('keeps the team on screen when a quiet refresh fails', async () => {
+    const wrapper = mountLead()
+    await flushPromises()
+
+    mocks.api.getPolicy.mockRejectedValue(new Error('blip'))
+    await live.registrations[0].reload()
+    await flushPromises()
+
+    expect(wrapper.find('[data-tile="state"]').exists()).toBe(true)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('shows that it is loading instead of a blank page', async () => {
     let release: (value: QAPolicy) => void = () => {}
     mocks.api.getPolicy.mockImplementation(

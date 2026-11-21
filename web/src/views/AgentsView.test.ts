@@ -220,9 +220,69 @@ describe('AgentsView', () => {
     await flushPromises()
     expect(wrapper.find('[data-stale-profile]').exists()).toBe(false)
 
+    // A finished health check notifies too, but leaves the editable fields alone.
+    mocks.api.llmProfiles.mockResolvedValue(profiles.map((profile) => ({ ...profile, health_status: 'ok' })))
+    await live.reload!([{ type: 'llm_profile.updated', id: '11' }])
+    await flushPromises()
+    expect(wrapper.find('[data-stale-profile]').exists()).toBe(false)
+
+    mocks.api.llmProfiles.mockResolvedValue(
+      profiles.map((profile) => (profile.id === 11 ? { ...profile, model: 'other-model' } : { ...profile })),
+    )
     await live.reload!([{ type: 'llm_profile.updated', id: '11' }])
     await flushPromises()
     expect(wrapper.get('[data-stale-profile]').text()).toContain('Otra persona cambió este perfil')
+    wrapper.unmount()
+  })
+
+  it('says so when the profile being edited was deleted elsewhere', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-profile-row="11"] [data-edit-profile]').trigger('click')
+    mocks.api.llmProfiles.mockResolvedValue(profiles.filter((profile) => profile.id !== 11))
+    await live.reload!([{ type: 'llm_profile.updated', id: '11' }])
+    await flushPromises()
+
+    expect(wrapper.get('[data-stale-profile]').text()).toContain('Otra persona eliminó este perfil')
+    expect(wrapper.find('[data-stale-profile] button').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the saved confirmation when its own save comes back as an event', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-policy-save]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Política guardada')
+    await live.reload!([{ type: 'team.updated', id: '1' }])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Política guardada')
+    wrapper.unmount()
+  })
+
+  it('does not overwrite policy edits made while the live check is in flight', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    let release: (value: typeof policy) => void = () => {}
+    mocks.api.getPolicy.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve
+        }),
+    )
+    const pending = live.reload!([{ type: 'team.updated', id: '1' }])
+    await flushPromises()
+    await wrapper.get('[data-policy-require-green-ci]').setValue(true)
+    release({ ...policy, max_passes: 2 })
+    await pending
+    await flushPromises()
+
+    expect((wrapper.get('[data-policy-require-green-ci]').element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.find('[data-stale-policy]').exists()).toBe(true)
     wrapper.unmount()
   })
 

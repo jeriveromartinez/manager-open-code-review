@@ -150,6 +150,24 @@ describe('SettingsView live updates', () => {
     wrapper.unmount()
   })
 
+  it('clears the notice once the group is saved', async () => {
+    const wrapper = mount(SettingsView)
+    await flushPromises()
+
+    await wrapper.find('input[name="ocr_bin"]').setValue('mine')
+    vi.mocked(api.settings).mockResolvedValue({ values: { ...stored, ocr_bin: 'theirs' }, fields })
+    await live.reload!([{ type: 'settings.updated', id: '' }])
+    await flushPromises()
+    expect(wrapper.find('[data-group="worker"] [data-stale-group]').exists()).toBe(true)
+
+    vi.mocked(api.saveSettings).mockResolvedValue({ values: { ...stored, ocr_bin: 'mine' }, fields })
+    await wrapper.get('[data-group="worker"]').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.find('[data-stale-group]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('does not warn about a group whose server values did not change', async () => {
     const wrapper = mount(SettingsView)
     await flushPromises()

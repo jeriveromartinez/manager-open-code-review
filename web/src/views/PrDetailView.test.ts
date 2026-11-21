@@ -163,6 +163,29 @@ describe('PrDetailView', () => {
     wrapper.unmount()
   })
 
+  it('lets the newest load win over an older quiet one', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    let releaseOld: (value: typeof detail) => void = () => {}
+    mocks.api.prDetail.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseOld = resolve
+        }),
+    )
+    const old = live.registrations[0].reload()
+    mocks.api.prDetail.mockResolvedValueOnce({ ...detail, title: 'Título nuevo' })
+    await live.registrations[0].reload()
+    releaseOld({ ...detail, title: 'Título viejo' })
+    await old
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Título nuevo')
+    expect(wrapper.text()).not.toContain('Título viejo')
+    wrapper.unmount()
+  })
+
   it('shows findings grouped by severity and retries the review', async () => {
     const wrapper = mountDetail()
     await flushPromises()
