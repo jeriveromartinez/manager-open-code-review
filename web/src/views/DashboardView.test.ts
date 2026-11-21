@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => {
       me: vi.fn(),
       stats: vi.fn(),
       prs: vi.fn(),
+      readiness: vi.fn(),
     },
     subscribeEvents: vi.fn(
       (onEvent: (event: EventPayload) => void, onState?: (connected: boolean) => void) => {
@@ -50,6 +51,8 @@ const prs: PRView[] = [
     html_url: 'https://github.com/acme/backend-api/pull/142',
     qa_status: 'ready_for_human',
     group: 'ready',
+    review_state: '',
+    review_reason: '',
     validations: { passed: 9, total: 9 },
     updated_at: '2026-11-18T10:00:00Z',
   },
@@ -62,6 +65,8 @@ const prs: PRView[] = [
     html_url: 'https://github.com/acme/frontend-app/pull/77',
     qa_status: 'pending',
     group: 'in_review',
+    review_state: 'running',
+    review_reason: '',
     validations: { passed: 0, total: 0 },
     updated_at: '2026-11-18T09:00:00Z',
   },
@@ -73,6 +78,9 @@ function mountDashboard(): VueWrapper {
     routes: [
       { path: '/', component: { template: '<div />' } },
       { path: '/prs/:id', component: { template: '<div />' } },
+      { path: '/repos', component: { template: '<div />' } },
+      { path: '/teams', component: { template: '<div />' } },
+      { path: '/agents', component: { template: '<div />' } },
       { path: '/:pathMatch(.*)*', component: { template: '<div />' } },
     ],
   })
@@ -94,8 +102,10 @@ describe('DashboardView', () => {
     })
     mocks.api.stats.mockResolvedValue(stats)
     mocks.api.prs.mockResolvedValue(prs)
+    mocks.api.readiness.mockResolvedValue({ ready: true, items: [] })
     mocks.api.stats.mockClear()
     mocks.api.prs.mockClear()
+    mocks.api.readiness.mockClear()
     mocks.subscribeEvents.mockClear()
   })
 
@@ -149,6 +159,77 @@ describe('DashboardView', () => {
 
     expect(mocks.api.stats).toHaveBeenCalledTimes(1)
     expect(mocks.api.prs).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('muestra el aviso de configuración pendiente con cada eslabón y su enlace', async () => {
+    mocks.api.readiness.mockResolvedValue({
+      ready: false,
+      items: [
+        {
+          key: 'repos_without_team',
+          label: '2 repositorios habilitados sin equipo asignado',
+          count: 2,
+          link: '/repos',
+        },
+        {
+          key: 'teams_without_policy',
+          label: '1 equipo sin política de revisión',
+          count: 1,
+          link: '/teams',
+        },
+        {
+          key: 'unhealthy_profiles',
+          label: '1 perfil LLM habilitado sin estado saludable',
+          count: 1,
+          link: '/agents',
+        },
+      ],
+    })
+
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    const banner = wrapper.get('[data-readiness-banner]')
+    expect(banner.text()).toContain('2 repositorios habilitados sin equipo asignado')
+    expect(banner.text()).toContain('1 equipo sin política de revisión')
+    expect(banner.text()).toContain('1 perfil LLM habilitado sin estado saludable')
+
+    expect(banner.get('[data-readiness-item="repos_without_team"] a').attributes('href')).toBe('/repos')
+    expect(banner.get('[data-readiness-item="teams_without_policy"] a').attributes('href')).toBe('/teams')
+    expect(banner.get('[data-readiness-item="unhealthy_profiles"] a').attributes('href')).toBe('/agents')
+    wrapper.unmount()
+  })
+
+  it('oculta el aviso cuando todos los eslabones están completos', async () => {
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    expect(mocks.api.readiness).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-readiness-banner]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('no consulta ni muestra el aviso a quien no es admin', async () => {
+    mocks.api.me.mockResolvedValue({
+      id: 2,
+      login: 'dev',
+      avatar_url: '',
+      is_admin: false,
+      teams: [],
+    })
+    mocks.api.readiness.mockResolvedValue({
+      ready: false,
+      items: [
+        { key: 'no_teams', label: 'No hay equipos', count: 1, link: '/teams' },
+      ],
+    })
+
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    expect(mocks.api.readiness).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-readiness-banner]').exists()).toBe(false)
     wrapper.unmount()
   })
 })

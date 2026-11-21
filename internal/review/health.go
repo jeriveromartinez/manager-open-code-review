@@ -69,24 +69,33 @@ func (c *ProfileChecker) Check(ctx context.Context, profileID uint) error {
 
 	text, _, err := agent.Run(ctx, healthPrompt, nil)
 	if err != nil {
-		message := truncateHealthMessage(err.Error())
+		message := healthFailureMessage(profileID, profile, err.Error())
 		if saveErr := c.Store.SetLLMHealth(ctx, profileID, store.HealthError, message); saveErr != nil {
 			return fmt.Errorf("review: health check profile %d: %v; record failure: %w", profileID, err, saveErr)
 		}
 		return fmt.Errorf("review: health check profile %d: %w", profileID, err)
 	}
 	if strings.TrimSpace(text) == "" {
-		message := "opencode returned no text"
+		message := healthFailureMessage(profileID, profile, "opencode returned no text")
 		if saveErr := c.Store.SetLLMHealth(ctx, profileID, store.HealthError, message); saveErr != nil {
 			return fmt.Errorf("review: empty answer, record failure: %w", saveErr)
 		}
-		return fmt.Errorf("review: health check profile %d: %s", profileID, message)
+		return fmt.Errorf("%s", message)
 	}
 
 	if err := c.Store.SetLLMHealth(ctx, profileID, store.HealthOK, ""); err != nil {
 		return fmt.Errorf("review: record ok health for profile %d: %w", profileID, err)
 	}
 	return nil
+}
+
+// healthFailureMessage persists the endpoint alongside the cause. OpenCode can
+// fail with a generic UnknownError, and the profile row alone does not say
+// which provider/model was being checked.
+func healthFailureMessage(profileID uint, profile store.LLMProfile, cause string) string {
+	message := fmt.Sprintf("review: health check profile %d (%s/%s): %s",
+		profileID, profile.Provider, profile.Model, cause)
+	return truncateHealthMessage(message)
 }
 
 func truncateHealthMessage(message string) string {

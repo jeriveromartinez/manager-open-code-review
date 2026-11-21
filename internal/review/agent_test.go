@@ -98,6 +98,85 @@ func TestAgentErrorDetailFromEventStream(t *testing.T) {
 	}
 }
 
+// TestAgentErrorDetailStructured covers the richer error.data shapes emitted
+// by OpenCode 1.19 provider errors. Each case asserts the operator-facing words
+// that make the failure actionable instead of the generic UnknownError text.
+func TestAgentErrorDetailStructured(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{
+			name: "provider request authentication",
+			raw: `{"type":"error","error":{"name":"ProviderRequestError","data":` +
+				`{"providerID":"nvidia","reason":"authentication","message":"invalid api key","status":401}}}`,
+			want: []string{"credencial", "HTTP 401", "API key"},
+		},
+		{
+			name: "model not found",
+			raw: `{"type":"error","error":{"name":"ModelNotFoundError","data":` +
+				`{"providerID":"nvidia","modelID":"nemotron","message":"model not found"}}}`,
+			want: []string{"modelo", "nvidia/nemotron"},
+		},
+		{
+			name: "provider not found",
+			raw: `{"type":"error","error":{"name":"ProviderNotFoundError","data":` +
+				`{"providerID":"acme","message":"unknown provider"}}}`,
+			want: []string{"proveedor", "acme", "soportados"},
+		},
+		{
+			name: "rate limit",
+			raw: `{"type":"error","error":{"name":"ProviderRequestError","data":` +
+				`{"providerID":"openai","reason":"rate_limit","message":"too many requests","status":429,"retryAfterMs":1500}}}`,
+			want: []string{"cuota", "HTTP 429", "1500"},
+		},
+		{
+			name: "unknown error with ref",
+			raw: `{"type":"error","error":{"name":"UnknownError","data":` +
+				`{"message":"Unexpected server error. Check server logs for details.","ref":"err_abc123"}}}`,
+			want: []string{"UnknownError", "no expuso", "ref", "err_abc123", "API key"},
+		},
+		{
+			name: "network dns failure",
+			raw: `{"type":"error","error":{"name":"UnknownError","data":` +
+				`{"message":"dial tcp: lookup api.example.test: no such host"}}}`,
+			want: []string{"red/DNS", "no such host"},
+		},
+		{
+			name: "provider overloaded",
+			raw: `{"type":"error","error":{"name":"ProviderRequestError","data":` +
+				`{"providerID":"nvidia","reason":"overloaded","message":"busy","status":503}}}`,
+			want: []string{"no disponible", "HTTP 503"},
+		},
+		{
+			name: "invalid request",
+			raw: `{"type":"error","error":{"name":"ProviderRequestError","data":` +
+				`{"providerID":"nvidia","reason":"invalid_request","message":"bad model","status":400,"responseBody":{"error":"bad model"},"url":"https://api.example.test/v1/chat"}}}`,
+			want: []string{"rechazó", "HTTP 400", "bad model", "api.example.test"},
+		},
+		{
+			name: "plain fallback stays unchanged",
+			raw:  `{"type":"error","error":{"name":"AI_APICallError","data":{"message":"401 Unauthorized"}}}`,
+			want: []string{"AI_APICallError: 401 Unauthorized"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := agentErrorDetail([]byte(tc.raw))
+			for _, fragment := range tc.want {
+				if !strings.Contains(got, fragment) {
+					t.Errorf("agentErrorDetail() = %q, want it to contain %q", got, fragment)
+				}
+			}
+			if len(got) > maxAgentErrorDetail {
+				t.Errorf("agentErrorDetail() has %d chars, want at most %d", len(got), maxAgentErrorDetail)
+			}
+		})
+	}
+}
+
 func TestAgentKillsProcessGroupOnTimeout(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	a := testAgent(t, t.TempDir())

@@ -24,6 +24,8 @@ const base: PRView = {
   html_url: 'https://github.com/acme/backend-api/pull/142',
   qa_status: 'ready_for_human',
   group: 'ready',
+  review_state: '',
+  review_reason: '',
   validations: { passed: 9, total: 9 },
   updated_at: '2026-11-18T10:00:00Z',
 }
@@ -37,6 +39,20 @@ describe('PrCard', () => {
     expect(wrapper.text()).toContain('backend-api #142')
     expect(wrapper.text()).toContain('Listo para ti')
     expect(wrapper.text()).toContain('9/9 validaciones correctas')
+  })
+
+  it('avisa cuando un PR pendiente no tiene revisión programada', () => {
+    const wrapper = mountCard({
+      ...base,
+      qa_status: 'pending',
+      group: 'in_review',
+      review_state: 'blocked',
+      review_reason: 'Repositorio sin equipo asignado',
+    })
+
+    expect(wrapper.text()).toContain('Sin revisión programada')
+    expect(wrapper.text()).toContain('Repositorio sin equipo asignado')
+    expect(wrapper.text()).not.toContain('Análisis en curso')
   })
 
   it('oculta la línea de validaciones cuando total es 0', () => {

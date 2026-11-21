@@ -27,7 +27,7 @@ func TestReviewClientJobTimeoutOutlivesRiverDefault(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := reviewClientConfig(tt.runner, river.NewWorkers(), nil, nil)
+			cfg := reviewClientConfig(tt.runner, river.NewWorkers(), nil)
 			if cfg.JobTimeout < tt.wantMin {
 				t.Errorf("JobTimeout = %v, want at least %v", cfg.JobTimeout, tt.wantMin)
 			}

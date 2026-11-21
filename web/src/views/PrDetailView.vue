@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, type Finding, type PRDetail } from '../api'
-import { statusLabel } from '../status'
+import { prStatusLabel, statusLabel } from '../status'
 
 const route = useRoute()
 const prId = computed(() => Number(route.params.id))
@@ -49,7 +49,9 @@ const latestRun = computed(() => {
   const runs = detail.value?.runs ?? []
   return runs.length > 0 ? runs[runs.length - 1] : null
 })
-const status = computed(() => statusLabel(detail.value?.qa_status ?? 'pending'))
+const status = computed(() =>
+  detail.value ? prStatusLabel(detail.value) : statusLabel('pending'),
+)
 
 function coverageCount(key: string): number {
   const value = latestRun.value?.coverage?.[key]
@@ -165,6 +167,7 @@ onMounted(() => {
           {{ detail.repo }} #{{ detail.number }} · por {{ detail.author_login }}
         </p>
         <p class="pr-detail__sha">SHA <code>{{ latestRun?.head_sha ?? '—' }}</code></p>
+        <p class="pr-detail__action">{{ status.action }}</p>
       </div>
       <div class="pr-detail__actions">
         <span class="badge" :class="`badge--${status.tone}`" data-qa-status>{{ status.tag }}</span>
@@ -307,6 +310,12 @@ onMounted(() => {
 .pr-detail__sha {
   margin-top: var(--space-2);
   color: var(--text-faint);
+  font-size: 13px;
+}
+
+.pr-detail__action {
+  margin-top: var(--space-1);
+  color: var(--text-muted);
   font-size: 13px;
 }
 

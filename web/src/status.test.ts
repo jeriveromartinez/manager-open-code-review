@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { statusLabel } from './status'
+import { prStatusLabel, statusLabel } from './status'
 import type { QAStatus } from './api'
 
 type Expected = {
@@ -24,5 +24,47 @@ const cases: Expected[] = [
 describe('statusLabel', () => {
   it.each(cases)('mapea $status a "$tag" / "$action" / $tone', ({ status, tag, action, tone }) => {
     expect(statusLabel(status)).toEqual({ tag, action, tone })
+  })
+})
+
+describe('prStatusLabel', () => {
+  it('explica por qué un PR pendiente no tiene revisión programada', () => {
+    expect(
+      prStatusLabel({
+        qa_status: 'pending',
+        review_state: 'blocked',
+        review_reason: 'Repositorio sin equipo asignado',
+      }),
+    ).toEqual({
+      tag: 'Sin revisión programada',
+      action: 'Repositorio sin equipo asignado',
+      tone: 'bad',
+    })
+  })
+
+  it('muestra que un PR pendiente se encolará en la próxima reconciliación', () => {
+    expect(
+      prStatusLabel({ qa_status: 'pending', review_state: 'scheduled', review_reason: '' }),
+    ).toEqual({
+      tag: 'Pendiente de revisión',
+      action: 'Se encolará en la próxima reconciliación',
+      tone: 'muted',
+    })
+  })
+
+  it('deja intacto un PR pendiente con una ejecución en curso', () => {
+    expect(
+      prStatusLabel({ qa_status: 'pending', review_state: 'running', review_reason: '' }),
+    ).toEqual({ tag: 'Revisando IA', action: 'Análisis en curso', tone: 'busy' })
+  })
+
+  it('solo reinterpreta el estado pending', () => {
+    expect(
+      prStatusLabel({
+        qa_status: 'changes_requested',
+        review_state: 'blocked',
+        review_reason: 'Repositorio sin equipo asignado',
+      }),
+    ).toEqual({ tag: 'Con defectos', action: 'Requiere corrección', tone: 'bad' })
   })
 })

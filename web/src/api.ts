@@ -22,6 +22,8 @@ export type PRView = {
   html_url: string
   qa_status: QAStatus
   group: PRGroup
+  review_state: 'running' | 'scheduled' | 'blocked' | ''
+  review_reason: string
   validations: { passed: number; total: number }
   updated_at: string
 }
@@ -81,6 +83,19 @@ export type Stats = {
   with_problems: number
 }
 
+/** Un eslabón de configuración que falta para que se ejecute una revisión. */
+export type ReadinessItem = {
+  key: string
+  label: string
+  count: number
+  link: string
+}
+
+export type Readiness = {
+  ready: boolean
+  items: ReadinessItem[]
+}
+
 export type TeamRole = 'lead' | 'qa' | 'developer'
 
 export type Me = {
@@ -99,6 +114,7 @@ export type Repository = {
   default_branch: string
   enabled: boolean
   team_id: number | null
+  has_policy: boolean
   account_login: string
 }
 
@@ -289,6 +305,7 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 export const api = {
   me: () => request<Me>('/api/me'),
   stats: () => request<Stats>('/api/stats'),
+  readiness: () => request<Readiness>('/api/readiness'),
   prs: (group?: PRGroup) =>
     request<PRView[]>(group ? `/api/prs?group=${encodeURIComponent(group)}` : '/api/prs'),
   prDetail: (id: number) => request<PRDetail>(`/api/prs/${id}`),

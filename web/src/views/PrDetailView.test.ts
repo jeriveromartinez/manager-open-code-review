@@ -24,6 +24,8 @@ const detail: PRDetail = {
   html_url: 'https://github.com/acme/backend-api/pull/142',
   qa_status: 'changes_requested',
   group: 'blocked',
+  review_state: 'running',
+  review_reason: '',
   validations: { passed: 3, total: 5 },
   updated_at: '2026-11-19T10:00:00Z',
   runs: [

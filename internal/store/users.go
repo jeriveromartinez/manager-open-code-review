@@ -413,6 +413,31 @@ func (s *Store) ListRepositories(ctx context.Context, u User) ([]Repository, err
 	return repos, nil
 }
 
+// RepositoryWithPolicy is a repository plus whether its assigned team has a QA
+// policy. A repository without a team always reports false.
+type RepositoryWithPolicy struct {
+	Repository
+	TeamHasPolicy bool
+}
+
+// ListRepositoriesWithPolicy applies the same visibility rules as
+// ListRepositories and annotates each row with its team policy status.
+func (s *Store) ListRepositoriesWithPolicy(ctx context.Context, u User) ([]RepositoryWithPolicy, error) {
+	q := s.DB.WithContext(ctx).Model(&Repository{}).
+		Select("repositories.*, EXISTS (SELECT 1 FROM qa_policies p WHERE p.team_id = repositories.team_id) AS team_has_policy")
+	if !u.IsAdmin {
+		teams := s.DB.WithContext(ctx).Model(&TeamMember{}).
+			Select("team_id").Where("user_id = ?", u.ID)
+		q = q.Where("repositories.team_id IN (?)", teams)
+	}
+
+	var repos []RepositoryWithPolicy
+	if err := q.Order("repositories.id").Find(&repos).Error; err != nil {
+		return nil, fmt.Errorf("list repositories with policy: %w", err)
+	}
+	return repos, nil
+}
+
 // Audit appends an administrative action to the audit log. actorID may be nil
 // for actions not performed by a signed-in user.
 func (s *Store) Audit(ctx context.Context, actorID *uint, action, targetType, targetID string, data any) error {

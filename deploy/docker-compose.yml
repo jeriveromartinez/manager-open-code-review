@@ -2,6 +2,17 @@ services:
   postgres:
     image: postgres:17
     restart: unless-stopped
+    # `unless-stopped` solo reinicia un contenedor que sigue existiendo: si se
+    # elimina (docker rm -f, docker compose down o una limpieza externa) no lo
+    # recrea, y el volumen `postgres-data` queda huérfano hasta el próximo
+    # `up`. Los datos sobreviven; el contenedor no.
+    #
+    # No añadas mem_limit/memswap_limit a este servicio: un límite demasiado
+    # bajo puede provocar justo el OOM que intentas evitar, y matar PostgreSQL
+    # por OOM es peor que dejar decidir al kernel con una visión global. La
+    # protección de memoria se aplica en el host (cgroups/systemd slices,
+    # reserva para el kernel y `shared_buffers` ajustado a la máquina), y
+    # PostgreSQL no debe compartir host con vecinos pesados sin límite.
     environment:
       POSTGRES_DB: qa_control_center
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
@@ -60,7 +71,10 @@ services:
       postgres:
         condition: service_healthy
     # La imagen app es debian-slim sin curl ni wget: el propio binario, que ya
-    # está en la imagen, hace de cliente HTTP contra su loopback.
+    # está en la imagen, hace de cliente HTTP contra su loopback. `qa
+    # healthcheck` sale con 1 en cualquier respuesta distinta de 200, y
+    # /healthz devuelve 503 cuando PostgreSQL no responde: si la base
+    # desaparece, el contenedor de la app queda unhealthy.
     healthcheck:
       test: ["CMD", "/usr/local/bin/qa", "healthcheck"]
       interval: 30s

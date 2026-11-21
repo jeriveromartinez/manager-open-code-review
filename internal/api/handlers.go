@@ -2,8 +2,10 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -21,15 +23,17 @@ import (
 // Response DTOs keep the JSON wire format snake_case and independent of the
 // store models' Go field names.
 type prResponse struct {
-	ID          uint   `json:"id"`
-	Repo        string `json:"repo"`
-	Number      int    `json:"number"`
-	Title       string `json:"title"`
-	AuthorLogin string `json:"author_login"`
-	HTMLURL     string `json:"html_url"`
-	QAStatus    string `json:"qa_status"`
-	Group       string `json:"group"`
-	Validations struct {
+	ID           uint   `json:"id"`
+	Repo         string `json:"repo"`
+	Number       int    `json:"number"`
+	Title        string `json:"title"`
+	AuthorLogin  string `json:"author_login"`
+	HTMLURL      string `json:"html_url"`
+	QAStatus     string `json:"qa_status"`
+	Group        string `json:"group"`
+	ReviewState  string `json:"review_state"`
+	ReviewReason string `json:"review_reason"`
+	Validations  struct {
 		Passed int `json:"passed"`
 		Total  int `json:"total"`
 	} `json:"validations"`
@@ -38,15 +42,17 @@ type prResponse struct {
 
 func prDTO(v store.PRView) prResponse {
 	out := prResponse{
-		ID:          v.ID,
-		Repo:        v.Repo,
-		Number:      v.Number,
-		Title:       v.Title,
-		AuthorLogin: v.AuthorLogin,
-		HTMLURL:     v.HTMLURL,
-		QAStatus:    v.QAStatus,
-		Group:       v.Group,
-		UpdatedAt:   v.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:           v.ID,
+		Repo:         v.Repo,
+		Number:       v.Number,
+		Title:        v.Title,
+		AuthorLogin:  v.AuthorLogin,
+		HTMLURL:      v.HTMLURL,
+		QAStatus:     v.QAStatus,
+		Group:        v.Group,
+		ReviewState:  v.ReviewState,
+		ReviewReason: v.ReviewReason,
+		UpdatedAt:    v.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 	out.Validations.Passed = v.Validations.Passed
 	out.Validations.Total = v.Validations.Total
@@ -58,6 +64,26 @@ type statsResponse struct {
 	AwaitingHuman int `json:"awaiting_human"`
 	InEvaluation  int `json:"in_evaluation"`
 	WithProblems  int `json:"with_problems"`
+}
+
+type readinessItemResponse struct {
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	Count int    `json:"count"`
+	Link  string `json:"link"`
+}
+
+type readinessResponse struct {
+	Ready bool                    `json:"ready"`
+	Items []readinessItemResponse `json:"items"`
+}
+
+func readinessLabel(count int, singular, plural string) string {
+	word := plural
+	if count == 1 {
+		word = singular
+	}
+	return strconv.Itoa(count) + " " + word
 }
 
 func statsDTO(s store.Stats) statsResponse {
@@ -91,10 +117,11 @@ type repoResponse struct {
 	DefaultBranch  string `json:"default_branch"`
 	Enabled        bool   `json:"enabled"`
 	TeamID         *uint  `json:"team_id"`
+	HasPolicy      bool   `json:"has_policy"`
 	AccountLogin   string `json:"account_login"`
 }
 
-func repoDTO(r store.Repository, accountLogin string) repoResponse {
+func repoDTO(r store.RepositoryWithPolicy, accountLogin string) repoResponse {
 	return repoResponse{
 		ID:             r.ID,
 		InstallationID: r.InstallationID,
@@ -103,6 +130,7 @@ func repoDTO(r store.Repository, accountLogin string) repoResponse {
 		DefaultBranch:  r.DefaultBranch,
 		Enabled:        r.Enabled,
 		TeamID:         r.TeamID,
+		HasPolicy:      r.TeamHasPolicy,
 		AccountLogin:   accountLogin,
 	}
 }
@@ -162,7 +190,26 @@ func writeAPIError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-func (s *server) healthz(w http.ResponseWriter, _ *http.Request) {
+// healthz reports readiness, not just liveness: the process cannot do useful
+// work without PostgreSQL, and compose uses this endpoint to decide whether the
+// worker may start. A cheap ping with a short deadline keeps the 30 s probe from
+// turning a slow database into a restart loop.
+func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
+	if s.Store == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "degraded", "error": "database not configured"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.Store.Ping(ctx); err != nil {
+		slog.Error("health check: database unavailable", "error", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "degraded",
+			"error":  "database unavailable",
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -206,6 +253,72 @@ func (s *server) stats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, statsDTO(stats))
 }
 
+// readiness lists the configuration links that are still missing, so the panel
+// can point the administrator at the screen where each one is fixed.
+func (s *server) readiness(w http.ResponseWriter, r *http.Request) {
+	report, err := s.Store.ReadinessReport(r.Context(), s.Cfg.LLMHealthStaleAfter())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "compute readiness")
+		return
+	}
+
+	items := make([]readinessItemResponse, 0, 5)
+	if report.NoTeams {
+		items = append(items, readinessItemResponse{
+			Key:   "no_teams",
+			Label: "No hay equipos: crea uno para asignar repositorios",
+			Count: 1,
+			Link:  "/teams",
+		})
+	}
+	if report.NoProfiles {
+		items = append(items, readinessItemResponse{
+			Key:   "no_profiles",
+			Label: "No hay perfiles LLM: añade uno y comprueba su salud",
+			Count: 1,
+			Link:  "/agents",
+		})
+	}
+	if report.ReposWithoutTeam > 0 {
+		items = append(items, readinessItemResponse{
+			Key: "repos_without_team",
+			Label: readinessLabel(
+				report.ReposWithoutTeam,
+				"repositorio habilitado sin equipo asignado",
+				"repositorios habilitados sin equipo asignado",
+			),
+			Count: report.ReposWithoutTeam,
+			Link:  "/repos",
+		})
+	}
+	if report.TeamsWithoutPolicy > 0 {
+		items = append(items, readinessItemResponse{
+			Key: "teams_without_policy",
+			Label: readinessLabel(
+				report.TeamsWithoutPolicy,
+				"equipo sin política de revisión",
+				"equipos sin política de revisión",
+			),
+			Count: report.TeamsWithoutPolicy,
+			Link:  "/teams",
+		})
+	}
+	if report.UnhealthyProfiles > 0 {
+		items = append(items, readinessItemResponse{
+			Key: "unhealthy_profiles",
+			Label: readinessLabel(
+				report.UnhealthyProfiles,
+				"perfil LLM habilitado sin estado saludable",
+				"perfiles LLM habilitados sin estado saludable",
+			),
+			Count: report.UnhealthyProfiles,
+			Link:  "/agents",
+		})
+	}
+
+	writeJSON(w, http.StatusOK, readinessResponse{Ready: len(items) == 0, Items: items})
+}
+
 func (s *server) prs(w http.ResponseWriter, r *http.Request) {
 	user, _ := auth.UserFrom(r.Context())
 	views, err := s.Store.ListVisiblePullRequests(r.Context(), user, store.PRFilter{Group: r.URL.Query().Get("group")})
@@ -222,7 +335,7 @@ func (s *server) prs(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) repos(w http.ResponseWriter, r *http.Request) {
 	user, _ := auth.UserFrom(r.Context())
-	repos, err := s.Store.ListRepositories(r.Context(), user)
+	repos, err := s.Store.ListRepositoriesWithPolicy(r.Context(), user)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "list repositories")
 		return

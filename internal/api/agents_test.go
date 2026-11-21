@@ -3,6 +3,7 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -36,6 +37,14 @@ func (h *recordingHealth) snapshot() []uint {
 	defer h.mu.Unlock()
 	return append([]uint(nil), h.ids...)
 }
+
+// failingHealth simulates a queue that cannot accept the automatic health
+// check: the profile create/patch must still succeed and only log the failure.
+type failingHealth struct {
+	err error
+}
+
+func (h failingHealth) EnqueueLLMHealth(context.Context, uint) error { return h.err }
 
 type recordingRetrier struct {
 	mu  sync.Mutex
@@ -259,15 +268,79 @@ func TestAgentHealthEnqueues(t *testing.T) {
 	var created map[string]any
 	decodeJSON(t, rec, &created)
 	id := uint(created["id"].(float64))
-	path := fmt.Sprintf("/api/llm-profiles/%d/health", id)
 
+	// Creating a profile already queues its first health check.
+	if ids := f.health.snapshot(); len(ids) != 1 || ids[0] != id {
+		t.Errorf("automatic EnqueueLLMHealth calls = %v, want [%d]", ids, id)
+	}
+
+	path := fmt.Sprintf("/api/llm-profiles/%d/health", id)
 	rec = f.request(http.MethodPost, path, nil, f.session(dev))
 	assertStatus(t, rec, http.StatusForbidden)
 
 	rec = f.request(http.MethodPost, path, nil, f.session(admin))
 	assertStatus(t, rec, http.StatusAccepted)
+	if ids := f.health.snapshot(); len(ids) != 2 || ids[1] != id {
+		t.Errorf("EnqueueLLMHealth calls = %v, want the manual check appended after the automatic one", ids)
+	}
+}
+
+func TestAgentCreateEnqueuesHealth(t *testing.T) {
+	f := newSecureFixture(t)
+	admin := f.user("admin", true)
+
+	rec := f.request(http.MethodPost, "/api/llm-profiles", profileBody(), f.session(admin))
+	assertStatus(t, rec, http.StatusCreated)
+	var created map[string]any
+	decodeJSON(t, rec, &created)
+	id := uint(created["id"].(float64))
+
 	if ids := f.health.snapshot(); len(ids) != 1 || ids[0] != id {
-		t.Errorf("EnqueueLLMHealth calls = %v, want [%d]", ids, id)
+		t.Fatalf("EnqueueLLMHealth calls = %v, want [%d] after create", ids, id)
+	}
+}
+
+func TestAgentCreateSurvivesHealthEnqueueFailure(t *testing.T) {
+	f := newSecureFixture(t)
+	f.deps.Health = failingHealth{err: errors.New("queue unavailable")}
+	f.rebuildRouter()
+	admin := f.user("admin", true)
+
+	rec := f.request(http.MethodPost, "/api/llm-profiles", profileBody(), f.session(admin))
+	assertStatus(t, rec, http.StatusCreated)
+
+	profiles, err := f.st.ListLLMProfiles(f.ctx)
+	if err != nil {
+		t.Fatalf("ListLLMProfiles: %v", err)
+	}
+	if len(profiles) != 1 {
+		t.Fatalf("profiles = %d, want the profile persisted despite the enqueue failure", len(profiles))
+	}
+}
+
+func TestAgentPatchEnqueuesHealthWhenEndpointChanges(t *testing.T) {
+	f := newSecureFixture(t)
+	admin := f.user("admin", true)
+	cookie := f.session(admin)
+
+	rec := f.request(http.MethodPost, "/api/llm-profiles", profileBody(), cookie)
+	assertStatus(t, rec, http.StatusCreated)
+	var created map[string]any
+	decodeJSON(t, rec, &created)
+	id := uint(created["id"].(float64))
+	path := fmt.Sprintf("/api/llm-profiles/%d", id)
+
+	// A change unrelated to the endpoint must not queue another check.
+	rec = f.request(http.MethodPatch, path, map[string]any{"concurrency": 3}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	if ids := f.health.snapshot(); len(ids) != 1 {
+		t.Errorf("EnqueueLLMHealth calls after a concurrency PATCH = %v, want only the create one", ids)
+	}
+
+	rec = f.request(http.MethodPatch, path, map[string]any{"model": "gpt-4o"}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	if ids := f.health.snapshot(); len(ids) != 2 || ids[1] != id {
+		t.Errorf("EnqueueLLMHealth calls after a model PATCH = %v, want [%d %d]", ids, id, id)
 	}
 }
 
