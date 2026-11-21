@@ -142,6 +142,7 @@ func TestApplySetsEveryField(t *testing.T) {
 		KeyMonitorRenotifyAfter: "5m",
 		KeyAlertWebhookURL:      "https://hooks.example.com/qa",
 		KeyBackupRetention:      "14",
+		KeyQAValidationSLA:      "6h",
 	})
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -156,7 +157,7 @@ func TestApplySetsEveryField(t *testing.T) {
 	if cfg.ReconcileInterval != 2*time.Minute || cfg.ReviewTimeout != 30*time.Minute ||
 		cfg.ReviewStaleAfter != 90*time.Minute || cfg.LLMHealthInterval != 10*time.Minute ||
 		cfg.WorkerQueueStale != 20*time.Minute || cfg.MonitorRenotifyAfter != 5*time.Minute ||
-		cfg.MonitorInterval != 30*time.Second {
+		cfg.MonitorInterval != 30*time.Second || cfg.QAValidationSLA != 6*time.Hour {
 		t.Error("one of the durations was not applied")
 	}
 	if cfg.ReviewConcurrency != 4 || cfg.ReviewAgentSteps != 60 || cfg.FetchDepthMax != 900 || cfg.BackupRetention != 14 {
@@ -176,8 +177,8 @@ func TestApplySetsEveryField(t *testing.T) {
 func TestDefaultsAndFieldsAgree(t *testing.T) {
 	valid := map[string]bool{"": true, "app": true, "worker": true, "monitor": true}
 	fields := Fields()
-	if len(fields) != 23 {
-		t.Fatalf("Fields() has %d keys, want 23", len(fields))
+	if len(fields) != 24 {
+		t.Fatalf("Fields() has %d keys, want 24", len(fields))
 	}
 	seen := map[string]bool{}
 	for _, field := range fields {
@@ -200,6 +201,7 @@ func TestRestartNamesTheProcessThatReadsTheKey(t *testing.T) {
 		KeyMonitorRenotifyAfter: "monitor",
 		KeyAlertWebhookURL:      "monitor",
 		KeyBackupRetention:      "",
+		KeyQAValidationSLA:      "app",
 	}
 	for _, field := range Fields() {
 		if target, ok := want[field.Key]; ok && field.Restart != target {

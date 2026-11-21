@@ -69,6 +69,8 @@ func applyOne(cfg *config.Config, key, raw string) error {
 		return setDuration(&cfg.ReviewTimeout, key, raw)
 	case KeyReviewStaleAfter:
 		return setDuration(&cfg.ReviewStaleAfter, key, raw)
+	case KeyQAValidationSLA:
+		return setDuration(&cfg.QAValidationSLA, key, raw)
 	case KeyLLMHealthInterval:
 		return setDuration(&cfg.LLMHealthInterval, key, raw)
 	case KeyWorkerQueueStale:

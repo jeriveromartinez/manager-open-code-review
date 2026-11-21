@@ -38,6 +38,7 @@ type Config struct {
 	MonitorRenotifyAfter time.Duration // monitor_renotify_after, default 30m
 	AlertWebhookURL      string        // alert_webhook_url (opcional, vacío = solo log)
 	BackupRetention      int           // backup_retention, default 7; deploy/backup.sh lee la BD (Task 7)
+	QAValidationSLA      time.Duration // qa_validation_sla, default 4h
 }
 
 // RequireMasterKey validates that a master key is available. Commands that
@@ -93,6 +94,9 @@ func Default() Config {
 		// enough to notice a broken key without polling the provider.
 		LLMHealthInterval: 30 * time.Minute,
 		BackupRetention:   7,
+		// Half a working day: a PR ready in the morning is validated before
+		// the end of the day.
+		QAValidationSLA: 4 * time.Hour,
 	}
 }
 
