@@ -143,10 +143,10 @@ onMounted(() => {
       </div>
     </header>
 
-    <section v-if="canEdit" class="accounts" aria-label="Cuentas conectadas">
-      <div class="accounts__header">
-        <h2 class="accounts__title">Cuentas conectadas</h2>
-        <div class="accounts__actions">
+    <section v-if="canEdit" class="accounts register" aria-label="Cuentas conectadas">
+      <div class="register__head">
+        <h2 class="register__title">Cuentas conectadas</h2>
+        <div class="register__actions">
           <button
             type="button"
             class="button button--ghost"
@@ -158,7 +158,7 @@ onMounted(() => {
           </button>
           <button
             type="button"
-            class="button button--ghost"
+            class="button button--primary"
             data-sync-all
             :disabled="syncingAll || syncPending.length > 0 || installations.length === 0"
             @click="syncAll"
@@ -167,7 +167,7 @@ onMounted(() => {
           </button>
           <a
             v-if="setupStatus?.install_url"
-            class="accounts__add"
+            class="button button--ghost accounts__add"
             :href="setupStatus.install_url"
             target="_blank"
             rel="noreferrer"
@@ -176,105 +176,139 @@ onMounted(() => {
           </a>
         </div>
       </div>
-      <ul v-if="installations.length > 0" class="accounts__list">
-        <li v-for="installation in installations" :key="installation.id" class="accounts__item">
-          <span>{{ installation.account_login }}</span>
-          <button
-            type="button"
-            class="button button--ghost"
-            :data-sync-installation="installation.id"
-            :disabled="isSyncing(installation.id) || syncingAll"
-            @click="syncInstallation(installation.id)"
-          >
-            {{ isSyncing(installation.id) ? 'Sincronizando…' : 'Sincronizar' }}
-          </button>
-        </li>
-      </ul>
-      <p v-else class="accounts__empty">Todavía no hay cuentas conectadas</p>
+      <p class="register__hint">
+        Sincronizar vuelve a leer las instalaciones y los repositorios desde GitHub. Sincronizar
+        todo encola una operación por cada cuenta. El proceso se ejecuta en segundo plano y tarda
+        unos segundos.
+      </p>
+      <div v-if="installations.length > 0" class="table-wrap">
+        <table class="register-table accounts__table">
+          <thead>
+            <tr>
+              <th scope="col">Cuenta</th>
+              <th scope="col">Tipo de cuenta</th>
+              <th scope="col" class="cell--action">Sincronización</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="installation in installations" :key="installation.id">
+              <td class="mono">{{ installation.account_login }}</td>
+              <td>{{ installation.account_type === 'Organization' ? 'Organización' : 'Usuario' }}</td>
+              <td class="cell--action">
+                <button
+                  type="button"
+                  class="button button--ghost"
+                  :data-sync-installation="installation.id"
+                  :disabled="isSyncing(installation.id) || syncingAll"
+                  @click="syncInstallation(installation.id)"
+                >
+                  {{ isSyncing(installation.id) ? 'Sincronizando…' : 'Sincronizar' }}
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p v-else class="empty-state accounts__empty">Todavía no hay cuentas conectadas</p>
       <p v-if="syncError" class="form-error" role="alert">{{ syncError }}</p>
-      <p v-else-if="syncMessage" class="accounts__message">{{ syncMessage }}</p>
+      <p v-else-if="syncMessage" class="register__message" role="status">{{ syncMessage }}</p>
     </section>
 
-    <p v-if="error" class="empty-state">{{ error }}</p>
-    <p v-else-if="!loading && repos.length === 0" class="empty-state">
-      No hay repositorios disponibles
-    </p>
-    <div v-else class="table-wrap">
-      <table class="repo-table">
-        <thead>
-          <tr>
-            <th scope="col">Repositorio</th>
-            <th scope="col">Cuenta</th>
-            <th scope="col">Visibilidad</th>
-            <th scope="col">Revisión automática</th>
-            <th scope="col">Equipo</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="repo in repos" :key="repo.id" :data-repo-row="repo.id">
-            <td class="repo-table__name">{{ repo.full_name }}</td>
-            <td>{{ repo.account_login }}</td>
-            <td>{{ repo.private ? 'Privado' : 'Público' }}</td>
-            <td>
-              <label class="switch">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  :checked="repo.enabled"
-                  :disabled="!canEdit"
-                  :aria-label="`Revisión automática para ${repo.full_name}`"
-                  :data-repo-enabled="repo.id"
-                  @change="setEnabled(repo, $event)"
-                />
-                <span>{{ repo.enabled ? 'Activada' : 'Desactivada' }}</span>
-              </label>
-              <p
-                v-if="repo.enabled && repo.team_id === null"
-                class="repo-table__warning"
-                :data-repo-warning="repo.id"
-              >
-                Habilitado sin equipo: no se revisará
-              </p>
-              <p
-                v-else-if="repo.enabled && repo.team_id !== null && !repo.has_policy"
-                class="repo-table__warning"
-                :data-repo-policy-warning="repo.id"
-              >
-                El equipo no tiene política: no se revisará
-              </p>
-              <p
-                v-else-if="canEdit && repo.team_id === null"
-                class="repo-table__hint"
-                :data-repo-hint="repo.id"
-              >
-                Sin equipo: activar no iniciará revisiones
-              </p>
-              <p
-                v-else-if="canEdit && repo.team_id !== null && !repo.has_policy"
-                class="repo-table__hint"
-                :data-repo-policy-hint="repo.id"
-              >
-                El equipo no tiene política: activar no iniciará revisiones
-              </p>
-            </td>
-            <td>
-              <select
-                v-if="canEdit"
-                class="field__input repo-table__select"
-                :value="repo.team_id ?? ''"
-                :aria-label="`Equipo de ${repo.full_name}`"
-                :data-repo-team="repo.id"
-                @change="setTeam(repo, $event)"
-              >
-                <option value="">Sin equipo</option>
-                <option v-for="team in teams" :key="team.id" :value="team.id">{{ team.name }}</option>
-              </select>
-              <span v-else :data-repo-team="repo.id">{{ teamName(repo.team_id) }}</span>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <section class="register" aria-label="Repositorios">
+      <div class="register__head">
+        <h2 class="register__title">Registro de repositorios</h2>
+        <span v-if="!loading" class="register__meta">Total: {{ repos.length }}</span>
+      </div>
+      <p v-if="error" class="empty-state" role="alert">{{ error }}</p>
+      <p v-else-if="!loading && repos.length === 0" class="empty-state">
+        No hay repositorios disponibles
+      </p>
+      <div v-else class="table-wrap">
+        <table class="repo-table register-table">
+          <thead>
+            <tr>
+              <th scope="col">Repositorio</th>
+              <th scope="col">Cuenta</th>
+              <th scope="col">Visibilidad</th>
+              <th scope="col">Revisión automática</th>
+              <th scope="col">Equipo</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="repo in repos" :key="repo.id" :data-repo-row="repo.id">
+              <td class="repo-table__name">
+                <span class="repo-table__id">#{{ repo.id }}</span>
+                <span class="repo-table__fullname">{{ repo.full_name }}</span>
+              </td>
+              <td class="mono">{{ repo.account_login }}</td>
+              <td>
+                <span class="badge" :class="repo.private ? 'badge--muted' : 'badge--ok'">
+                  {{ repo.private ? 'Privado' : 'Público' }}
+                </span>
+              </td>
+              <td>
+                <label class="switch">
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    :checked="repo.enabled"
+                    :disabled="!canEdit"
+                    :aria-label="`Revisión automática para ${repo.full_name}`"
+                    :data-repo-enabled="repo.id"
+                    @change="setEnabled(repo, $event)"
+                  />
+                  <span>{{ repo.enabled ? 'Activada' : 'Desactivada' }}</span>
+                </label>
+                <p
+                  v-if="repo.enabled && repo.team_id === null"
+                  class="repo-table__warning"
+                  :data-repo-warning="repo.id"
+                >
+                  Habilitado sin equipo: no se revisará
+                </p>
+                <p
+                  v-else-if="repo.enabled && repo.team_id !== null && !repo.has_policy"
+                  class="repo-table__warning"
+                  :data-repo-policy-warning="repo.id"
+                >
+                  El equipo no tiene política: no se revisará
+                </p>
+                <p
+                  v-else-if="canEdit && repo.team_id === null"
+                  class="repo-table__hint"
+                  :data-repo-hint="repo.id"
+                >
+                  Sin equipo: activar no iniciará revisiones
+                </p>
+                <p
+                  v-else-if="canEdit && repo.team_id !== null && !repo.has_policy"
+                  class="repo-table__hint"
+                  :data-repo-policy-hint="repo.id"
+                >
+                  El equipo no tiene política: activar no iniciará revisiones
+                </p>
+              </td>
+              <td>
+                <select
+                  v-if="canEdit"
+                  class="field__input repo-table__select"
+                  :value="repo.team_id ?? ''"
+                  :aria-label="`Equipo de ${repo.full_name}`"
+                  :data-repo-team="repo.id"
+                  @change="setTeam(repo, $event)"
+                >
+                  <option value="">Sin equipo</option>
+                  <option v-for="team in teams" :key="team.id" :value="team.id">
+                    {{ team.name }}
+                  </option>
+                </select>
+                <span v-else :data-repo-team="repo.id">{{ teamName(repo.team_id) }}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
   </section>
 </template>
 
@@ -285,115 +319,130 @@ onMounted(() => {
   gap: var(--space-5);
 }
 
-.accounts {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-  padding: var(--space-4);
+.register {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
 }
 
-.accounts__header {
+.register__head {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--space-3);
-  margin-bottom: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: var(--rule-heavy) solid var(--text);
 }
 
-.accounts__title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
+.register__title {
+  font-size: 17px;
 }
 
-.accounts__actions {
+.register__meta {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.register__actions {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.register .button {
+  min-height: 40px;
 }
 
 .accounts__add {
-  color: var(--accent, #0969da);
-  font-size: 14px;
-  font-weight: 500;
   text-decoration: none;
 }
 
-.accounts__add:hover {
-  text-decoration: underline;
+.register__hint {
+  max-width: 72ch;
+  color: var(--text-muted);
+  font-size: 13.5px;
 }
 
-.accounts__list {
-  margin: 0;
-  padding-left: var(--space-5);
-  color: var(--text);
-}
-
-.accounts__item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
+.register__message {
+  color: var(--ok);
+  font-size: 13.5px;
 }
 
 .accounts__empty {
-  margin: 0;
   color: var(--text-muted);
-  font-size: 14px;
 }
 
-.accounts__message {
-  margin-top: var(--space-2);
-  color: var(--ok);
+.register-table {
+  font-size: 14.5px;
+}
+
+.register-table th {
+  padding: var(--space-3);
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.register-table td {
+  padding: var(--space-3);
+}
+
+.register-table th + th,
+.register-table td + td {
+  border-left: var(--rule-hair) solid var(--border);
+}
+
+.cell--action {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.mono,
+.repo-table__name {
+  font-family: var(--font-mono);
+}
+
+.repo-table__id {
+  margin-right: var(--space-2);
+  color: var(--text-faint);
   font-size: 13px;
 }
 
-.table-wrap {
-  overflow-x: auto;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-sm);
-}
-
-.repo-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 14px;
-}
-
-.repo-table th,
-.repo-table td {
-  padding: var(--space-3) var(--space-4);
-  text-align: left;
-  border-bottom: 1px solid var(--border);
-}
-
-.repo-table th {
-  color: var(--text-muted);
-  font-size: 12.5px;
-  font-weight: 600;
-}
-
-.repo-table tbody tr:last-child td {
-  border-bottom: 0;
-}
-
-.repo-table__name {
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
-  font-weight: 600;
+.repo-table__fullname {
+  white-space: nowrap;
 }
 
 .repo-table__select {
-  padding: 5px 8px;
-  font-size: 13px;
+  min-height: 40px;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2);
+  font-size: 14px;
+}
+
+.repo-table__select:hover {
+  border-color: var(--text);
+  background: var(--surface-3);
+}
+
+.repo-table__select:active {
+  background: var(--surface-3);
+}
+
+.repo-table__select:focus-visible,
+.switch input:focus-visible {
+  outline: var(--rule-heavy) solid var(--focus);
+  outline-offset: var(--space-1);
 }
 
 .switch {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+  min-height: 40px;
   cursor: pointer;
 }
 
@@ -404,20 +453,37 @@ onMounted(() => {
   cursor: pointer;
 }
 
+.switch:hover span {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.switch:active span {
+  color: var(--text-muted);
+}
+
 .switch input:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
+  opacity: 0.55;
 }
 
 .repo-table__warning {
   margin-top: var(--space-1);
   color: var(--bad);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .repo-table__hint {
   margin-top: var(--space-1);
   color: var(--text-muted);
-  font-size: 12.5px;
+  font-size: 13px;
+}
+
+@media (pointer: coarse) {
+  .register .button,
+  .switch,
+  .repo-table__select {
+    min-height: 44px;
+  }
 }
 </style>
