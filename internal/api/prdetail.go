@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
@@ -53,22 +52,24 @@ func reviewRunDTOOf(run store.ReviewRun) reviewRunDTO {
 }
 
 type findingDTO struct {
-	ID             string `json:"id"`
-	Fingerprint    string `json:"fingerprint"`
-	Path           string `json:"path"`
-	StartLine      int    `json:"start_line"`
-	EndLine        int    `json:"end_line"`
-	Severity       string `json:"severity"`
-	Category       string `json:"category"`
-	Title          string `json:"title"`
-	Body           string `json:"body"`
-	Suggestion     string `json:"suggestion"`
-	Confidence     string `json:"confidence"`
-	Status         string `json:"status"`
-	FirstSeenRunID uint   `json:"first_seen_run_id"`
-	LastSeenRunID  uint   `json:"last_seen_run_id"`
-	CreatedAt      string `json:"created_at"`
-	UpdatedAt      string `json:"updated_at"`
+	ID             string  `json:"id"`
+	Fingerprint    string  `json:"fingerprint"`
+	Path           string  `json:"path"`
+	StartLine      int     `json:"start_line"`
+	EndLine        int     `json:"end_line"`
+	Severity       string  `json:"severity"`
+	Category       string  `json:"category"`
+	Title          string  `json:"title"`
+	Body           string  `json:"body"`
+	Suggestion     string  `json:"suggestion"`
+	Confidence     string  `json:"confidence"`
+	Status         string  `json:"status"`
+	FirstSeenRunID uint    `json:"first_seen_run_id"`
+	LastSeenRunID  uint    `json:"last_seen_run_id"`
+	TriagedBy      string  `json:"triaged_by"`
+	TriagedAt      *string `json:"triaged_at"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
 }
 
 func findingDTOOf(f store.Finding) findingDTO {
@@ -78,6 +79,7 @@ func findingDTOOf(f store.Finding) findingDTO {
 		Category: f.Category, Title: f.Title, Body: f.Body,
 		Suggestion: f.Suggestion, Confidence: f.Confidence, Status: f.Status,
 		FirstSeenRunID: f.FirstSeenRunID, LastSeenRunID: f.LastSeenRunID,
+		TriagedBy: f.TriagedBy, TriagedAt: formatTimePtr(f.TriagedAt),
 		CreatedAt: f.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt: f.UpdatedAt.UTC().Format(time.RFC3339),
 	}
@@ -156,16 +158,8 @@ func (s *server) retryPR(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusNotFound, "pull request not found")
 		return
 	}
-	if !user.IsAdmin {
-		role, err := s.Store.RepoRole(r.Context(), user.ID, pr.RepositoryID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			writeAPIError(w, http.StatusInternalServerError, "load repository role")
-			return
-		}
-		if role != "lead" {
-			writeAPIError(w, http.StatusForbidden, "forbidden")
-			return
-		}
+	if !s.canTriage(w, r, user, pr) {
+		return
 	}
 	if s.Reviews == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "review retrier unavailable")

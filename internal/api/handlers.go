@@ -37,7 +37,20 @@ type prResponse struct {
 		Passed int `json:"passed"`
 		Total  int `json:"total"`
 	} `json:"validations"`
-	UpdatedAt string `json:"updated_at"`
+	OpenFindings severityCountsResponse `json:"open_findings"`
+	StatusSince  string                 `json:"status_since"`
+	UpdatedAt    string                 `json:"updated_at"`
+}
+
+type severityCountsResponse struct {
+	Blocker int `json:"blocker"`
+	Major   int `json:"major"`
+	Minor   int `json:"minor"`
+	Nit     int `json:"nit"`
+}
+
+func severityCountsDTO(c store.SeverityCounts) severityCountsResponse {
+	return severityCountsResponse{Blocker: c.Blocker, Major: c.Major, Minor: c.Minor, Nit: c.Nit}
 }
 
 func prDTO(v store.PRView) prResponse {
@@ -52,6 +65,8 @@ func prDTO(v store.PRView) prResponse {
 		Group:        v.Group,
 		ReviewState:  v.ReviewState,
 		ReviewReason: v.ReviewReason,
+		OpenFindings: severityCountsDTO(v.OpenFindings),
+		StatusSince:  v.StatusSince.UTC().Format(time.RFC3339),
 		UpdatedAt:    v.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 	out.Validations.Passed = v.Validations.Passed

@@ -25,7 +25,8 @@ func (s *server) withdrawFinding(w http.ResponseWriter, r *http.Request) {
 	s.findingTransition(w, r, store.FindingWithdrawn)
 }
 
-// confirmFinding undoes a dismissal, bringing the finding back to open.
+// confirmFinding records that a person vouches for the finding. On a dismissed
+// finding it also brings it back to open.
 func (s *server) confirmFinding(w http.ResponseWriter, r *http.Request) {
 	s.findingTransition(w, r, store.FindingOpen)
 }
@@ -74,10 +75,11 @@ func (s *server) findingTransition(w http.ResponseWriter, r *http.Request, statu
 	if status == store.FindingOpen {
 		action = "finding.confirmed"
 	}
-	changed, err := s.Store.SetFindingStatusAudited(r.Context(), finding.ID, status, store.FindingAudit{
-		Action: action,
-		Actor:  user.Login,
-		Reason: body.Reason,
+	changed, err := s.Store.TriageFinding(r.Context(), finding.ID, status, store.FindingAudit{
+		Action:  action,
+		Actor:   user.Login,
+		ActorID: &user.ID,
+		Reason:  body.Reason,
 	})
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "update finding")
@@ -105,23 +107,33 @@ func (s *server) findingTransition(w http.ResponseWriter, r *http.Request, statu
 }
 
 // authorizedPR loads the pull request and enforces the same rule as retry: an
-// admin, or the lead of the repository's team.
+// admin, or the lead or QA of the repository's team. Triage is QA's daily job;
+// developers stay out because they would be judging their own code.
 func (s *server) authorizedPR(w http.ResponseWriter, r *http.Request, user store.User, prID uint) (store.PullRequest, bool) {
 	var pr store.PullRequest
 	if err := s.Store.DB.WithContext(r.Context()).Take(&pr, prID).Error; err != nil {
 		writeAPIError(w, http.StatusNotFound, "pull request not found")
 		return store.PullRequest{}, false
 	}
-	if !user.IsAdmin {
-		role, err := s.Store.RepoRole(r.Context(), user.ID, pr.RepositoryID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			writeAPIError(w, http.StatusInternalServerError, "load repository role")
-			return store.PullRequest{}, false
-		}
-		if role != "lead" {
-			writeAPIError(w, http.StatusForbidden, "forbidden")
-			return store.PullRequest{}, false
-		}
+	if !s.canTriage(w, r, user, pr) {
+		return store.PullRequest{}, false
 	}
 	return pr, true
+}
+
+// canTriage writes the error response itself when it returns false.
+func (s *server) canTriage(w http.ResponseWriter, r *http.Request, user store.User, pr store.PullRequest) bool {
+	if user.IsAdmin {
+		return true
+	}
+	role, err := s.Store.RepoRole(r.Context(), user.ID, pr.RepositoryID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		writeAPIError(w, http.StatusInternalServerError, "load repository role")
+		return false
+	}
+	if role != "lead" && role != "qa" {
+		writeAPIError(w, http.StatusForbidden, "forbidden")
+		return false
+	}
+	return true
 }

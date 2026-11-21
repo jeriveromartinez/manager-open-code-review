@@ -47,8 +47,8 @@ func TestSettingsReturnsDefaultsAndMetadata(t *testing.T) {
 	if body.Values["review_timeout"] != "20m0s" && body.Values["review_timeout"] != "20m" {
 		t.Errorf("review_timeout = %q, want the 20m default", body.Values["review_timeout"])
 	}
-	if len(body.Fields) != 23 {
-		t.Fatalf("fields = %d, want 23", len(body.Fields))
+	if len(body.Fields) != 24 {
+		t.Fatalf("fields = %d, want 24", len(body.Fields))
 	}
 }
 
