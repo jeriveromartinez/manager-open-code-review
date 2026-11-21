@@ -572,7 +572,12 @@ func TestSetupInstalledRequestPendingApproval(t *testing.T) {
 	}
 	// GitHub sends the browser here before any account exists, so the page
 	// cannot lean on the SPA's stylesheet.
-	for _, want := range []string{"<style>", `name="description"`, "<title>"} {
+	for _, want := range []string{
+		"<title>QA Control Center. Instalación pendiente</title>",
+		`name="description"`,
+		"overflow-x: clip",
+		":focus-visible",
+	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body is missing %q: the page must be self-contained", want)
 		}
