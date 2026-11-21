@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeriveromartinez/qa-control-center/internal/llmmodels"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
@@ -173,8 +174,14 @@ func writeOpenCodeConfig(home string, profile store.LLMProfile, steps int) error
 	options := map[string]string{
 		"apiKey": "{env:" + apiKeyEnvVar + "}",
 	}
+	// OpenCode 1.19 only knows a fixed set of providers by name. For the rest
+	// (CommandCode, for example) it builds "<undefined>/chat/completions"
+	// unless the endpoint is written here. The table is closed and shared with
+	// the model-listing API, so the client still cannot choose the URL.
 	if profile.BaseURL != nil && *profile.BaseURL != "" {
 		options["baseURL"] = *profile.BaseURL
+	} else if baseURL, ok := llmmodels.ProviderBaseURL(profile.Provider); ok {
+		options["baseURL"] = baseURL
 	}
 	provider := map[string]any{
 		"options": options,
@@ -315,7 +322,11 @@ func describeAgentError(name string, data agentErrorData) string {
 	case reason == "invalid_request" || status == 400:
 		detail = "el proveedor rechazó la petición" + statusLabel + "; revisa el modelo o los parámetros del perfil"
 	case name == "UnknownError":
-		detail = "OpenCode no expuso el detalle del proveedor (UnknownError); revisa el proveedor, el modelo y la API key del perfil"
+		detail = "OpenCode devolvió un error genérico (UnknownError)"
+		if message != "" {
+			detail += ": " + message
+		}
+		detail += "; revisa el proveedor, el modelo y la API key del perfil"
 		if ref := strings.TrimSpace(data.Ref); ref != "" {
 			detail += "; ref: " + ref
 		}
