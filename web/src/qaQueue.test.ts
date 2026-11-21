@@ -19,6 +19,7 @@ function pr(overrides: Partial<PRView>): PRView {
     validations: { passed: 0, total: 0 },
     open_findings: { blocker: 0, major: 0, minor: 0, nit: 0 },
     status_since: '2026-11-21T11:00:00Z',
+    team_id: 3,
     updated_at: '2026-11-21T11:00:00Z',
     ...overrides,
   }

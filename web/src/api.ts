@@ -26,6 +26,8 @@ export type PRView = {
   review_reason: string
   validations: { passed: number; total: number }
   open_findings: SeverityCounts
+  /** Team that owns the repository; null when the repository has none. */
+  team_id: number | null
   /** When the PR entered its current `qa_status` (RFC 3339). */
   status_since: string
   updated_at: string
@@ -49,6 +51,7 @@ export type QASummary = {
   false_positive: number
   precision_window_days: number
   categories: { category: string; count: number }[]
+  confirmed_by_repo: { repo: string; count: number }[]
   category_window_days: number
   validation_sla_seconds: number
 }
@@ -336,7 +339,8 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 
 export const api = {
   me: () => request<Me>('/api/me'),
-  qaSummary: () => request<QASummary>('/api/qa/summary'),
+  qaSummary: (teamId?: number) =>
+    request<QASummary>(teamId === undefined ? '/api/qa/summary' : `/api/qa/summary?team_id=${teamId}`),
   readiness: () => request<Readiness>('/api/readiness'),
   prs: () => request<PRView[]>('/api/prs'),
   prDetail: (id: number) => request<PRDetail>(`/api/prs/${id}`),

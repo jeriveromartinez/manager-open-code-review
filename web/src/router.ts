@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { api, setUnauthorizedHandler } from './api'
 import AgentsView from './views/AgentsView.vue'
 import DashboardView from './views/DashboardView.vue'
+import LeadView from './views/LeadView.vue'
 import LoginView from './views/LoginView.vue'
 import PrDetailView from './views/PrDetailView.vue'
 import ReposView from './views/ReposView.vue'
@@ -34,6 +35,7 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'dashboard', component: DashboardView },
+    { path: '/lead', name: 'lead', component: LeadView },
     { path: '/repos', name: 'repos', component: ReposView },
     { path: '/teams', name: 'teams', component: TeamsView },
     { path: '/agents', name: 'agents', component: AgentsView },
