@@ -1,24 +1,26 @@
 <script setup lang="ts">
-import type { PRGroup } from '../api'
+import type { BucketFilter } from '../stores/prs'
 
 const props = defineProps<{
-  modelValue: PRGroup
+  modelValue: BucketFilter
+  counts: Record<BucketFilter, number>
 }>()
 
 const emit = defineEmits<{
-  'update:modelValue': [value: PRGroup]
+  'update:modelValue': [value: BucketFilter]
 }>()
 
-const tabs: { label: string; value: PRGroup }[] = [
+const tabs: { label: string; value: BucketFilter }[] = [
+  { label: 'Para validar', value: 'ready' },
+  { label: 'Con defectos', value: 'defects' },
+  { label: 'Inconclusos', value: 'inconclusive' },
+  { label: 'En revisión IA', value: 'ai' },
   { label: 'Todos', value: '' },
-  { label: 'En revisión', value: 'in_review' },
-  { label: 'Bloqueados', value: 'blocked' },
-  { label: 'Listos', value: 'ready' },
 ]
 </script>
 
 <template>
-  <div class="filter-tabs" role="tablist" aria-label="Filtrar Pull Requests">
+  <div class="filter-tabs" role="tablist" aria-label="Filtrar pull requests">
     <button
       v-for="tab in tabs"
       :key="tab.label"
@@ -27,9 +29,11 @@ const tabs: { label: string; value: PRGroup }[] = [
       class="filter-tab"
       :class="{ 'filter-tab--active': props.modelValue === tab.value }"
       :aria-selected="props.modelValue === tab.value"
+      :data-tab="tab.value || 'all'"
       @click="emit('update:modelValue', tab.value)"
     >
       {{ tab.label }}
+      <span class="filter-tab__count">{{ props.counts[tab.value] }}</span>
     </button>
   </div>
 </template>

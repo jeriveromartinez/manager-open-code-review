@@ -25,7 +25,32 @@ export type PRView = {
   review_state: 'running' | 'scheduled' | 'blocked' | ''
   review_reason: string
   validations: { passed: number; total: number }
+  open_findings: SeverityCounts
+  /** Momento en que el PR entró en su `qa_status` actual (RFC 3339). */
+  status_since: string
   updated_at: string
+}
+
+export type SeverityCounts = {
+  blocker: number
+  major: number
+  minor: number
+  nit: number
+}
+
+/** Resumen de la cola de QA sobre los PRs que ve el usuario. */
+export type QASummary = {
+  ready_for_human: number
+  inconclusive: number
+  runs_running: number
+  runs_queued: number
+  untriaged: SeverityCounts
+  confirmed: number
+  false_positive: number
+  precision_window_days: number
+  categories: { category: string; count: number }[]
+  category_window_days: number
+  validation_sla_seconds: number
 }
 
 /** Ejecución de revisión. CloneTokenEnc nunca se expone en la API. */
@@ -63,6 +88,9 @@ export type Finding = {
   status: string
   first_seen_run_id: number
   last_seen_run_id: number
+  /** Quién confirmó el hallazgo o lo marcó como falso positivo desde el panel. */
+  triaged_by: string
+  triaged_at: string | null
   created_at: string
   updated_at: string
 }
@@ -74,13 +102,6 @@ export type Finding = {
 export type PRDetail = PRView & {
   runs: ReviewRun[]
   findings: Finding[]
-}
-
-export type Stats = {
-  open: number
-  awaiting_human: number
-  in_evaluation: number
-  with_problems: number
 }
 
 /** Un eslabón de configuración que falta para que se ejecute una revisión. */
@@ -314,10 +335,9 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 
 export const api = {
   me: () => request<Me>('/api/me'),
-  stats: () => request<Stats>('/api/stats'),
+  qaSummary: () => request<QASummary>('/api/qa/summary'),
   readiness: () => request<Readiness>('/api/readiness'),
-  prs: (group?: PRGroup) =>
-    request<PRView[]>(group ? `/api/prs?group=${encodeURIComponent(group)}` : '/api/prs'),
+  prs: () => request<PRView[]>('/api/prs'),
   prDetail: (id: number) => request<PRDetail>(`/api/prs/${id}`),
   retryPR: (id: number) =>
     request<{ status: string }>(`/api/prs/${id}/retry`, { method: 'POST' }),

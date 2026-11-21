@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, type Finding, type PRDetail } from '../api'
+import { isForbidden } from '../errors'
 import { prStatusLabel, statusLabel } from '../status'
 
 const route = useRoute()
@@ -53,6 +54,34 @@ const status = computed(() =>
   detail.value ? prStatusLabel(detail.value) : statusLabel('pending'),
 )
 
+// Lo que QA comprueba antes de aprobar en GitHub. Los resueltos no cuentan: ya
+// no son una decisión pendiente de nadie.
+const validation = computed(() => {
+  const pr = detail.value
+  const findings = (pr?.findings ?? []).filter((finding) => finding.status !== 'resolved')
+  const open = findings.filter((finding) => finding.status === 'open')
+  const validations = pr?.validations ?? { passed: 0, total: 0 }
+  const run = latestRun.value
+  return {
+    triaged: findings.filter((finding) => finding.triaged_by !== '').length,
+    total: findings.length,
+    untriaged: open.filter((finding) => finding.triaged_by === '').length,
+    openBlockers: open.filter((finding) => finding.severity === 'blocker').length,
+    ciKnown: validations.total > 0,
+    ciGreen: validations.total > 0 && validations.passed === validations.total,
+    ciText: `${validations.passed}/${validations.total}`,
+    aiDone: run?.status === 'succeeded',
+    aiText: run ? `Última revisión IA: ${run.status}` : 'La IA todavía no ha revisado este PR',
+  }
+})
+
+function triageNote(finding: Finding): string {
+  if (finding.triaged_by === '') return 'Sin triar'
+  return finding.status === 'withdrawn'
+    ? `Falso positivo según ${finding.triaged_by}`
+    : `Confirmado por ${finding.triaged_by}`
+}
+
 function coverageCount(key: string): number {
   const value = latestRun.value?.coverage?.[key]
   return typeof value === 'number' ? value : 0
@@ -83,8 +112,10 @@ async function retry(): Promise<void> {
   try {
     await api.retryPR(prId.value)
     await load()
-  } catch {
-    error.value = 'No se pudo reintentar la revisión'
+  } catch (err) {
+    error.value = isForbidden(err)
+      ? 'Solo QA o el lead del equipo pueden reintentar'
+      : 'No se pudo reintentar la revisión'
   } finally {
     retrying.value = false
   }
@@ -137,10 +168,14 @@ async function applyAction(): Promise<void> {
       await api.confirmFinding(prId.value, finding.id)
     }
     await load()
-  } catch {
+  } catch (err) {
     detail.value = previous
-    error.value =
-      action === 'withdraw' ? 'No se pudo descartar el hallazgo' : 'No se pudo confirmar el hallazgo'
+    if (isForbidden(err)) {
+      error.value = 'Solo QA o el lead del equipo pueden triar hallazgos'
+    } else {
+      error.value =
+        action === 'withdraw' ? 'No se pudo descartar el hallazgo' : 'No se pudo confirmar el hallazgo'
+    }
   } finally {
     acting.value = null
     reason.value = ''
@@ -196,7 +231,46 @@ onMounted(() => {
       </div>
     </dl>
 
-    <p v-if="error" class="form-error">{{ error }}</p>
+    <p v-if="error" class="form-error" role="alert">{{ error }}</p>
+
+    <section class="tile qa-check" aria-labelledby="qa-check-title" data-qa-check>
+      <div class="qa-check__head">
+        <div>
+          <h2 id="qa-check-title" class="tile__title">Validación QA</h2>
+          <p class="qa-check__figure" data-triaged-count>
+            {{ validation.triaged }}/{{ validation.total }} triados
+          </p>
+        </div>
+        <a
+          class="button button--light"
+          :href="`${detail.html_url}/files`"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Revisar y aprobar en GitHub ↗
+        </a>
+      </div>
+      <ul class="qa-check__list">
+        <li :class="validation.ciGreen ? 'is-ok' : validation.ciKnown ? 'is-bad' : 'is-unknown'" data-check="ci">
+          {{ validation.ciKnown ? `CI: ${validation.ciText} checks en verde` : 'CI sin datos para este commit' }}
+        </li>
+        <li :class="validation.aiDone ? 'is-ok' : 'is-bad'" data-check="ai">{{ validation.aiText }}</li>
+        <li :class="validation.openBlockers === 0 ? 'is-ok' : 'is-bad'" data-check="blockers">
+          {{
+            validation.openBlockers === 0
+              ? 'Sin bloqueantes abiertos'
+              : `${validation.openBlockers} bloqueante${validation.openBlockers === 1 ? '' : 's'} abierto${validation.openBlockers === 1 ? '' : 's'}`
+          }}
+        </li>
+        <li :class="validation.untriaged === 0 ? 'is-ok' : 'is-unknown'" data-check="untriaged">
+          {{
+            validation.untriaged === 0
+              ? 'Todos los hallazgos abiertos están triados'
+              : `${validation.untriaged} hallazgo${validation.untriaged === 1 ? '' : 's'} sin triar`
+          }}
+        </li>
+      </ul>
+    </section>
 
     <section class="pr-section" aria-label="Ejecuciones">
       <div class="pr-section__head">
@@ -270,6 +344,13 @@ onMounted(() => {
             <span>{{ finding.suggestion }}</span>
           </p>
           <div class="finding__actions">
+            <span
+              class="finding__triage"
+              :class="{ 'finding__triage--done': finding.triaged_by !== '' }"
+              data-triage-note
+            >
+              {{ triageNote(finding) }}
+            </span>
             <button
               class="button button--ghost finding__action"
               type="button"
@@ -278,7 +359,18 @@ onMounted(() => {
               :disabled="acting === finding.id"
               @click="askWithdraw(finding)"
             >
-              Descartar
+              Falso positivo
+            </button>
+            <button
+              v-if="finding.triaged_by === ''"
+              class="button button--light finding__action"
+              type="button"
+              data-confirm
+              :data-finding-id="finding.id"
+              :disabled="acting === finding.id"
+              @click="askConfirm(finding)"
+            >
+              Confirmar
             </button>
           </div>
         </article>
@@ -302,6 +394,7 @@ onMounted(() => {
             </p>
           </div>
           <div class="finding__actions">
+            <span class="finding__triage" data-triage-note>{{ triageNote(finding) }}</span>
             <button
               class="button button--ghost finding__action"
               type="button"
@@ -310,7 +403,7 @@ onMounted(() => {
               :disabled="acting === finding.id"
               @click="askConfirm(finding)"
             >
-              Confirmar
+              Restaurar
             </button>
           </div>
         </article>
@@ -320,7 +413,7 @@ onMounted(() => {
     <div v-if="confirming" class="dialog-backdrop" data-confirm-dialog>
       <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="finding-action-title">
         <h2 id="finding-action-title" class="dialog__title">
-          {{ confirming.action === 'withdraw' ? 'Descartar hallazgo' : 'Confirmar hallazgo' }}
+          {{ confirming.action === 'withdraw' ? 'Marcar como falso positivo' : 'Confirmar hallazgo' }}
         </h2>
         <p class="dialog__text">
           <strong>{{ confirming.finding.title }}</strong>
@@ -348,7 +441,7 @@ onMounted(() => {
             :disabled="acting !== null"
             @click="applyAction"
           >
-            {{ confirming.action === 'withdraw' ? 'Descartar' : 'Confirmar' }}
+            {{ confirming.action === 'withdraw' ? 'Falso positivo' : 'Confirmar' }}
           </button>
         </div>
       </div>
@@ -598,9 +691,14 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-4);
-  border-left: var(--rule-heavy) solid var(--border-strong);
-  border-bottom: var(--rule-hair) solid var(--border);
+  padding: 22px;
+  background: var(--surface);
+  border: var(--rule-hair) solid #262626;
+  border-radius: var(--radius-lg);
+}
+
+[data-severity='blocker'] .finding {
+  border-color: var(--accent);
 }
 
 .severity[data-severity='blocker'] .finding,
@@ -653,7 +751,73 @@ onMounted(() => {
 
 .finding__actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: var(--rule-hair) dashed var(--border);
+}
+
+.finding__triage {
+  margin-right: auto;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.finding__triage--done {
+  color: var(--ok);
+}
+
+.qa-check__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.qa-check__figure {
+  margin-top: var(--space-2);
+  font-size: 30px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.qa-check__list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-2) var(--space-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.qa-check__list li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.qa-check__list li::before {
+  content: '';
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dot-dim);
+}
+
+.qa-check__list .is-ok::before {
+  background: var(--ok);
+}
+
+.qa-check__list .is-bad::before {
+  background: var(--accent);
 }
 
 .severity--withdrawn .severity__title {
