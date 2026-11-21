@@ -53,6 +53,7 @@ describe('AppShell', () => {
     expect(wrapper.get('[data-brand]').text()).toBe('QA Control Center')
     expect(navLabels(wrapper)).toEqual(['Mi cola', 'Repositorios', 'Equipos'])
     expect(wrapper.get('[data-nav="/repos"]').attributes('aria-current')).toBe('page')
+    expect(wrapper.get('[data-nav="/"]').attributes('aria-current')).toBeUndefined()
     expect(wrapper.find('[data-page]').exists()).toBe(true)
   })
 

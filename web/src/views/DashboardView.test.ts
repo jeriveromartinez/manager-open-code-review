@@ -312,10 +312,30 @@ describe('DashboardView', () => {
   })
 
   it('names the teams in the queue heading instead of counting repos', async () => {
+    mocks.api.me.mockResolvedValue({
+      id: 2,
+      login: 'mvega',
+      avatar_url: '',
+      is_admin: false,
+      teams: [
+        { id: 3, name: 'Pagos', role: 'qa' },
+        { id: 4, name: 'Web', role: 'qa' },
+      ],
+    })
     const wrapper = mountDashboard()
     await flushPromises()
 
-    expect(wrapper.get('[data-queue-summary]').text()).toBe('Pagos · 4 PRs abiertos · ordenados por tiempo de espera')
+    expect(wrapper.get('[data-queue-summary]').text()).toBe('Pagos y Web · 4 PRs abiertos · ordenados por tiempo de espera')
+    wrapper.unmount()
+  })
+
+  it('does not narrow the heading to an admin own teams, since an admin sees every team', async () => {
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    expect(wrapper.get('[data-queue-summary]').text()).toBe(
+      'Todos los equipos · 4 PRs abiertos · ordenados por tiempo de espera',
+    )
     wrapper.unmount()
   })
 

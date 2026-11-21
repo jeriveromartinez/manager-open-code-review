@@ -19,10 +19,12 @@ const width = computed(() => `${Math.min(Math.max(0, props.count), props.max) * 
 </script>
 
 <template>
-  <span v-if="label" class="dot-bar" role="img" :aria-label="label">
-    <span class="dot-bar__fill" :class="`dot-bar__fill--${tone}`" :style="{ width }" />
-  </span>
-  <span v-else class="dot-bar" aria-hidden="true">
+  <span
+    class="dot-bar"
+    :role="label ? 'img' : undefined"
+    :aria-label="label"
+    :aria-hidden="label ? undefined : 'true'"
+  >
     <span class="dot-bar__fill" :class="`dot-bar__fill--${tone}`" :style="{ width }" />
   </span>
 </template>

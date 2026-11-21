@@ -348,6 +348,12 @@ img {
 
 /* ---------- Loading ---------- */
 
+.empty-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .loader {
   display: flex;
   align-items: center;
@@ -1144,5 +1150,11 @@ tbody tr:hover {
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+  }
+
+  /* A near-zero duration on an infinite blink flickers; stop it instead. */
+  .live--on,
+  .loader__dot {
+    animation: none !important;
   }
 }

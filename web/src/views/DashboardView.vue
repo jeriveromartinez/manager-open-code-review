@@ -88,7 +88,8 @@ function bar(label: string, count: number, tone: DotTone) {
 
 const queueSummary = computed(() => {
   const names = (session.me?.teams ?? []).map((team) => team.name)
-  const teams = names.length > 1 ? `${names.slice(0, -1).join(', ')} y ${names[names.length - 1]}` : names[0]
+  const own = names.length > 1 ? `${names.slice(0, -1).join(', ')} y ${names[names.length - 1]}` : names[0]
+  const teams = session.me?.is_admin ? 'Todos los equipos' : own
   const count = prsStore.prs.length
   const open = `${count} ${count === 1 ? 'PR abierto' : 'PRs abiertos'}`
   return [teams, open, 'ordenados por tiempo de espera'].filter(Boolean).join(' · ')
@@ -228,7 +229,7 @@ onBeforeUnmount(() => {
             />
           </li>
         </ul>
-        <div v-else class="waiting__row">
+        <div v-else class="empty-bar">
           <p class="tile__empty">Nada esperando validación.</p>
           <DotBar :count="0" tone="on" />
         </div>
@@ -269,7 +270,7 @@ onBeforeUnmount(() => {
             :label="
               precision.decided > 0
                 ? `${precision.percent}% de hallazgos confirmados: ${precision.confirmed} confirmados, ${precision.falsePositive} falsos positivos`
-                : 'Sin hallazgos triados en este periodo'
+                : 'Acierto sin datos'
             "
           >
             <span v-if="precision.decided > 0" class="ring-row__figure" data-precision>{{ precision.percent }}%</span>
@@ -360,7 +361,7 @@ onBeforeUnmount(() => {
             <span class="bars__count">{{ row.count }}</span>
           </li>
         </ul>
-        <div v-else class="waiting__row tile__foot">
+        <div v-else class="empty-bar tile__foot">
           <p class="tile__empty">Sin defectos confirmados todavía.</p>
           <DotBar :count="0" tone="on" />
         </div>

@@ -25,7 +25,6 @@ const error = ref<string | null>(null)
 const now = ref(new Date())
 let clock: ReturnType<typeof setInterval> | null = null
 
-
 const thresholdLabels: Record<Threshold, string> = {
   blocker: 'Bloqueante',
   major: 'Mayor',
@@ -286,7 +285,7 @@ onBeforeUnmount(() => {
               :label="
                 precision.decided > 0
                   ? `${precision.percent}% de hallazgos confirmados en el equipo`
-                  : 'Sin hallazgos triados en este periodo'
+                  : 'Acierto sin datos'
               "
             >
               <span v-if="precision.decided > 0" class="ring-row__figure" data-precision>{{ precision.percent }}%</span>
@@ -419,12 +418,6 @@ onBeforeUnmount(() => {
   font-size: 40px;
   font-weight: 900;
   line-height: 1;
-}
-
-.empty-bar {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
 }
 
 .legend,
