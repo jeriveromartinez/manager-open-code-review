@@ -278,6 +278,59 @@ img {
   padding: var(--space-5) var(--space-5) 72px;
 }
 
+/* Ultrawide: the two queues show their summary and their list side by side;
+ * every other page grows a little but keeps tables and forms readable. */
+@media (min-width: 2200px) {
+  .shell {
+    --container: 1760px;
+  }
+
+  .shell--wide {
+    --container: 3200px;
+  }
+
+  .shell__bar,
+  .container {
+    padding-left: 40px;
+    padding-right: 40px;
+  }
+}
+
+/* ---------- Split view ---------- */
+
+.split {
+  display: flex;
+  flex-direction: column;
+  gap: 36px;
+}
+
+.split__aside,
+.split__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+}
+
+@media (min-width: 2200px) {
+  .split {
+    display: grid;
+    grid-template-columns: minmax(0, 1100px) minmax(0, 1fr);
+    align-items: start;
+    gap: 40px;
+  }
+
+  /* The summary stays in view while the list beside it scrolls. */
+  .split__aside {
+    position: sticky;
+    top: var(--space-5);
+  }
+
+  .split__aside .tile-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
 /* ---------- Page header ---------- */
 
 .dashboard {

@@ -209,182 +209,188 @@ onBeforeUnmount(() => {
     </p>
 
     <template v-else-if="team">
-      <section class="tile-grid" aria-label="Resumen del equipo">
-        <article class="tile" data-tile="state">
-          <h2 class="tile__title"><span class="tile__index">01</span>Estado del equipo</h2>
-          <div class="ring-row">
-            <DotRing
-              :segments="[
-                { value: buckets.ready, tone: 'on' },
-                { value: buckets.ai, tone: 'dim' },
-                { value: buckets.problems, tone: 'bad' },
-              ]"
-              :label="`${prs.length} PRs abiertos: ${buckets.ready} listos, ${buckets.ai} en evaluación, ${buckets.problems} bloqueados`"
-            >
-              <span class="ring-row__figure">{{ prs.length }}</span>
-              <span class="caption">Abiertos</span>
-            </DotRing>
-            <dl class="legend">
-              <div>
-                <dt class="caption"><span class="dot dot--on" />Listos</dt>
-                <dd>{{ buckets.ready }}</dd>
-              </div>
-              <div>
-                <dt class="caption"><span class="dot dot--dim" />Evaluando</dt>
-                <dd>{{ buckets.ai }}</dd>
-              </div>
-              <div>
-                <dt class="caption"><span class="dot dot--bad" />Bloqueados</dt>
-                <dd class="is-late" data-blocked-count>{{ buckets.problems }}</dd>
-              </div>
-            </dl>
-          </div>
-        </article>
-
-        <article class="tile" :class="{ 'tile--alert': qaWait.late > 0 }" data-tile="qa-wait">
-          <h2 class="tile__title"><span class="tile__index">02</span>Espera de QA</h2>
-          <KpiCard label="Listos para validar" :value="qaWait.ready" />
-          <dl class="stats tile__foot">
-            <div>
-              <dt class="caption">Fuera de plazo</dt>
-              <dd :class="{ 'is-late': qaWait.late > 0 }" data-late-count>{{ qaWait.late }}</dd>
-            </div>
-            <div>
-              <dt class="caption">El más antiguo</dt>
-              <dd>{{ qaWait.oldest }}</dd>
-            </div>
-          </dl>
-        </article>
-
-        <article class="tile" :class="{ 'tile--alert': !hasPolicy }" data-tile="policy">
-          <h2 class="tile__title"><span class="tile__index">03</span>Política activa</h2>
-          <template v-if="hasPolicy && policy">
-            <p class="policy__headline">
-              Bloquea desde <span class="is-late">{{ thresholdLabels[policy.blocking_threshold as Threshold] ?? policy.blocking_threshold }}</span>
-            </p>
-            <p class="tile__hint">
-              {{ policy.max_passes }} pases como máximo · CI verde {{ policy.require_green_ci ? 'requerido' : 'no requerido' }}
-            </p>
-            <table class="simulation">
-              <caption class="caption">PRs abiertos que quedarían bloqueados con cada umbral</caption>
-              <tbody>
-                <tr
-                  v-for="row in simulation"
-                  :key="row.threshold"
-                  :class="{ 'simulation__row--current': row.current }"
-                  :data-threshold="row.threshold"
+      <div class="split">
+        <div class="split__aside">
+          <section class="tile-grid" aria-label="Resumen del equipo">
+            <article class="tile" data-tile="state">
+              <h2 class="tile__title"><span class="tile__index">01</span>Estado del equipo</h2>
+              <div class="ring-row">
+                <DotRing
+                  :segments="[
+                    { value: buckets.ready, tone: 'on' },
+                    { value: buckets.ai, tone: 'dim' },
+                    { value: buckets.problems, tone: 'bad' },
+                  ]"
+                  :label="`${prs.length} PRs abiertos: ${buckets.ready} listos, ${buckets.ai} en evaluación, ${buckets.problems} bloqueados`"
                 >
-                  <th scope="row">{{ row.label }}{{ row.current ? ' (actual)' : '' }}</th>
-                  <td>{{ row.blocked }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </template>
-          <template v-else>
-            <p class="tile__hint" data-no-policy>Sin política: los PRs de este equipo no se revisan.</p>
-          </template>
-          <RouterLink v-if="session.me?.is_admin" class="button tile__foot" to="/agents">Ajustar política →</RouterLink>
-        </article>
-
-        <article class="tile" data-tile="precision">
-          <h2 class="tile__title">
-            <span class="tile__index">04</span>Precisión de la IA · {{ summary?.precision_window_days ?? 7 }} días
-          </h2>
-          <div class="ring-row">
-            <DotRing
-              :segments="[
-                { value: precision.confirmed, tone: 'on' },
-                { value: precision.falsePositive, tone: 'bad' },
-              ]"
-              :label="
-                precision.decided > 0
-                  ? `${precision.percent}% de hallazgos confirmados en el equipo`
-                  : 'Acierto sin datos'
-              "
-            >
-              <span v-if="precision.decided > 0" class="ring-row__figure" data-precision>{{ precision.percent }}%</span>
-              <span v-else class="ring-row__figure" aria-hidden="true">—</span>
-              <span class="caption">Acierto</span>
-            </DotRing>
-            <dl class="legend">
-              <div>
-                <dt class="caption"><span class="dot dot--on" />Confirmados</dt>
-                <dd>{{ precision.confirmed }}</dd>
+                  <span class="ring-row__figure">{{ prs.length }}</span>
+                  <span class="caption">Abiertos</span>
+                </DotRing>
+                <dl class="legend">
+                  <div>
+                    <dt class="caption"><span class="dot dot--on" />Listos</dt>
+                    <dd>{{ buckets.ready }}</dd>
+                  </div>
+                  <div>
+                    <dt class="caption"><span class="dot dot--dim" />Evaluando</dt>
+                    <dd>{{ buckets.ai }}</dd>
+                  </div>
+                  <div>
+                    <dt class="caption"><span class="dot dot--bad" />Bloqueados</dt>
+                    <dd class="is-late" data-blocked-count>{{ buckets.problems }}</dd>
+                  </div>
+                </dl>
               </div>
-              <div>
-                <dt class="caption"><span class="dot dot--bad" />Falsos positivos</dt>
-                <dd :class="{ 'is-late': precision.falsePositive > 0 }">{{ precision.falsePositive }}</dd>
+            </article>
+
+            <article class="tile" :class="{ 'tile--alert': qaWait.late > 0 }" data-tile="qa-wait">
+              <h2 class="tile__title"><span class="tile__index">02</span>Espera de QA</h2>
+              <KpiCard label="Listos para validar" :value="qaWait.ready" />
+              <dl class="stats tile__foot">
+                <div>
+                  <dt class="caption">Fuera de plazo</dt>
+                  <dd :class="{ 'is-late': qaWait.late > 0 }" data-late-count>{{ qaWait.late }}</dd>
+                </div>
+                <div>
+                  <dt class="caption">El más antiguo</dt>
+                  <dd>{{ qaWait.oldest }}</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="tile" :class="{ 'tile--alert': !hasPolicy }" data-tile="policy">
+              <h2 class="tile__title"><span class="tile__index">03</span>Política activa</h2>
+              <template v-if="hasPolicy && policy">
+                <p class="policy__headline">
+                  Bloquea desde <span class="is-late">{{ thresholdLabels[policy.blocking_threshold as Threshold] ?? policy.blocking_threshold }}</span>
+                </p>
+                <p class="tile__hint">
+                  {{ policy.max_passes }} pases como máximo · CI verde {{ policy.require_green_ci ? 'requerido' : 'no requerido' }}
+                </p>
+                <table class="simulation">
+                  <caption class="caption">PRs abiertos que quedarían bloqueados con cada umbral</caption>
+                  <tbody>
+                    <tr
+                      v-for="row in simulation"
+                      :key="row.threshold"
+                      :class="{ 'simulation__row--current': row.current }"
+                      :data-threshold="row.threshold"
+                    >
+                      <th scope="row">{{ row.label }}{{ row.current ? ' (actual)' : '' }}</th>
+                      <td>{{ row.blocked }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </template>
+              <template v-else>
+                <p class="tile__hint" data-no-policy>Sin política: los PRs de este equipo no se revisan.</p>
+              </template>
+              <RouterLink v-if="session.me?.is_admin" class="button tile__foot" to="/agents">Ajustar política →</RouterLink>
+            </article>
+
+            <article class="tile" data-tile="precision">
+              <h2 class="tile__title">
+                <span class="tile__index">04</span>Precisión de la IA · {{ summary?.precision_window_days ?? 7 }} días
+              </h2>
+              <div class="ring-row">
+                <DotRing
+                  :segments="[
+                    { value: precision.confirmed, tone: 'on' },
+                    { value: precision.falsePositive, tone: 'bad' },
+                  ]"
+                  :label="
+                    precision.decided > 0
+                      ? `${precision.percent}% de hallazgos confirmados en el equipo`
+                      : 'Acierto sin datos'
+                  "
+                >
+                  <span v-if="precision.decided > 0" class="ring-row__figure" data-precision>{{ precision.percent }}%</span>
+                  <span v-else class="ring-row__figure" aria-hidden="true">—</span>
+                  <span class="caption">Acierto</span>
+                </DotRing>
+                <dl class="legend">
+                  <div>
+                    <dt class="caption"><span class="dot dot--on" />Confirmados</dt>
+                    <dd>{{ precision.confirmed }}</dd>
+                  </div>
+                  <div>
+                    <dt class="caption"><span class="dot dot--bad" />Falsos positivos</dt>
+                    <dd :class="{ 'is-late': precision.falsePositive > 0 }">{{ precision.falsePositive }}</dd>
+                  </div>
+                </dl>
               </div>
-            </dl>
-          </div>
-          <p v-if="precision.decided === 0" class="tile__empty">Aún no hay hallazgos triados en este periodo.</p>
-        </article>
+              <p v-if="precision.decided === 0" class="tile__empty">Aún no hay hallazgos triados en este periodo.</p>
+            </article>
 
-        <article class="tile" data-tile="repos-defects">
-          <h2 class="tile__title">
-            <span class="tile__index">05</span>Defectos por repo · {{ summary?.category_window_days ?? 30 }} días
-          </h2>
-          <KpiCard label="Confirmados por QA" :value="confirmedInRepos" />
-          <ul v-if="byRepo.length > 0" class="bars tile__foot">
-            <li v-for="row in byRepo" :key="row.repo" class="bars__row">
-              <span class="caption">{{ row.repo }}</span>
-              <DotBar :count="row.count" :tone="row.tone" :label="`${row.count} defectos confirmados en ${row.repo}`" />
-              <span class="bars__count">{{ row.count }}</span>
-            </li>
-          </ul>
-          <div v-else class="empty-bar tile__foot">
-            <p class="tile__empty">Sin defectos confirmados todavía.</p>
-            <DotBar :count="0" tone="on" />
-          </div>
-        </article>
+            <article class="tile" data-tile="repos-defects">
+              <h2 class="tile__title">
+                <span class="tile__index">05</span>Defectos por repo · {{ summary?.category_window_days ?? 30 }} días
+              </h2>
+              <KpiCard label="Confirmados por QA" :value="confirmedInRepos" />
+              <ul v-if="byRepo.length > 0" class="bars tile__foot">
+                <li v-for="row in byRepo" :key="row.repo" class="bars__row">
+                  <span class="caption">{{ row.repo }}</span>
+                  <DotBar :count="row.count" :tone="row.tone" :label="`${row.count} defectos confirmados en ${row.repo}`" />
+                  <span class="bars__count">{{ row.count }}</span>
+                </li>
+              </ul>
+              <div v-else class="empty-bar tile__foot">
+                <p class="tile__empty">Sin defectos confirmados todavía.</p>
+                <DotBar :count="0" tone="on" />
+              </div>
+            </article>
 
-        <article class="tile" data-tile="coverage">
-          <h2 class="tile__title"><span class="tile__index">06</span>Cobertura de repos</h2>
-          <KpiCard
-            label="Con revisión automática"
-            :value="repos.filter((repo) => repo.enabled && repo.has_policy).length"
-          />
-          <ul v-if="repos.length > 0" class="rows tile__foot">
-            <li v-for="repo in repos" :key="repo.id" class="rows__item" :data-repo="repo.full_name">
-              <span>{{ repo.full_name }}</span>
-              <span :class="repo.enabled && repo.has_policy ? 'is-ok' : 'is-late'">
-                {{ !repo.enabled ? 'Deshabilitado' : repo.has_policy ? 'Activa' : 'Sin política' }}
-              </span>
-            </li>
-          </ul>
-          <p v-else class="tile__empty">El equipo no tiene repositorios asignados.</p>
-        </article>
-      </section>
-
-      <section class="pr-section" aria-labelledby="decisions-title">
-        <div class="pr-section__head">
-          <h2 id="decisions-title" class="pr-section__title">Necesitan una decisión</h2>
-          <span class="pr-section__count">{{ decisions.length }}</span>
+            <article class="tile" data-tile="coverage">
+              <h2 class="tile__title"><span class="tile__index">06</span>Cobertura de repos</h2>
+              <KpiCard
+                label="Con revisión automática"
+                :value="repos.filter((repo) => repo.enabled && repo.has_policy).length"
+              />
+              <ul v-if="repos.length > 0" class="rows tile__foot">
+                <li v-for="repo in repos" :key="repo.id" class="rows__item" :data-repo="repo.full_name">
+                  <span>{{ repo.full_name }}</span>
+                  <span :class="repo.enabled && repo.has_policy ? 'is-ok' : 'is-late'">
+                    {{ !repo.enabled ? 'Deshabilitado' : repo.has_policy ? 'Activa' : 'Sin política' }}
+                  </span>
+                </li>
+              </ul>
+              <p v-else class="tile__empty">El equipo no tiene repositorios asignados.</p>
+            </article>
+          </section>
         </div>
-        <p v-if="decisions.length === 0" class="empty-state">Nada bloqueado ni fuera de plazo.</p>
-        <div v-else class="decisions">
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">PR</th>
-                <th scope="col">Motivo</th>
-                <th scope="col">Espera</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in decisions" :key="row.pr.id" data-decision>
-                <td>
-                  <RouterLink :to="`/prs/${row.pr.id}`">{{ row.pr.title }}</RouterLink>
-                  <br />
-                  <span class="caption">{{ row.pr.repo }} #{{ row.pr.number }} · por {{ row.pr.author_login }}</span>
-                </td>
-                <td class="decisions__reason">{{ row.reason }}</td>
-                <td class="decisions__wait">{{ row.wait }}</td>
-              </tr>
-            </tbody>
-          </table>
+
+        <div class="split__main">
+          <section class="pr-section" aria-labelledby="decisions-title">
+            <div class="pr-section__head">
+              <h2 id="decisions-title" class="pr-section__title">Necesitan una decisión</h2>
+              <span class="pr-section__count">{{ decisions.length }}</span>
+            </div>
+            <p v-if="decisions.length === 0" class="empty-state">Nada bloqueado ni fuera de plazo.</p>
+            <div v-else class="decisions">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">PR</th>
+                    <th scope="col">Motivo</th>
+                    <th scope="col">Espera</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in decisions" :key="row.pr.id" data-decision>
+                    <td>
+                      <RouterLink :to="`/prs/${row.pr.id}`">{{ row.pr.title }}</RouterLink>
+                      <br />
+                      <span class="caption">{{ row.pr.repo }} #{{ row.pr.number }} · por {{ row.pr.author_login }}</span>
+                    </td>
+                    <td class="decisions__reason">{{ row.reason }}</td>
+                    <td class="decisions__wait">{{ row.wait }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </div>
-      </section>
+      </div>
     </template>
   </section>
 </template>

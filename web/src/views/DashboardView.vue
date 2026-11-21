@@ -207,179 +207,185 @@ onBeforeUnmount(() => {
 
     <p v-if="retryError" class="form-error" role="alert">{{ retryError }}</p>
 
-    <section class="tile-grid" aria-label="Resumen de QA">
-      <article class="tile" data-tile="ready">
-        <h2 class="tile__title"><span class="tile__index">01</span>Para validar</h2>
-        <KpiCard label="PRs listos para ti" :value="prsStore.summary?.ready_for_human ?? 0" />
-        <ul v-if="waitingRows.length > 0" class="waiting">
-          <li v-for="row in waitingRows" :key="row.pr.id" class="waiting__row">
-            <div class="waiting__line">
-              <span>{{ row.pr.repo }} #{{ row.pr.number }}</span>
-              <span :class="{ 'is-late': row.late }">{{ row.wait }}{{ row.late ? ' · fuera de plazo' : '' }}</span>
+    <div class="split">
+      <div class="split__aside">
+        <section class="tile-grid" aria-label="Resumen de QA">
+          <article class="tile" data-tile="ready">
+            <h2 class="tile__title"><span class="tile__index">01</span>Para validar</h2>
+            <KpiCard label="PRs listos para ti" :value="prsStore.summary?.ready_for_human ?? 0" />
+            <ul v-if="waitingRows.length > 0" class="waiting">
+              <li v-for="row in waitingRows" :key="row.pr.id" class="waiting__row">
+                <div class="waiting__line">
+                  <span>{{ row.pr.repo }} #{{ row.pr.number }}</span>
+                  <span :class="{ 'is-late': row.late }">{{ row.wait }}{{ row.late ? ' · fuera de plazo' : '' }}</span>
+                </div>
+                <DotMeter
+                  v-if="slaSeconds > 0"
+                  :segments="row.segments"
+                  :label="`Espera ${row.wait} de un plazo de ${slaLabel}`"
+                />
+              </li>
+            </ul>
+            <div v-else class="empty-bar">
+              <p class="tile__empty">Nada esperando validación.</p>
+              <DotBar :count="0" tone="on" />
             </div>
-            <DotMeter
-              v-if="slaSeconds > 0"
-              :segments="row.segments"
-              :label="`Espera ${row.wait} de un plazo de ${slaLabel}`"
-            />
-          </li>
-        </ul>
-        <div v-else class="empty-bar">
-          <p class="tile__empty">Nada esperando validación.</p>
-          <DotBar :count="0" tone="on" />
-        </div>
-        <RouterLink
-          v-if="oldestReady.length > 0"
-          class="button button--light tile__foot"
-          :to="`/prs/${oldestReady[0].id}`"
-          data-start-oldest
-        >
-          Empezar por el más antiguo →
-        </RouterLink>
-      </article>
-
-      <article class="tile" data-tile="triage">
-        <h2 class="tile__title"><span class="tile__index">02</span>Triage de hallazgos</h2>
-        <KpiCard label="Sin triar" :value="untriaged.total" />
-        <p class="tile__hint">Confirma lo que es real y marca los falsos positivos antes de validar.</p>
-        <ul class="bars tile__foot">
-          <li v-for="row in untriaged.rows" :key="row.label" class="bars__row">
-            <span class="caption">{{ row.label }}</span>
-            <DotBar :count="row.count" :tone="row.tone" :label="`${row.count} ${row.label.toLowerCase()} sin triar`" />
-            <span class="bars__count" :class="{ 'is-late': row.tone === 'bad' && row.count > 0 }">{{ row.count }}</span>
-          </li>
-        </ul>
-      </article>
-
-      <article class="tile" data-tile="precision">
-        <h2 class="tile__title">
-          <span class="tile__index">03</span>Precisión de la IA ·
-          {{ prsStore.summary?.precision_window_days ?? 7 }} días
-        </h2>
-        <div class="ring-row">
-          <DotRing
-            :segments="[
-              { value: precision.confirmed, tone: 'on' },
-              { value: precision.falsePositive, tone: 'bad' },
-            ]"
-            :label="
-              precision.decided > 0
-                ? `${precision.percent}% de hallazgos confirmados: ${precision.confirmed} confirmados, ${precision.falsePositive} falsos positivos`
-                : 'Acierto sin datos'
-            "
-          >
-            <span v-if="precision.decided > 0" class="ring-row__figure" data-precision>{{ precision.percent }}%</span>
-            <span v-else class="ring-row__figure" aria-hidden="true">—</span>
-            <span class="caption">Acierto</span>
-          </DotRing>
-          <dl class="legend">
-            <div>
-              <dt class="caption"><span class="dot dot--on" />Confirmados</dt>
-              <dd>{{ precision.confirmed }}</dd>
-            </div>
-            <div>
-              <dt class="caption"><span class="dot dot--bad" />Falsos positivos</dt>
-              <dd :class="{ 'is-late': precision.falsePositive > 0 }">{{ precision.falsePositive }}</dd>
-            </div>
-          </dl>
-        </div>
-        <p v-if="precision.decided === 0" class="tile__empty">Aún no hay hallazgos triados en este periodo.</p>
-      </article>
-
-      <article
-        class="tile"
-        :class="{ 'tile--alert': (prsStore.summary?.inconclusive ?? 0) > 0 }"
-        data-tile="inconclusive"
-      >
-        <h2 class="tile__title"><span class="tile__index">04</span>Inconclusos</h2>
-        <KpiCard
-          label="La IA no terminó"
-          :tone="(prsStore.summary?.inconclusive ?? 0) > 0 ? 'bad' : 'default'"
-          :value="prsStore.summary?.inconclusive ?? 0"
-        />
-        <ul v-if="inconclusive.length > 0" class="rows tile__foot">
-          <li v-for="pr in inconclusive" :key="pr.id" class="rows__item">
-            <RouterLink :to="`/prs/${pr.id}`" class="rows__link">{{ pr.repo }} #{{ pr.number }}</RouterLink>
-            <button
-              class="button"
-              type="button"
-              :data-retry-pr="pr.id"
-              :disabled="retrying === pr.id"
-              @click="retry(pr.id)"
+            <RouterLink
+              v-if="oldestReady.length > 0"
+              class="button button--light tile__foot"
+              :to="`/prs/${oldestReady[0].id}`"
+              data-start-oldest
             >
-              {{ retrying === pr.id ? 'Reintentando…' : 'Reintentar' }}
-            </button>
-          </li>
-        </ul>
-        <p v-else class="tile__empty">Todas las revisiones terminaron.</p>
-      </article>
+              Empezar por el más antiguo →
+            </RouterLink>
+          </article>
 
-      <article class="tile" data-tile="agent">
-        <h2 class="tile__title"><span class="tile__index">05</span>Agente IA</h2>
-        <p class="agent__state">{{ running > 0 ? 'Revisando…' : 'En espera' }}</p>
-        <svg class="agent__face" width="84" height="84" viewBox="0 0 96 96" aria-hidden="true">
-          <circle cx="48" cy="48" r="40" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="0 7.33" />
-          <line x1="34" y1="46" x2="40" y2="46" class="agent__eye" stroke-width="4" stroke-linecap="round" />
-          <line x1="56" y1="46" x2="62" y2="46" class="agent__eye" stroke-width="4" stroke-linecap="round" />
-        </svg>
-        <svg class="agent__pulse" width="100%" height="36" viewBox="0 0 280 40" aria-hidden="true" data-agent-pulse>
-          <template v-if="running > 0">
-            <polyline
-              points="0,20 64,20 70,15 76,25 82,8 88,32 94,4 100,36 106,10 112,29 118,17 124,22 176,20 182,13 188,27 194,20 280,20"
-              class="agent__pulse-track"
+          <article class="tile" data-tile="triage">
+            <h2 class="tile__title"><span class="tile__index">02</span>Triage de hallazgos</h2>
+            <KpiCard label="Sin triar" :value="untriaged.total" />
+            <p class="tile__hint">Confirma lo que es real y marca los falsos positivos antes de validar.</p>
+            <ul class="bars tile__foot">
+              <li v-for="row in untriaged.rows" :key="row.label" class="bars__row">
+                <span class="caption">{{ row.label }}</span>
+                <DotBar :count="row.count" :tone="row.tone" :label="`${row.count} ${row.label.toLowerCase()} sin triar`" />
+                <span class="bars__count" :class="{ 'is-late': row.tone === 'bad' && row.count > 0 }">{{ row.count }}</span>
+              </li>
+            </ul>
+          </article>
+
+          <article class="tile" data-tile="precision">
+            <h2 class="tile__title">
+              <span class="tile__index">03</span>Precisión de la IA ·
+              {{ prsStore.summary?.precision_window_days ?? 7 }} días
+            </h2>
+            <div class="ring-row">
+              <DotRing
+                :segments="[
+                  { value: precision.confirmed, tone: 'on' },
+                  { value: precision.falsePositive, tone: 'bad' },
+                ]"
+                :label="
+                  precision.decided > 0
+                    ? `${precision.percent}% de hallazgos confirmados: ${precision.confirmed} confirmados, ${precision.falsePositive} falsos positivos`
+                    : 'Acierto sin datos'
+                "
+              >
+                <span v-if="precision.decided > 0" class="ring-row__figure" data-precision>{{ precision.percent }}%</span>
+                <span v-else class="ring-row__figure" aria-hidden="true">—</span>
+                <span class="caption">Acierto</span>
+              </DotRing>
+              <dl class="legend">
+                <div>
+                  <dt class="caption"><span class="dot dot--on" />Confirmados</dt>
+                  <dd>{{ precision.confirmed }}</dd>
+                </div>
+                <div>
+                  <dt class="caption"><span class="dot dot--bad" />Falsos positivos</dt>
+                  <dd :class="{ 'is-late': precision.falsePositive > 0 }">{{ precision.falsePositive }}</dd>
+                </div>
+              </dl>
+            </div>
+            <p v-if="precision.decided === 0" class="tile__empty">Aún no hay hallazgos triados en este periodo.</p>
+          </article>
+
+          <article
+            class="tile"
+            :class="{ 'tile--alert': (prsStore.summary?.inconclusive ?? 0) > 0 }"
+            data-tile="inconclusive"
+          >
+            <h2 class="tile__title"><span class="tile__index">04</span>Inconclusos</h2>
+            <KpiCard
+              label="La IA no terminó"
+              :tone="(prsStore.summary?.inconclusive ?? 0) > 0 ? 'bad' : 'default'"
+              :value="prsStore.summary?.inconclusive ?? 0"
             />
-            <polyline points="76,25 82,8 88,32 94,4 100,36 106,10 112,29" class="agent__pulse-live" />
-          </template>
-          <polyline v-else points="0,20 280,20" class="agent__pulse-track" />
-        </svg>
-        <dl class="stats tile__foot">
-          <div>
-            <dt class="caption">En curso</dt>
-            <dd data-runs-running>{{ running }}</dd>
-          </div>
-          <div>
-            <dt class="caption">En cola</dt>
-            <dd data-runs-queued>{{ queued }}</dd>
-          </div>
-        </dl>
-      </article>
+            <ul v-if="inconclusive.length > 0" class="rows tile__foot">
+              <li v-for="pr in inconclusive" :key="pr.id" class="rows__item">
+                <RouterLink :to="`/prs/${pr.id}`" class="rows__link">{{ pr.repo }} #{{ pr.number }}</RouterLink>
+                <button
+                  class="button"
+                  type="button"
+                  :data-retry-pr="pr.id"
+                  :disabled="retrying === pr.id"
+                  @click="retry(pr.id)"
+                >
+                  {{ retrying === pr.id ? 'Reintentando…' : 'Reintentar' }}
+                </button>
+              </li>
+            </ul>
+            <p v-else class="tile__empty">Todas las revisiones terminaron.</p>
+          </article>
 
-      <article class="tile" data-tile="categories">
-        <h2 class="tile__title"><span class="tile__index">06</span>Dónde probar a mano</h2>
-        <p class="tile__hint">
-          Defectos confirmados por categoría, últimos {{ prsStore.summary?.category_window_days ?? 30 }} días.
-        </p>
-        <ul v-if="categories.length > 0" class="bars tile__foot">
-          <li v-for="row in categories" :key="row.label" class="bars__row">
-            <span class="caption">{{ row.label }}</span>
-            <DotBar :count="row.count" :tone="row.tone" :label="`${row.count} defectos de ${row.label}`" />
-            <span class="bars__count">{{ row.count }}</span>
-          </li>
-        </ul>
-        <div v-else class="empty-bar tile__foot">
-          <p class="tile__empty">Sin defectos confirmados todavía.</p>
-          <DotBar :count="0" tone="on" />
-        </div>
-      </article>
-    </section>
+          <article class="tile" data-tile="agent">
+            <h2 class="tile__title"><span class="tile__index">05</span>Agente IA</h2>
+            <p class="agent__state">{{ running > 0 ? 'Revisando…' : 'En espera' }}</p>
+            <svg class="agent__face" width="84" height="84" viewBox="0 0 96 96" aria-hidden="true">
+              <circle cx="48" cy="48" r="40" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="0 7.33" />
+              <line x1="34" y1="46" x2="40" y2="46" class="agent__eye" stroke-width="4" stroke-linecap="round" />
+              <line x1="56" y1="46" x2="62" y2="46" class="agent__eye" stroke-width="4" stroke-linecap="round" />
+            </svg>
+            <svg class="agent__pulse" width="100%" height="36" viewBox="0 0 280 40" aria-hidden="true" data-agent-pulse>
+              <template v-if="running > 0">
+                <polyline
+                  points="0,20 64,20 70,15 76,25 82,8 88,32 94,4 100,36 106,10 112,29 118,17 124,22 176,20 182,13 188,27 194,20 280,20"
+                  class="agent__pulse-track"
+                />
+                <polyline points="76,25 82,8 88,32 94,4 100,36 106,10 112,29" class="agent__pulse-live" />
+              </template>
+              <polyline v-else points="0,20 280,20" class="agent__pulse-track" />
+            </svg>
+            <dl class="stats tile__foot">
+              <div>
+                <dt class="caption">En curso</dt>
+                <dd data-runs-running>{{ running }}</dd>
+              </div>
+              <div>
+                <dt class="caption">En cola</dt>
+                <dd data-runs-queued>{{ queued }}</dd>
+              </div>
+            </dl>
+          </article>
 
-    <section class="pr-section" aria-labelledby="queue-title">
-      <div class="pr-section__head queue__head">
-        <div>
-          <h2 id="queue-title" class="pr-section__title">PRs de mis equipos</h2>
-          <p class="page-subtitle" data-queue-summary>{{ queueSummary }}</p>
-        </div>
-        <FilterTabs :model-value="prsStore.bucket" :counts="prsStore.counts" @update:model-value="changeBucket" />
+          <article class="tile" data-tile="categories">
+            <h2 class="tile__title"><span class="tile__index">06</span>Dónde probar a mano</h2>
+            <p class="tile__hint">
+              Defectos confirmados por categoría, últimos {{ prsStore.summary?.category_window_days ?? 30 }} días.
+            </p>
+            <ul v-if="categories.length > 0" class="bars tile__foot">
+              <li v-for="row in categories" :key="row.label" class="bars__row">
+                <span class="caption">{{ row.label }}</span>
+                <DotBar :count="row.count" :tone="row.tone" :label="`${row.count} defectos de ${row.label}`" />
+                <span class="bars__count">{{ row.count }}</span>
+              </li>
+            </ul>
+            <div v-else class="empty-bar tile__foot">
+              <p class="tile__empty">Sin defectos confirmados todavía.</p>
+              <DotBar :count="0" tone="on" />
+            </div>
+          </article>
+        </section>
       </div>
 
-      <p v-if="prsStore.error" class="empty-state">{{ prsStore.error }}</p>
-      <p v-else-if="!prsStore.loading && prsStore.visible.length === 0" class="empty-state">
-        Nada pendiente en este filtro.
-      </p>
-      <div v-else class="pr-grid">
-        <PrCard v-for="pr in prsStore.visible" :key="pr.id" :pr="pr" :sla-seconds="slaSeconds" :now="now" />
+      <div class="split__main">
+        <section class="pr-section" aria-labelledby="queue-title">
+          <div class="pr-section__head queue__head">
+            <div>
+              <h2 id="queue-title" class="pr-section__title">PRs de mis equipos</h2>
+              <p class="page-subtitle" data-queue-summary>{{ queueSummary }}</p>
+            </div>
+            <FilterTabs :model-value="prsStore.bucket" :counts="prsStore.counts" @update:model-value="changeBucket" />
+          </div>
+
+          <p v-if="prsStore.error" class="empty-state">{{ prsStore.error }}</p>
+          <p v-else-if="!prsStore.loading && prsStore.visible.length === 0" class="empty-state">
+            Nada pendiente en este filtro.
+          </p>
+          <div v-else class="pr-grid">
+            <PrCard v-for="pr in prsStore.visible" :key="pr.id" :pr="pr" :sla-seconds="slaSeconds" :now="now" />
+          </div>
+        </section>
       </div>
-    </section>
+    </div>
   </section>
 </template>
 
