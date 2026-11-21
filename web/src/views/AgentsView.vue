@@ -10,12 +10,16 @@ import {
   type Team,
 } from '../api'
 import { useSessionStore } from '../stores/session'
+import { llmPlatforms, type LLMPlatform } from '../llmPlatforms'
+
+type ProfileTab = 'platform' | 'custom'
+
+const CUSTOM_MODEL = '__custom__'
 
 type ProfileForm = {
   name: string
   provider: string
   model: string
-  mode: string
   base_url: string
   api_key: string
   concurrency: number
@@ -27,7 +31,6 @@ function emptyForm(): ProfileForm {
     name: '',
     provider: '',
     model: '',
-    mode: '',
     base_url: '',
     api_key: '',
     concurrency: 1,
@@ -47,6 +50,15 @@ const modalOpen = ref(false)
 const editingId = ref<number | null>(null)
 const form = ref<ProfileForm>(emptyForm())
 const formError = ref<string | null>(null)
+const tab = ref<ProfileTab>('platform')
+const modelSelect = ref('')
+const modelOther = ref('')
+
+const selectedPlatform = computed<LLMPlatform | null>(
+  () => llmPlatforms.find((platform) => platform.id === form.value.provider) ?? null,
+)
+const modelIsCustom = computed(() => modelSelect.value === CUSTOM_MODEL)
+const platformModelOptions = computed(() => selectedPlatform.value?.models ?? [])
 
 const selectedTeamId = ref<number | null>(null)
 const policy = ref<QAPolicy | null>(null)
@@ -140,10 +152,54 @@ async function load(): Promise<void> {
   }
 }
 
+function selectPlatform(platform: LLMPlatform): void {
+  form.value.provider = platform.id
+  const model = platform.models[0]
+  form.value.model = model.id
+  modelSelect.value = model.id
+  modelOther.value = ''
+}
+
+function setTab(next: ProfileTab): void {
+  tab.value = next
+  if (next !== 'platform') return
+  const platform = selectedPlatform.value
+  if (platform === null) return
+  const known = platform.models.some((model) => model.id === form.value.model)
+  modelSelect.value = known ? form.value.model : CUSTOM_MODEL
+  modelOther.value = known ? '' : form.value.model
+}
+
+function onModelSelectChange(event: Event): void {
+  modelSelect.value = (event.target as HTMLSelectElement).value
+  if (modelSelect.value === CUSTOM_MODEL) {
+    modelOther.value = form.value.model
+    return
+  }
+  form.value.model = modelSelect.value
+}
+
+function onModelOtherInput(event: Event): void {
+  modelOther.value = (event.target as HTMLInputElement).value
+  form.value.model = modelOther.value.trim()
+}
+
+function defaultProfileName(): string {
+  if (tab.value === 'platform' && selectedPlatform.value !== null) {
+    const platform = selectedPlatform.value
+    const label = platform.models.find((model) => model.id === form.value.model)?.label
+    return `${platform.name} ${label ?? form.value.model}`.trim()
+  }
+  return `${form.value.provider} ${form.value.model}`.trim()
+}
+
 function openCreate(): void {
   editingId.value = null
   form.value = emptyForm()
   formError.value = null
+  tab.value = 'platform'
+  modelSelect.value = ''
+  modelOther.value = ''
   modalOpen.value = true
 }
 
@@ -153,7 +209,6 @@ function openEdit(profile: LLMProfile): void {
     name: profile.name,
     provider: profile.provider,
     model: profile.model,
-    mode: profile.mode,
     base_url: profile.base_url ?? '',
     // La clave nunca se recibe del backend: se deja vacía para conservarla.
     api_key: '',
@@ -161,6 +216,9 @@ function openEdit(profile: LLMProfile): void {
     enabled: profile.enabled,
   }
   formError.value = null
+  tab.value = 'custom'
+  modelSelect.value = ''
+  modelOther.value = ''
   modalOpen.value = true
 }
 
@@ -168,32 +226,42 @@ function closeModal(): void {
   modalOpen.value = false
   editingId.value = null
   form.value = emptyForm()
+  tab.value = 'platform'
+  modelSelect.value = ''
+  modelOther.value = ''
 }
 
 async function submitProfile(): Promise<void> {
   formError.value = null
   const current = form.value
-  const common = {
-    name: current.name.trim(),
-    provider: current.provider.trim(),
-    model: current.model.trim(),
-    mode: current.mode.trim(),
-    base_url: current.base_url.trim() || null,
+  const provider = current.provider.trim()
+  const model = current.model.trim()
+  if (!provider || !model) {
+    formError.value = 'Selecciona una plataforma y un modelo'
+    return
+  }
+  if (editingId.value === null && !current.api_key) {
+    formError.value = 'La clave API es obligatoria'
+    return
+  }
+  const body: LLMProfileInput = {
+    name: current.name.trim() || defaultProfileName(),
+    provider,
+    model,
     concurrency: current.concurrency,
     enabled: current.enabled,
+    api_key: current.api_key,
+  }
+  if (tab.value === 'custom') {
+    body.base_url = current.base_url.trim() || null
   }
 
   try {
     if (editingId.value === null) {
-      if (!current.api_key) {
-        formError.value = 'La clave API es obligatoria'
-        return
-      }
-      const body: LLMProfileInput = { ...common, api_key: current.api_key }
       await api.createLLMProfile(body)
     } else {
-      const patch: LLMProfilePatch = { ...common }
-      if (current.api_key) patch.api_key = current.api_key
+      const patch: LLMProfilePatch = { ...body }
+      if (!current.api_key) delete patch.api_key
       await api.updateLLMProfile(editingId.value, patch)
     }
     await refreshProfiles()
@@ -426,18 +494,98 @@ onMounted(() => {
           </header>
 
           <div class="modal__body">
-            <div class="modal__fields">
-              <label class="field modal__field--wide">
-                <span class="field__label">Nombre</span>
-                <input
-                  v-model="form.name"
-                  class="field__input"
-                  type="text"
-                  autofocus
-                  data-profile-name
-                />
-                <span class="field__hint">Nombre visible en el registro.</span>
-              </label>
+            <div class="profile-tabs" role="tablist" aria-label="Tipo de conexión">
+              <button
+                class="profile-tabs__tab"
+                type="button"
+                role="tab"
+                :aria-selected="tab === 'platform'"
+                data-profile-tab-platform
+                @click="setTab('platform')"
+              >
+                Plataforma conocida
+              </button>
+              <button
+                class="profile-tabs__tab"
+                type="button"
+                role="tab"
+                :aria-selected="tab === 'custom'"
+                data-profile-tab-custom
+                @click="setTab('custom')"
+              >
+                Conexión personalizada
+              </button>
+            </div>
+
+            <div v-if="tab === 'platform'" role="tabpanel" aria-label="Plataforma conocida">
+              <div class="platform-grid" role="group" aria-label="Plataformas disponibles">
+                <button
+                  v-for="platform in llmPlatforms"
+                  :key="platform.id"
+                  class="platform-card"
+                  type="button"
+                  :aria-pressed="selectedPlatform?.id === platform.id"
+                  :data-platform="platform.id"
+                  @click="selectPlatform(platform)"
+                >
+                  {{ platform.name }}
+                </button>
+              </div>
+
+              <div v-if="selectedPlatform" class="modal__fields">
+                <label class="field modal__field--wide">
+                  <span class="field__label">Clave API</span>
+                  <input
+                    v-model="form.api_key"
+                    class="field__input"
+                    type="password"
+                    autocomplete="new-password"
+                    data-profile-api-key
+                  />
+                  <span class="field__hint">
+                    Se guarda cifrada, se comprueba al guardar y no vuelve a mostrarse.
+                  </span>
+                </label>
+                <label class="field modal__field--wide">
+                  <span class="field__label">Modelo</span>
+                  <select
+                    class="field__input"
+                    :value="modelSelect"
+                    data-profile-model
+                    @change="onModelSelectChange"
+                  >
+                    <option
+                      v-for="model in platformModelOptions"
+                      :key="model.id"
+                      :value="model.id"
+                    >
+                      {{ model.label }}
+                    </option>
+                    <option :value="CUSTOM_MODEL">Otro modelo…</option>
+                  </select>
+                  <input
+                    v-if="modelIsCustom"
+                    v-model="modelOther"
+                    class="field__input modal__model-custom"
+                    type="text"
+                    placeholder="Identificador del modelo"
+                    aria-label="Identificador del modelo"
+                    data-profile-model-custom
+                    @input="onModelOtherInput"
+                  />
+                </label>
+              </div>
+              <p v-else class="modal__platform-hint">
+                Elige una plataforma para añadir su clave API.
+              </p>
+            </div>
+
+            <div
+              v-else
+              class="modal__fields"
+              role="tabpanel"
+              aria-label="Conexión personalizada"
+            >
               <label class="field">
                 <span class="field__label">Proveedor</span>
                 <input
@@ -446,7 +594,9 @@ onMounted(() => {
                   type="text"
                   data-profile-provider
                 />
-                <span class="field__hint">Identificador del proveedor; por ejemplo openai.</span>
+                <span class="field__hint">
+                  Identificador del proveedor de OpenCode; por ejemplo openai.
+                </span>
               </label>
               <label class="field">
                 <span class="field__label">Modelo</span>
@@ -469,12 +619,7 @@ onMounted(() => {
                 />
                 <span class="field__hint">Cifrada; no vuelve a mostrarse después de guardar.</span>
               </label>
-              <label class="field">
-                <span class="field__label">Modo</span>
-                <input v-model="form.mode" class="field__input" type="text" data-profile-mode />
-                <span class="field__hint">Tipo de conexión: api o local.</span>
-              </label>
-              <label class="field">
+              <label class="field modal__field--wide">
                 <span class="field__label">URL base (opcional)</span>
                 <input
                   v-model="form.base_url"
@@ -484,25 +629,39 @@ onMounted(() => {
                 />
                 <span class="field__hint">Endpoint compatible; opcional.</span>
               </label>
-              <label class="field">
-                <span class="field__label">Concurrencia</span>
-                <input
-                  v-model.number="form.concurrency"
-                  class="field__input"
-                  type="number"
-                  min="1"
-                  data-profile-concurrency
-                />
-                <span class="field__hint">Solicitudes simultáneas (mínimo 1).</span>
-              </label>
-              <label class="modal__enabled">
-                <input v-model="form.enabled" type="checkbox" data-profile-enabled />
-                <span class="modal__enabled-text">
-                  <span class="field__label">Perfil activado</span>
-                  <span class="field__hint">Si se desactiva, no se usa para revisiones.</span>
-                </span>
-              </label>
             </div>
+
+            <details class="modal__advanced" data-profile-advanced>
+              <summary class="modal__advanced-summary">Opciones avanzadas</summary>
+              <div class="modal__fields modal__advanced-fields">
+                <label class="field modal__field--wide">
+                  <span class="field__label">Nombre</span>
+                  <input v-model="form.name" class="field__input" type="text" data-profile-name />
+                  <span class="field__hint">
+                    Si lo dejas vacío se usa
+                    «{{ defaultProfileName() || 'plataforma y modelo' }}».
+                  </span>
+                </label>
+                <label class="field">
+                  <span class="field__label">Concurrencia</span>
+                  <input
+                    v-model.number="form.concurrency"
+                    class="field__input"
+                    type="number"
+                    min="1"
+                    data-profile-concurrency
+                  />
+                  <span class="field__hint">Solicitudes simultáneas (mínimo 1).</span>
+                </label>
+                <label class="modal__enabled">
+                  <input v-model="form.enabled" type="checkbox" data-profile-enabled />
+                  <span class="modal__enabled-text">
+                    <span class="field__label">Perfil activado</span>
+                    <span class="field__hint">Si se desactiva, no se usa para revisiones.</span>
+                  </span>
+                </label>
+              </div>
+            </details>
           </div>
 
           <p v-if="formError" class="form-error modal__error" role="alert">{{ formError }}</p>
@@ -838,6 +997,127 @@ onMounted(() => {
   gap: var(--space-1);
 }
 
+.profile-tabs {
+  display: flex;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+  border-bottom: var(--rule-hair) solid var(--border);
+}
+
+.profile-tabs__tab {
+  min-height: 40px;
+  padding: var(--space-2) 0;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 14px;
+  background: none;
+  border: 0;
+  border-bottom: var(--rule-heavy) solid transparent;
+  cursor: pointer;
+}
+
+.profile-tabs__tab:hover {
+  color: var(--text);
+}
+
+.profile-tabs__tab:active {
+  color: var(--text);
+  border-bottom-color: var(--border-strong);
+}
+
+.profile-tabs__tab[aria-selected='true'] {
+  color: var(--text);
+  border-bottom-color: var(--text);
+}
+
+.profile-tabs__tab:focus-visible {
+  outline: var(--rule-heavy) solid var(--focus);
+  outline-offset: var(--rule-hair);
+}
+
+.platform-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.platform-card {
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  background: var(--surface-2);
+  border: var(--rule-hair) solid var(--border);
+  cursor: pointer;
+}
+
+.platform-card:hover {
+  border-color: var(--text-muted);
+}
+
+.platform-card:active {
+  border-color: var(--text);
+}
+
+.platform-card[aria-pressed='true'] {
+  border-color: var(--border-strong);
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+
+.platform-card:focus-visible {
+  outline: var(--rule-heavy) solid var(--focus);
+  outline-offset: var(--rule-hair);
+}
+
+.modal__platform-hint {
+  max-width: 60ch;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.modal__model-custom {
+  margin-top: var(--space-2);
+}
+
+.modal__advanced {
+  margin-top: var(--space-4);
+  border-top: var(--rule-hair) solid var(--border);
+}
+
+.modal__advanced-summary {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.modal__advanced-summary:hover {
+  color: var(--text);
+}
+
+.modal__advanced-summary:active {
+  color: var(--text);
+}
+
+.modal__advanced[open] .modal__advanced-summary {
+  color: var(--text);
+}
+
+.modal__advanced-summary:focus-visible {
+  outline: var(--rule-heavy) solid var(--focus);
+  outline-offset: var(--rule-hair);
+}
+
+.modal__advanced-fields {
+  margin-top: var(--space-3);
+}
+
 .modal__error {
   flex: none;
   padding: 0 var(--space-5) var(--space-4);
@@ -917,6 +1197,10 @@ onMounted(() => {
   .modal__actions {
     flex-wrap: wrap;
     padding: var(--space-3) var(--space-4) var(--space-4);
+  }
+
+  .platform-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .modal__actions .button {
