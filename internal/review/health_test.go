@@ -151,6 +151,18 @@ func TestProfileCheckNotifies(t *testing.T) {
 		t.Errorf("events after a failed check = %+v, want [%+v %+v]", got, want, want)
 	}
 
+	emptyBin := filepath.Join(t.TempDir(), "empty-opencode.sh")
+	if err := os.WriteFile(emptyBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write silent binary: %v", err)
+	}
+	checker.Bin = emptyBin
+	if err := checker.Check(ctx, profile.ID); err == nil {
+		t.Fatal("Check with an empty answer returned nil error")
+	}
+	if got := pub.snapshot(); !reflect.DeepEqual(got, []events.Event{want, want, want}) {
+		t.Errorf("events after an empty answer = %+v, want three %+v", got, want)
+	}
+
 	// A failed notification must not turn a healthy verdict into an error.
 	checker.Bin = fakeOpencodeBin(t)
 	checker.Events = failingRunEvents{}

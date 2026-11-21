@@ -93,7 +93,8 @@ func (s *server) findingTransition(w http.ResponseWriter, r *http.Request, statu
 		writeAPIError(w, http.StatusInternalServerError, "update finding")
 		return
 	}
-	// Notify even when the status already matched: the PR verdict may change.
+	// Notify even when the status already matched: the triage verdict and who
+	// gave it can change without the status moving.
 	s.notify(r.Context(), events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)})
 
 	if s.Findings != nil {

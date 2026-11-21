@@ -111,6 +111,18 @@ type runOutcome struct {
 	prID   uint
 }
 
+// announce tells open panels that the run's pull request changed state. The
+// state is already stored, so a lost notification is only logged.
+func (r *Runner) announce(ctx context.Context, run store.ReviewRun) {
+	if r.Events == nil {
+		return
+	}
+	ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(run.PullRequestID), 10)}
+	if err := r.Events.Publish(ctx, ev); err != nil {
+		slog.Warn("publish event", "type", ev.Type, "id", ev.ID, "run_id", run.ID, "error", err)
+	}
+}
+
 // CheckProfile verifies an LLM profile with the same OpenCode binary and
 // timeout as the review pipeline.
 func (r *Runner) CheckProfile(ctx context.Context, profileID uint) error {
@@ -137,12 +149,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	if !claimed {
 		return nil
 	}
-	if r.Events != nil {
-		ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(run.PullRequestID), 10)}
-		if err := r.Events.Publish(ctx, ev); err != nil {
-			slog.Warn("publish event", "type", ev.Type, "id", ev.ID, "run_id", run.ID, "error", err)
-		}
-	}
+	r.announce(ctx, run)
 
 	var cfg store.ReviewConfig
 	var outcome runOutcome
@@ -165,6 +172,8 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 				}
 				return fmt.Errorf("requeue review run %d: %w", runID, err)
 			}
+			// The claim showed the run as started; it is waiting again.
+			r.announce(ctx, run)
 			capacity.Wait = CapacityWait(run.Attempt)
 			slog.Info("review run waiting for profile capacity",
 				"run_id", run.ID, "profile_id", capacity.ProfileID,

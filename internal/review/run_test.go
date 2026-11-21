@@ -997,10 +997,12 @@ func TestRunSaturatedProfileIsRequeued(t *testing.T) {
 	if got := f.jobs.published(); len(got) != 0 {
 		t.Errorf("EnqueuePublish calls = %v, want none for a requeued run", got)
 	}
-	// Only the claim is announced; a requeued run publishes no terminal event.
-	wantClaim := []events.Event{{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}}
-	if got := f.events.snapshot(); !reflect.DeepEqual(got, wantClaim) {
-		t.Errorf("events = %+v, want only the claim %+v for a requeued run", got, wantClaim)
+	// The claim and the return to the queue are both announced, so the panel
+	// stops showing the run as started; there is no terminal event.
+	prEvent := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
+	want := []events.Event{prEvent, prEvent}
+	if got := f.events.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("events = %+v, want the claim and the requeue %+v", got, want)
 	}
 
 	// Releasing the slot lets the retried run go through.
@@ -1071,6 +1073,12 @@ func TestRunDuplicateDeliveryIsNoop(t *testing.T) {
 // when it ends.
 func TestClaimNotifiesThePR(t *testing.T) {
 	f := newRunTestFixture(t)
+	// Move the run id away from the PR id so an event carrying the run id
+	// instead of the PR id fails.
+	if err := f.s.DB.WithContext(f.ctx).Exec("UPDATE review_runs SET id = id + 1000 WHERE id = ?", f.runID).Error; err != nil {
+		t.Fatalf("shift run id: %v", err)
+	}
+	f.runID += 1000
 	r := f.runner()
 	if err := r.Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("Run() error = %v", err)

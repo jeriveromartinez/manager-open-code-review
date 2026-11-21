@@ -72,6 +72,11 @@ func TestTeamWritesNotifyTheTeam(t *testing.T) {
 	member := f.user("team-member", false)
 	cookie := f.session(f.user("team-admin", true))
 	profile := seedProfile(t, f, "team-notify", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	// A team created straight in the store moves the team ids past the policy
+	// ids, so an event carrying the policy id instead of the team id fails.
+	if _, err := f.st.CreateTeam(f.ctx, "Decoy"); err != nil {
+		t.Fatalf("create decoy team: %v", err)
+	}
 
 	rec := f.request(http.MethodPost, "/api/teams", map[string]any{"name": "Notified"}, cookie)
 	assertStatus(t, rec, http.StatusCreated)
