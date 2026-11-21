@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import {
   api,
   type LLMProfile,
@@ -97,6 +97,24 @@ async function loadPolicy(): Promise<void> {
   }
 }
 
+function requestedTeamId(): number | null {
+  const raw = new URLSearchParams(window.location.search).get('team')
+  if (raw === null || raw.trim() === '') return null
+  const id = Number(raw)
+  return Number.isInteger(id) && id > 0 ? id : null
+}
+
+// TeamsView links here with the team preselected and #policy, so the policy
+// section must be in view once the page has rendered.
+async function focusPolicy(): Promise<void> {
+  if (window.location.hash !== '#policy') return
+  await nextTick()
+  const section = document.getElementById('policy')
+  if (section && typeof section.scrollIntoView === 'function') {
+    section.scrollIntoView({ block: 'start' })
+  }
+}
+
 async function load(): Promise<void> {
   loading.value = true
   error.value = null
@@ -104,10 +122,17 @@ async function load(): Promise<void> {
     const [profileList, teamList] = await Promise.all([api.llmProfiles(), api.teams()])
     profiles.value = profileList
     teams.value = teamList
+    const requested = requestedTeamId()
+    if (requested !== null && teamList.some((team) => team.id === requested)) {
+      selectedTeamId.value = requested
+    }
     if (selectedTeamId.value === null && teamList.length > 0) {
       selectedTeamId.value = teamList[0].id
+    }
+    if (selectedTeamId.value !== null) {
       await loadPolicy()
     }
+    await focusPolicy()
   } catch {
     error.value = 'No se pudieron cargar los perfiles LLM'
   } finally {
@@ -326,6 +351,7 @@ onMounted(() => {
 
     <section
       v-if="isAdmin && teams.length > 0"
+      id="policy"
       class="policy"
       aria-labelledby="policy-title"
     >

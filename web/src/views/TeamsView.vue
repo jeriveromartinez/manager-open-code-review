@@ -38,6 +38,10 @@ function canManage(team: Team): boolean {
   )
 }
 
+function policyHref(team: Team): string {
+  return `/agents?team=${team.id}#policy`
+}
+
 function ensureDraft(teamId: number): void {
   if (!drafts.value[teamId]) {
     drafts.value[teamId] = { userId: null, role: 'qa' }
@@ -192,9 +196,19 @@ onMounted(() => {
             <h2 class="team-roster__title">{{ team.name }}</h2>
             <p class="team-roster__slug">{{ team.slug }}</p>
           </div>
-          <p class="team-roster__count">
-            {{ team.members.length }} miembro{{ team.members.length === 1 ? '' : 's' }}
-          </p>
+          <div class="team-roster__meta">
+            <p class="team-roster__count">
+              {{ team.members.length }} miembro{{ team.members.length === 1 ? '' : 's' }}
+            </p>
+            <a
+              v-if="isAdmin"
+              class="button button--ghost team-roster__policy"
+              :href="policyHref(team)"
+              data-team-policy
+            >
+              Política de revisión
+            </a>
+          </div>
         </header>
 
         <div class="table-wrap team-roster__table">
@@ -358,12 +372,25 @@ onMounted(() => {
   line-height: 1.5;
 }
 
+.team-roster__meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
 .team-roster__count {
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.team-roster__policy {
+  min-height: 40px;
+  padding: var(--space-1) var(--space-2);
+  font-size: 13px;
 }
 
 .team-roster__table {
