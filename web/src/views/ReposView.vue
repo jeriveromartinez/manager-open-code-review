@@ -146,172 +146,178 @@ onMounted(() => {
       </div>
     </header>
 
-    <section v-if="canEdit" class="accounts register" aria-label="Cuentas conectadas">
-      <div class="register__head">
-        <h2 class="register__title">Cuentas conectadas</h2>
-        <div class="register__actions">
-          <button
-            type="button"
-            class="button button--ghost"
-            data-refresh-repos
-            :disabled="refreshing"
-            @click="refresh"
-          >
-            {{ refreshing ? 'Actualizando…' : 'Actualizar' }}
-          </button>
-          <button
-            type="button"
-            class="button button--primary"
-            data-sync-all
-            :disabled="syncingAll || syncPending.length > 0 || installations.length === 0"
-            @click="syncAll"
-          >
-            {{ syncingAll ? 'Sincronizando…' : 'Sincronizar todo' }}
-          </button>
-          <a
-            v-if="setupStatus?.install_url"
-            class="button button--ghost accounts__add"
-            :href="setupStatus.install_url"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Añadir cuenta
-          </a>
-        </div>
+    <div class="split split--narrow">
+      <div v-if="canEdit" class="split__aside">
+        <section class="accounts register" aria-label="Cuentas conectadas">
+          <div class="register__head">
+            <h2 class="register__title">Cuentas conectadas</h2>
+            <div class="register__actions">
+              <button
+                type="button"
+                class="button button--ghost"
+                data-refresh-repos
+                :disabled="refreshing"
+                @click="refresh"
+              >
+                {{ refreshing ? 'Actualizando…' : 'Actualizar' }}
+              </button>
+              <button
+                type="button"
+                class="button button--primary"
+                data-sync-all
+                :disabled="syncingAll || syncPending.length > 0 || installations.length === 0"
+                @click="syncAll"
+              >
+                {{ syncingAll ? 'Sincronizando…' : 'Sincronizar todo' }}
+              </button>
+              <a
+                v-if="setupStatus?.install_url"
+                class="button button--ghost accounts__add"
+                :href="setupStatus.install_url"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Añadir cuenta
+              </a>
+            </div>
+          </div>
+          <p class="register__hint">
+            Sincronizar vuelve a leer las instalaciones y los repositorios desde GitHub. Sincronizar
+            todo encola una operación por cada cuenta. El proceso se ejecuta en segundo plano y tarda
+            unos segundos.
+          </p>
+          <div v-if="installations.length > 0" class="table-wrap">
+            <table class="register-table accounts__table">
+              <thead>
+                <tr>
+                  <th scope="col">Cuenta</th>
+                  <th scope="col">Tipo de cuenta</th>
+                  <th scope="col" class="cell--action">Sincronización</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="installation in installations" :key="installation.id">
+                  <td class="mono">{{ installation.account_login }}</td>
+                  <td>{{ installation.account_type === 'Organization' ? 'Organización' : 'Usuario' }}</td>
+                  <td class="cell--action">
+                    <button
+                      type="button"
+                      class="button button--ghost"
+                      :data-sync-installation="installation.id"
+                      :disabled="isSyncing(installation.id) || syncingAll"
+                      @click="syncInstallation(installation.id)"
+                    >
+                      {{ isSyncing(installation.id) ? 'Sincronizando…' : 'Sincronizar' }}
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="empty-state accounts__empty">Todavía no hay cuentas conectadas</p>
+          <p v-if="syncError" class="form-error" role="alert">{{ syncError }}</p>
+          <p v-else-if="syncMessage" class="register__message" role="status">{{ syncMessage }}</p>
+        </section>
       </div>
-      <p class="register__hint">
-        Sincronizar vuelve a leer las instalaciones y los repositorios desde GitHub. Sincronizar
-        todo encola una operación por cada cuenta. El proceso se ejecuta en segundo plano y tarda
-        unos segundos.
-      </p>
-      <div v-if="installations.length > 0" class="table-wrap">
-        <table class="register-table accounts__table">
-          <thead>
-            <tr>
-              <th scope="col">Cuenta</th>
-              <th scope="col">Tipo de cuenta</th>
-              <th scope="col" class="cell--action">Sincronización</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="installation in installations" :key="installation.id">
-              <td class="mono">{{ installation.account_login }}</td>
-              <td>{{ installation.account_type === 'Organization' ? 'Organización' : 'Usuario' }}</td>
-              <td class="cell--action">
-                <button
-                  type="button"
-                  class="button button--ghost"
-                  :data-sync-installation="installation.id"
-                  :disabled="isSyncing(installation.id) || syncingAll"
-                  @click="syncInstallation(installation.id)"
-                >
-                  {{ isSyncing(installation.id) ? 'Sincronizando…' : 'Sincronizar' }}
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p v-else class="empty-state accounts__empty">Todavía no hay cuentas conectadas</p>
-      <p v-if="syncError" class="form-error" role="alert">{{ syncError }}</p>
-      <p v-else-if="syncMessage" class="register__message" role="status">{{ syncMessage }}</p>
-    </section>
 
-    <section class="register" aria-label="Repositorios">
-      <div class="register__head">
-        <h2 class="register__title">Registro de repositorios</h2>
-        <span v-if="!loading" class="register__meta">Total: {{ repos.length }}</span>
+      <div class="split__main">
+        <section class="register" aria-label="Repositorios">
+          <div class="register__head">
+            <h2 class="register__title">Registro de repositorios</h2>
+            <span v-if="!loading" class="register__meta">Total: {{ repos.length }}</span>
+          </div>
+          <p v-if="error" class="empty-state" role="alert">{{ error }}</p>
+          <p v-else-if="!loading && repos.length === 0" class="empty-state">
+            No hay repositorios disponibles
+          </p>
+          <div v-else class="table-wrap">
+            <table class="repo-table register-table">
+              <thead>
+                <tr>
+                  <th scope="col">Repositorio</th>
+                  <th scope="col">Cuenta</th>
+                  <th scope="col">Visibilidad</th>
+                  <th scope="col">Revisión automática</th>
+                  <th scope="col">Equipo</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="repo in repos" :key="repo.id" :data-repo-row="repo.id">
+                  <td class="repo-table__name">
+                    <span class="repo-table__id">#{{ repo.id }}</span>
+                    <span class="repo-table__fullname">{{ repo.full_name }}</span>
+                  </td>
+                  <td class="mono">{{ repo.account_login }}</td>
+                  <td>
+                    <span class="badge" :class="repo.private ? 'badge--muted' : 'badge--ok'">
+                      {{ repo.private ? 'Privado' : 'Público' }}
+                    </span>
+                  </td>
+                  <td>
+                    <label class="switch">
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        :checked="repo.enabled"
+                        :disabled="!canEdit"
+                        :aria-label="`Revisión automática para ${repo.full_name}`"
+                        :data-repo-enabled="repo.id"
+                        @change="setEnabled(repo, $event)"
+                      />
+                      <span>{{ repo.enabled ? 'Activada' : 'Desactivada' }}</span>
+                    </label>
+                    <p
+                      v-if="repo.enabled && repo.team_id === null"
+                      class="repo-table__warning"
+                      :data-repo-warning="repo.id"
+                    >
+                      Habilitado sin equipo: no se revisará
+                    </p>
+                    <p
+                      v-else-if="repo.enabled && repo.team_id !== null && !repo.has_policy"
+                      class="repo-table__warning"
+                      :data-repo-policy-warning="repo.id"
+                    >
+                      El equipo no tiene política: no se revisará
+                    </p>
+                    <p
+                      v-else-if="canEdit && repo.team_id === null"
+                      class="repo-table__hint"
+                      :data-repo-hint="repo.id"
+                    >
+                      Sin equipo: activar no iniciará revisiones
+                    </p>
+                    <p
+                      v-else-if="canEdit && repo.team_id !== null && !repo.has_policy"
+                      class="repo-table__hint"
+                      :data-repo-policy-hint="repo.id"
+                    >
+                      El equipo no tiene política: activar no iniciará revisiones
+                    </p>
+                  </td>
+                  <td>
+                    <select
+                      v-if="canEdit"
+                      class="field__input repo-table__select"
+                      :value="repo.team_id ?? ''"
+                      :aria-label="`Equipo de ${repo.full_name}`"
+                      :data-repo-team="repo.id"
+                      @change="setTeam(repo, $event)"
+                    >
+                      <option value="">Sin equipo</option>
+                      <option v-for="team in teams" :key="team.id" :value="team.id">
+                        {{ team.name }}
+                      </option>
+                    </select>
+                    <span v-else :data-repo-team="repo.id">{{ teamName(repo.team_id) }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
-      <p v-if="error" class="empty-state" role="alert">{{ error }}</p>
-      <p v-else-if="!loading && repos.length === 0" class="empty-state">
-        No hay repositorios disponibles
-      </p>
-      <div v-else class="table-wrap">
-        <table class="repo-table register-table">
-          <thead>
-            <tr>
-              <th scope="col">Repositorio</th>
-              <th scope="col">Cuenta</th>
-              <th scope="col">Visibilidad</th>
-              <th scope="col">Revisión automática</th>
-              <th scope="col">Equipo</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="repo in repos" :key="repo.id" :data-repo-row="repo.id">
-              <td class="repo-table__name">
-                <span class="repo-table__id">#{{ repo.id }}</span>
-                <span class="repo-table__fullname">{{ repo.full_name }}</span>
-              </td>
-              <td class="mono">{{ repo.account_login }}</td>
-              <td>
-                <span class="badge" :class="repo.private ? 'badge--muted' : 'badge--ok'">
-                  {{ repo.private ? 'Privado' : 'Público' }}
-                </span>
-              </td>
-              <td>
-                <label class="switch">
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    :checked="repo.enabled"
-                    :disabled="!canEdit"
-                    :aria-label="`Revisión automática para ${repo.full_name}`"
-                    :data-repo-enabled="repo.id"
-                    @change="setEnabled(repo, $event)"
-                  />
-                  <span>{{ repo.enabled ? 'Activada' : 'Desactivada' }}</span>
-                </label>
-                <p
-                  v-if="repo.enabled && repo.team_id === null"
-                  class="repo-table__warning"
-                  :data-repo-warning="repo.id"
-                >
-                  Habilitado sin equipo: no se revisará
-                </p>
-                <p
-                  v-else-if="repo.enabled && repo.team_id !== null && !repo.has_policy"
-                  class="repo-table__warning"
-                  :data-repo-policy-warning="repo.id"
-                >
-                  El equipo no tiene política: no se revisará
-                </p>
-                <p
-                  v-else-if="canEdit && repo.team_id === null"
-                  class="repo-table__hint"
-                  :data-repo-hint="repo.id"
-                >
-                  Sin equipo: activar no iniciará revisiones
-                </p>
-                <p
-                  v-else-if="canEdit && repo.team_id !== null && !repo.has_policy"
-                  class="repo-table__hint"
-                  :data-repo-policy-hint="repo.id"
-                >
-                  El equipo no tiene política: activar no iniciará revisiones
-                </p>
-              </td>
-              <td>
-                <select
-                  v-if="canEdit"
-                  class="field__input repo-table__select"
-                  :value="repo.team_id ?? ''"
-                  :aria-label="`Equipo de ${repo.full_name}`"
-                  :data-repo-team="repo.id"
-                  @change="setTeam(repo, $event)"
-                >
-                  <option value="">Sin equipo</option>
-                  <option v-for="team in teams" :key="team.id" :value="team.id">
-                    {{ team.name }}
-                  </option>
-                </select>
-                <span v-else :data-repo-team="repo.id">{{ teamName(repo.team_id) }}</span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
+    </div>
   </section>
 </template>
 

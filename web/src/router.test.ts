@@ -11,16 +11,6 @@ vi.mock('./api', () => ({
 const admin: Me = { id: 1, login: 'admin', avatar_url: '', is_admin: true, teams: [] }
 const member: Me = { id: 2, login: 'dev', avatar_url: '', is_admin: false, teams: [] }
 
-describe('wide layout', () => {
-  it('lets only the two queues use the full width of a large screen', () => {
-    const wide = router
-      .getRoutes()
-      .filter((route) => route.meta.wide)
-      .map((route) => route.name)
-    expect(wide.sort()).toEqual(['dashboard', 'lead'])
-  })
-})
-
 describe('admin guard', () => {
   beforeEach(async () => {
     setActivePinia(createPinia())

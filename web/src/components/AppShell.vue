@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
-import { RouterLink, useRoute } from 'vue-router'
+import { RouterLink } from 'vue-router'
 import RoleSwitch from './RoleSwitch.vue'
 import { useLiveStore } from '../stores/live'
 import { useSessionStore } from '../stores/session'
 
 const session = useSessionStore()
 const live = useLiveStore()
-const route = useRoute()
 
 const links = computed(() => {
   const base = [
@@ -47,7 +46,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="shell" :class="{ 'shell--wide': route.meta.wide }">
+  <div class="shell">
     <header class="shell__bar">
       <div class="shell__identity">
         <span

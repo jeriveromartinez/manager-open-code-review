@@ -243,122 +243,124 @@ onMounted(load)
 
     <p v-else-if="error" class="form-error" role="alert">{{ error }}</p>
 
-    <template v-for="group in groups" :key="group.id">
-      <form
-        v-if="fieldsOf(group.id).length > 0"
-        class="settings-group"
-        :data-group="group.id"
-        @submit.prevent="save(group.id)"
-      >
-        <div aria-live="polite">
-          <p v-if="staleGroups.includes(group.id)" class="stale-notice" data-stale-group>
-            Otra persona cambió estos ajustes.
-            <button class="button button--ghost" type="button" @click="reloadGroup(group.id)">Recargar</button>
-          </p>
-        </div>
-        <header class="settings-group__head">
-          <h2 class="settings-group__title">{{ group.title }}</h2>
-          <span v-if="restartLabel(group.id)" class="badge badge--busy">
-            {{ restartLabel(group.id) }}
-          </span>
-        </header>
-        <p class="settings-group__hint">{{ group.hint }}</p>
-
-        <div class="settings-group__grid">
-          <div
-            v-for="field in fieldsOf(group.id)"
-            :key="field.key"
-            class="field"
-            :data-field="field.key"
-          >
-            <label class="field__label" :for="`setting-${field.key}`">{{ field.label }}</label>
-            <p class="field__help">
-              {{ field.help }}
-              <span v-if="field.default" class="field__default">
-                Predeterminado: <code>{{ field.default }}</code>.
-              </span>
+    <div class="card-grid">
+      <template v-for="group in groups" :key="group.id">
+        <form
+          v-if="fieldsOf(group.id).length > 0"
+          class="settings-group"
+          :data-group="group.id"
+          @submit.prevent="save(group.id)"
+        >
+          <div aria-live="polite">
+            <p v-if="staleGroups.includes(group.id)" class="stale-notice" data-stale-group>
+              Otra persona cambió estos ajustes.
+              <button class="button button--ghost" type="button" @click="reloadGroup(group.id)">Recargar</button>
             </p>
+          </div>
+          <header class="settings-group__head">
+            <h2 class="settings-group__title">{{ group.title }}</h2>
+            <span v-if="restartLabel(group.id)" class="badge badge--busy">
+              {{ restartLabel(group.id) }}
+            </span>
+          </header>
+          <p class="settings-group__hint">{{ group.hint }}</p>
 
-            <div v-if="field.kind === 'duration'" class="field__control field__control--duration">
-              <input
-                :id="`setting-${field.key}`"
-                :value="durations[field.key].amount"
-                class="field__input"
-                type="number"
-                min="0"
-                step="1"
-                inputmode="numeric"
-                autocomplete="off"
-                :name="field.key"
-                @input="
-                  durations[field.key].amount = ($event.target as HTMLInputElement).value;
-                  markDirty()
-                "
-              />
-              <select
-                v-model="durations[field.key].unit"
-                class="field__select"
-                :name="`${field.key}_unit`"
-                :aria-label="`Unidad de ${field.label}`"
-                @change="markDirty"
-              >
-                <option v-for="unit in durationUnits" :key="unit" :value="unit">
-                  {{ unitLabels[unit] }}
-                </option>
-              </select>
-            </div>
+          <div class="settings-group__grid">
+            <div
+              v-for="field in fieldsOf(group.id)"
+              :key="field.key"
+              class="field"
+              :data-field="field.key"
+            >
+              <label class="field__label" :for="`setting-${field.key}`">{{ field.label }}</label>
+              <p class="field__help">
+                {{ field.help }}
+                <span v-if="field.default" class="field__default">
+                  Predeterminado: <code>{{ field.default }}</code>.
+                </span>
+              </p>
 
-            <label v-else-if="field.kind === 'bool'" class="field__check">
-              <input
-                :id="`setting-${field.key}`"
-                :name="field.key"
-                type="checkbox"
-                :checked="values[field.key] === 'true'"
-                @change="setBool(field.key, ($event.target as HTMLInputElement).checked)"
-              />
-              <span>{{ values[field.key] === 'true' ? 'Activado' : 'Desactivado' }}</span>
-            </label>
+              <div v-if="field.kind === 'duration'" class="field__control field__control--duration">
+                <input
+                  :id="`setting-${field.key}`"
+                  :value="durations[field.key].amount"
+                  class="field__input"
+                  type="number"
+                  min="0"
+                  step="1"
+                  inputmode="numeric"
+                  autocomplete="off"
+                  :name="field.key"
+                  @input="
+                    durations[field.key].amount = ($event.target as HTMLInputElement).value;
+                    markDirty()
+                  "
+                />
+                <select
+                  v-model="durations[field.key].unit"
+                  class="field__select"
+                  :name="`${field.key}_unit`"
+                  :aria-label="`Unidad de ${field.label}`"
+                  @change="markDirty"
+                >
+                  <option v-for="unit in durationUnits" :key="unit" :value="unit">
+                    {{ unitLabels[unit] }}
+                  </option>
+                </select>
+              </div>
 
-            <div v-else class="field__control">
-              <input
-                :id="`setting-${field.key}`"
-                v-model="values[field.key]"
-                class="field__input"
-                :type="
-                  field.kind === 'int'
-                    ? 'number'
-                    : field.secret && !revealed[field.key]
-                      ? 'password'
-                      : 'text'
-                "
-                :name="field.key"
-                :inputmode="field.kind === 'int' ? 'numeric' : field.kind === 'url' ? 'url' : undefined"
-                :autocomplete="field.secret ? 'new-password' : 'off'"
-                @input="markDirty"
-              />
-              <button
-                v-if="field.secret"
-                type="button"
-                class="button button--ghost field__reveal"
-                @click="toggleReveal(field.key)"
-              >
-                {{ revealed[field.key] ? 'Ocultar' : 'Mostrar' }}
-              </button>
+              <label v-else-if="field.kind === 'bool'" class="field__check">
+                <input
+                  :id="`setting-${field.key}`"
+                  :name="field.key"
+                  type="checkbox"
+                  :checked="values[field.key] === 'true'"
+                  @change="setBool(field.key, ($event.target as HTMLInputElement).checked)"
+                />
+                <span>{{ values[field.key] === 'true' ? 'Activado' : 'Desactivado' }}</span>
+              </label>
+
+              <div v-else class="field__control">
+                <input
+                  :id="`setting-${field.key}`"
+                  v-model="values[field.key]"
+                  class="field__input"
+                  :type="
+                    field.kind === 'int'
+                      ? 'number'
+                      : field.secret && !revealed[field.key]
+                        ? 'password'
+                        : 'text'
+                  "
+                  :name="field.key"
+                  :inputmode="field.kind === 'int' ? 'numeric' : field.kind === 'url' ? 'url' : undefined"
+                  :autocomplete="field.secret ? 'new-password' : 'off'"
+                  @input="markDirty"
+                />
+                <button
+                  v-if="field.secret"
+                  type="button"
+                  class="button button--ghost field__reveal"
+                  @click="toggleReveal(field.key)"
+                >
+                  {{ revealed[field.key] ? 'Ocultar' : 'Mostrar' }}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
 
-        <footer class="settings-group__actions">
-          <button
-            type="submit"
-            class="button button--primary"
-            :disabled="saving === group.id || !isDirty(group.id)"
-          >
-            {{ saving === group.id ? 'Guardando…' : 'Guardar' }}
-          </button>
-          <span v-if="isDirty(group.id)" class="settings-group__dirty">Cambios sin guardar</span>
-        </footer>
-      </form>
-    </template>
+          <footer class="settings-group__actions">
+            <button
+              type="submit"
+              class="button button--primary"
+              :disabled="saving === group.id || !isDirty(group.id)"
+            >
+              {{ saving === group.id ? 'Guardando…' : 'Guardar' }}
+            </button>
+            <span v-if="isDirty(group.id)" class="settings-group__dirty">Cambios sin guardar</span>
+          </footer>
+        </form>
+      </template>
+    </div>
   </section>
 </template>

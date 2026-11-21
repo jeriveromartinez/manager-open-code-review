@@ -112,6 +112,16 @@ describe('TeamsView', () => {
     wrapper.unmount()
   })
 
+  it('lays the teams out as cards in a grid', async () => {
+    mocks.session.me = leadT1
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    const grid = wrapper.get('.card-grid')
+    expect(grid.findAll('[data-team-id]')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
   it('como lead de T1 ve controles en T1 y no en T2', async () => {
     mocks.session.me = leadT1
 
