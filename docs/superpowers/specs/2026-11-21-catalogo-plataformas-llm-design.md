@@ -30,7 +30,7 @@ de perfiles existentes y el mensaje de error por nombre duplicado.
 ## Enfoques considerados
 
 - **A. Tarjetas de plataforma (elegido).** Pestaña «Plataforma conocida» con
-  diez tarjetas; al elegir una solo quedan clave y modelo, con el resto en
+  catorce tarjetas; al elegir una solo quedan clave y modelo, con el resto en
   «Opciones avanzadas». Pestaña «Conexión personalizada» con el formulario
   completo. Es la única donde «pegar la clave y guardar» es literal.
 - **B. Dos desplegables.** Plataforma y modelo como selects y la clave debajo;
@@ -52,11 +52,15 @@ otro identificador.
 |---|---|---|
 | OpenAI | `openai` | `gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-5.4-nano` |
 | Anthropic | `anthropic` | `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5` |
+| OpenCode | `opencode` | `gpt-6.2-sol`, `claude-sonnet-5-5`, `gemini-3.7-flash` |
 | Google Gemini | `google` | `gemini-4-carbon`, `gemini-4-neon`, `gemini-3.8-flash` |
 | OpenRouter | `openrouter` | `openrouter/auto`, `anthropic/claude-sonnet-5.5`, `google/gemini-3.7-flash` |
+| CommandCode | `commandcode` | `gpt-6.1-terra`, `moonshotai/Kimi-K3.1-Pro`, `google/gemini-4-argon` |
 | Groq | `groq` | `openai/gpt-oss-120b`, `qwen/qwen3.8-27b`, `llama-3.3-70b-versatile` |
 | Mistral | `mistral` | `mistral-large-latest`, `devstral-medium-latest`, `mistral-medium-2604` |
 | DeepSeek | `deepseek` | `deepseek-v4-pro`, `deepseek-v4-flash` |
+| Kimi | `moonshotai` | `kimi-k3.1-pro`, `kimi-k3`, `kimi-k2.7-code` |
+| GLM | `zai` | `glm-5.3`, `glm-5.2`, `glm-5.3-flash` |
 | xAI | `xai` | `grok-4.7`, `grok-4.6`, `grok-4.5` |
 | Together AI | `togetherai` | `moonshotai/Kimi-K3.1-Pro`, `deepseek-ai/DeepSeek-V4-Pro-0813`, `MiniMaxAI/MiniMax-M3` |
 | Fireworks | `fireworks-ai` | `accounts/fireworks/routers/deepseek-flash-latest`, `accounts/fireworks/routers/glm-latest`, `accounts/fireworks/routers/kimi-k3-fast` |
