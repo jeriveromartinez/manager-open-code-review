@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 
@@ -57,6 +58,12 @@ type Deps struct {
 
 type server struct {
 	Deps
+	// settingsMu serialises the read-validate-write cycle of a settings save.
+	// Without it two admins saving different keys of an interdependent pair can
+	// each validate against the pre-save state and persist an incoherent pair.
+	// The serialisation is per process, which is sound because the deployment
+	// runs a single app instance; scaling out would need a lock in PostgreSQL.
+	settingsMu sync.Mutex
 }
 
 // NewRouter builds the complete HTTP handler: public setup/auth routes, the
@@ -82,7 +89,11 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/auth/callback", d.Auth.Callback)
 	r.Post("/auth/logout", d.Auth.Logout)
 
-	if d.Webhooks != nil {
+	// The setting is read at startup because the route table is built here: with
+	// the webhook disabled the request falls through to the static fallback,
+	// which rejects the POST method, so a delivery GitHub still sends finds
+	// nothing to process.
+	if d.Webhooks != nil && d.Cfg.WebhooksEnabled {
 		r.Post("/webhooks/github", d.Webhooks.ServeHTTP)
 	}
 
@@ -128,6 +139,9 @@ func NewRouter(d Deps) http.Handler {
 				r.Patch("/llm-profiles/{id}", s.patchLLMProfile)
 				r.Delete("/llm-profiles/{id}", s.deleteLLMProfile)
 				r.Post("/llm-profiles/{id}/health", s.enqueueLLMHealth)
+
+				r.Get("/settings", s.getSettings)
+				r.Put("/settings", s.putSettings)
 			})
 		})
 	})

@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
@@ -11,8 +10,9 @@ import (
 )
 
 type setupStatusResponse struct {
-	Configured bool   `json:"configured"`
-	InstallURL string `json:"install_url"`
+	Configured    bool   `json:"configured"`
+	InstallURL    string `json:"install_url"`
+	TokenRequired bool   `json:"token_required"`
 }
 
 type setupManifestResponse struct {
@@ -28,7 +28,7 @@ func (s *server) isConfigured(r *http.Request) bool {
 // setupStatus tells the SPA whether the App has been created and where to send
 // the administrator for installation.
 func (s *server) setupStatus(w http.ResponseWriter, r *http.Request) {
-	response := setupStatusResponse{}
+	response := setupStatusResponse{TokenRequired: s.SetupToken != ""}
 	if _, err := s.Store.LoadAppConfig(r.Context()); err == nil {
 		response.Configured = true
 		app, err := s.Apps.App(r.Context())
@@ -47,24 +47,44 @@ func (s *server) setupManifest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
+		Name       string `json:"name"`
 		SetupToken string `json:"setup_token"`
-		Org        string `json:"org"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if s.SetupToken == "" || body.SetupToken != s.SetupToken {
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		writeAPIError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	// The token is optional: it only exists for operators who want to lock the
+	// setup window down. Leaving it unset keeps the first-run wizard honest
+	// instead of asking for a value copied from the logs.
+	if s.SetupToken != "" && body.SetupToken != s.SetupToken {
 		writeAPIError(w, http.StatusForbidden, "invalid setup token")
 		return
 	}
 
-	manifest := github.BuildManifest(s.Cfg.PublicURL, s.Cfg.WebhooksEnabled, "QA Control Center")
-	base := strings.TrimRight(s.Cfg.GitHubURL, "/")
-	actionURL := base + "/settings/apps/new"
-	if org := strings.TrimSpace(body.Org); org != "" {
-		actionURL = base + "/organizations/" + url.PathEscape(org) + "/settings/apps/new"
+	configuredURL := strings.TrimRight(strings.TrimSpace(s.Cfg.PublicURL), "/")
+	publicURL := configuredURL
+	if publicURL == "" {
+		publicURL = s.requestPublicURL(r)
 	}
+	if publicURL == "" {
+		writeAPIError(w, http.StatusBadRequest, "cannot determine the public URL")
+		return
+	}
+	if configuredURL == "" {
+		if err := s.Store.SaveSettings(r.Context(), nil, map[string]string{"public_url": publicURL}); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "save public url")
+			return
+		}
+	}
+
+	manifest := github.BuildManifest(publicURL, s.Cfg.WebhooksEnabled, name)
+	actionURL := strings.TrimRight(s.Cfg.GitHubURL, "/") + "/settings/apps/new"
 	writeJSON(w, http.StatusOK, setupManifestResponse{ActionURL: actionURL, Manifest: manifest})
 }
 

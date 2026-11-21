@@ -17,8 +17,8 @@ type Notifier interface {
 	Notify(ctx context.Context, alert Alert) error
 }
 
-// webhookPayload is the stable contract of QA_ALERT_WEBHOOK_URL. It is a
-// generic JSON document on purpose: no vendor-specific envelope, so any
+// webhookPayload is the stable contract of the alert_webhook_url setting. It
+// is a generic JSON document on purpose: no vendor-specific envelope, so any
 // receiver can consume it.
 type webhookPayload struct {
 	Severity  string         `json:"severity"`

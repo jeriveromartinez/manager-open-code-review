@@ -54,31 +54,26 @@ func (a *Auth) client() *http.Client {
 	return http.DefaultClient
 }
 
-func (a *Auth) secureCookies() bool {
-	u, err := url.Parse(a.PublicURL)
-	return err == nil && strings.EqualFold(u.Scheme, "https")
-}
-
-func (a *Auth) sessionCookie(value string, maxAge int) *http.Cookie {
+func (a *Auth) sessionCookie(value string, maxAge int, publicURL string) *http.Cookie {
 	return &http.Cookie{
 		Name:     SessionCookie,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   a.secureCookies(),
+		Secure:   a.secureCookies(publicURL),
 		MaxAge:   maxAge,
 	}
 }
 
-func (a *Auth) stateCookie(value string, maxAge int) *http.Cookie {
+func (a *Auth) stateCookie(value string, maxAge int, publicURL string) *http.Cookie {
 	return &http.Cookie{
 		Name:     stateCookie,
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   a.secureCookies(),
+		Secure:   a.secureCookies(publicURL),
 		MaxAge:   maxAge,
 	}
 }
@@ -109,12 +104,13 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "generate oauth state", http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, a.stateCookie(state, int(stateTTL.Seconds())))
+	publicURL := a.PublicURLFor(r.Context(), r)
+	http.SetCookie(w, a.stateCookie(state, int(stateTTL.Seconds()), publicURL))
 
 	q := url.Values{}
 	q.Set("client_id", app.Creds.ClientID)
 	q.Set("state", state)
-	q.Set("redirect_uri", strings.TrimRight(a.PublicURL, "/")+"/auth/callback")
+	q.Set("redirect_uri", callbackURL(publicURL))
 	target := strings.TrimRight(a.GitHubURL, "/") + "/login/oauth/authorize?" + q.Encode()
 	http.Redirect(w, r, target, http.StatusFound)
 }
@@ -122,8 +118,9 @@ func (a *Auth) Login(w http.ResponseWriter, r *http.Request) {
 // Callback validates the OAuth state, exchanges the code for a token, loads the
 // GitHub profile and starts a local session.
 func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
+	publicURL := a.PublicURLFor(r.Context(), r)
 	// The state cookie is single use, clear it even when validation fails.
-	http.SetCookie(w, a.stateCookie("", -1))
+	http.SetCookie(w, a.stateCookie("", -1, publicURL))
 
 	cookie, err := r.Cookie(stateCookie)
 	if err != nil || cookie.Value == "" || r.URL.Query().Get("state") != cookie.Value {
@@ -146,7 +143,7 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := a.exchangeCode(r.Context(), app, code)
+	token, err := a.exchangeCode(r.Context(), app, code, publicURL)
 	if err != nil {
 		http.Error(w, "oauth token exchange failed", http.StatusBadGateway)
 		return
@@ -168,16 +165,16 @@ func (a *Auth) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, a.sessionCookie(session, int(sessionTTL.Seconds())))
+	http.SetCookie(w, a.sessionCookie(session, int(sessionTTL.Seconds()), publicURL))
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
-func (a *Auth) exchangeCode(ctx context.Context, app *github.App, code string) (string, error) {
+func (a *Auth) exchangeCode(ctx context.Context, app *github.App, code, publicURL string) (string, error) {
 	form := url.Values{}
 	form.Set("client_id", app.Creds.ClientID)
 	form.Set("client_secret", app.Creds.ClientSecret)
 	form.Set("code", code)
-	form.Set("redirect_uri", strings.TrimRight(a.PublicURL, "/")+"/auth/callback")
+	form.Set("redirect_uri", callbackURL(publicURL))
 
 	endpoint := strings.TrimRight(a.GitHubURL, "/") + "/login/oauth/access_token"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
@@ -247,7 +244,7 @@ func (a *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(SessionCookie); err == nil && cookie.Value != "" {
 		_ = a.Store.DeleteSession(r.Context(), cookie.Value)
 	}
-	http.SetCookie(w, a.sessionCookie("", -1))
+	http.SetCookie(w, a.sessionCookie("", -1, a.PublicURLFor(r.Context(), r)))
 	w.WriteHeader(http.StatusNoContent)
 }
 

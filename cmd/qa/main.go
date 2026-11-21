@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -37,6 +35,9 @@ func usage() string {
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// Package-level slog calls must reach the same JSON stream as the logger
+	// the commands receive, or a parsed log pipeline loses the fallback warnings.
+	slog.SetDefault(logger)
 
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, usage())
@@ -84,6 +85,9 @@ func runServe() error {
 	defer st.Close()
 	if err := st.Migrate(ctx); err != nil {
 		return fmt.Errorf("migrate: %w", err)
+	}
+	if err := loadSettings(ctx, st, &cfg); err != nil {
+		return fmt.Errorf("load settings: %w", err)
 	}
 
 	box, err := crypto.NewBox(cfg.MasterKey)
@@ -137,16 +141,17 @@ func runServe() error {
 		}
 	}()
 
-	// A fresh instance has no App credentials. Generate a one-time setup token
-	// so only an operator with access to the logs can create the App.
-	setupToken := ""
+	// A fresh instance has no App credentials. The setup window is open: the
+	// form asks only for the App name, and QA_SETUP_TOKEN locks it down when
+	// the operator sets it.
+	setupToken := strings.TrimSpace(os.Getenv("QA_SETUP_TOKEN"))
 	if _, err := st.LoadAppConfig(ctx); errors.Is(err, store.ErrNotConfigured) {
-		raw := make([]byte, 16)
-		if _, err := rand.Read(raw); err != nil {
-			return fmt.Errorf("generate setup token: %w", err)
+		if cfg.PublicURL == "" {
+			slog.Warn("setup required", "url", "/setup",
+				"detail", "the public URL will be detected when the wizard runs")
+		} else {
+			slog.Warn("setup required", "url", strings.TrimRight(cfg.PublicURL, "/")+"/setup")
 		}
-		setupToken = hex.EncodeToString(raw)
-		slog.Warn("setup required", "setup_token", setupToken, "url", cfg.PublicURL+"/setup")
 	}
 
 	authn := &auth.Auth{
@@ -233,6 +238,9 @@ func runWorker() error {
 		return err
 	}
 	defer st.Close()
+	if err := loadSettings(ctx, st, &cfg); err != nil {
+		return fmt.Errorf("load settings: %w", err)
+	}
 
 	workerBox, err := crypto.NewBox(cfg.WorkerKey)
 	if err != nil {
@@ -265,7 +273,7 @@ func runWorker() error {
 	watchdog := &review.Watchdog{
 		Store: st, Events: eventsPublisher, StaleAfter: cfg.ReviewStaleAfter,
 	}
-	// A verdict is refreshed by the worker every QA_LLM_HEALTH_INTERVAL; the
+	// A verdict is refreshed by the worker every llm_health_interval; the
 	// panel marks it stale at twice that, so one delayed cycle is not alarming.
 	healthStaleAfter := cfg.LLMHealthStaleAfter()
 	sweeper := &review.HealthSweeper{Store: st, StaleAfter: healthStaleAfter}

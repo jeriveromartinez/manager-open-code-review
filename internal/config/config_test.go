@@ -1,7 +1,9 @@
 package config_test
 
 import (
+	"bytes"
 	"encoding/base64"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +26,6 @@ func getenv(m map[string]string) func(string) string {
 func requiredEnv() map[string]string {
 	return map[string]string{
 		"QA_DATABASE_URL": "postgres://localhost/qa",
-		"QA_PUBLIC_URL":   "https://qa.example.com",
 		"QA_MASTER_KEY":   testMasterKey(),
 		"QA_WORKER_KEY":   testWorkerKey(),
 	}
@@ -71,7 +72,6 @@ func TestLoadMissingRequired(t *testing.T) {
 		missing string
 	}{
 		{name: "database url", missing: "QA_DATABASE_URL"},
-		{name: "public url", missing: "QA_PUBLIC_URL"},
 	}
 
 	for _, tt := range tests {
@@ -120,96 +120,79 @@ func TestLoadBadMasterKey(t *testing.T) {
 	}
 }
 
-func TestLoadTrimsPublicURL(t *testing.T) {
+func TestLoadOnlyReadsTheEssentials(t *testing.T) {
+	cfg, err := config.Load(func(key string) string {
+		switch key {
+		case "QA_DATABASE_URL":
+			return "postgres://x/y"
+		case "QA_WORKER_KEY":
+			return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("w"), 32))
+		case "QA_MASTER_KEY":
+			return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("m"), 32))
+		case "QA_REVIEW_TIMEOUT":
+			return "99m"
+		case "QA_PUBLIC_URL":
+			return "https://ignored.example.com"
+		case "QA_OCR_BIN":
+			return "/nope"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ReviewTimeout != 20*time.Minute {
+		t.Errorf("ReviewTimeout = %s, want the 20m default: the environment must be ignored", cfg.ReviewTimeout)
+	}
+	if cfg.PublicURL != "" {
+		t.Errorf("PublicURL = %q, want it empty: the setup detects and stores it", cfg.PublicURL)
+	}
+	if cfg.OCRBin != "ocr" {
+		t.Errorf("OCRBin = %q, want the default", cfg.OCRBin)
+	}
+}
+
+// TestLoadIgnoresEveryLegacyKey cannot accept a silently honoured value: the
+// DeepEqual, not the junk, is what proves every retired variable is ignored.
+func TestLoadIgnoresEveryLegacyKey(t *testing.T) {
 	env := requiredEnv()
-	env["QA_PUBLIC_URL"] = "https://qa.example.com/"
+	for _, key := range config.LegacyEnvKeys() {
+		env[key] = "not a valid value for " + key
+	}
 
 	cfg, err := config.Load(getenv(env))
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("Load() error = %v, want the legacy variables to be ignored", err)
 	}
-	if cfg.PublicURL != "https://qa.example.com" {
-		t.Errorf("PublicURL = %q, want %q", cfg.PublicURL, "https://qa.example.com")
+
+	essentials := cfg
+	essentials.DatabaseURL = ""
+	essentials.MasterKey = nil
+	essentials.WorkerKey = nil
+	if !reflect.DeepEqual(essentials, config.Default()) {
+		t.Errorf("Load() = %+v, want the defaults with only the essentials set", essentials)
 	}
 }
 
-func TestLoadOverrides(t *testing.T) {
-	env := requiredEnv()
-	env["QA_LISTEN_ADDR"] = "127.0.0.1:9090"
-	env["QA_WEBHOOKS_ENABLED"] = "false"
-	env["QA_RECONCILE_INTERVAL"] = "30s"
-	env["QA_GITHUB_URL"] = "https://ghe.example.com"
-	env["QA_GITHUB_API_URL"] = "https://ghe.example.com/api/v3"
-	env["QA_WORKER_HEALTH_ADDR"] = "127.0.0.1:9091"
-	env["QA_WORKER_QUEUE_STALE_AFTER"] = "2m"
-
-	cfg, err := config.Load(getenv(env))
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+func TestLegacyEnvKeysCoverEveryMovedSetting(t *testing.T) {
+	keys := config.LegacyEnvKeys()
+	if len(keys) != 23 {
+		t.Fatalf("LegacyEnvKeys() has %d entries, want 23", len(keys))
 	}
-
-	if cfg.ListenAddr != "127.0.0.1:9090" {
-		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, "127.0.0.1:9090")
+	seen := map[string]bool{}
+	for _, key := range keys {
+		if seen[key] {
+			t.Errorf("duplicate legacy key %q", key)
+		}
+		seen[key] = true
 	}
-	if cfg.WebhooksEnabled {
-		t.Error("WebhooksEnabled = true, want false")
+	for _, want := range []string{"QA_REVIEW_TIMEOUT", "QA_MONITOR_INTERVAL", "QA_WORKER_HEALTH_ADDR", "QA_BACKUP_RETENTION", "QA_PUBLIC_URL"} {
+		if !seen[want] {
+			t.Errorf("LegacyEnvKeys() missing %q", want)
+		}
 	}
-	if cfg.ReconcileInterval != 30*time.Second {
-		t.Errorf("ReconcileInterval = %v, want %v", cfg.ReconcileInterval, 30*time.Second)
-	}
-	if cfg.GitHubURL != "https://ghe.example.com" {
-		t.Errorf("GitHubURL = %q, want %q", cfg.GitHubURL, "https://ghe.example.com")
-	}
-	if cfg.GitHubAPIURL != "https://ghe.example.com/api/v3" {
-		t.Errorf("GitHubAPIURL = %q, want %q", cfg.GitHubAPIURL, "https://ghe.example.com/api/v3")
-	}
-	if cfg.WorkerHealthAddr != "127.0.0.1:9091" {
-		t.Errorf("WorkerHealthAddr = %q, want %q", cfg.WorkerHealthAddr, "127.0.0.1:9091")
-	}
-	if cfg.WorkerQueueStale != 2*time.Minute {
-		t.Errorf("WorkerQueueStale = %v, want %v", cfg.WorkerQueueStale, 2*time.Minute)
-	}
-}
-
-func TestLoadBadWorkerQueueStaleAfter(t *testing.T) {
-	for _, value := range []string{"nope", "0s", "-5m"} {
-		t.Run(value, func(t *testing.T) {
-			env := requiredEnv()
-			env["QA_WORKER_QUEUE_STALE_AFTER"] = value
-			if _, err := config.Load(getenv(env)); err == nil {
-				t.Fatalf("Load() with %q: esperaba error", value)
-			}
-		})
-	}
-}
-
-func TestLoadBadReconcileInterval(t *testing.T) {
-	env := requiredEnv()
-	env["QA_RECONCILE_INTERVAL"] = "10 minutos"
-
-	_, err := config.Load(getenv(env))
-	if err == nil {
-		t.Fatal("Load() error = nil, want error mentioning QA_RECONCILE_INTERVAL")
-	}
-	if !strings.Contains(err.Error(), "QA_RECONCILE_INTERVAL") {
-		t.Errorf("Load() error = %q, want it to mention QA_RECONCILE_INTERVAL", err.Error())
-	}
-}
-
-func TestLoadNonPositiveReconcileInterval(t *testing.T) {
-	for _, value := range []string{"0s", "-1m"} {
-		t.Run(value, func(t *testing.T) {
-			env := requiredEnv()
-			env["QA_RECONCILE_INTERVAL"] = value
-
-			_, err := config.Load(getenv(env))
-			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning QA_RECONCILE_INTERVAL", value)
-			}
-			if !strings.Contains(err.Error(), "QA_RECONCILE_INTERVAL") {
-				t.Errorf("Load() error = %q, want it to mention QA_RECONCILE_INTERVAL", err.Error())
-			}
-		})
+	if seen["QA_DATABASE_URL"] || seen["QA_WORKER_KEY"] {
+		t.Error("the essentials are not legacy")
 	}
 }
 
@@ -319,187 +302,5 @@ func TestLoadReviewDefaults(t *testing.T) {
 	}
 	if cfg.GitBaseURL != "https://github.com" {
 		t.Errorf("GitBaseURL = %q, want %q", cfg.GitBaseURL, "https://github.com")
-	}
-}
-
-func TestLoadReviewOverrides(t *testing.T) {
-	env := requiredEnv()
-	env["QA_REVIEW_CONCURRENCY"] = "8"
-	env["QA_REVIEW_AGENT_STEPS"] = "12"
-	env["QA_REVIEW_TIMEOUT"] = "45s"
-	env["QA_REVIEW_STALE_AFTER"] = "2h"
-	env["QA_LLM_HEALTH_INTERVAL"] = "10m"
-	env["QA_WORKSPACE_DIR"] = "/var/qa"
-	env["QA_OCR_BIN"] = "/usr/bin/ocr"
-	env["QA_OPENCODE_BIN"] = "/usr/bin/opencode"
-	env["QA_FETCH_DEPTH_MAX"] = "1000"
-	env["QA_GIT_BASE_URL"] = "https://ghe.example.com/"
-
-	cfg, err := config.Load(getenv(env))
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if cfg.ReviewConcurrency != 8 {
-		t.Errorf("ReviewConcurrency = %d, want 8", cfg.ReviewConcurrency)
-	}
-	if cfg.ReviewAgentSteps != 12 {
-		t.Errorf("ReviewAgentSteps = %d, want 12", cfg.ReviewAgentSteps)
-	}
-	if cfg.ReviewTimeout != 45*time.Second {
-		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 45*time.Second)
-	}
-	if cfg.ReviewStaleAfter != 2*time.Hour {
-		t.Errorf("ReviewStaleAfter = %v, want %v", cfg.ReviewStaleAfter, 2*time.Hour)
-	}
-	if cfg.LLMHealthInterval != 10*time.Minute {
-		t.Errorf("LLMHealthInterval = %v, want %v", cfg.LLMHealthInterval, 10*time.Minute)
-	}
-	if cfg.WorkspaceDir != "/var/qa" {
-		t.Errorf("WorkspaceDir = %q, want %q", cfg.WorkspaceDir, "/var/qa")
-	}
-	if cfg.OCRBin != "/usr/bin/ocr" {
-		t.Errorf("OCRBin = %q, want %q", cfg.OCRBin, "/usr/bin/ocr")
-	}
-	if cfg.OpencodeBin != "/usr/bin/opencode" {
-		t.Errorf("OpencodeBin = %q, want %q", cfg.OpencodeBin, "/usr/bin/opencode")
-	}
-	if cfg.FetchDepthMax != 1000 {
-		t.Errorf("FetchDepthMax = %d, want %d", cfg.FetchDepthMax, 1000)
-	}
-	if cfg.GitBaseURL != "https://ghe.example.com" {
-		t.Errorf("GitBaseURL = %q, want %q (no trailing slash)", cfg.GitBaseURL, "https://ghe.example.com")
-	}
-}
-
-func TestLoadBadReviewConcurrency(t *testing.T) {
-	for _, value := range []string{"0", "-1", "x"} {
-		t.Run(value, func(t *testing.T) {
-			env := requiredEnv()
-			env["QA_REVIEW_CONCURRENCY"] = value
-
-			_, err := config.Load(getenv(env))
-			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning QA_REVIEW_CONCURRENCY", value)
-			}
-			if !strings.Contains(err.Error(), "QA_REVIEW_CONCURRENCY") {
-				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_CONCURRENCY", err.Error())
-			}
-		})
-	}
-}
-
-func TestLoadBadReviewAgentSteps(t *testing.T) {
-	for _, value := range []string{"0", "-1", "x"} {
-		t.Run(value, func(t *testing.T) {
-			env := requiredEnv()
-			env["QA_REVIEW_AGENT_STEPS"] = value
-
-			_, err := config.Load(getenv(env))
-			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning QA_REVIEW_AGENT_STEPS", value)
-			}
-			if !strings.Contains(err.Error(), "QA_REVIEW_AGENT_STEPS") {
-				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_AGENT_STEPS", err.Error())
-			}
-		})
-	}
-}
-
-func TestLoadBadReviewTimeout(t *testing.T) {
-	for _, value := range []string{"0s", "-1m", "10 minutos"} {
-		t.Run(value, func(t *testing.T) {
-			env := requiredEnv()
-			env["QA_REVIEW_TIMEOUT"] = value
-
-			_, err := config.Load(getenv(env))
-			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning QA_REVIEW_TIMEOUT", value)
-			}
-			if !strings.Contains(err.Error(), "QA_REVIEW_TIMEOUT") {
-				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_TIMEOUT", err.Error())
-			}
-		})
-	}
-}
-
-func TestLoadBadReviewStaleAfter(t *testing.T) {
-	for _, value := range []string{"0s", "-1m", "una hora"} {
-		t.Run(value, func(t *testing.T) {
-			env := requiredEnv()
-			env["QA_REVIEW_STALE_AFTER"] = value
-
-			_, err := config.Load(getenv(env))
-			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning QA_REVIEW_STALE_AFTER", value)
-			}
-			if !strings.Contains(err.Error(), "QA_REVIEW_STALE_AFTER") {
-				t.Errorf("Load() error = %q, want it to mention QA_REVIEW_STALE_AFTER", err.Error())
-			}
-		})
-	}
-}
-
-func TestLoadBadLLMHealthInterval(t *testing.T) {
-	for _, value := range []string{"0s", "-1m", "media hora"} {
-		t.Run(value, func(t *testing.T) {
-			env := requiredEnv()
-			env["QA_LLM_HEALTH_INTERVAL"] = value
-
-			_, err := config.Load(getenv(env))
-			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning QA_LLM_HEALTH_INTERVAL", value)
-			}
-			if !strings.Contains(err.Error(), "QA_LLM_HEALTH_INTERVAL") {
-				t.Errorf("Load() error = %q, want it to mention QA_LLM_HEALTH_INTERVAL", err.Error())
-			}
-		})
-	}
-}
-
-func TestLoadBadFetchDepthMax(t *testing.T) {
-	for _, value := range []string{"0", "-1", "x"} {
-		t.Run(value, func(t *testing.T) {
-			env := requiredEnv()
-			env["QA_FETCH_DEPTH_MAX"] = value
-
-			_, err := config.Load(getenv(env))
-			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning QA_FETCH_DEPTH_MAX", value)
-			}
-			if !strings.Contains(err.Error(), "QA_FETCH_DEPTH_MAX") {
-				t.Errorf("Load() error = %q, want it to mention QA_FETCH_DEPTH_MAX", err.Error())
-			}
-		})
-	}
-}
-
-func TestLoadEmptyReviewPaths(t *testing.T) {
-	for _, key := range []string{"QA_WORKSPACE_DIR", "QA_OCR_BIN", "QA_OPENCODE_BIN"} {
-		t.Run(key, func(t *testing.T) {
-			env := requiredEnv()
-			env[key] = "   "
-
-			_, err := config.Load(getenv(env))
-			if err == nil {
-				t.Fatalf("Load() error = nil for %q, want error mentioning %s", key, key)
-			}
-			if !strings.Contains(err.Error(), key) {
-				t.Errorf("Load() error = %q, want it to mention %s", err.Error(), key)
-			}
-		})
-	}
-}
-
-func TestLoadEmptyGitBaseURL(t *testing.T) {
-	env := requiredEnv()
-	env["QA_GIT_BASE_URL"] = "/"
-
-	_, err := config.Load(getenv(env))
-	if err == nil {
-		t.Fatal("Load() error = nil, want error mentioning QA_GIT_BASE_URL")
-	}
-	if !strings.Contains(err.Error(), "QA_GIT_BASE_URL") {
-		t.Errorf("Load() error = %q, want it to mention QA_GIT_BASE_URL", err.Error())
 	}
 }

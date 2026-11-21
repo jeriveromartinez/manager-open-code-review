@@ -23,10 +23,11 @@ cp deploy/.env.example deploy/.env
 openssl rand -base64 32   # QA_MASTER_KEY (solo app)
 openssl rand -base64 32   # QA_WORKER_KEY (app y worker)
 docker compose -f deploy/docker-compose.yml up -d --build
-docker compose -f deploy/docker-compose.yml logs app | grep setup_token
 ```
 
-Abre `http://localhost:8080/setup`, pega el token y crea la GitHub App (en tu cuenta personal o en una organización). Después instálala en los repositorios y habilítalos desde el panel. La guía completa está en [docs/install.md](docs/install.md).
+Abre `http://localhost:8080/setup`, escribe el **nombre de la App** y crea la GitHub App; se registra en tu cuenta personal, y después puedes instalarla en cualquier organización donde tengas permiso. En el mismo paso se detecta la URL pública desde la petición y se guarda en la base. Tras instalar la App en los repositorios, habilítalos desde el panel. La guía completa está en [docs/install.md](docs/install.md).
+
+`QA_SETUP_TOKEN` es un endurecimiento opcional: si lo defines en `deploy/.env`, el setup exige ese valor; si no, el formulario solo pide el nombre. Termina el setup antes de exponer la instancia a internet: hasta que exista configuración, la ventana de setup sigue abierta. Si la URL detectada no es la correcta, corrígela en **Ajustes → General** (eso arregla los enlaces del panel y los redirects de OAuth del panel) y actualiza también `redirect_url`, `callback_urls` y `setup_url` en la GitHub App desde GitHub, o repite el setup desde la URL correcta antes de configurarla.
 
 Si no tienes una URL pública, consulta la sección [modo solo polling](docs/install.md#modo-solo-polling-sin-url-pública).
 
@@ -37,32 +38,30 @@ Los backups programados y la restauración verificada están en [docs/backup.md]
 | Variable | Descripción | Valor por defecto |
 |---|---|---|
 | `QA_DATABASE_URL` | Cadena de conexión a PostgreSQL (obligatoria) | — |
-| `QA_PUBLIC_URL` | URL pública sin `/` final (obligatoria) | — |
 | `QA_MASTER_KEY` | Base64 de 32 bytes para cifrar la configuración de la GitHub App (obligatoria en `app`; `openssl rand -base64 32`) | — |
 | `QA_WORKER_KEY` | Base64 de 32 bytes para cifrar API keys y tokens de clonado (obligatoria en `app` y `worker`; clave distinta de `QA_MASTER_KEY`) | — |
-| `QA_LISTEN_ADDR` | Dirección de escucha de `qa serve` | `:8080` |
-| `QA_WEBHOOKS_ENABLED` | Habilita los webhooks de GitHub | `true` |
-| `QA_RECONCILE_INTERVAL` | Intervalo de reconciliación (duration de Go) | `5m` |
-| `QA_GITHUB_URL` | Base web de GitHub | `https://github.com` |
-| `QA_GITHUB_API_URL` | Base de la API de GitHub | `https://api.github.com` |
-| `POSTGRES_PASSWORD` | Contraseña del contenedor `postgres` | — |
+| `QA_SETUP_TOKEN` | Opcional: si se define, el asistente de `/setup` exige ese valor para crear la App | vacío (setup abierto) |
 
-Ajustes opcionales del worker: `QA_REVIEW_CONCURRENCY` (`2`), `QA_REVIEW_AGENT_STEPS` (`40`, iteraciones del agente por pasada), `QA_REVIEW_TIMEOUT` (`20m`, presupuesto total del run), `QA_REVIEW_STALE_AFTER` (`45m`), `QA_LLM_HEALTH_INTERVAL` (`30m`, cada cuánto se comprueba la salud de los perfiles LLM caducados), `QA_WORKER_HEALTH_ADDR` (`:9090`), `QA_WORKER_QUEUE_STALE_AFTER` (`10m`), `QA_WORKSPACE_DIR` (`/tmp/qa`), `QA_OCR_BIN` (`ocr`), `QA_OPENCODE_BIN` (`opencode`), `QA_FETCH_DEPTH_MAX` (`500`) y `QA_GIT_BASE_URL` (`https://github.com`).
+La URL pública no se declara en el entorno: el asistente de `/setup` la detecta de la petición y la guarda en `app_settings`, y se puede corregir en **Ajustes → General**.
 
-`QA_LLM_HEALTH_INTERVAL` es la cadencia del barrido de salud de los perfiles LLM: al arrancar el worker y cada intervalo, encola una comprobación para cada perfil activo cuyo último resultado supera dos veces ese intervalo, y para los que nunca se comprobaron. Un perfil en error espera `15m` antes de reintentarse, para no gastar cuota en una clave rota. `GET /api/llm-profiles` devuelve `health_age_seconds` y `health_stale` (marcado con el mismo umbral de dos intervalos), de modo que un barrido detenido se ve en el panel en lugar de parecer un perfil sano.
+`POSTGRES_PASSWORD` no la lee la app: solo configura el contenedor `postgres` y debe coincidir con la contraseña de `QA_DATABASE_URL`.
 
-Ajustes opcionales del monitor de alertas (`qa monitor`, perfil `monitor`): `QA_WORKER_HEALTH_URL` (`http://worker:9090`), `QA_MONITOR_INTERVAL` (`1m`), `QA_MONITOR_RENOTIFY_AFTER` (`30m`) y `QA_ALERT_WEBHOOK_URL` (vacío = solo log). Detalle en [Alertas](#alertas-qa-monitor).
+Todo lo demás —escucha, reconciliación, revisión, worker, alertas y backups— se edita en el panel, en **Ajustes** (solo administradores). La base manda sobre el entorno: las variables retiradas se ignoran y el arranque avisa de las que sigan definidas. Cada sección del panel indica si el cambio necesita reiniciar la app, el worker o el monitor.
 
-`QA_REVIEW_STALE_AFTER` es el umbral del vigilante de runs huérfanos: al arrancar y cada 5 minutos, los runs en `running` cuya hora de inicio supera ese umbral pasan a `failed` con código `interrupted`, se publica el check como `action_required` y el PR queda `inconclusive`. Debe superar `QA_REVIEW_TIMEOUT` (más el margen de reintentos), o matará revisiones sanas.
+`listen_addr` y `worker_health_addr` deben seguir coincidiendo con los `healthcheck` de [deploy/docker-compose.yml](deploy/docker-compose.yml): el worker solo arranca cuando el healthcheck de `app` (que sondea `127.0.0.1:8080`) está sano, y el suyo sondea `127.0.0.1:9090`. Si cambias una dirección sin actualizar el compose, el contenedor queda unhealthy y, con `listen_addr`, el worker y el monitor no llegan a arrancar.
 
-El worker expone salud y métricas en `QA_WORKER_HEALTH_ADDR` (`:9090` por defecto):
+`llm_health_interval` es la cadencia del barrido de salud de los perfiles LLM: al arrancar el worker y cada intervalo, encola una comprobación para cada perfil activo cuyo último resultado supera dos veces ese intervalo, y para los que nunca se comprobaron. Un perfil en error espera `15m` antes de reintentarse, para no gastar cuota en una clave rota. `GET /api/llm-profiles` devuelve `health_age_seconds` y `health_stale` (marcado con el mismo umbral de dos intervalos), de modo que un barrido detenido se ve en el panel en lugar de parecer un perfil sano.
+
+`review_stale_after` es el umbral del vigilante de runs huérfanos: al arrancar y cada 5 minutos, los runs en `running` cuya hora de inicio supera ese umbral pasan a `failed` con código `interrupted`, se publica el check como `action_required` y el PR queda `inconclusive`. Debe superar `review_timeout` (más el margen de reintentos), o matará revisiones sanas.
+
+El worker expone salud y métricas en `worker_health_addr` (`:9090` por defecto):
 
 | Ruta | Contenido |
 |---|---|
 | `GET /healthz` | Estado del proceso, `uptime_seconds`, ping a Postgres y versión de `ocr` y `opencode`. Devuelve **503** y `status: degraded` si la base o cualquiera de los binarios falla. |
 | `GET /metrics` | Cola de River (`available`, `running`, `scheduled`, `discarded`, `oldest_available_seconds`), runs de la última hora por estado, percentil 95 de duración y `stalled`. |
 
-`stalled` es `true` cuando hay jobs esperando, ninguno en ejecución y el más antiguo lleva más de `QA_WORKER_QUEUE_STALE_AFTER` (`10m`) esperando: la cola no avanza porque el worker no consume. Una cola con trabajo reciente no se marca, para que un pico legítimo no dispare alertas.
+`stalled` es `true` cuando hay jobs esperando, ninguno en ejecución y el más antiguo lleva más de `worker_queue_stale_after` (`10m`) esperando: la cola no avanza porque el worker no consume. Una cola con trabajo reciente no se marca, para que un pico legítimo no dispare alertas.
 
 ### Alertas: `qa monitor`
 
@@ -72,14 +71,18 @@ Un worker caído no puede avisar de que está caído, así que las alertas viven
 docker compose -f deploy/docker-compose.yml --profile monitor up -d
 ```
 
-No necesita base de datos ni claves: solo HTTP contra `QA_WORKER_HEALTH_URL`, así que se levanta con la misma imagen `qa-control-center:local` sin `QA_MASTER_KEY` ni `QA_WORKER_KEY`. Cada alerta se escribe siempre en el log JSON; si además defines `QA_ALERT_WEBHOOK_URL`, se envía un `POST`.
+No necesita claves, así que se levanta con la misma imagen `qa-control-center:local` sin `QA_MASTER_KEY` ni `QA_WORKER_KEY`. Al arrancar lee su configuración de la base de datos, como el resto de procesos; si la base no responde o los valores guardados no validan, usa los defaults y registra un aviso en lugar de no arrancar: un monitor que se niega a arrancar cuando PostgreSQL está caído no puede avisar de que PostgreSQL está caído. Una vez arrancado no vuelve a consultar la base.
 
-| Variable | Descripción | Valor por defecto |
+Las cuatro claves se editan en **Ajustes → Alertas** y un cambio pide reiniciar el monitor:
+
+| Ajuste | Descripción | Valor por defecto |
 |---|---|---|
-| `QA_WORKER_HEALTH_URL` | Base del endpoint de salud del worker, sin ruta final | `http://worker:9090` |
-| `QA_MONITOR_INTERVAL` | Cadencia de sondeo (debe ser > 0) | `1m` |
-| `QA_MONITOR_RENOTIFY_AFTER` | Cada cuánto se recuerda un problema que sigue abierto (>= `QA_MONITOR_INTERVAL`) | `30m` |
-| `QA_ALERT_WEBHOOK_URL` | Endpoint `POST` opcional para las alertas; vacío = solo log | — |
+| `worker_health_url` | Base del endpoint de salud del worker, sin ruta final | `http://worker:9090` |
+| `monitor_interval` | Cadencia de sondeo (debe ser > 0) | `1m` |
+| `monitor_renotify_after` | Cada cuánto se recuerda un problema que sigue abierto (>= `monitor_interval`) | `30m` |
+| `alert_webhook_url` | Endpoint `POST` opcional para las alertas; vacío = solo log | — |
+
+Cada alerta se escribe siempre en el log JSON; si además hay `alert_webhook_url`, se envía un `POST`.
 
 Códigos estables de alerta:
 
@@ -91,7 +94,7 @@ Códigos estables de alerta:
 | `dependency_down` | Un binario del worker (`ocr`, `opencode`) no responde; el `subject` lleva su nombre |
 | `queue_stalled` | `/metrics` devuelve `stalled: true`; el mensaje lleva los conteos observados |
 
-Un problema nuevo avisa una vez; si persiste, se recuerda cada `QA_MONITOR_RENOTIFY_AFTER`; cuando desaparece se emite **una** recuperación. Un problema que se resuelve y vuelve a aparecer cuenta como nuevo. Un webhook que responde 5xx se registra como error y el bucle sigue: la alerta siguiente se entrega igual.
+Un problema nuevo avisa una vez; si persiste, se recuerda cada `monitor_renotify_after`; cuando desaparece se emite **una** recuperación. Un problema que se resuelve y vuelve a aparecer cuenta como nuevo. Un webhook que responde 5xx se registra como error y el bucle sigue: la alerta siguiente se entrega igual.
 
 El cuerpo del webhook es un JSON pequeño y estable, sin envoltorio de ningún proveedor:
 
@@ -109,7 +112,7 @@ El cuerpo del webhook es un JSON pequeño y estable, sin envoltorio de ningún p
 
 `app` y `worker` tienen `healthcheck` en compose, de modo que `docker compose ps` refleja la realidad. La imagen del worker es `node:24-trixie-slim` (sin `curl` ni `wget`), así que usa `node -e 'fetch(...)'`; la de `app` es `debian:bookworm-slim` con solo `ca-certificates` y `git`, así que el propio binario hace de cliente con `qa healthcheck` (0 si `/healthz` responde 200, 1 en cualquier otro caso).
 
-El check `QA Control Center` en `in_progress` más de `QA_REVIEW_STALE_AFTER` lo cubre el watchdog, no este monitor; conviene vigilarlo desde fuera.
+El check `QA Control Center` en `in_progress` más de `review_stale_after` lo cubre el watchdog, no este monitor; conviene vigilarlo desde fuera.
 
 ## Revisión automática (Fase 2)
 

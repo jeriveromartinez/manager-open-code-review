@@ -133,6 +133,7 @@ export type User = {
 export type SetupStatus = {
   configured: boolean
   install_url: string
+  token_required: boolean
 }
 
 export type SetupManifest = {
@@ -141,13 +142,27 @@ export type SetupManifest = {
 }
 
 export type SetupManifestRequest = {
-  setup_token: string
-  org: string
+  name: string
+  setup_token?: string
 }
 
 export type RepoPatch = {
   enabled?: boolean
   team_id?: number | null
+}
+
+export interface SettingsField {
+  key: string
+  group: 'general' | 'review' | 'worker' | 'alerts' | 'backups'
+  default: string
+  restart: '' | 'app' | 'worker' | 'monitor'
+  secret: boolean
+}
+
+/** `values` es la configuración efectiva, así que las duraciones llegan en formato de Go. */
+export interface SettingsResponse {
+  values: Record<string, string>
+  fields: SettingsField[]
 }
 
 /**
@@ -312,6 +327,9 @@ export const api = {
   setupStatus: () => request<SetupStatus>('/api/setup/status'),
   setupManifest: (body: SetupManifestRequest) =>
     request<SetupManifest>('/api/setup/manifest', { method: 'POST', body }),
+  settings: () => request<SettingsResponse>('/api/settings'),
+  saveSettings: (values: Record<string, string>) =>
+    request<SettingsResponse>('/api/settings', { method: 'PUT', body: { values } }),
 }
 
 /**

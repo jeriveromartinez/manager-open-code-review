@@ -178,9 +178,9 @@ func NewReviewClient(pool *pgxpool.Pool, runner *review.Runner, checker *review.
 
 // reviewClientConfig is separate from NewReviewClient so a test can assert the
 // job timeout River actually receives. River's one-minute default is far below
-// the review budget (QA_REVIEW_TIMEOUT, 20m by default): without this the job
-// context died before the LLM finished and the run stayed "running" after a
-// retry.
+// the review budget (the review_timeout setting, 20m by default): without this
+// the job context died before the LLM finished and the run stayed "running"
+// after a retry.
 func reviewClientConfig(runner *review.Runner, workers *river.Workers, queues map[string]river.QueueConfig, periodic []*river.PeriodicJob) *river.Config {
 	jobTimeout := 30 * time.Minute
 	if runner != nil && runner.Cfg.Timeout > 0 {

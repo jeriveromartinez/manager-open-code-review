@@ -88,7 +88,7 @@ type RunStats struct {
 	Failed       int   `json:"failed"`
 	Inconclusive int   `json:"inconclusive"`
 	// DurationP95Seconds is the 95th percentile of finished runs. A p95 close
-	// to QA_REVIEW_TIMEOUT means the budget is too tight for the profile.
+	// to review_timeout means the budget is too tight for the profile.
 	DurationP95Seconds int `json:"duration_p95_seconds"`
 }
 

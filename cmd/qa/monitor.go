@@ -8,25 +8,24 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/config"
 	"github.com/jeriveromartinez/qa-control-center/internal/monitor"
+	"github.com/jeriveromartinez/qa-control-center/internal/settings"
+	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
-// runMonitor polls the worker and delivers alerts. It loads its own
-// configuration instead of config.Load: the monitor has no database and no
-// keys, so the required variables of serve/worker would reject a valid
-// container.
+// runMonitor polls the worker and delivers alerts. It never calls config.Load:
+// the monitor has no worker key, so the essentials of serve/worker would
+// reject a valid container.
 func runMonitor(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := config.LoadMonitor(os.Getenv)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
+	cfg, _ := monitorConfig(ctx, strings.TrimSpace(os.Getenv("QA_DATABASE_URL")))
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	notifiers := monitor.MultiNotifier{monitor.NewLogNotifier(logger)}
@@ -37,16 +36,47 @@ func runMonitor(logger *slog.Logger) error {
 	poller := &monitor.Poller{
 		Source:   monitor.NewFetcher(cfg.WorkerHealthURL, client),
 		Notifier: notifiers,
-		Tracker:  monitor.NewTracker(cfg.RenotifyAfter),
+		Tracker:  monitor.NewTracker(cfg.MonitorRenotifyAfter),
 		Logger:   logger,
 	}
 
 	logger.Info("worker monitor started",
 		"worker", cfg.WorkerHealthURL,
-		"interval", cfg.Interval.String(),
-		"renotify_after", cfg.RenotifyAfter.String(),
+		"interval", cfg.MonitorInterval.String(),
+		"renotify_after", cfg.MonitorRenotifyAfter.String(),
 		"webhook", cfg.AlertWebhookURL != "")
-	return poller.Run(ctx, cfg.Interval)
+	return poller.Run(ctx, cfg.MonitorInterval)
+}
+
+// monitorConfig reads the stored settings, because the monitor is configured
+// from the panel like everything else. A missing or unreachable database must
+// not stop it: a monitor that refuses to start when PostgreSQL is down cannot
+// report that PostgreSQL is down, so it falls back to the defaults. The error
+// return is part of the planned signature and is reserved for a future hard
+// failure; today every path succeeds.
+func monitorConfig(ctx context.Context, dsn string) (config.Config, error) {
+	cfg := config.Default()
+	if dsn == "" {
+		slog.Warn("no database URL; the monitor uses the default settings")
+		return cfg, nil
+	}
+	st, err := store.Open(ctx, dsn)
+	if err != nil {
+		slog.Warn("database unavailable; the monitor uses the default settings", "error", err)
+		return cfg, nil
+	}
+	defer st.Close()
+
+	values, err := st.Settings(ctx)
+	if err != nil {
+		slog.Warn("cannot read settings; the monitor uses the defaults", "error", err)
+		return cfg, nil
+	}
+	if err := settings.Apply(&cfg, values); err != nil {
+		slog.Warn("stored settings are invalid; the monitor uses the defaults", "error", err)
+		return config.Default(), nil
+	}
+	return cfg, nil
 }
 
 // healthcheckURL resolves the target of `qa healthcheck`. The default is the

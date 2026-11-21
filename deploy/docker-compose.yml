@@ -15,7 +15,8 @@ services:
 
   # Backup programado con retención. Vive fuera de la app a propósito: usa
   # pg_dump contra el servidor, así que no necesita QA_MASTER_KEY ni puede
-  # descifrar nada de lo que copia.
+  # descifrar nada de lo que copia. La retención es el ajuste del panel
+  # backup_retention; el script la lee de app_settings en cada ejecución.
   backup:
     image: postgres:17
     profiles: ["backup"]
@@ -25,7 +26,6 @@ services:
         condition: service_healthy
     environment:
       QA_DATABASE_URL: ${QA_DATABASE_URL}
-      QA_BACKUP_RETENTION: ${QA_BACKUP_RETENTION:-7}
     volumes:
       - backups-data:/backups
       # Los scripts viven en el repo, así que se montan en solo lectura.
@@ -52,7 +52,9 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    # La app necesita QA_MASTER_KEY y QA_WORKER_KEY (ambas en .env).
+    # La app necesita QA_MASTER_KEY y QA_WORKER_KEY (ambas en .env). El .env
+    # solo lleva la cadena de conexión y las dos claves; el resto se edita en
+    # Ajustes, incluida la URL pública que detecta el asistente de /setup.
     env_file: .env
     depends_on:
       postgres:
@@ -103,25 +105,16 @@ services:
     # Sin env_file: el worker nunca debe recibir QA_MASTER_KEY.
     environment:
       QA_DATABASE_URL: ${QA_DATABASE_URL}
-      QA_PUBLIC_URL: ${QA_PUBLIC_URL}
       QA_WORKER_KEY: ${QA_WORKER_KEY}
-      QA_REVIEW_CONCURRENCY: ${QA_REVIEW_CONCURRENCY:-2}
-      QA_REVIEW_AGENT_STEPS: ${QA_REVIEW_AGENT_STEPS:-40}
-      QA_REVIEW_TIMEOUT: ${QA_REVIEW_TIMEOUT:-20m}
-      QA_REVIEW_STALE_AFTER: ${QA_REVIEW_STALE_AFTER:-45m}
-      QA_LLM_HEALTH_INTERVAL: ${QA_LLM_HEALTH_INTERVAL:-30m}
-      QA_WORKER_HEALTH_ADDR: ${QA_WORKER_HEALTH_ADDR:-:9090}
-      QA_WORKER_QUEUE_STALE_AFTER: ${QA_WORKER_QUEUE_STALE_AFTER:-10m}
-      QA_WORKSPACE_DIR: ${QA_WORKSPACE_DIR:-/tmp/qa}
-      QA_OCR_BIN: ${QA_OCR_BIN:-ocr}
-      QA_OPENCODE_BIN: ${QA_OPENCODE_BIN:-opencode}
-      QA_GIT_BASE_URL: ${QA_GIT_BASE_URL:-https://github.com}
-      QA_FETCH_DEPTH_MAX: ${QA_FETCH_DEPTH_MAX:-500}
     depends_on:
       postgres:
         condition: service_healthy
+      # service_started no espera al migrate, y el worker lee app_settings al
+      # arrancar: en una base nueva moriría con «relation app_settings does not
+      # exist». El healthcheck de la app solo responde con la base y las
+      # migraciones listas.
       app:
-        condition: service_started
+        condition: service_healthy
     volumes:
       # Auth de opencode por perfil, persistida dentro del worker.
       - opencode-data:/home/qa/.opencode
@@ -141,18 +134,16 @@ services:
 
   # Las alertas viven fuera del worker a propósito: un proceso muerto no puede
   # avisar de que está muerto. Sondea /healthz y /metrics, mantiene estado
-  # entre ciclos y no necesita base de datos ni claves.
+  # entre ciclos y no necesita claves. Su configuración (URL del worker,
+  # intervalos y webhook) vive en app_settings: si la base no responde al
+  # arrancar, usa los defaults y avisa en el log en vez de no arrancar.
   monitor:
     image: qa-control-center:local
     profiles: ["monitor"]
     restart: unless-stopped
     command: ["monitor"]
     environment:
-      QA_WORKER_HEALTH_URL: ${QA_WORKER_HEALTH_URL:-http://worker:9090}
-      QA_MONITOR_INTERVAL: ${QA_MONITOR_INTERVAL:-1m}
-      QA_MONITOR_RENOTIFY_AFTER: ${QA_MONITOR_RENOTIFY_AFTER:-30m}
-      # Vacío = solo log. Con URL, POST JSON genérico.
-      QA_ALERT_WEBHOOK_URL: ${QA_ALERT_WEBHOOK_URL:-}
+      QA_DATABASE_URL: ${QA_DATABASE_URL}
     depends_on:
       worker:
         condition: service_started

@@ -16,6 +16,7 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	ghapp "github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
+	"github.com/jeriveromartinez/qa-control-center/internal/web"
 )
 
 type recordingHealth struct {
@@ -84,23 +85,19 @@ func newSecureFixture(t *testing.T) *secureFixture {
 		HTTP:      http.DefaultClient,
 	}
 	deps := api.Deps{
-		Cfg:        f.cfg,
-		Store:      f.st,
-		Box:        f.box,
-		WorkerBox:  workerBox,
-		Apps:       provider,
-		Auth:       a,
-		Webhooks:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
-		Broker:     events.NewBroker(f.st.Pool),
-		Events:     f.pub,
-		Jobs:       f.jobs,
-		SetupToken: testSetupToken,
-		Static: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("spa"))
-		}),
-		Health:  health,
-		Reviews: reviews,
+		Cfg:       f.cfg,
+		Store:     f.st,
+		Box:       f.box,
+		WorkerBox: workerBox,
+		Apps:      provider,
+		Auth:      a,
+		Webhooks:  f.webhooks,
+		Broker:    events.NewBroker(f.st.Pool),
+		Events:    f.pub,
+		Jobs:      f.jobs,
+		Static:    web.Handler(),
+		Health:    health,
+		Reviews:   reviews,
 	}
 	f.router = api.NewRouter(deps)
 	return &secureFixture{apiFixture: f, deps: deps, health: health, reviews: reviews, workerBox: workerBox}

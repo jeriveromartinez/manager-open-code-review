@@ -21,9 +21,8 @@ import (
 	ghapp "github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
+	"github.com/jeriveromartinez/qa-control-center/internal/web"
 )
-
-const testSetupToken = "test-setup-token"
 
 type recordingJobs struct {
 	mu  sync.Mutex
@@ -62,15 +61,23 @@ func (p *recordingPublisher) snapshot() []events.Event {
 }
 
 type apiFixture struct {
-	t      *testing.T
-	ctx    context.Context
-	st     *store.Store
-	box    *crypto.Box
-	cfg    config.Config
-	router http.Handler
-	jobs   *recordingJobs
-	pub    *recordingPublisher
-	seq    int64
+	t        *testing.T
+	ctx      context.Context
+	st       *store.Store
+	box      *crypto.Box
+	cfg      config.Config
+	router   http.Handler
+	jobs     *recordingJobs
+	pub      *recordingPublisher
+	webhooks *recordingWebhook
+	seq      int64
+}
+
+type recordingWebhook struct{ hits int }
+
+func (h *recordingWebhook) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	h.hits++
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func newAPIFixture(t *testing.T) *apiFixture {
@@ -89,6 +96,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	}
 	jobs := &recordingJobs{}
 	pub := &recordingPublisher{}
+	webhooks := &recordingWebhook{}
 	provider := ghapp.NewStoreAppProvider(st, box, cfg.GitHubAPIURL)
 	a := &auth.Auth{
 		Store:     st,
@@ -99,22 +107,18 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		HTTP:      http.DefaultClient,
 	}
 	router := api.NewRouter(api.Deps{
-		Cfg:        cfg,
-		Store:      st,
-		Box:        box,
-		Apps:       provider,
-		Auth:       a,
-		Webhooks:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
-		Broker:     events.NewBroker(st.Pool),
-		Events:     pub,
-		Jobs:       jobs,
-		SetupToken: testSetupToken,
-		Static: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("spa"))
-		}),
+		Cfg:      cfg,
+		Store:    st,
+		Box:      box,
+		Apps:     provider,
+		Auth:     a,
+		Webhooks: webhooks,
+		Broker:   events.NewBroker(st.Pool),
+		Events:   pub,
+		Jobs:     jobs,
+		Static:   web.Handler(),
 	})
-	return &apiFixture{t: t, ctx: context.Background(), st: st, box: box, cfg: cfg, router: router, jobs: jobs, pub: pub}
+	return &apiFixture{t: t, ctx: context.Background(), st: st, box: box, cfg: cfg, router: router, jobs: jobs, pub: pub, webhooks: webhooks}
 }
 
 func (f *apiFixture) nextID() int64 {
@@ -308,39 +312,138 @@ func TestLeadManagesOwnTeamOnly(t *testing.T) {
 	}
 }
 
-func TestSetupRequiresToken(t *testing.T) {
-	f := newAPIFixture(t)
+func TestSetupAsksOnlyForTheAppName(t *testing.T) {
+	f := newSecureFixture(t)
 
-	rec := f.request(http.MethodPost, "/api/setup/manifest", map[string]string{
-		"setup_token": "wrong", "org": "acme",
-	}, nil)
+	rec := f.request(http.MethodPost, "/api/setup/manifest", map[string]any{}, nil)
+	assertStatus(t, rec, http.StatusBadRequest)
+
+	rec = f.request(http.MethodPost, "/api/setup/manifest", map[string]any{"name": "Acme QA"}, nil)
+	assertStatus(t, rec, http.StatusOK)
+
+	var body struct {
+		ActionURL string `json:"action_url"`
+		Manifest  struct {
+			Name string `json:"name"`
+		} `json:"manifest"`
+	}
+	decodeJSON(t, rec, &body)
+	if body.Manifest.Name != "Acme QA" {
+		t.Errorf("manifest name = %q, want Acme QA", body.Manifest.Name)
+	}
+	if body.ActionURL != "https://github.example/settings/apps/new" {
+		t.Errorf("action_url = %q, want the personal account URL", body.ActionURL)
+	}
+
+	// El fixture ya trae public_url: el setup no debe reescribir la fila.
+	stored, err := f.st.Settings(f.ctx)
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if stored["public_url"] != "" {
+		t.Errorf("public_url = %q, want nothing persisted when the config already knows it", stored["public_url"])
+	}
+}
+
+func TestSetupPersistsTheDetectedPublicURL(t *testing.T) {
+	f := newSecureFixture(t)
+	// El fixture fija una URL pública; se vacía para comprobar que el setup la
+	// deduce de la petición, que es el caso de una instalación existente.
+	f.deps.Cfg.PublicURL = ""
+	f.rebuildRouter()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/setup/manifest",
+		strings.NewReader(`{"name":"Acme QA"}`))
+	req.Host = "qa.example.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	var body struct {
+		Manifest struct {
+			URL          string   `json:"url"`
+			RedirectURL  string   `json:"redirect_url"`
+			CallbackURLs []string `json:"callback_urls"`
+			SetupURL     string   `json:"setup_url"`
+		} `json:"manifest"`
+	}
+	decodeJSON(t, rec, &body)
+	if body.Manifest.URL != "https://qa.example.com" {
+		t.Errorf("manifest url = %q, want https://qa.example.com", body.Manifest.URL)
+	}
+	if body.Manifest.RedirectURL != "https://qa.example.com/setup/callback" {
+		t.Errorf("manifest redirect_url = %q, want the detected URL", body.Manifest.RedirectURL)
+	}
+	if len(body.Manifest.CallbackURLs) != 1 || body.Manifest.CallbackURLs[0] != "https://qa.example.com/auth/callback" {
+		t.Errorf("manifest callback_urls = %v, want [https://qa.example.com/auth/callback]", body.Manifest.CallbackURLs)
+	}
+	if body.Manifest.SetupURL != "https://qa.example.com/setup/installed" {
+		t.Errorf("manifest setup_url = %q, want the detected URL", body.Manifest.SetupURL)
+	}
+
+	stored, err := f.st.Settings(f.ctx)
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if stored["public_url"] != "https://qa.example.com" {
+		t.Errorf("public_url = %q, want https://qa.example.com", stored["public_url"])
+	}
+}
+
+func TestSetupTreatsAWhitespaceOnlyPublicURLAsUnset(t *testing.T) {
+	f := newSecureFixture(t)
+	f.deps.Cfg.PublicURL = "   "
+	f.rebuildRouter()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/setup/manifest",
+		strings.NewReader(`{"name":"Acme QA"}`))
+	req.Host = "qa.example.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	assertStatus(t, rec, http.StatusOK)
+
+	stored, err := f.st.Settings(f.ctx)
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if stored["public_url"] != "https://qa.example.com" {
+		t.Errorf("public_url = %q, want the detected URL: a blank value is unset", stored["public_url"])
+	}
+}
+
+func TestSetupWithoutAnyPublicURLIsRejected(t *testing.T) {
+	f := newSecureFixture(t)
+	f.deps.Cfg.PublicURL = ""
+	f.rebuildRouter()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/setup/manifest",
+		strings.NewReader(`{"name":"Acme QA"}`))
+	req.Host = ""
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	assertStatus(t, rec, http.StatusBadRequest)
+	if !strings.Contains(rec.Body.String(), "cannot determine the public URL") {
+		t.Errorf("body = %q, want the public URL error", rec.Body.String())
+	}
+}
+
+func TestSetupTokenIsEnforcedOnlyWhenConfigured(t *testing.T) {
+	f := newSecureFixture(t)
+	f.deps.SetupToken = "s3cret"
+	f.rebuildRouter()
+
+	rec := f.request(http.MethodPost, "/api/setup/manifest", map[string]any{"name": "Acme QA"}, nil)
 	assertStatus(t, rec, http.StatusForbidden)
-
-	rec = f.request(http.MethodPost, "/api/setup/manifest", map[string]string{
-		"setup_token": testSetupToken, "org": "acme",
-	}, nil)
+	rec = f.request(http.MethodPost, "/api/setup/manifest", map[string]any{"name": "Acme QA", "setup_token": "s3cret"}, nil)
 	assertStatus(t, rec, http.StatusOK)
-	var result struct {
-		ActionURL string         `json:"action_url"`
-		Manifest  map[string]any `json:"manifest"`
-	}
-	decodeJSON(t, rec, &result)
-	wantAction := "https://github.example/organizations/acme/settings/apps/new"
-	if result.ActionURL != wantAction {
-		t.Errorf("action_url = %q, want %q", result.ActionURL, wantAction)
-	}
-	if result.Manifest["name"] != "QA Control Center" {
-		t.Errorf("manifest name = %v, want QA Control Center", result.Manifest["name"])
-	}
+}
 
-	rec = f.request(http.MethodPost, "/api/setup/manifest", map[string]string{
-		"setup_token": testSetupToken,
-	}, nil)
-	assertStatus(t, rec, http.StatusOK)
-	decodeJSON(t, rec, &result)
-	if result.ActionURL != "https://github.example/settings/apps/new" {
-		t.Errorf("action_url without org = %q", result.ActionURL)
-	}
+// TestSetupIsClosedOnceConfigured keeps the window shut: creating the App must
+// stop being possible as soon as credentials exist, token or no token.
+func TestSetupIsClosedOnceConfigured(t *testing.T) {
+	f := newSecureFixture(t)
 
 	err := ghapp.SaveCredentials(f.ctx, f.st, f.box, ghapp.AppCredentials{
 		AppID: 1, Slug: "qa-control-center",
@@ -351,9 +454,7 @@ func TestSetupRequiresToken(t *testing.T) {
 		t.Fatalf("SaveCredentials: %v", err)
 	}
 
-	rec = f.request(http.MethodPost, "/api/setup/manifest", map[string]string{
-		"setup_token": testSetupToken, "org": "acme",
-	}, nil)
+	rec := f.request(http.MethodPost, "/api/setup/manifest", map[string]any{"name": "Acme QA"}, nil)
 	assertStatus(t, rec, http.StatusConflict)
 
 	rec = f.request(http.MethodGet, "/setup/callback?code=abc", nil, nil)
@@ -366,12 +467,13 @@ func TestSetupStatus(t *testing.T) {
 	rec := f.request(http.MethodGet, "/api/setup/status", nil, nil)
 	assertStatus(t, rec, http.StatusOK)
 	var status struct {
-		Configured bool   `json:"configured"`
-		InstallURL string `json:"install_url"`
+		Configured    bool   `json:"configured"`
+		InstallURL    string `json:"install_url"`
+		TokenRequired bool   `json:"token_required"`
 	}
 	decodeJSON(t, rec, &status)
-	if status.Configured || status.InstallURL != "" {
-		t.Errorf("initial setup status = %+v, want false/\"\"", status)
+	if status.Configured || status.InstallURL != "" || status.TokenRequired {
+		t.Errorf("initial setup status = %+v, want false/\"\"/false", status)
 	}
 
 	if err := ghapp.SaveCredentials(f.ctx, f.st, f.box, ghapp.AppCredentials{
@@ -390,6 +492,53 @@ func TestSetupStatus(t *testing.T) {
 	}
 	if want := "https://github.example/apps/qa-control-center/installations/new"; status.InstallURL != want {
 		t.Errorf("install_url = %q, want %q", status.InstallURL, want)
+	}
+}
+
+func TestSetupStatusReportsWhetherTheTokenIsRequired(t *testing.T) {
+	f := newSecureFixture(t)
+	f.deps.SetupToken = "s3cret"
+	f.rebuildRouter()
+
+	rec := f.request(http.MethodGet, "/api/setup/status", nil, nil)
+	assertStatus(t, rec, http.StatusOK)
+	var status struct {
+		TokenRequired bool `json:"token_required"`
+	}
+	decodeJSON(t, rec, &status)
+	if !status.TokenRequired {
+		t.Error("token_required = false, want true when the operator configured a setup token")
+	}
+}
+
+// TestWebhooksRouteFollowsTheSetting pins that webhooks_enabled is a runtime
+// control: with it off a delivery must not reach the handler, because GitHub
+// keeps sending to a webhook configured on the App.
+func TestWebhooksRouteFollowsTheSetting(t *testing.T) {
+	f := newSecureFixture(t)
+
+	f.deps.Cfg.WebhooksEnabled = false
+	f.rebuildRouter()
+	rec := f.request(http.MethodPost, "/webhooks/github", map[string]any{"action": "opened"}, nil)
+	if rec.Code == http.StatusNoContent {
+		t.Error("POST reached the webhook handler while webhooks are disabled")
+	}
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("status = %d, want %d: the static fallback rejects the method", rec.Code, http.StatusMethodNotAllowed)
+	}
+	if allow := rec.Header().Get("Allow"); allow != "GET, HEAD" {
+		t.Errorf("Allow = %q, want %q", allow, "GET, HEAD")
+	}
+	if f.webhooks.hits != 0 {
+		t.Errorf("webhook handler served %d request(s) while webhooks are disabled", f.webhooks.hits)
+	}
+
+	f.deps.Cfg.WebhooksEnabled = true
+	f.rebuildRouter()
+	rec = f.request(http.MethodPost, "/webhooks/github", map[string]any{"action": "opened"}, nil)
+	assertStatus(t, rec, http.StatusNoContent)
+	if f.webhooks.hits != 1 {
+		t.Errorf("webhook handler served %d request(s) while enabled, want 1", f.webhooks.hits)
 	}
 }
 

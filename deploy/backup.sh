@@ -5,20 +5,33 @@
 #   destino  directorio donde dejar el .dump (por defecto /backups)
 #
 # Variables:
-#   QA_DATABASE_URL   DSN de la base (obligatoria)
-#   QA_BACKUP_RETENTION  backups a conservar (por defecto 7)
+#   QA_DATABASE_URL   DSN de la base (obligatoria). De ahí sale también
+#                     backup_retention, el ajuste del panel (7 si no se puede leer).
 #
 # El dump se escribe en un archivo temporal y solo se renombra cuando
 # pg_restore puede leerlo, así un backup truncado nunca reemplaza a uno bueno.
 set -eu
 
 destino="${1:-/backups}"
-retencion="${QA_BACKUP_RETENTION:-7}"
 
 if [ -z "${QA_DATABASE_URL:-}" ]; then
     echo "QA_DATABASE_URL is required" >&2
     exit 1
 fi
+
+# The retention is a panel setting, but a failed read must not abort the
+# backup: the dump below already needs the database, so the only thing a
+# missing row can cost is the configured value, not tonight's copy.
+retencion=$(psql "$QA_DATABASE_URL" -tAc \
+    "SELECT value FROM app_settings WHERE key = 'backup_retention'" 2>/dev/null || true)
+retencion=$(printf '%s' "$retencion" | tr -d '[:space:]')
+# Only 1-3 digit positives without a leading zero: a hand-written row such as
+# "00" or "08" is not a count, and passing it to the prune would either delete
+# every dump or abort on an illegal octal number.
+case "$retencion" in
+    [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;;
+    *) retencion=7 ;;
+esac
 
 mkdir -p "$destino"
 

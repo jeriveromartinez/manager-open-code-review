@@ -4,51 +4,40 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
 
-// Config holds the runtime configuration of the QA Control Center, loaded from
-// environment variables.
+// Config holds the runtime configuration of the QA Control Center. Load reads
+// only what a process cannot discover by itself; everything else starts at its
+// default and is later overwritten from the settings table.
 type Config struct {
 	DatabaseURL          string        // QA_DATABASE_URL (requerido)
-	PublicURL            string        // QA_PUBLIC_URL (requerido, sin "/" final)
-	ListenAddr           string        // QA_LISTEN_ADDR, default ":8080"
+	PublicURL            string        // public_url en la BD; el setup la detecta y la guarda
+	ListenAddr           string        // listen_addr, default ":8080"
 	MasterKey            []byte        // QA_MASTER_KEY base64 std, exactamente 32 bytes (opcional en Load)
 	WorkerKey            []byte        // QA_WORKER_KEY base64 std, exactamente 32 bytes (requerido)
-	WebhooksEnabled      bool          // QA_WEBHOOKS_ENABLED, default true
-	ReconcileInterval    time.Duration // QA_RECONCILE_INTERVAL, default 5m
-	GitHubURL            string        // QA_GITHUB_URL, default "https://github.com"
-	GitHubAPIURL         string        // QA_GITHUB_API_URL, default "https://api.github.com"
-	ReviewConcurrency    int           // QA_REVIEW_CONCURRENCY, default 2
-	ReviewAgentSteps     int           // QA_REVIEW_AGENT_STEPS, default 40
-	ReviewTimeout        time.Duration // QA_REVIEW_TIMEOUT, default 20m
-	ReviewStaleAfter     time.Duration // QA_REVIEW_STALE_AFTER, default 45m
-	LLMHealthInterval    time.Duration // QA_LLM_HEALTH_INTERVAL, default 30m
-	WorkspaceDir         string        // QA_WORKSPACE_DIR, default "/tmp/qa"
-	WorkerHealthAddr     string        // QA_WORKER_HEALTH_ADDR, default ":9090"
-	WorkerQueueStale     time.Duration // QA_WORKER_QUEUE_STALE_AFTER, default 10m
-	OCRBin               string        // QA_OCR_BIN, default "ocr"
-	OpencodeBin          string        // QA_OPENCODE_BIN, default "opencode"
-	FetchDepthMax        int           // QA_FETCH_DEPTH_MAX, default 500
-	GitBaseURL           string        // QA_GIT_BASE_URL, default "https://github.com", sin "/" final
-	WorkerHealthURL      string        // QA_WORKER_HEALTH_URL, default "http://worker:9090", sin "/" final
-	MonitorInterval      time.Duration // QA_MONITOR_INTERVAL, default 1m
-	MonitorRenotifyAfter time.Duration // QA_MONITOR_RENOTIFY_AFTER, default 30m
-	AlertWebhookURL      string        // QA_ALERT_WEBHOOK_URL (opcional, vacío = solo log)
-}
-
-// MonitorConfig is what `qa monitor` needs. It is deliberately separate from
-// Config: the monitor only speaks HTTP, so requiring the database URL and the
-// worker key (as Load does for the other commands) would make it unusable as
-// its own container.
-type MonitorConfig struct {
-	WorkerHealthURL string
-	Interval        time.Duration
-	RenotifyAfter   time.Duration
-	AlertWebhookURL string
+	WebhooksEnabled      bool          // webhooks_enabled, default true
+	ReconcileInterval    time.Duration // reconcile_interval, default 5m
+	GitHubURL            string        // github_url, default "https://github.com"
+	GitHubAPIURL         string        // github_api_url, default "https://api.github.com"
+	ReviewConcurrency    int           // review_concurrency, default 2
+	ReviewAgentSteps     int           // review_agent_steps, default 40
+	ReviewTimeout        time.Duration // review_timeout, default 20m
+	ReviewStaleAfter     time.Duration // review_stale_after, default 45m
+	LLMHealthInterval    time.Duration // llm_health_interval, default 30m
+	WorkspaceDir         string        // workspace_dir, default "/tmp/qa"
+	WorkerHealthAddr     string        // worker_health_addr, default ":9090"
+	WorkerQueueStale     time.Duration // worker_queue_stale_after, default 10m
+	OCRBin               string        // ocr_bin, default "ocr"
+	OpencodeBin          string        // opencode_bin, default "opencode"
+	FetchDepthMax        int           // fetch_depth_max, default 500
+	GitBaseURL           string        // git_base_url, default "https://github.com", sin "/" final
+	WorkerHealthURL      string        // worker_health_url, default "http://worker:9090", sin "/" final
+	MonitorInterval      time.Duration // monitor_interval, default 1m
+	MonitorRenotifyAfter time.Duration // monitor_renotify_after, default 30m
+	AlertWebhookURL      string        // alert_webhook_url (opcional, vacío = solo log)
+	BackupRetention      int           // backup_retention, default 7; deploy/backup.sh lee la BD (Task 7)
 }
 
 // RequireMasterKey validates that a master key is available. Commands that
@@ -71,81 +60,10 @@ func (c Config) LLMHealthStaleAfter() time.Duration {
 	return 2 * interval
 }
 
-// LoadMonitor builds only the monitor settings. `qa monitor` has no database
-// nor keys to validate, so it never calls Load: that would reject a perfectly
-// working monitor container for missing QA_WORKER_KEY.
-func LoadMonitor(getenv func(string) string) (MonitorConfig, error) {
-	url, interval, renotify, webhook, err := loadMonitorSettings(getenv)
-	if err != nil {
-		return MonitorConfig{}, err
-	}
-	return MonitorConfig{
-		WorkerHealthURL: url,
-		Interval:        interval,
-		RenotifyAfter:   renotify,
-		AlertWebhookURL: webhook,
-	}, nil
-}
-
-// loadMonitorSettings is shared by Load and LoadMonitor so both commands read
-// the same variables with the same rules.
-func loadMonitorSettings(getenv func(string) string) (string, time.Duration, time.Duration, string, error) {
-	healthURL := "http://worker:9090"
-	if raw := getenv("QA_WORKER_HEALTH_URL"); raw != "" {
-		v := strings.TrimRight(strings.TrimSpace(raw), "/")
-		u, err := url.Parse(v)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return "", 0, 0, "", fmt.Errorf("QA_WORKER_HEALTH_URL must be an absolute http(s) URL, got %q", raw)
-		}
-		healthURL = v
-	}
-
-	interval := time.Minute
-	if v := strings.TrimSpace(getenv("QA_MONITOR_INTERVAL")); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_INTERVAL must be a duration: %w", err)
-		}
-		if d <= 0 {
-			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_INTERVAL must be greater than zero, got %q", v)
-		}
-		interval = d
-	}
-
-	renotify := 30 * time.Minute
-	if v := strings.TrimSpace(getenv("QA_MONITOR_RENOTIFY_AFTER")); v != "" {
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_RENOTIFY_AFTER must be a duration: %w", err)
-		}
-		if d <= 0 {
-			return "", 0, 0, "", fmt.Errorf("QA_MONITOR_RENOTIFY_AFTER must be greater than zero, got %q", v)
-		}
-		renotify = d
-	}
-	// Re-notifying faster than the poll interval would make every tick an
-	// alert, which is the same as having no state machine at all.
-	if renotify < interval {
-		return "", 0, 0, "", fmt.Errorf(
-			"QA_MONITOR_RENOTIFY_AFTER must be greater than or equal to QA_MONITOR_INTERVAL, got %s < %s",
-			renotify, interval)
-	}
-
-	webhook := strings.TrimSpace(getenv("QA_ALERT_WEBHOOK_URL"))
-	if webhook != "" {
-		u, err := url.Parse(webhook)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return "", 0, 0, "", fmt.Errorf("QA_ALERT_WEBHOOK_URL must be an absolute http(s) URL, got %q", webhook)
-		}
-	}
-
-	return healthURL, interval, renotify, webhook, nil
-}
-
-// Load builds a Config from the values returned by getenv. It returns an error
-// when a required variable is missing or malformed.
-func Load(getenv func(string) string) (Config, error) {
-	cfg := Config{
+// Default returns the configuration used when nothing is configured yet. Load
+// starts from it and the database overrides only what an administrator saved.
+func Default() Config {
+	return Config{
 		ListenAddr:        ":8080",
 		WebhooksEnabled:   true,
 		ReconcileInterval: 5 * time.Minute,
@@ -174,199 +92,70 @@ func Load(getenv func(string) string) (Config, error) {
 		// A provider credential changes rarely, so half an hour is frequent
 		// enough to notice a broken key without polling the provider.
 		LLMHealthInterval: 30 * time.Minute,
+		BackupRetention:   7,
 	}
+}
+
+// LegacyEnvKeys lists the variables that used to configure behaviour and are
+// now ignored: they live in the database and are edited from the panel.
+func LegacyEnvKeys() []string {
+	return []string{
+		"QA_LISTEN_ADDR", "QA_WEBHOOKS_ENABLED", "QA_RECONCILE_INTERVAL",
+		"QA_GITHUB_URL", "QA_GITHUB_API_URL",
+		"QA_REVIEW_CONCURRENCY", "QA_REVIEW_AGENT_STEPS", "QA_REVIEW_TIMEOUT",
+		"QA_REVIEW_STALE_AFTER", "QA_LLM_HEALTH_INTERVAL", "QA_FETCH_DEPTH_MAX", "QA_GIT_BASE_URL",
+		"QA_WORKSPACE_DIR", "QA_OCR_BIN", "QA_OPENCODE_BIN",
+		"QA_WORKER_HEALTH_ADDR", "QA_WORKER_QUEUE_STALE_AFTER",
+		"QA_WORKER_HEALTH_URL", "QA_MONITOR_INTERVAL", "QA_MONITOR_RENOTIFY_AFTER", "QA_ALERT_WEBHOOK_URL",
+		"QA_BACKUP_RETENTION",
+		// Set by the setup wizard from the incoming request and stored in
+		// app_settings, so a process never reads it from the environment.
+		"QA_PUBLIC_URL",
+	}
+}
+
+// Load builds a Config from the values returned by getenv. Only the essentials
+// are read: they cannot be stored in the database before connecting to it, and
+// the keys decrypt it. Everything else keeps its Default until the database
+// overrides it. It returns an error when an essential is missing or malformed.
+func Load(getenv func(string) string) (Config, error) {
+	cfg := Default()
 
 	cfg.DatabaseURL = strings.TrimSpace(getenv("QA_DATABASE_URL"))
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("QA_DATABASE_URL is required")
 	}
 
-	cfg.PublicURL = strings.TrimRight(strings.TrimSpace(getenv("QA_PUBLIC_URL")), "/")
-	if cfg.PublicURL == "" {
-		return Config{}, errors.New("QA_PUBLIC_URL is required")
-	}
-
-	if rawMasterKey := strings.TrimSpace(getenv("QA_MASTER_KEY")); rawMasterKey != "" {
-		masterKey, err := base64.StdEncoding.DecodeString(rawMasterKey)
+	if raw := strings.TrimSpace(getenv("QA_MASTER_KEY")); raw != "" {
+		key, err := decodeKey(raw, "QA_MASTER_KEY")
 		if err != nil {
-			return Config{}, fmt.Errorf("QA_MASTER_KEY must be valid base64: %w", err)
+			return Config{}, err
 		}
-		if len(masterKey) != 32 {
-			return Config{}, fmt.Errorf("QA_MASTER_KEY must decode to exactly 32 bytes, got %d", len(masterKey))
-		}
-		cfg.MasterKey = masterKey
+		cfg.MasterKey = key
 	}
 
 	rawWorkerKey := strings.TrimSpace(getenv("QA_WORKER_KEY"))
 	if rawWorkerKey == "" {
 		return Config{}, errors.New("QA_WORKER_KEY is required")
 	}
-	workerKey, err := base64.StdEncoding.DecodeString(rawWorkerKey)
-	if err != nil {
-		return Config{}, fmt.Errorf("QA_WORKER_KEY must be valid base64: %w", err)
-	}
-	if len(workerKey) != 32 {
-		return Config{}, fmt.Errorf("QA_WORKER_KEY must decode to exactly 32 bytes, got %d", len(workerKey))
-	}
-	cfg.WorkerKey = workerKey
-
-	if v := strings.TrimSpace(getenv("QA_LISTEN_ADDR")); v != "" {
-		cfg.ListenAddr = v
-	}
-
-	if v := strings.TrimSpace(getenv("QA_WEBHOOKS_ENABLED")); v != "" {
-		enabled, err := strconv.ParseBool(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("QA_WEBHOOKS_ENABLED must be a boolean: %w", err)
-		}
-		cfg.WebhooksEnabled = enabled
-	}
-
-	if v := strings.TrimSpace(getenv("QA_RECONCILE_INTERVAL")); v != "" {
-		interval, err := time.ParseDuration(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("QA_RECONCILE_INTERVAL must be a duration: %w", err)
-		}
-		if interval <= 0 {
-			return Config{}, fmt.Errorf("QA_RECONCILE_INTERVAL must be greater than zero, got %q", v)
-		}
-		cfg.ReconcileInterval = interval
-	}
-
-	if v := strings.TrimSpace(getenv("QA_GITHUB_URL")); v != "" {
-		cfg.GitHubURL = strings.TrimRight(v, "/")
-	}
-
-	if v := strings.TrimSpace(getenv("QA_GITHUB_API_URL")); v != "" {
-		cfg.GitHubAPIURL = strings.TrimRight(v, "/")
-	}
-
-	if v := strings.TrimSpace(getenv("QA_REVIEW_CONCURRENCY")); v != "" {
-		concurrency, err := strconv.Atoi(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("QA_REVIEW_CONCURRENCY must be an integer: %w", err)
-		}
-		if concurrency <= 0 {
-			return Config{}, fmt.Errorf("QA_REVIEW_CONCURRENCY must be greater than zero, got %q", v)
-		}
-		cfg.ReviewConcurrency = concurrency
-	}
-
-	if v := strings.TrimSpace(getenv("QA_REVIEW_AGENT_STEPS")); v != "" {
-		steps, err := strconv.Atoi(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("QA_REVIEW_AGENT_STEPS must be an integer: %w", err)
-		}
-		if steps <= 0 {
-			return Config{}, fmt.Errorf("QA_REVIEW_AGENT_STEPS must be greater than zero, got %q", v)
-		}
-		cfg.ReviewAgentSteps = steps
-	}
-
-	if v := strings.TrimSpace(getenv("QA_REVIEW_TIMEOUT")); v != "" {
-		timeout, err := time.ParseDuration(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("QA_REVIEW_TIMEOUT must be a duration: %w", err)
-		}
-		if timeout <= 0 {
-			return Config{}, fmt.Errorf("QA_REVIEW_TIMEOUT must be greater than zero, got %q", v)
-		}
-		cfg.ReviewTimeout = timeout
-	}
-
-	if v := strings.TrimSpace(getenv("QA_REVIEW_STALE_AFTER")); v != "" {
-		stale, err := time.ParseDuration(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("QA_REVIEW_STALE_AFTER must be a duration: %w", err)
-		}
-		if stale <= 0 {
-			return Config{}, fmt.Errorf("QA_REVIEW_STALE_AFTER must be greater than zero, got %q", v)
-		}
-		cfg.ReviewStaleAfter = stale
-	}
-
-	if v := strings.TrimSpace(getenv("QA_LLM_HEALTH_INTERVAL")); v != "" {
-		interval, err := time.ParseDuration(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("QA_LLM_HEALTH_INTERVAL must be a duration: %w", err)
-		}
-		if interval <= 0 {
-			return Config{}, fmt.Errorf("QA_LLM_HEALTH_INTERVAL must be greater than zero, got %q", v)
-		}
-		cfg.LLMHealthInterval = interval
-	}
-
-	if raw := getenv("QA_WORKSPACE_DIR"); raw != "" {
-		v := strings.TrimSpace(raw)
-		if v == "" {
-			return Config{}, errors.New("QA_WORKSPACE_DIR must not be empty")
-		}
-		cfg.WorkspaceDir = v
-	}
-
-	if raw := getenv("QA_WORKER_HEALTH_ADDR"); raw != "" {
-		v := strings.TrimSpace(raw)
-		if v == "" {
-			return Config{}, errors.New("QA_WORKER_HEALTH_ADDR must not be empty")
-		}
-		cfg.WorkerHealthAddr = v
-	}
-
-	if raw := getenv("QA_WORKER_QUEUE_STALE_AFTER"); raw != "" {
-		v := strings.TrimSpace(raw)
-		stale, err := time.ParseDuration(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("QA_WORKER_QUEUE_STALE_AFTER must be a duration: %w", err)
-		}
-		if stale <= 0 {
-			return Config{}, fmt.Errorf("QA_WORKER_QUEUE_STALE_AFTER must be greater than zero, got %q", v)
-		}
-		cfg.WorkerQueueStale = stale
-	}
-
-	if raw := getenv("QA_OCR_BIN"); raw != "" {
-		v := strings.TrimSpace(raw)
-		if v == "" {
-			return Config{}, errors.New("QA_OCR_BIN must not be empty")
-		}
-		cfg.OCRBin = v
-	}
-
-	if raw := getenv("QA_OPENCODE_BIN"); raw != "" {
-		v := strings.TrimSpace(raw)
-		if v == "" {
-			return Config{}, errors.New("QA_OPENCODE_BIN must not be empty")
-		}
-		cfg.OpencodeBin = v
-	}
-
-	if v := strings.TrimSpace(getenv("QA_FETCH_DEPTH_MAX")); v != "" {
-		depth, err := strconv.Atoi(v)
-		if err != nil {
-			return Config{}, fmt.Errorf("QA_FETCH_DEPTH_MAX must be an integer: %w", err)
-		}
-		if depth <= 0 {
-			return Config{}, fmt.Errorf("QA_FETCH_DEPTH_MAX must be greater than zero, got %q", v)
-		}
-		cfg.FetchDepthMax = depth
-	}
-
-	if raw := getenv("QA_GIT_BASE_URL"); raw != "" {
-		v := strings.TrimRight(strings.TrimSpace(raw), "/")
-		if v == "" {
-			return Config{}, errors.New("QA_GIT_BASE_URL must not be empty")
-		}
-		cfg.GitBaseURL = v
-	}
-
-	healthURL, interval, renotify, webhook, err := loadMonitorSettings(getenv)
+	workerKey, err := decodeKey(rawWorkerKey, "QA_WORKER_KEY")
 	if err != nil {
 		return Config{}, err
 	}
-	cfg.WorkerHealthURL = healthURL
-	cfg.MonitorInterval = interval
-	cfg.MonitorRenotifyAfter = renotify
-	cfg.AlertWebhookURL = webhook
+	cfg.WorkerKey = workerKey
 
 	return cfg, nil
+}
+
+// decodeKey enforces the key format every consumer relies on: base64 std and
+// exactly 32 bytes, which is the size the ciphers take.
+func decodeKey(raw, name string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be valid base64: %w", name, err)
+	}
+	if len(key) != 32 {
+		return nil, fmt.Errorf("%s must decode to exactly 32 bytes, got %d", name, len(key))
+	}
+	return key, nil
 }
