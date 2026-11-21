@@ -20,12 +20,15 @@ const waiting = computed(() => {
   return bucket.value === 'ready' ? `espera validación ${text}` : `en este estado ${text}`
 })
 
-const ctas: Partial<Record<string, string>> = {
-  ready: 'Validar →',
-  defects: 'Ver defectos →',
-  inconclusive: 'Ver motivo →',
+const ctas: Partial<Record<string, { text: string; label: string }>> = {
+  ready: { text: 'Validar →', label: 'Validar' },
+  defects: { text: 'Ver defectos →', label: 'Ver defectos de' },
+  inconclusive: { text: 'Ver motivo →', label: 'Ver motivo de' },
 }
-const cta = computed(() => ctas[bucket.value] ?? 'Ver detalle →')
+const ctaFor = computed(() => ctas[bucket.value] ?? { text: 'Ver detalle →', label: 'Ver detalle de' })
+const cta = computed(() => ctaFor.value.text)
+// The arrow is decoration; screen readers hear the action and the PR instead.
+const ctaLabel = computed(() => ctaFor.value.label)
 
 const validationDots = computed(() => {
   const { passed, total } = props.pr.validations
@@ -53,7 +56,7 @@ const validationDots = computed(() => {
       </span>
     </p>
 
-    <dl class="pr-card__findings" aria-label="Hallazgos abiertos">
+    <dl class="pr-card__findings">
       <div>
         <dt class="caption">Bloq.</dt>
         <dd :class="{ 'pr-card__count--bad': pr.open_findings.blocker > 0 }" data-open-blockers>
@@ -86,6 +89,7 @@ const validationDots = computed(() => {
         class="button"
         :class="bucket === 'ready' ? 'button--light' : ''"
         :to="`/prs/${pr.id}`"
+        :aria-label="`${ctaLabel} ${pr.repo} #${pr.number}`"
         data-cta
       >
         {{ cta }}

@@ -15,6 +15,7 @@ const tabs: { label: string; value: BucketFilter }[] = [
   { label: 'Con defectos', value: 'defects' },
   { label: 'Inconclusos', value: 'inconclusive' },
   { label: 'En revisión IA', value: 'ai' },
+  { label: 'En pausa o aprobación', value: 'other' },
   { label: 'Todos', value: '' },
 ]
 </script>

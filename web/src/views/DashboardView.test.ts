@@ -138,8 +138,8 @@ describe('DashboardView', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('Hola, mvega · QA en Pagos · plazo de validación 4 h')
-    expect(tile(wrapper, 'ready').text()).toContain('2')
-    expect(tile(wrapper, 'triage').text()).toContain('7')
+    expect(tile(wrapper, 'ready').get('.kpi-card__value').text()).toBe('2')
+    expect(tile(wrapper, 'triage').get('.kpi-card__value').text()).toBe('7')
     expect(wrapper.get('[data-precision]').text()).toBe('80%')
     expect(tile(wrapper, 'inconclusive').classes()).toContain('tile--alert')
     expect(wrapper.get('[data-runs-running]').text()).toBe('1')
@@ -290,6 +290,21 @@ describe('DashboardView', () => {
 
     expect(mocks.api.readiness).not.toHaveBeenCalled()
     expect(wrapper.find('[data-readiness-banner]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps PRs waiting for approval or paused reachable from their own tab', async () => {
+    mocks.api.prs.mockResolvedValue([
+      ...prs,
+      pr({ id: 5, repo: 'payments', number: 12, qa_status: 'awaiting_approval', group: 'blocked' }),
+    ])
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    expect(wrapper.get('[data-tab="other"]').text()).toContain('1')
+    await wrapper.get('[data-tab="other"]').trigger('click')
+    expect(wrapper.findAll('.pr-card')).toHaveLength(1)
+    expect(wrapper.text()).toContain('payments #12')
     wrapper.unmount()
   })
 })

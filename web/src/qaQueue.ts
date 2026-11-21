@@ -4,7 +4,6 @@ export type QaBucket = 'ready' | 'defects' | 'inconclusive' | 'ai' | 'other'
 
 const bucketOrder: QaBucket[] = ['ready', 'defects', 'inconclusive', 'ai', 'other']
 
-/** Agrupa un PR según lo que QA tiene que hacer con él. */
 export function qaBucket(pr: Pick<PRView, 'qa_status'>): QaBucket {
   switch (pr.qa_status) {
     case 'ready_for_human':
@@ -34,13 +33,13 @@ export function formatWait(minutes: number): string {
   return `${Math.floor(hours / 24)}d ${String(hours % 24).padStart(2, '0')}h`
 }
 
-/** Solo cuenta el plazo de los PRs que esperan a QA; un SLA de 0 lo desactiva. */
+// Only PRs waiting on QA run against the SLA, and an SLA of 0 turns it off.
 export function isOverSla(pr: Pick<PRView, 'qa_status' | 'status_since'>, slaSeconds: number, now: Date): boolean {
   if (slaSeconds <= 0 || qaBucket(pr) !== 'ready') return false
   return waitMinutes(pr, now) * 60 > slaSeconds
 }
 
-/** Lo que espera a QA primero y, dentro de cada grupo, lo más antiguo primero. */
+// Work waiting on QA first; within each bucket, the longest wait first.
 export function sortForQueue(prs: PRView[]): PRView[] {
   return [...prs].sort((a, b) => {
     const byBucket = bucketOrder.indexOf(qaBucket(a)) - bucketOrder.indexOf(qaBucket(b))

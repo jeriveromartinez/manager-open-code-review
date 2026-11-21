@@ -26,7 +26,7 @@ export type PRView = {
   review_reason: string
   validations: { passed: number; total: number }
   open_findings: SeverityCounts
-  /** Momento en que el PR entró en su `qa_status` actual (RFC 3339). */
+  /** When the PR entered its current `qa_status` (RFC 3339). */
   status_since: string
   updated_at: string
 }
@@ -38,7 +38,7 @@ export type SeverityCounts = {
   nit: number
 }
 
-/** Resumen de la cola de QA sobre los PRs que ve el usuario. */
+/** QA queue overview over the PRs the user can see. */
 export type QASummary = {
   ready_for_human: number
   inconclusive: number
@@ -88,7 +88,8 @@ export type Finding = {
   status: string
   first_seen_run_id: number
   last_seen_run_id: number
-  /** Quién confirmó el hallazgo o lo marcó como falso positivo desde el panel. */
+  /** QA verdict from the panel; a review run or /qa moving the status leaves it unchanged. */
+  triage_verdict: '' | 'confirmed' | 'false_positive'
   triaged_by: string
   triaged_at: string | null
   created_at: string

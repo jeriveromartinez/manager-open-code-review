@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, type Finding, type PRDetail } from '../api'
-import { isForbidden } from '../errors'
+import { isConflict, isForbidden } from '../errors'
 import { prStatusLabel, statusLabel } from '../status'
 
 const route = useRoute()
@@ -54,8 +54,8 @@ const status = computed(() =>
   detail.value ? prStatusLabel(detail.value) : statusLabel('pending'),
 )
 
-// Lo que QA comprueba antes de aprobar en GitHub. Los resueltos no cuentan: ya
-// no son una decisión pendiente de nadie.
+// What QA checks before approving in GitHub. Resolved findings are left out:
+// they are no longer anyone's decision.
 const validation = computed(() => {
   const pr = detail.value
   const findings = (pr?.findings ?? []).filter((finding) => finding.status !== 'resolved')
@@ -63,23 +63,41 @@ const validation = computed(() => {
   const validations = pr?.validations ?? { passed: 0, total: 0 }
   const run = latestRun.value
   return {
-    triaged: findings.filter((finding) => finding.triaged_by !== '').length,
+    triaged: findings.filter((finding) => finding.triage_verdict !== '').length,
     total: findings.length,
-    untriaged: open.filter((finding) => finding.triaged_by === '').length,
+    untriaged: open.filter((finding) => finding.triage_verdict === '').length,
     openBlockers: open.filter((finding) => finding.severity === 'blocker').length,
     ciKnown: validations.total > 0,
     ciGreen: validations.total > 0 && validations.passed === validations.total,
     ciText: `${validations.passed}/${validations.total}`,
     aiDone: run?.status === 'succeeded',
-    aiText: run ? `Última revisión IA: ${run.status}` : 'La IA todavía no ha revisado este PR',
+    aiText: run
+      ? `Última revisión IA: ${runStatusLabels[run.status] ?? run.status}`
+      : 'La IA todavía no ha revisado este PR',
   }
 })
 
+const runStatusLabels: Record<string, string> = {
+  queued: 'en cola',
+  running: 'en curso',
+  succeeded: 'completada',
+  failed: 'fallida',
+  inconclusive: 'inconclusa',
+  superseded: 'sustituida',
+}
+
+// The note follows QA's verdict, not the status: a run can reopen a false
+// positive and a /qa dismiss can withdraw a confirmed finding.
 function triageNote(finding: Finding): string {
-  if (finding.triaged_by === '') return 'Sin triar'
-  return finding.status === 'withdrawn'
-    ? `Falso positivo según ${finding.triaged_by}`
-    : `Confirmado por ${finding.triaged_by}`
+  if (finding.status === 'resolved') return 'Resuelto en el código'
+  switch (finding.triage_verdict) {
+    case 'confirmed':
+      return `Confirmado por ${finding.triaged_by}`
+    case 'false_positive':
+      return `Falso positivo según ${finding.triaged_by}`
+    default:
+      return 'Sin triar'
+  }
 }
 
 function coverageCount(key: string): number {
@@ -172,6 +190,8 @@ async function applyAction(): Promise<void> {
     detail.value = previous
     if (isForbidden(err)) {
       error.value = 'Solo QA o el lead del equipo pueden triar hallazgos'
+    } else if (isConflict(err)) {
+      error.value = 'El hallazgo ya está resuelto en el código'
     } else {
       error.value =
         action === 'withdraw' ? 'No se pudo descartar el hallazgo' : 'No se pudo confirmar el hallazgo'
@@ -346,12 +366,15 @@ onMounted(() => {
           <div class="finding__actions">
             <span
               class="finding__triage"
-              :class="{ 'finding__triage--done': finding.triaged_by !== '' }"
+              :class="{ 'finding__triage--done': finding.triage_verdict === 'confirmed' }"
               data-triage-note
             >
               {{ triageNote(finding) }}
             </span>
+            <!-- A resolved finding is no longer QA's call: confirming it would
+                 reopen it and block the PR again. -->
             <button
+              v-if="finding.status === 'open'"
               class="button button--ghost finding__action"
               type="button"
               data-withdraw
@@ -362,7 +385,7 @@ onMounted(() => {
               Falso positivo
             </button>
             <button
-              v-if="finding.triaged_by === ''"
+              v-if="finding.status === 'open' && finding.triage_verdict !== 'confirmed'"
               class="button button--light finding__action"
               type="button"
               data-confirm
@@ -693,7 +716,7 @@ onMounted(() => {
   gap: var(--space-2);
   padding: 22px;
   background: var(--surface);
-  border: var(--rule-hair) solid #262626;
+  border: var(--rule-hair) solid var(--tile-border);
   border-radius: var(--radius-lg);
 }
 

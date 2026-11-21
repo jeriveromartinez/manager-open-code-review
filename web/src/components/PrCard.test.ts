@@ -45,6 +45,7 @@ describe('PrCard', () => {
     expect(wrapper.text()).toContain('Listo para ti')
     expect(wrapper.text()).toContain('9/9 validaciones correctas')
     expect(wrapper.get('[data-cta]').text()).toBe('Validar →')
+    expect(wrapper.get('[data-cta]').attributes('aria-label')).toBe('Validar backend-api #142')
   })
 
   it('avisa cuando un PR pendiente no tiene revisión programada', () => {
