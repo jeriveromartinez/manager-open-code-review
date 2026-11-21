@@ -104,6 +104,7 @@ func NewRouter(d Deps) http.Handler {
 
 			r.Get("/me", s.me)
 			r.Get("/stats", s.stats)
+			r.Get("/qa/summary", s.qaSummary)
 			r.Get("/prs", s.prs)
 			r.Get("/prs/{id}", s.prDetail)
 			r.Get("/repos", s.repos)

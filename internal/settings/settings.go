@@ -30,6 +30,7 @@ const (
 	KeyMonitorRenotifyAfter = "monitor_renotify_after"
 	KeyAlertWebhookURL      = "alert_webhook_url"
 	KeyBackupRetention      = "backup_retention"
+	KeyQAValidationSLA      = "qa_validation_sla"
 )
 
 type Group string
@@ -126,6 +127,12 @@ func Fields() []Field {
 			Label: "Intervalo de salud LLM",
 			Help:  "Cada cuánto el worker comprueba los perfiles de lenguaje habilitados.",
 			Kind:  "duration", Unit: "m", Default: "30m", Restart: "worker",
+		},
+		{
+			Key: KeyQAValidationSLA, Group: GroupReview,
+			Label: "Plazo de validación QA",
+			Help:  "Un PR listo para QA que lleva más que esto esperando aparece fuera de plazo en el panel.",
+			Kind:  "duration", Unit: "h", Default: "4h", Restart: "app",
 		},
 		{
 			Key: KeyFetchDepthMax, Group: GroupReview,
@@ -237,5 +244,6 @@ func ToMap(cfg config.Config) map[string]string {
 		KeyMonitorRenotifyAfter: cfg.MonitorRenotifyAfter.String(),
 		KeyAlertWebhookURL:      cfg.AlertWebhookURL,
 		KeyBackupRetention:      strconv.Itoa(cfg.BackupRetention),
+		KeyQAValidationSLA:      cfg.QAValidationSLA.String(),
 	}
 }

@@ -27,6 +27,9 @@ const (
 	FindingResolved  = "resolved"
 	FindingWithdrawn = "withdrawn"
 
+	VerdictConfirmed     = "confirmed"
+	VerdictFalsePositive = "false_positive"
+
 	ArtifactSummary = "summary_comment"
 	ArtifactReview  = "review"
 	ArtifactCheck   = "check_run"
@@ -135,6 +138,9 @@ type PullRequest struct {
 	ValidationsPassed int       `gorm:"column:validations_passed"`
 	ValidationsFailed int       `gorm:"column:validations_failed"`
 	ValidationsTotal  int       `gorm:"column:validations_total"`
+	// Maintained by a database trigger whenever qa_status changes, so GORM
+	// must never write it.
+	QAStatusChangedAt time.Time `gorm:"column:qa_status_changed_at;<-:false"`
 }
 
 // AuditLog records an administrative action.
@@ -232,6 +238,12 @@ type Finding struct {
 	GithubThreadID      string    `gorm:"column:github_thread_id"`
 	CreatedAt           time.Time `gorm:"column:created_at"`
 	UpdatedAt           time.Time `gorm:"column:updated_at"`
+	// TriageVerdict, TriagedBy and TriagedAt record the last panel decision on
+	// the finding. Only TriageFinding writes them: a review run or a /qa command
+	// changes Status but leaves QA's verdict as it was.
+	TriageVerdict string     `gorm:"column:triage_verdict"`
+	TriagedBy     string     `gorm:"column:triaged_by"`
+	TriagedAt     *time.Time `gorm:"column:triaged_at"`
 }
 
 // FindingEvent records a lifecycle transition of a finding.
