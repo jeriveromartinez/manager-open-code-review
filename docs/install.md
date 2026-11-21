@@ -75,7 +75,7 @@ La App creada desde el manifiesto se suscribe a estos eventos. Sin webhooks solo
 | `pull_request` | Sincronizar el PR y lanzar la revisión de `opened`, `synchronize`, `reopened` y `ready_for_review` | Sí: la reconciliación encola los PRs abiertos sin run para su SHA. |
 | `pull_request_review_thread` | Resolver o reabrir un hallazgo cuando alguien marca el hilo como resuelto o sin resolver en GitHub | No. En polling el hallazgo conserva el estado del último run. |
 | `issue_comment` | Comandos `/qa retry`, `/qa dismiss` y `/qa confirm` en el PR | No. En polling, los descartes y las confirmaciones se hacen desde el panel. |
-| `check_suite`, `check_run`, `status` | Reevaluar el gate cuando termina el CI | La App los recibe, pero esta fase todavía no los procesa: el gate se recalcula al publicar un run, al resolver o reabrir un hilo y al aplicar un comando `/qa`. |
+| `check_suite`, `check_run`, `status` | Reevaluar el gate cuando termina el CI: releer las validaciones del SHA y lanzar la revisión si la política exige CI en verde | Sí: la reconciliación refresca las validaciones y el encolado vuelve a evaluar el gate. |
 
 La App necesita además la suscripción a `pull_request_review_thread`: una App creada antes de que este evento estuviera en el manifiesto debe añadirlo a mano en **Settings → GitHub Apps → Permissions & events**, o resolver los hilos solo se reflejará en el panel tras la siguiente revisión.
 

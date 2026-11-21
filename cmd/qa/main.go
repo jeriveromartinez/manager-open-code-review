@@ -273,7 +273,7 @@ func runWorker() error {
 	watchdog := &review.Watchdog{
 		Store: st, Events: eventsPublisher, StaleAfter: cfg.ReviewStaleAfter,
 	}
-	// A verdict is refreshed by the worker every QA_LLM_HEALTH_INTERVAL; the
+	// A verdict is refreshed by the worker every llm_health_interval; the
 	// panel marks it stale at twice that, so one delayed cycle is not alarming.
 	healthStaleAfter := cfg.LLMHealthStaleAfter()
 	sweeper := &review.HealthSweeper{Store: st, StaleAfter: healthStaleAfter}
