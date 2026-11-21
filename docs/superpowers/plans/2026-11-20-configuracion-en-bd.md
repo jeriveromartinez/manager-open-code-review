@@ -2100,3 +2100,82 @@ git commit -m "feat(setup): ask only for the app name"
 - **Cobertura del spec**: `.env` (Task 7), `app_settings` y defaults (Tasks 1–2), carga sin cambiar call sites (Tasks 3–4), ignorar el env con aviso (Tasks 3–4), validación cruzada (Task 2), API admin y PUT parcial (Task 5), pantalla por secciones con marca de reinicio (Task 6), monitor con fallback (Task 7), retención de backups desde la BD (Task 7), setup por nombre con token opcional y URL detectada (Task 8). Nada del spec queda sin tarea.
 - **Placeholders**: los pasos de código llevan el código real; los helpers del fixture (`newSecureFixture`, `f.request`, `f.st`, `f.ctx`, `f.router`, `f.rebuildRouter`) están verificados contra `internal/api/agents_test.go` y `internal/api/api_test.go`.
 - **Consistencia de tipos**: `settings.Key*`, `settings.Field` (`key/group/default/restart/secret`), `settings.ToMap`, `settings.Apply`, `*settings.KeyError`, `store.Settings/SaveSettings`, `config.Default()`, `config.LegacyEnvKeys()`, `server.requestPublicURL`, `monitorConfig`, `api.settings/saveSettings` se usan con la misma firma en todas las tareas.
+
+---
+
+## Enmiendas aplicadas durante la ejecución
+
+Las tareas 1–5 se ejecutaron tal cual. Estas son las desviaciones aprobadas de las
+tareas 6–8 y de las rondas de revisión, con el motivo que las justifica.
+
+### Task 6 — pantalla de ajustes
+
+- El guardado mezcla en el borrador local sólo las claves enviadas. El primer
+  borrador reemplazaba `values` con la respuesta completa y borraba los cambios
+  sin guardar de las otras secciones.
+- La ruta `/settings` lleva `meta: { admin: true }` y una guarda en
+  `router.beforeEach` que carga la sesión y manda a `dashboard` a quien no es
+  admin; `web/src/router.test.ts` cubre ambos caminos.
+- `restartLabel()` reúne todos los objetivos presentes de la sección
+  (`app`, `worker`, `monitor`) unidos con `y`; antes devolvía sólo el primero y
+  ocultaba el resto en secciones mixtas.
+- Un fallo de carga deja el control *Reintentar* montado y deshabilitado mientras
+  la petición está en vuelo, y no pinta formularios con `fields` vacío (ni por
+  lista vacía ni por grupo vacío), para que nunca se pueda enviar `{}`.
+- Los campos secretos usan `autocomplete="new-password"` y el resto `off`; el
+  aviso de guardado se limpia al primer cambio en cualquier campo.
+
+### Task 7 — despliegue, monitor y backups
+
+- `monitorConfig(ctx, dsn)` conserva la firma pedida, pero su `error` queda
+  reservado a un fallo duro futuro: cualquier problema (DSN vacío, base
+  inalcanzable, `Settings` fallando o filas que no validan) devuelve
+  `config.Default()` y una advertencia. `runMonitor` ya no envuelve la llamada en
+  un error que no puede existir.
+- `qa monitor` prueba el fallback con un DSN inalcanzable
+  (`postgres://u:p@127.0.0.1:1/...`) además del DSN vacío, y afirma los cuatro
+  campos del monitor.
+- Al borrar `internal/config/monitor_test.go` (Ruling A) sus reglas pasan a
+  `internal/settings/apply_test.go`: esquema distinto de http(s) y URL absoluta
+  sin host para `worker_health_url`, y `-1m` en las dos claves del monitor, además
+  de `TestSetDurationRejectsNonPositive` para que la regla `renotify >= interval`
+  no enmascare la de duración positiva.
+- `deploy/backup.sh` acepta sólo `1..999` sin ceros a la izquierda; una fila
+  manual con `00`, `0` o texto cae al fallback `7` en lugar de borrar todos los
+  dumps o abortar.
+- `slog.SetDefault(logger)` en `main`, para que las advertencias del monitor y de
+  `loadSettings` salgan como JSON por stdout.
+- `README` avisa de que `listen_addr` y `worker_health_addr` deben seguir
+  coincidiendo con los healthchecks del compose, porque el worker espera a que la
+  app esté sana.
+
+### Task 8 — setup sin token
+
+- `POST /api/setup/manifest` recibe `{"name"}`; el nombre es obligatorio y se usa
+  tal cual. El campo `org` desaparece: la App se crea en la cuenta personal de
+  quien hace el setup.
+- `auth` resuelve la URL pública por petición (`PublicURLFor`: campo → fila
+  `public_url` → cabeceras de la petición) y `internal/api/publicurl.go` delega en
+  `auth.RequestPublicURL`. Sin esto, una instalación nueva (o una que actualiza y
+  ya no lee `QA_PUBLIC_URL`) enviaría un `redirect_uri` sin host hasta reiniciar.
+  `Login`, `Callback` y el intercambio de código comparten `callbackURL`.
+- `GET /api/setup/status` publica `token_required` (`SetupToken != ""`). El
+  asistente pinta exactamente un campo cuando es `false` (el caso normal) y añade
+  el del token cuando es `true`; un 403 también lo revela, para que el
+  endurecimiento opcional no sea un callejón sin salida. Si la consulta de estado
+  falla, se asume `false` y el asistente sigue.
+- La URL detectada se persiste sólo cuando `Cfg.PublicURL` estaba vacía, y el
+  valor normalizado se calcula una vez para el manifiesto y para esa guarda.
+- `LegacyEnvKeys()` pasa a 23 entradas con `QA_PUBLIC_URL` incluida (Ruling T):
+  una instalación que conserve la variable recibe el aviso de que ya no se lee.
+
+### Revisión de rama completa — `webhooks_enabled`
+
+El ajuste existía en el panel pero su único consumidor era `BuildManifest`, en una
+ruta inalcanzable después del setup. Ahora `NewRouter` monta
+`POST /webhooks/github` sólo cuando `d.Cfg.WebhooksEnabled` es verdadero, de modo
+que apagarlo tiene efecto al reiniciar `app` (el panel ya marca ese reinicio) y las
+entregas caen en el fallback de la SPA. `docs/install.md` describe el modo polling
+real: la App se crea siempre con hook, el operador lo borra o desactiva en GitHub,
+pone `webhooks_enabled: false` en **Ajustes → General** y reinicia; sin webhooks no
+hay comandos `/qa` ni disputas de hilos.
