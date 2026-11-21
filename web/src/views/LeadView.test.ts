@@ -258,6 +258,27 @@ describe('LeadView', () => {
     wrapper.unmount()
   })
 
+  it('shows that it is loading instead of a blank page', async () => {
+    let release: (value: QAPolicy) => void = () => {}
+    mocks.api.getPolicy.mockImplementation(
+      () =>
+        new Promise<QAPolicy>((resolve) => {
+          release = resolve
+        }),
+    )
+    const wrapper = mountLead()
+    await flushPromises()
+
+    expect(wrapper.get('[role="status"]').text()).toContain('Cargando')
+    expect(wrapper.find('[data-tile="state"]').exists()).toBe(false)
+
+    release(policy)
+    await flushPromises()
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper.find('[data-tile="state"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('ignores a slow answer for a team that is no longer selected', async () => {
     mocks.api.me.mockResolvedValue({
       id: 7,

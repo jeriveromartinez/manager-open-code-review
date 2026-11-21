@@ -118,8 +118,9 @@ const validationDots = computed(() => {
 
 .pr-card__findings dd {
   margin-top: var(--space-1);
+  font-family: var(--font-display);
   font-size: 22px;
-  font-weight: 800;
+  font-weight: 900;
   font-variant-numeric: tabular-nums;
 }
 

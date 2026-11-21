@@ -35,7 +35,6 @@ export const usePrsStore = defineStore('prs', () => {
     for (const pr of prs.value) result[qaBucket(pr)]++
     return result
   })
-  const repoCount = computed(() => new Set(prs.value.map((pr) => pr.repo)).size)
 
   async function refresh(): Promise<void> {
     loading.value = true
@@ -104,7 +103,6 @@ export const usePrsStore = defineStore('prs', () => {
     loading,
     connected,
     error,
-    repoCount,
     refresh,
     setBucket,
     scheduleRefresh,
