@@ -37,7 +37,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #66 | Verificar y activar caché de prompt | S | #71 | **Hecho** (#97); falta medir la tasa de acierto con el proveedor real |
 | #79 | Evaluar y subir OCR 1.14.0 | S | — | **Hecho** (#98) |
 | #71 | Usar `ocr review` nativo como motor | L | #79 (recomendado) | Pendiente |
-| #72 | Techo de 270k, caché y esfuerzo por equipo | M/L | #71 | Pendiente |
+| #72 | Techo de 270k, caché y esfuerzo por equipo | M/L | #71 | **Parcial** (#106): ajuste global y controles por equipo configurables y validados; el motor aún no los aplica (pendiente de #71) |
 | #80 | Diffs enormes por partes sin abandonar el PR | L | #71, #72 | Pendiente |
 | #74 | Revisión incremental por push y antirrebote | L | #71 | Pendiente |
 | #76 | Seguimiento del objetivo global | — | todas | **Seguimiento** |
@@ -53,6 +53,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 - #65 hecho (#96): la variante del perfil deja de ignorarse y cada run muestra sus tokens de razonamiento.
 - #66 hecho (#97): cada petición lleva `prompt_cache_key` estable por perfil y el banco de tokens verifica que los `cached_tokens` llegan al consumo del run. Faltan las mediciones con el proveedor real.
 - #79 hecho (#98): OCR 1.14.0 fijado en el worker; en el PR de referencia la cobertura pasa de 5 a 7 archivos revisables (4 archivos Rust de test/bench excluidos, 6 extensiones nuevas). Siguiente: #71.
+- #72 parcial (#106): ajuste global `review_context_ceiling` (270k), techo por equipo, esfuerzo y tope de gasto configurables, migrados y validados (API/panel). La aplicación real, la caché y el estado `inconclusive` por presupuesto llegan con la integración del motor nativo (#71).
 
 ## Fases
 
@@ -89,7 +90,7 @@ Objetivo: dejar de pagar un bucle genérico de OpenCode y usar los controles de 
 
 - [x] #79 Evaluar OCR 1.14.0 (exclusiones y extensiones), subir la versión del worker y comparar cobertura antes/después. No bloquea #71. (#98) Cobertura del PR de referencia: 5 → 7 revisables; 4 archivos Rust de test/bench excluidos y 6 extensiones nuevas soportadas.
 - [ ] #71 Una sola invocación a `ocr review` por revisión: argumentos y entorno del perfil, mapeo de hallazgos y estados, clave fuera de disco, fixtures reales.
-- [ ] #72 Ajuste `review_context_ceiling` (270k), caché por conversación y esfuerzo por equipo; tope de gasto opcional desactivado por defecto.
+- [ ] #72 Ajuste `review_context_ceiling` (270k), caché por conversación y esfuerzo por equipo; tope de gasto opcional desactivado por defecto. Configuración en #106; falta la aplicación en el motor (#71).
 - [ ] #80 Trocear diffs enormes por hunks, deduplicar hallazgos de trozos contiguos y publicar cobertura por archivo; nunca abandonar el PR entero.
 - [ ] #74 Revisión incremental `<sha revisado>..<head>` con vuelta a completa ante force-push, cambio de base o run parcial; antirrebote de 2 min.
 
