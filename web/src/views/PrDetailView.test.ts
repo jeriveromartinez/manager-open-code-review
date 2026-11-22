@@ -244,6 +244,90 @@ describe('PrDetailView', () => {
     wrapper.unmount()
   })
 
+  it('lists each covered file with the label for its status', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [
+        {
+          ...detail.runs[0],
+          coverage: {
+            reviewed_files: 1,
+            skipped_files: 1,
+            excluded_files: 1,
+            files: [
+              { path: 'auth.go', status: 'reviewed' },
+              { path: 'big.go', status: 'reviewed_by_parts', chunks: 3 },
+              { path: 'other.go', status: 'not_reviewed', reason: 'too_large' },
+              { path: 'README.md', status: 'excluded', reason: 'unsupported_ext' },
+            ],
+          },
+        },
+      ],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const rows = wrapper.findAll('[data-coverage-file]')
+    expect(rows).toHaveLength(4)
+    expect(rows[0].get('code').text()).toBe('auth.go')
+    expect(rows[0].get('[data-coverage-file-status]').text()).toBe('Revisado')
+    expect(rows[1].get('code').text()).toBe('big.go')
+    expect(rows[1].get('[data-coverage-file-status]').text()).toBe('Revisado por partes (3 trozos)')
+    expect(rows[2].get('[data-coverage-file-status]').text()).toBe('No revisado: too_large')
+    expect(rows[3].get('[data-coverage-file-status]').text()).toBe('Excluido: unsupported_ext')
+
+    wrapper.unmount()
+  })
+
+  it('shows an unknown coverage status verbatim', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [
+        {
+          ...detail.runs[0],
+          coverage: { files: [{ path: 'odd.go', status: 'quarantined' }] },
+        },
+      ],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.get('[data-coverage-file-status]').text()).toBe('quarantined')
+
+    wrapper.unmount()
+  })
+
+  it('renders no per-file list when the coverage has no files field', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.find('[data-coverage-files]').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('renders no per-file list when the files array is empty', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [
+        {
+          ...detail.runs[0],
+          coverage: { reviewed_files: 2, skipped_files: 1, excluded_files: 4, files: [] },
+        },
+      ],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.find('[data-coverage-files]').exists()).toBe(false)
+    expect(wrapper.find('[data-coverage-file]').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
   it('shows the header, run details and coverage counts', async () => {
     const wrapper = mountDetail()
     await flushPromises()

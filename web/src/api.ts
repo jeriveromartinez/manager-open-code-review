@@ -74,6 +74,27 @@ export type RunTokenStats = {
   max_context: number
 }
 
+/**
+ * Archivo dentro de la cobertura de una ejecución. `status` se deja como string
+ * para que un estado nuevo del backend se muestre tal cual en vez de romper.
+ */
+export type CoverageFile = {
+  path: string
+  status: string
+  /** Trozos en los que se partió un archivo revisado por partes. */
+  chunks?: number
+  /** Motivo por el que un archivo no se revisó o quedó excluido. */
+  reason?: string
+}
+
+/**
+ * Cobertura de una ejecución. `files` falta en las ejecuciones anteriores a
+ * #80, así que la lista por archivo es opcional.
+ */
+export type ReviewCoverage = Record<string, unknown> & {
+  files?: CoverageFile[]
+}
+
 /** Ejecución de revisión. CloneTokenEnc nunca se expone en la API. */
 export type ReviewRun = {
   id: number
@@ -84,7 +105,7 @@ export type ReviewRun = {
   status: string
   attempt: number
   summary: string
-  coverage: Record<string, unknown>
+  coverage: ReviewCoverage
   usage: Record<string, unknown>
   error_code: string
   error_message: string
