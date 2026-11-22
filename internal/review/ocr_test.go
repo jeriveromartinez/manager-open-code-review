@@ -98,9 +98,9 @@ func TestParseRulesRejectsMissingGroups(t *testing.T) {
 	}
 }
 
-func TestExecOCRPassesRepoFlag(t *testing.T) {
+func TestExecOCRPassesRepoAndExcludeFlags(t *testing.T) {
 	ctx := context.Background()
-	o := &OCR{Bin: fakeOCRBin(t), RepoDir: "/repo/de/prueba"}
+	o := &OCR{Bin: fakeOCRBin(t), RepoDir: "/repo/de/prueba", Excludes: "**/*.pb.go,vendor/**"}
 
 	argvPreview := filepath.Join(t.TempDir(), "preview.argv")
 	t.Setenv("FAKE_OCR_ARGV_FILE", argvPreview)
@@ -110,8 +110,11 @@ func TestExecOCRPassesRepoFlag(t *testing.T) {
 	assertArgv(t, argvPreview, []string{
 		"delegate", "preview", "--format", "json",
 		"--repo", "/repo/de/prueba", "--from", "BASE123", "--to", "HEAD456",
+		"--exclude", "**/*.pb.go,vendor/**",
 	})
 
+	// The rules command must see the same exclusions as the preview, so the
+	// pass plan and the resolved rules describe the same file set.
 	argvRule := filepath.Join(t.TempDir(), "rule.argv")
 	t.Setenv("FAKE_OCR_ARGV_FILE", argvRule)
 	if _, err := o.Rules(ctx, "BASE123", "HEAD456", []string{"main.go", "auth.go"}); err != nil {
@@ -120,7 +123,22 @@ func TestExecOCRPassesRepoFlag(t *testing.T) {
 	assertArgv(t, argvRule, []string{
 		"delegate", "rule", "--format", "json",
 		"--repo", "/repo/de/prueba", "--from", "BASE123", "--to", "HEAD456",
+		"--exclude", "**/*.pb.go,vendor/**",
 		"main.go", "auth.go",
+	})
+}
+
+func TestExecOCROmitsEmptyExcludeFlag(t *testing.T) {
+	o := &OCR{Bin: fakeOCRBin(t), RepoDir: "/repo"}
+
+	argv := filepath.Join(t.TempDir(), "preview.argv")
+	t.Setenv("FAKE_OCR_ARGV_FILE", argv)
+	if _, err := o.Preview(context.Background(), "BASE", "HEAD"); err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	assertArgv(t, argv, []string{
+		"delegate", "preview", "--format", "json",
+		"--repo", "/repo", "--from", "BASE", "--to", "HEAD",
 	})
 }
 

@@ -8,11 +8,12 @@ import (
 )
 
 // BuildPrompt arma el prompt del agente de revisión. Toda cadena controlada por
-// el PR (metadatos, reglas y hallazgos previos) viaja dentro de
-// <untrusted>…</untrusted> y se sanitiza para no romper el cerco ni convertirse
-// en menciones. El diff se adjunta con `-f`; su ruta no se nombra porque el
-// agente la usaba para leerlo otra vez y duplicar el contexto.
-func BuildPrompt(pr store.PullRequest, rules []RuleGroup, open []store.Finding, _ string) string {
+// el PR o por el equipo (metadatos, reglas, instrucciones extra y hallazgos
+// previos) viaja dentro de <untrusted>…</untrusted> y se sanitiza para no romper
+// el cerco ni convertirse en menciones. El diff se adjunta con `-f`; su ruta no
+// se nombra porque el agente la usaba para leerlo otra vez y duplicar el
+// contexto.
+func BuildPrompt(pr store.PullRequest, rules []RuleGroup, open []store.Finding, extraInstructions, _ string) string {
 	var b strings.Builder
 
 	b.WriteString("Eres un revisor de código. Analiza el diff adjunto y responde SOLO con el JSON del esquema indicado.\n")
@@ -50,6 +51,12 @@ func BuildPrompt(pr store.PullRequest, rules []RuleGroup, open []store.Finding, 
 		fmt.Fprintf(&b, "Archivos: %s\n", strings.Join(paths, ", "))
 	}
 	b.WriteString("\n")
+
+	if extra := strings.TrimSpace(extraInstructions); extra != "" {
+		b.WriteString("=== Instrucciones del equipo (DATA) ===\n")
+		writeField(&b, "Instrucciones", extra, true)
+		b.WriteString("\n")
+	}
 
 	b.WriteString("=== Hallazgos abiertos previos (DATA) ===\n")
 	for _, f := range open {
