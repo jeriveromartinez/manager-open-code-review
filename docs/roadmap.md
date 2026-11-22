@@ -28,7 +28,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #63 | Sumar el consumo de todos los pasos y pasadas | M | — | Pendiente |
 | #61 | Planificar pasadas por bytes (límite de 50 KB de OpenCode) | S/M | — | Pendiente |
 | #67 | Aclarar que `review_agent_steps` es por pasada | XS | — | Pendiente |
-| #69 | Drenar revisiones en vuelo al recrear el worker | M | — | **Hecho** |
+| #69 | Drenar revisiones en vuelo al recrear el worker | M | — | **Hecho** (#91) |
 | #68 | Refrescar el token de clonado de runs en cola | S/M | — | Pendiente |
 | #73 | Registrar y mostrar el consumo real (columnas, API, panel) | M/L | #63 | Pendiente |
 | #77 | Aplicar `exclude_globs` y `extra_instructions` de la política | M | — | Pendiente |
