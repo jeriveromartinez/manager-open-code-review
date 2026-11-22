@@ -177,7 +177,12 @@ func parseOpenCodeUsage(raw []byte) *store.HealthUsage {
 	if usage.MaxContext == 0 {
 		usage.MaxContext = usage.Input + usage.CacheRead + usage.CacheWrite
 	}
-	if usage.Total == 0 && usage.Input == 0 && usage.Output == 0 &&
+	// OpenCode can omit the total while still reporting its parts. Deriving it
+	// keeps the check out of the average as a zero-token one.
+	if usage.Total == 0 {
+		usage.Total = usage.Input + usage.Output + usage.Reasoning
+	}
+	if usage.Total == 0 && usage.Input == 0 && usage.Output == 0 && usage.Reasoning == 0 &&
 		usage.CacheRead == 0 && usage.CacheWrite == 0 {
 		return nil
 	}
