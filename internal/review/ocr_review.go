@@ -101,6 +101,9 @@ type nativeCoverageItem struct {
 	Fingerprint    string `json:"fingerprint"`
 	Classification string `json:"classification"`
 	Reason         string `json:"reason"`
+	// ExcludeReason is set only on excluded items ("too_large",
+	// "unsupported_ext", ...). It is not the same field as Reason.
+	ExcludeReason string `json:"exclude_reason"`
 }
 
 type nativeCoverage struct {
@@ -532,11 +535,13 @@ func nativeTitle(content string) string {
 }
 
 // mergeNativeFindings deduplicates comments by fingerprint, keeping the stable
-// position of the first occurrence and letting the last duplicate win.
+// position of the first occurrence and letting the last duplicate win. Before
+// hashing, adjacent chunks may report the same finding with a slightly shifted
+// range; the fuzzy pass merges those and keeps the earliest range and body.
 func mergeNativeFindings(comments []nativeComment) AgentOutput {
 	var out AgentOutput
 	seen := make(map[string]int)
-	for _, finding := range nativeFindings(comments) {
+	for _, finding := range dedupeNearbyFindings(nativeFindings(comments)) {
 		fp := Fingerprint(finding, nil)
 		if i, ok := seen[fp]; ok {
 			out.Findings[i] = finding
@@ -687,16 +692,7 @@ func nativeTokenUsage(res nativeReview) tokenUsage {
 
 func nativeSummaryText(res nativeReview, status string) string {
 	reviewed, _, _ := nativeCoverageCounts(res)
-	prefix := "Revisión completada"
-	switch status {
-	case store.RunInconclusive:
-		prefix = "Revisión parcial"
-	case store.RunFailed:
-		prefix = "Revisión fallida"
-	}
-	return fmt.Sprintf("%s: %d %s revisados, %d %s",
-		prefix, reviewed, plural(reviewed, "archivo", "archivos"),
-		len(res.Comments), plural(len(res.Comments), "hallazgo", "hallazgos"))
+	return coverageSummaryText(status, reviewed, len(res.Comments))
 }
 
 func plural(n int, singular, pluralForm string) string {

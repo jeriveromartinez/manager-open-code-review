@@ -45,20 +45,69 @@ func normalizeTitle(title string) string {
 	return strings.Join(strings.Fields(strings.ToLower(title)), " ")
 }
 
+// normalizeCoveragePath quita el "./" inicial que el manifiesto de OCR añade a
+// veces, para que la ruta coincida con la guardada en los hallazgos.
+func normalizeCoveragePath(path string) string {
+	return strings.TrimPrefix(strings.TrimSpace(path), "./")
+}
+
 // reviewedPaths devuelve el conjunto de rutas que OCR informó como completadas
-// o reutilizadas. El manifiesto puede traer un "./" inicial; se recorta para
-// que coincida con la ruta guardada en los hallazgos.
+// o reutilizadas.
 func reviewedPaths(coverage nativeCoverage) map[string]bool {
 	paths := make(map[string]bool, len(coverage.Completed)+len(coverage.Reused))
 	for _, group := range [][]nativeCoverageItem{coverage.Completed, coverage.Reused} {
 		for _, item := range group {
-			path := strings.TrimPrefix(strings.TrimSpace(item.Path), "./")
-			if path != "" {
+			if path := normalizeCoveragePath(item.Path); path != "" {
 				paths[path] = true
 			}
 		}
 	}
 	return paths
+}
+
+// dedupeNearbyFindings fusiona hallazgos que describen el mismo problema desde
+// dos trozos contiguos del mismo archivo. La huella exacta ya los uniría cuando
+// coinciden ruta, categoría y título, pero dos trozos pueden separar el rango
+// unas líneas; aquí se acepta un margen de contextRadius líneas. Se conserva el
+// rango que empieza primero y el cuerpo de la primera aparición.
+func dedupeNearbyFindings(findings []AgentFinding) []AgentFinding {
+	kept := make([]AgentFinding, 0, len(findings))
+	for _, finding := range findings {
+		merged := false
+		for i := range kept {
+			if !sameNearbyFinding(kept[i], finding) {
+				continue
+			}
+			// Preferir el rango que empieza primero sin perder el primer cuerpo.
+			if finding.StartLine < kept[i].StartLine {
+				kept[i].StartLine = finding.StartLine
+				kept[i].EndLine = finding.EndLine
+			} else if finding.StartLine == kept[i].StartLine && finding.EndLine > kept[i].EndLine {
+				kept[i].EndLine = finding.EndLine
+			}
+			merged = true
+			break
+		}
+		if !merged {
+			kept = append(kept, finding)
+		}
+	}
+	return kept
+}
+
+func sameNearbyFinding(a, b AgentFinding) bool {
+	if a.Path != b.Path || a.Category != b.Category {
+		return false
+	}
+	if normalizeTitle(a.Title) != normalizeTitle(b.Title) {
+		return false
+	}
+	return rangesNearby(a, b, contextRadius)
+}
+
+// rangesNearby indica si dos rangos se solapan o distan como mucho gap líneas.
+func rangesNearby(a, b AgentFinding, gap int) bool {
+	return b.StartLine <= a.EndLine+gap+1 && a.StartLine <= b.EndLine+gap+1
 }
 
 // findingsInPaths conserva solo los hallazgos abiertos de archivos revisados.
