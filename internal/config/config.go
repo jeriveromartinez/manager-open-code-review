@@ -34,6 +34,7 @@ type Config struct {
 	ReviewAgentSteps     int           // review_agent_steps, default 8
 	ReviewContextCeiling int           // review_context_ceiling, default 270000
 	ReviewTimeout        time.Duration // review_timeout, default 20m
+	ReviewDebounce       time.Duration // review_debounce, default 2m
 	ReviewStaleAfter     time.Duration // review_stale_after, default 45m
 	LLMHealthInterval    time.Duration // llm_health_interval, default 6h
 	WorkspaceDir         string        // workspace_dir, default "/tmp/qa"
@@ -84,8 +85,11 @@ func Default() Config {
 		ReviewAgentSteps:     8,
 		ReviewContextCeiling: ReviewContextCeilingDefault,
 		ReviewTimeout:        20 * time.Minute,
-		WorkspaceDir:         "/tmp/qa",
-		WorkerHealthAddr:     ":9090",
+		// A burst of pushes is common while a PR is being prepared; waiting two
+		// quiet minutes reviews the final head instead of every intermediate one.
+		ReviewDebounce:   2 * time.Minute,
+		WorkspaceDir:     "/tmp/qa",
+		WorkerHealthAddr: ":9090",
 		// A job waiting ten minutes with nothing running means the worker is
 		// not consuming, not that the queue is merely busy.
 		WorkerQueueStale: 10 * time.Minute,

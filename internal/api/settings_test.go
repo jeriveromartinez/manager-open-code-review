@@ -47,8 +47,11 @@ func TestSettingsReturnsDefaultsAndMetadata(t *testing.T) {
 	if body.Values["review_timeout"] != "20m0s" && body.Values["review_timeout"] != "20m" {
 		t.Errorf("review_timeout = %q, want the 20m default", body.Values["review_timeout"])
 	}
-	if len(body.Fields) != 25 {
-		t.Fatalf("fields = %d, want 25", len(body.Fields))
+	if body.Values["review_debounce"] != "2m0s" && body.Values["review_debounce"] != "2m" {
+		t.Errorf("review_debounce = %q, want the 2m default", body.Values["review_debounce"])
+	}
+	if len(body.Fields) != 26 {
+		t.Fatalf("fields = %d, want 26", len(body.Fields))
 	}
 	if body.Values["review_context_ceiling"] != "270000" {
 		t.Errorf("review_context_ceiling = %q, want 270000", body.Values["review_context_ceiling"])

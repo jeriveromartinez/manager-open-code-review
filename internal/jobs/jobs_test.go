@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net/http"
@@ -160,5 +161,116 @@ func TestLLMHealthJobArgs(t *testing.T) {
 	opts := args.InsertOpts()
 	if opts.Queue != "llm_health" || opts.MaxAttempts != 1 {
 		t.Errorf("InsertOpts() = queue %q attempts %d, want llm_health/1", opts.Queue, opts.MaxAttempts)
+	}
+}
+
+func TestReviewTriggerJobArgs(t *testing.T) {
+	args := jobs.ReviewTriggerArgs{PRID: 12, HeadSHA: "sha-abc"}
+	if args.Kind() != "review_trigger" {
+		t.Errorf("Kind() = %q, want review_trigger", args.Kind())
+	}
+	opts := args.InsertOpts()
+	if opts.Queue != "control" || opts.MaxAttempts != 3 {
+		t.Errorf("InsertOpts() = queue %q attempts %d, want control/3", opts.Queue, opts.MaxAttempts)
+	}
+}
+
+// The debounce lives in the database, not in the process: the insert must carry
+// the captured head and a scheduled_at far enough in the future, and a
+// redelivery of the same push must collapse into the same job.
+func TestEnqueueReviewTriggerSchedulesJob(t *testing.T) {
+	s := testutil.NewStore(t)
+	client, err := jobs.NewControlClient(s.Pool, &syncer.Syncer{Store: s})
+	if err != nil {
+		t.Fatalf("NewControlClient() error = %v", err)
+	}
+	enqueuer := jobs.NewEnqueuer(client)
+	ctx := context.Background()
+
+	before := time.Now()
+	const delay = 2 * time.Minute
+	if err := enqueuer.EnqueueReviewTrigger(ctx, 42, "sha-debounce", delay); err != nil {
+		t.Fatalf("EnqueueReviewTrigger() error = %v", err)
+	}
+	if err := enqueuer.EnqueueReviewTrigger(ctx, 42, "sha-debounce", delay); err != nil {
+		t.Fatalf("duplicate EnqueueReviewTrigger() error = %v", err)
+	}
+
+	var (
+		kind        string
+		rawArgs     []byte
+		scheduledAt time.Time
+		queue       string
+		attempts    int
+	)
+	if err := s.Pool.QueryRow(ctx, `
+		SELECT kind, args, scheduled_at, queue, max_attempts
+		FROM river_job WHERE kind = 'review_trigger'`).
+		Scan(&kind, &rawArgs, &scheduledAt, &queue, &attempts); err != nil {
+		t.Fatalf("read scheduled job: %v", err)
+	}
+	if kind != "review_trigger" || queue != "control" || attempts != 3 {
+		t.Errorf("job = kind %q queue %q attempts %d, want review_trigger/control/3", kind, queue, attempts)
+	}
+
+	var args struct {
+		PRID    uint   `json:"pr_id"`
+		HeadSHA string `json:"head_sha"`
+	}
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		t.Fatalf("decode args %s: %v", rawArgs, err)
+	}
+	if args.PRID != 42 || args.HeadSHA != "sha-debounce" {
+		t.Errorf("args = %+v, want pr_id 42 head_sha sha-debounce", args)
+	}
+	if scheduledAt.Before(before.Add(delay-time.Second)) || scheduledAt.After(time.Now().Add(delay+time.Second)) {
+		t.Errorf("scheduled_at = %v, want about %v from now", scheduledAt, delay)
+	}
+
+	var count int
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE kind = 'review_trigger'`).Scan(&count); err != nil {
+		t.Fatalf("count scheduled jobs: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("scheduled jobs = %d, want 1: identical pushes share the job", count)
+	}
+}
+
+type recordingTrigger struct {
+	fired chan string
+}
+
+func (r *recordingTrigger) EnqueuePending(context.Context, int) (int, error) { return 0, nil }
+
+func (r *recordingTrigger) FireDebounced(_ context.Context, prID uint, headSHA string) error {
+	r.fired <- fmt.Sprintf("%d:%s", prID, headSHA)
+	return nil
+}
+
+// The control client must run the scheduled job itself and call FireDebounced
+// with the args captured at scheduling time.
+func TestControlClientRunsReviewTriggerJob(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	trigger := &recordingTrigger{fired: make(chan string, 1)}
+	client, err := jobs.NewControlClient(s.Pool, &syncer.Syncer{Store: s}, jobs.ControlDeps{Trigger: trigger})
+	if err != nil {
+		t.Fatalf("NewControlClient() error = %v", err)
+	}
+	startClient(t, ctx, client)
+
+	if err := jobs.NewEnqueuer(client).EnqueueReviewTrigger(ctx, 9, "sha-fire", 0); err != nil {
+		t.Fatalf("EnqueueReviewTrigger() error = %v", err)
+	}
+
+	select {
+	case got := <-trigger.fired:
+		if got != "9:sha-fire" {
+			t.Errorf("FireDebounced args = %q, want 9:sha-fire", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("review_trigger job was not worked within 10s")
 	}
 }

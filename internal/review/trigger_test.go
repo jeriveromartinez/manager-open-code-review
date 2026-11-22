@@ -25,11 +25,18 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
 )
 
+type triggerCall struct {
+	prID    uint
+	headSHA string
+	delay   time.Duration
+}
+
 type triggerTestJobs struct {
 	mu          sync.Mutex
 	reviews     []uint
 	publishes   []uint
 	health      []uint
+	triggers    []triggerCall
 	failReviews int
 }
 
@@ -55,6 +62,13 @@ func (j *triggerTestJobs) EnqueueLLMHealth(_ context.Context, profileID uint) er
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.health = append(j.health, profileID)
+	return nil
+}
+
+func (j *triggerTestJobs) EnqueueReviewTrigger(_ context.Context, prID uint, headSHA string, delay time.Duration) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.triggers = append(j.triggers, triggerCall{prID: prID, headSHA: headSHA, delay: delay})
 	return nil
 }
 
@@ -121,6 +135,7 @@ type seedOpts struct {
 	withPolicy     bool
 	profileEnabled bool
 	headSHA        string
+	state          string
 	requireGreenCI bool
 }
 
@@ -215,11 +230,15 @@ func (f *triggerFixture) seed(name string, opts seedOpts) store.PullRequest {
 	if sha == "" {
 		sha = "sha-" + name
 	}
+	state := opts.state
+	if state == "" {
+		state = "open"
+	}
 	pr := store.PullRequest{
 		RepositoryID: repoID, Number: int(f.seq), Title: "PR " + name,
 		AuthorLogin: "octocat", HeadSHA: sha, BaseRef: "main", HeadRef: "branch-" + name,
 		HTMLURL: "https://github.com/acme/" + name + "/pull/1",
-		Draft:   opts.draft, IsFork: opts.fork, State: "open", QAStatus: store.StatusPending,
+		Draft:   opts.draft, IsFork: opts.fork, State: state, QAStatus: store.StatusPending,
 		GitHubUpdatedAt: time.Now().UTC(),
 	}
 	if err := f.st.DB.WithContext(f.ctx).Create(&pr).Error; err != nil {
@@ -726,5 +745,216 @@ func TestEnqueueWithFailedNotificationStillQueues(t *testing.T) {
 	}
 	if len(runs) != 1 || len(f.jobs.reviews) != 1 {
 		t.Errorf("runs = %d, EnqueueReview calls = %v; want one queued run", len(runs), f.jobs.reviews)
+	}
+}
+
+// A configured debounce turns the push webhook into a scheduled job. The run
+// must not be created yet: a burst of pushes would otherwise review every
+// intermediate head.
+func TestTriggerDebouncesPullRequest(t *testing.T) {
+	f := newTriggerFixture(t)
+	f.trigger.Debounce = 2 * time.Minute
+	pr := f.seed("app", eligibleOpts())
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs = %d, want none before the debounce fires", len(runs))
+	}
+	if len(f.jobs.triggers) != 1 {
+		t.Fatalf("EnqueueReviewTrigger calls = %v, want one", f.jobs.triggers)
+	}
+	got := f.jobs.triggers[0]
+	if got.prID != pr.ID || got.headSHA != pr.HeadSHA || got.delay != 2*time.Minute {
+		t.Errorf("scheduled trigger = %+v, want pull request %d head %q delay 2m", got, pr.ID, pr.HeadSHA)
+	}
+	if len(f.jobs.reviews) != 0 || len(f.checks.started) != 0 {
+		t.Errorf("unexpected enqueues/checks before the debounce: %v / %v", f.jobs.reviews, f.checks.started)
+	}
+}
+
+// The zero value must keep the immediate path used by every existing caller.
+func TestTriggerWithoutDebounceStaysImmediate(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 || len(f.jobs.reviews) != 1 {
+		t.Errorf("runs = %d, EnqueueReview calls = %v; want one immediate run", len(runs), f.jobs.reviews)
+	}
+	if len(f.jobs.triggers) != 0 {
+		t.Errorf("EnqueueReviewTrigger calls = %v, want none without a debounce", f.jobs.triggers)
+	}
+}
+
+func TestTriggerDebounceSkipsDraftsForksAndDisabled(t *testing.T) {
+	f := newTriggerFixture(t)
+	f.trigger.Debounce = 2 * time.Minute
+	for name, opts := range map[string]seedOpts{
+		"draft":    {draft: true, repoEnabled: true, withPolicy: true, profileEnabled: true},
+		"fork":     {fork: true, repoEnabled: true, withPolicy: true, profileEnabled: true},
+		"disabled": {withPolicy: true, profileEnabled: true},
+	} {
+		pr := f.seed(name, opts)
+		if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+			t.Fatalf("OnPullRequest(%s) error = %v", name, err)
+		}
+	}
+	if len(f.jobs.triggers) != 0 {
+		t.Errorf("EnqueueReviewTrigger calls = %v, want none for ineligible pull requests", f.jobs.triggers)
+	}
+}
+
+func TestFireDebouncedCreatesRunForCurrentHead(t *testing.T) {
+	f := newTriggerFixture(t)
+	f.trigger.Debounce = 2 * time.Minute
+	pr := f.seed("app", eligibleOpts())
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	if err := f.trigger.FireDebounced(f.ctx, pr.ID, pr.HeadSHA); err != nil {
+		t.Fatalf("FireDebounced() error = %v", err)
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Status != store.RunQueued || runs[0].Trigger != "webhook" {
+		t.Fatalf("runs = %+v, want one queued webhook run", runs)
+	}
+	if len(f.jobs.reviews) != 1 || f.jobs.reviews[0] != runs[0].ID {
+		t.Errorf("EnqueueReview calls = %v, want [%d]", f.jobs.reviews, runs[0].ID)
+	}
+}
+
+// A push that arrived after the job was scheduled has its own job: the older
+// one must no-op even though its args still match the PR row in every other way.
+func TestFireDebouncedIgnoresStaleHead(t *testing.T) {
+	f := newTriggerFixture(t)
+	f.trigger.Debounce = 2 * time.Minute
+	pr := f.seed("app", eligibleOpts())
+	oldHead := pr.HeadSHA
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.PullRequest{}).
+		Where("id = ?", pr.ID).Update("head_sha", "sha-newer").Error; err != nil {
+		t.Fatalf("move the head: %v", err)
+	}
+
+	if err := f.trigger.FireDebounced(f.ctx, pr.ID, oldHead); err != nil {
+		t.Fatalf("FireDebounced(old head) error = %v", err)
+	}
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("runs = %+v, want none for the superseded head", runs)
+	}
+
+	if err := f.trigger.FireDebounced(f.ctx, pr.ID, "sha-newer"); err != nil {
+		t.Fatalf("FireDebounced(current head) error = %v", err)
+	}
+	runs, err = f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].HeadSHA != "sha-newer" {
+		t.Fatalf("runs = %+v, want one run for the current head", runs)
+	}
+}
+
+// The pre-check is only a fast path: the head must still match when the config
+// is reloaded under the PR lock, or a push landing in between would start the
+// wrong review.
+func TestEnqueueForHeadRejectsStaleHeadUnderLock(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	oldHead := pr.HeadSHA
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.PullRequest{}).
+		Where("id = ?", pr.ID).Update("head_sha", "sha-newer").Error; err != nil {
+		t.Fatalf("move the head: %v", err)
+	}
+
+	created, err := f.trigger.enqueueForHead(f.ctx, pr.ID, oldHead, "webhook", false)
+	if err != nil {
+		t.Fatalf("enqueueForHead(old head) error = %v", err)
+	}
+	if created {
+		t.Fatal("enqueueForHead(old head) created a run, want none")
+	}
+	if runs, err := f.st.ListReviewRuns(f.ctx, pr.ID); err != nil || len(runs) != 0 {
+		t.Fatalf("runs = %+v, err = %v; want none", runs, err)
+	}
+	if len(f.jobs.reviews) != 0 || len(f.checks.started) != 0 {
+		t.Errorf("unexpected enqueues/checks: %v / %v", f.jobs.reviews, f.checks.started)
+	}
+
+	created, err = f.trigger.enqueueForHead(f.ctx, pr.ID, "sha-newer", "webhook", false)
+	if err != nil || !created {
+		t.Fatalf("enqueueForHead(current head) = %v, %v; want a created run", created, err)
+	}
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil || len(runs) != 1 || runs[0].HeadSHA != "sha-newer" {
+		t.Fatalf("runs = %+v, err = %v; want one run for the current head", runs, err)
+	}
+}
+
+// The PR can become a draft or a fork while the job waits, and the
+// configuration can disappear (disabled repo, removed policy).
+func TestFireDebouncedSkipsIneligiblePullRequests(t *testing.T) {
+	cases := []struct {
+		name string
+		opts seedOpts
+		head string
+	}{
+		{"draft", seedOpts{draft: true, repoEnabled: true, withPolicy: true, profileEnabled: true}, ""},
+		{"fork", seedOpts{fork: true, repoEnabled: true, withPolicy: true, profileEnabled: true}, ""},
+		{"closed", seedOpts{repoEnabled: true, withPolicy: true, profileEnabled: true, state: "closed"}, ""},
+		{"merged", seedOpts{repoEnabled: true, withPolicy: true, profileEnabled: true, state: "merged"}, ""},
+		{"disabled", seedOpts{withPolicy: true, profileEnabled: true}, ""},
+		{"stale-head", eligibleOpts(), "sha-anterior"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTriggerFixture(t)
+			f.trigger.Debounce = 2 * time.Minute
+			pr := f.seed("app", tc.opts)
+			head := tc.head
+			if head == "" {
+				head = pr.HeadSHA
+			}
+
+			if err := f.trigger.FireDebounced(f.ctx, pr.ID, head); err != nil {
+				t.Fatalf("FireDebounced() error = %v", err)
+			}
+			runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+			if err != nil {
+				t.Fatalf("ListReviewRuns: %v", err)
+			}
+			if len(runs) != 0 {
+				t.Errorf("runs = %+v, want none", runs)
+			}
+			if len(f.jobs.reviews) != 0 || len(f.checks.started) != 0 {
+				t.Errorf("unexpected enqueues/checks: %v / %v", f.jobs.reviews, f.checks.started)
+			}
+		})
 	}
 }

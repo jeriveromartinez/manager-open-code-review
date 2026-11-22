@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
 	ghapp "github.com/jeriveromartinez/qa-control-center/internal/github"
@@ -37,6 +38,9 @@ func (j *recordingReviewJobs) EnqueueReview(_ context.Context, runID uint) error
 
 func (j *recordingReviewJobs) EnqueuePublish(context.Context, uint) error   { return nil }
 func (j *recordingReviewJobs) EnqueueLLMHealth(context.Context, uint) error { return nil }
+func (j *recordingReviewJobs) EnqueueReviewTrigger(context.Context, uint, string, time.Duration) error {
+	return nil
+}
 
 type recordingChecks struct{}
 

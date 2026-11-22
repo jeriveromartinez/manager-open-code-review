@@ -143,6 +143,10 @@ type PullRequest struct {
 	QAStatusChangedAt time.Time `gorm:"column:qa_status_changed_at;<-:false"`
 }
 
+// IsOpen reports whether GitHub still has the pull request open. A merged or
+// closed PR must not start a review, even if a scheduled trigger is pending.
+func (p PullRequest) IsOpen() bool { return p.State == stateOpen }
+
 // AuditLog records an administrative action.
 type AuditLog struct {
 	ID          uint           `gorm:"column:id;primaryKey"`

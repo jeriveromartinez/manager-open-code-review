@@ -56,6 +56,8 @@ Todo lo demás —escucha, reconciliación, revisión, worker, alertas y backups
 
 `review_stale_after` es el umbral del vigilante de runs huérfanos: al arrancar y cada 5 minutos, los runs en `running` cuya hora de inicio supera ese umbral pasan a `failed` con código `interrupted`, se publica el check como `action_required` y el PR queda `inconclusive`. Debe superar `review_timeout` (más el margen de reintentos), o matará revisiones sanas.
 
+`review_debounce` (2m por defecto) agrupa pushes seguidos de un PR: cada push del webhook programa la revisión para dentro de ese tiempo y, al vencer, solo arranca si el head del PR sigue siendo el capturado al programarla. Un push posterior gana: su propio job vence después y el anterior no hace nada. Los borradores y los forks se omiten tanto al programar como al vencer, porque el PR puede cambiar de estado mientras espera. El cambio requiere reiniciar la app.
+
 `review_context_ceiling` (270000 por defecto, entre 4096 y 2000000) es el máximo de tokens de entrada de **cada conversación** con el modelo, no el gasto total de la revisión. Es el equivalente a `/autocompact 270k`: al acercarse al techo el motor compacta el historial y sigue, y lo que no cabe se reparte entre subtareas. Cada equipo puede sustituirlo con su propio techo en la política. El motor nativo aplica el techo efectivo como `--max-tokens`, el esfuerzo de la política como `--effort` y, si está activado, el tope de gasto como `--max-tokens-budget`. La política se lee en cada run, así que cambiar el techo, el esfuerzo o el tope de un equipo se aplica en la siguiente revisión sin reiniciar el worker.
 
 El worker expone salud y métricas en `worker_health_addr` (`:9090` por defecto):
