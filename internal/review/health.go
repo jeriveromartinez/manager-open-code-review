@@ -2,8 +2,10 @@ package review
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,26 +14,32 @@ import (
 
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
+	"github.com/jeriveromartinez/qa-control-center/internal/llmmodels"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
 const (
+	// healthPrompt is only used by the agent fallback for providers outside the
+	// closed table. The normal probe sends a short ping through llmmodels.Ping.
 	healthPrompt         = `Responde solo con {"ok":true}`
-	defaultHealthTimeout = 60 * time.Second
+	defaultHealthTimeout = 2 * time.Minute
 	maxHealthMessage     = 500
 )
 
-// ProfileChecker verifies that a stored LLM profile can actually answer through
-// OpenCode and persists the outcome on the profile row.
+// ProfileChecker verifies that a stored LLM profile can actually answer and
+// persists the outcome on the profile row.
 type ProfileChecker struct {
-	Store   *store.Store
-	Box     *crypto.Box
-	Bin     string
+	Store *store.Store
+	Box   *crypto.Box
+	// Bin runs the agent fallback for providers the closed table does not know
+	// and that have no base URL override. Empty means "opencode".
+	Bin string
+	// Timeout bounds one check. Zero means defaultHealthTimeout.
 	Timeout time.Duration
 	Events  events.Publisher
 }
 
-// Check decrypts the profile key, runs a minimal prompt in an isolated agent and
+// Check decrypts the profile key, sends one minimal tool-free request and
 // records HealthOK or HealthError with a bounded message. A failed check returns
 // an error after the failed health status has been persisted.
 func (c *ProfileChecker) Check(ctx context.Context, profileID uint) error {
@@ -55,10 +63,51 @@ func (c *ProfileChecker) Check(ctx context.Context, profileID uint) error {
 	if timeout <= 0 {
 		timeout = defaultHealthTimeout
 	}
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
+	if cause := c.probe(checkCtx, profile, key); cause != "" {
+		message := healthFailureMessage(profileID, profile, cause)
+		if saveErr := c.Store.SetLLMHealth(ctx, profileID, store.HealthError, message); saveErr != nil {
+			return fmt.Errorf("review: health check profile %d: %s; record failure: %w", profileID, cause, saveErr)
+		}
+		c.notify(ctx, profileID)
+		return fmt.Errorf("review: health check profile %d: %s", profileID, cause)
+	}
+
+	if err := c.Store.SetLLMHealth(ctx, profileID, store.HealthOK, ""); err != nil {
+		return fmt.Errorf("review: record ok health for profile %d: %w", profileID, err)
+	}
+	c.notify(ctx, profileID)
+	return nil
+}
+
+// probe returns an operator-facing cause, or an empty string when the provider
+// answered. The direct request is the normal path; the agent is only kept for
+// providers OpenCode knows by name but this package's closed table does not.
+func (c *ProfileChecker) probe(ctx context.Context, profile store.LLMProfile, key []byte) string {
+	client := llmmodels.New(nil)
+	baseURL := ""
+	if profile.BaseURL != nil {
+		baseURL = *profile.BaseURL
+	}
+
+	err := client.Ping(ctx, profile.Provider, baseURL, profile.Model, string(key))
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, llmmodels.ErrUnknownProvider):
+		slog.Debug("health check falls back to opencode", "profile_id", profile.ID, "provider", profile.Provider)
+		return c.probeAgent(ctx, profile, key)
+	default:
+		return describeProbeError(profile, err)
+	}
+}
+
+func (c *ProfileChecker) probeAgent(ctx context.Context, profile store.LLMProfile, key []byte) string {
 	work, err := os.MkdirTemp("", "qa-health-")
 	if err != nil {
-		return fmt.Errorf("review: create health workspace: %w", err)
+		return fmt.Sprintf("no se pudo preparar el entorno de OpenCode: %v", err)
 	}
 	defer os.RemoveAll(work)
 
@@ -68,32 +117,43 @@ func (c *ProfileChecker) Check(ctx context.Context, profileID uint) error {
 		Home:    filepath.Join(work, "home"),
 		Profile: profile,
 		APIKey:  string(key),
-		Timeout: timeout,
 	}
-
 	text, _, err := agent.Run(ctx, healthPrompt, nil)
 	if err != nil {
-		message := healthFailureMessage(profileID, profile, err.Error())
-		if saveErr := c.Store.SetLLMHealth(ctx, profileID, store.HealthError, message); saveErr != nil {
-			return fmt.Errorf("review: health check profile %d: %v; record failure: %w", profileID, err, saveErr)
-		}
-		c.notify(ctx, profileID)
-		return fmt.Errorf("review: health check profile %d: %w", profileID, err)
+		return err.Error()
 	}
 	if strings.TrimSpace(text) == "" {
-		message := healthFailureMessage(profileID, profile, "opencode returned no text")
-		if saveErr := c.Store.SetLLMHealth(ctx, profileID, store.HealthError, message); saveErr != nil {
-			return fmt.Errorf("review: empty answer, record failure: %w", saveErr)
-		}
-		c.notify(ctx, profileID)
-		return fmt.Errorf("%s", message)
+		return "opencode returned no text"
 	}
+	return ""
+}
 
-	if err := c.Store.SetLLMHealth(ctx, profileID, store.HealthOK, ""); err != nil {
-		return fmt.Errorf("review: record ok health for profile %d: %w", profileID, err)
+// describeProbeError reuses the actionable sentences of describeAgentError so a
+// profile shows the same message whichever path checked it. Transport errors are
+// never echoed: a Google URL carries the key in the query string.
+func describeProbeError(profile store.LLMProfile, err error) string {
+	var upstream *llmmodels.UpstreamError
+	if errors.As(err, &upstream) {
+		if upstream.Status == 0 {
+			if errors.Is(upstream.Err, context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+				return "tiempo de espera agotado al contactar con el proveedor"
+			}
+			if upstream.Err != nil && isNetworkFailure(upstream.Err.Error()) {
+				return "fallo de red/DNS al conectar con el proveedor"
+			}
+			return "no se pudo contactar con el proveedor"
+		}
+		data := agentErrorData{Status: upstream.Status, Message: upstream.Message}
+		if upstream.Status == http.StatusNotFound {
+			data.ProviderID = profile.Provider
+			data.ModelID = profile.Model
+		}
+		return describeAgentError("", data)
 	}
-	c.notify(ctx, profileID)
-	return nil
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "tiempo de espera agotado al contactar con el proveedor"
+	}
+	return err.Error()
 }
 
 // notify announces a stored verdict. The verdict is the check's result, so a
@@ -108,9 +168,9 @@ func (c *ProfileChecker) notify(ctx context.Context, profileID uint) {
 	}
 }
 
-// healthFailureMessage persists the endpoint alongside the cause. OpenCode can
-// fail with a generic UnknownError, and the profile row alone does not say
-// which provider/model was being checked.
+// healthFailureMessage persists the endpoint alongside the cause. A provider
+// can fail generically, and the profile row alone does not say which
+// provider/model was being checked.
 func healthFailureMessage(profileID uint, profile store.LLMProfile, cause string) string {
 	message := fmt.Sprintf("review: health check profile %d (%s/%s): %s",
 		profileID, profile.Provider, profile.Model, cause)

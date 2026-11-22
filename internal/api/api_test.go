@@ -1230,6 +1230,7 @@ func TestReadinessReadyWhenEngineConfigured(t *testing.T) {
 func TestReadinessNamesEachMissingLink(t *testing.T) {
 	f := newAPIFixture(t)
 	f.team("QA")
+	teamUsingProfile := f.team("Pagos")
 	checkedAt := time.Now().UTC()
 	profile := store.LLMProfile{
 		Name: "broken", Provider: "anthropic", Model: "claude-sonnet",
@@ -1238,6 +1239,13 @@ func TestReadinessNamesEachMissingLink(t *testing.T) {
 	}
 	if err := f.st.DB.WithContext(f.ctx).Create(&profile).Error; err != nil {
 		t.Fatalf("seed unhealthy profile: %v", err)
+	}
+	// Readiness only counts profiles a policy points at: an unused one is never
+	// swept and cannot block reviews.
+	if err := f.st.DB.WithContext(f.ctx).Create(&store.QAPolicy{
+		TeamID: teamUsingProfile.ID, LLMProfileID: profile.ID,
+	}).Error; err != nil {
+		t.Fatalf("seed policy: %v", err)
 	}
 	f.installation(7002)
 	f.repo(7102, 7002, "acme/orphan", nil, true)

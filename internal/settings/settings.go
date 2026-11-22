@@ -125,8 +125,8 @@ func Fields() []Field {
 		{
 			Key: KeyLLMHealthInterval, Group: GroupReview,
 			Label: "Intervalo de salud LLM",
-			Help:  "Cada cuánto el worker comprueba los perfiles de lenguaje habilitados.",
-			Kind:  "duration", Unit: "m", Default: "30m", Restart: "worker",
+			Help:  "Cada cuánto el worker comprueba con una petición mínima los perfiles en uso por alguna política.",
+			Kind:  "duration", Unit: "m", Default: "6h", Restart: "worker",
 		},
 		{
 			Key: KeyQAValidationSLA, Group: GroupReview,

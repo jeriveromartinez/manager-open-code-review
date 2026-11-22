@@ -581,7 +581,8 @@ func TestPolicyRejectsInvalidConfirmationFlag(t *testing.T) {
 func TestProfilesExposeHealthAge(t *testing.T) {
 	f := newSecureFixture(t)
 	fresh := time.Now().UTC().Add(-time.Minute)
-	stale := time.Now().UTC().Add(-3 * time.Hour)
+	// The panel's staleness threshold is twice the 6h sweep interval.
+	stale := time.Now().UTC().Add(-13 * time.Hour)
 	seedProfile(t, f, "fresh", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK, HealthCheckedAt: &fresh})
 	seedProfile(t, f, "stale", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK, HealthCheckedAt: &stale})
 	seedProfile(t, f, "never", store.LLMProfile{Enabled: true, HealthStatus: store.HealthUnknown})

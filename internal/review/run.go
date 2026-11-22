@@ -185,15 +185,14 @@ func (r *Runner) announce(ctx context.Context, run store.ReviewRun) {
 	}
 }
 
-// CheckProfile verifies an LLM profile with the same OpenCode binary and
-// timeout as the review pipeline.
+// CheckProfile verifies an LLM profile with one minimal provider request. The
+// review binary is only the fallback for providers outside the closed table.
 func (r *Runner) CheckProfile(ctx context.Context, profileID uint) error {
 	return (&ProfileChecker{
-		Store:   r.Store,
-		Box:     r.Box,
-		Bin:     r.Cfg.OpencodeBin,
-		Timeout: r.Cfg.Timeout,
-		Events:  r.Events,
+		Store:  r.Store,
+		Box:    r.Box,
+		Bin:    r.Cfg.OpencodeBin,
+		Events: r.Events,
 	}).Check(ctx, profileID)
 }
 

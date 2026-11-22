@@ -3,6 +3,8 @@ package review
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -181,4 +183,161 @@ func TestRunnerCheckProfilePassesEvents(t *testing.T) {
 	if got := f.events.snapshot(); !reflect.DeepEqual(got, want) {
 		t.Errorf("events = %+v, want %+v", got, want)
 	}
+}
+
+func newProbeProfile(t *testing.T, s *store.Store, box *crypto.Box, name, providerID, model string, baseURL *string) store.LLMProfile {
+	t.Helper()
+	sealed, err := box.Seal([]byte("sk-probe"))
+	if err != nil {
+		t.Fatalf("seal key: %v", err)
+	}
+	profile := store.LLMProfile{
+		Name: name, Provider: providerID, Model: model, BaseURL: baseURL,
+		APIKeyEnc: sealed, Enabled: true, HealthStatus: store.HealthUnknown,
+	}
+	if err := s.DB.WithContext(context.Background()).Create(&profile).Error; err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+	return profile
+}
+
+func loadHealth(t *testing.T, s *store.Store, id uint) store.LLMProfile {
+	t.Helper()
+	var got store.LLMProfile
+	if err := s.DB.WithContext(context.Background()).First(&got, id).Error; err != nil {
+		t.Fatalf("reload profile: %v", err)
+	}
+	return got
+}
+
+// TestProfileCheckUsesOneMinimalRequest is the cost guard of #75: a healthy
+// profile is checked with one tool-free request well below 200 input tokens,
+// not with a full agent run.
+func TestProfileCheckUsesOneMinimalRequest(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+
+	provider := testutil.NewFakeProvider(t, nil)
+	base := provider.URL()
+	profile := newProbeProfile(t, s, box, "probe-one-call", "nvidia", "nemotron", &base)
+
+	checker := &ProfileChecker{Store: s, Box: box, Timeout: 5 * time.Second}
+	if err := checker.Check(ctx, profile.ID); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want exactly one", len(requests))
+	}
+	got := requests[0]
+	if len(got.Tools) != 0 {
+		t.Errorf("tools = %v, want none", got.Tools)
+	}
+	if got.EstimatedInputTokens >= 200 {
+		t.Errorf("estimated input tokens = %d, want fewer than 200", got.EstimatedInputTokens)
+	}
+	if got.Model != "nemotron" {
+		t.Errorf("model = %q, want the profile model", got.Model)
+	}
+
+	if health := loadHealth(t, s, profile.ID); health.HealthStatus != store.HealthOK {
+		t.Errorf("health_status = %q, want %q", health.HealthStatus, store.HealthOK)
+	}
+}
+
+func TestProfileCheckMapsProviderErrors(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   []string
+	}{
+		{"rejected key", 401, `{"error":{"message":"invalid api key"}}`, []string{"credencial rechazada", "HTTP 401", "API key"}},
+		{"quota", 429, `{"error":{"message":"rate limited"}}`, []string{"cuota", "HTTP 429"}},
+		{"missing model", 404, `{"error":{"message":"model not found"}}`, []string{"no existe en el proveedor", "nvidia/nemotron"}},
+		{"unavailable", 503, `{"error":{"message":"down"}}`, []string{"proveedor no disponible", "HTTP 503"}},
+		{"rejected request", 400, `{"error":{"message":"bad params"}}`, []string{"rechazó la petición", "HTTP 400"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := testutil.NewFakeProvider(t, func(testutil.ProviderRequest) testutil.ProviderReply {
+				return testutil.ProviderReply{Status: tc.status, Body: tc.body}
+			})
+			base := provider.URL()
+			profile := newProbeProfile(t, s, box, "probe-"+tc.name, "nvidia", "nemotron", &base)
+
+			checker := &ProfileChecker{Store: s, Box: box, Timeout: 5 * time.Second}
+			if err := checker.Check(ctx, profile.ID); err == nil {
+				t.Fatal("Check returned nil error for a failing provider")
+			}
+			health := loadHealth(t, s, profile.ID)
+			if health.HealthStatus != store.HealthError {
+				t.Fatalf("health_status = %q, want %q", health.HealthStatus, store.HealthError)
+			}
+			for _, fragment := range tc.want {
+				if !strings.Contains(health.HealthError, fragment) {
+					t.Errorf("health_error = %q, want it to contain %q", health.HealthError, fragment)
+				}
+			}
+			if !strings.Contains(health.HealthError, "profile ") {
+				t.Errorf("health_error = %q, want the profile id", health.HealthError)
+			}
+		})
+	}
+}
+
+func TestProfileCheckReportsNetworkAndTimeout(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+
+	t.Run("network", func(t *testing.T) {
+		closed := httptest.NewServer(http.NotFoundHandler())
+		base := closed.URL + "/v1"
+		closed.Close()
+		profile := newProbeProfile(t, s, box, "probe-network", "nvidia", "nemotron", &base)
+
+		checker := &ProfileChecker{Store: s, Box: box, Timeout: 5 * time.Second}
+		if err := checker.Check(ctx, profile.ID); err == nil {
+			t.Fatal("Check returned nil error for a closed provider")
+		}
+		health := loadHealth(t, s, profile.ID)
+		if !strings.Contains(health.HealthError, "fallo de red/DNS") {
+			t.Errorf("health_error = %q, want the network sentence", health.HealthError)
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		provider := testutil.NewFakeProvider(t, func(testutil.ProviderRequest) testutil.ProviderReply {
+			time.Sleep(300 * time.Millisecond)
+			return testutil.ProviderReply{Text: `{"ok":true}`}
+		})
+		base := provider.URL()
+		profile := newProbeProfile(t, s, box, "probe-timeout", "nvidia", "nemotron", &base)
+
+		checker := &ProfileChecker{Store: s, Box: box, Timeout: 30 * time.Millisecond}
+		if err := checker.Check(ctx, profile.ID); err == nil {
+			t.Fatal("Check returned nil error for a slow provider")
+		}
+		health := loadHealth(t, s, profile.ID)
+		if !strings.Contains(health.HealthError, "tiempo de espera agotado") {
+			t.Errorf("health_error = %q, want the timeout sentence", health.HealthError)
+		}
+	})
 }

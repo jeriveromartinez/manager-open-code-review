@@ -172,8 +172,10 @@ func newRunTestFixture(t *testing.T) *runTestFixture {
 
 	team := store.Team{Name: "qa", Slug: "qa"}
 	mustCreateRunTest(t, s, ctx, &team)
+	// The provider is outside the closed table, so the health check keeps using
+	// the fake OpenCode binary instead of reaching a real endpoint.
 	profile := store.LLMProfile{
-		Name: "reviewer", Provider: "anthropic", Model: "claude-sonnet",
+		Name: "reviewer", Provider: "nvidia", Model: "nemotron",
 		APIKeyEnc: sealedKey, Enabled: true, HealthStatus: store.HealthUnknown,
 	}
 	mustCreateRunTest(t, s, ctx, &profile)

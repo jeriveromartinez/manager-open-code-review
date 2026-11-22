@@ -3,9 +3,11 @@ package review
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/jeriveromartinez/qa-control-center/internal/config"
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
@@ -23,6 +25,21 @@ func sealHealthKey(t *testing.T) *crypto.Box {
 		t.Fatalf("NewBox: %v", err)
 	}
 	return box
+}
+
+// useProfile makes the profile part of a team policy, which is what puts it in
+// scope for the sweeper.
+func useProfile(t *testing.T, s *store.Store, profileID uint) {
+	t.Helper()
+	team, err := s.CreateTeam(context.Background(), fmt.Sprintf("health-team-%d", profileID))
+	if err != nil {
+		t.Fatalf("CreateTeam: %v", err)
+	}
+	if _, err := s.SaveQAPolicy(context.Background(), store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profileID,
+	}); err != nil {
+		t.Fatalf("SaveQAPolicy: %v", err)
+	}
 }
 
 func TestHealthSweeperEnqueuesStaleProfiles(t *testing.T) {
@@ -44,6 +61,7 @@ func TestHealthSweeperEnqueuesStaleProfiles(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateLLMProfile(%s): %v", name, err)
 		}
+		useProfile(t, s, profile.ID)
 		return profile
 	}
 
@@ -96,6 +114,7 @@ func TestHealthSweeperBacksOffFailedProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateLLMProfile: %v", err)
 	}
+	useProfile(t, s, profile.ID)
 
 	var enqueued []uint
 	sweeper := &HealthSweeper{
@@ -142,12 +161,14 @@ func TestHealthSweeperHonoursBatch(t *testing.T) {
 		t.Fatalf("Seal: %v", err)
 	}
 	for i := 0; i < 5; i++ {
-		if _, err := s.CreateLLMProfile(ctx, store.LLMProfile{
+		profile, err := s.CreateLLMProfile(ctx, store.LLMProfile{
 			Name: "p" + string(rune('a'+i)), Provider: "openai", Model: "m",
 			APIKeyEnc: sealed, Enabled: true, HealthStatus: store.HealthUnknown,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("CreateLLMProfile: %v", err)
 		}
+		useProfile(t, s, profile.ID)
 	}
 
 	var enqueued []uint
@@ -175,12 +196,14 @@ func TestHealthSweeperSkipsDisabledProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	if _, err := s.CreateLLMProfile(ctx, store.LLMProfile{
+	profile, err := s.CreateLLMProfile(ctx, store.LLMProfile{
 		Name: "off", Provider: "openai", Model: "m",
 		APIKeyEnc: sealed, Enabled: false, HealthStatus: store.HealthUnknown,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("CreateLLMProfile: %v", err)
 	}
+	useProfile(t, s, profile.ID)
 
 	sweeper := &HealthSweeper{Store: s, Enqueue: func(context.Context, uint) error {
 		t.Error("a disabled profile was enqueued")
@@ -192,6 +215,86 @@ func TestHealthSweeperSkipsDisabledProfiles(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+// TestHealthSweeperSkipsUnusedProfiles is the cost guard: an enabled profile
+// no policy points at is never used for a review, so checking it only spends
+// quota.
+func TestHealthSweeperSkipsUnusedProfiles(t *testing.T) {
+	s := newHealthSweepStore(t)
+	ctx := context.Background()
+	box := sealHealthKey(t)
+	sealed, err := box.Seal([]byte("sk-test"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if _, err := s.CreateLLMProfile(ctx, store.LLMProfile{
+		Name: "unused", Provider: "openai", Model: "m",
+		APIKeyEnc: sealed, Enabled: true, HealthStatus: store.HealthUnknown,
+	}); err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+
+	sweeper := &HealthSweeper{Store: s, Enqueue: func(context.Context, uint) error {
+		t.Error("an unused profile was enqueued")
+		return nil
+	}}
+	count, err := sweeper.Sweep(ctx)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+// TestDefaultHealthIntervalChecksAHealthyProfileTwiceADay pins the cost
+// criterion of #75: the 6h sweep re-checks a healthy profile only after two
+// intervals, so it makes two requests a day, never more than four.
+func TestDefaultHealthIntervalChecksAHealthyProfileTwiceADay(t *testing.T) {
+	cfg := config.Default()
+	if checks := int(24 * time.Hour / cfg.LLMHealthStaleAfter()); checks > 4 {
+		t.Fatalf("checks per day = %d, want at most 4", checks)
+	}
+
+	s := newHealthSweepStore(t)
+	ctx := context.Background()
+	box := sealHealthKey(t)
+	sealed, err := box.Seal([]byte("sk-test"))
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	checked := time.Now().Add(-11 * time.Hour)
+	profile, err := s.CreateLLMProfile(ctx, store.LLMProfile{
+		Name: "healthy", Provider: "openai", Model: "m",
+		APIKeyEnc: sealed, Enabled: true, HealthStatus: store.HealthOK, HealthCheckedAt: &checked,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+	useProfile(t, s, profile.ID)
+
+	var enqueued []uint
+	sweeper := &HealthSweeper{
+		Store:      s,
+		StaleAfter: cfg.LLMHealthStaleAfter(),
+		Enqueue: func(_ context.Context, id uint) error {
+			enqueued = append(enqueued, id)
+			return nil
+		},
+	}
+	if count, err := sweeper.Sweep(ctx); err != nil || count != 0 {
+		t.Fatalf("Sweep at 11h = (%d, %v), want (0, nil)", count, err)
+	}
+
+	older := time.Now().Add(-13 * time.Hour)
+	if err := s.DB.WithContext(ctx).Model(&store.LLMProfile{}).
+		Where("id = ?", profile.ID).Update("health_checked_at", older).Error; err != nil {
+		t.Fatalf("age the verdict: %v", err)
+	}
+	if count, err := sweeper.Sweep(ctx); err != nil || count != 1 || len(enqueued) != 1 {
+		t.Fatalf("Sweep at 13h = (%d, %v) enqueued %v, want the profile", count, err, enqueued)
 	}
 }
 
@@ -211,12 +314,14 @@ func TestHealthSweeperKeepsGoingAfterEnqueueError(t *testing.T) {
 		t.Fatalf("Seal: %v", err)
 	}
 	for i := 0; i < 3; i++ {
-		if _, err := s.CreateLLMProfile(ctx, store.LLMProfile{
+		profile, err := s.CreateLLMProfile(ctx, store.LLMProfile{
 			Name: "q" + string(rune('a'+i)), Provider: "openai", Model: "m",
 			APIKeyEnc: sealed, Enabled: true, HealthStatus: store.HealthUnknown,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("CreateLLMProfile: %v", err)
 		}
+		useProfile(t, s, profile.ID)
 	}
 
 	calls := 0

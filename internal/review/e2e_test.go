@@ -733,7 +733,7 @@ func (f *e2eFixture) assertAgentConfig(t *testing.T) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("decode opencode config: %v", err)
 	}
-	provider, ok := cfg.Provider["anthropic"]
+	provider, ok := cfg.Provider["nvidia"]
 	if !ok {
 		t.Fatalf("config has no provider entry (OpenCode 1.19 drops the V2 providers block): %s", raw)
 	}

@@ -285,8 +285,8 @@ func TestLoadReviewDefaults(t *testing.T) {
 	if cfg.ReviewStaleAfter != 45*time.Minute {
 		t.Errorf("ReviewStaleAfter = %v, want %v", cfg.ReviewStaleAfter, 45*time.Minute)
 	}
-	if cfg.LLMHealthInterval != 30*time.Minute {
-		t.Errorf("LLMHealthInterval = %v, want %v", cfg.LLMHealthInterval, 30*time.Minute)
+	if cfg.LLMHealthInterval != 6*time.Hour {
+		t.Errorf("LLMHealthInterval = %v, want %v", cfg.LLMHealthInterval, 6*time.Hour)
 	}
 	if cfg.WorkspaceDir != "/tmp/qa" {
 		t.Errorf("WorkspaceDir = %q, want %q", cfg.WorkspaceDir, "/tmp/qa")

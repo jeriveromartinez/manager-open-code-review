@@ -1,8 +1,9 @@
-// Package llmmodels lists the models a provider offers, using the caller's API
-// key and a fixed URL per provider.
+// Package llmmodels lists the models a provider offers and probes it with one
+// minimal chat request, using the caller's API key and a fixed URL per provider.
 package llmmodels
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,13 @@ const (
 	defaultTimeout   = 10 * time.Second
 	maxResponseBytes = 2 << 20
 	maxModels        = 500
+	// pingPrompt is the whole conversation of a health probe. The request is
+	// measured in dozens of tokens instead of the agent's ~5k.
+	pingPrompt = "ping"
+	// maxErrorBody bounds the provider error body read from a failed probe.
+	maxErrorBody = 64 << 10
+	// maxErrorMessage bounds the provider sentence carried to the profile row.
+	maxErrorMessage = 300
 )
 
 // Model is one entry a provider exposes for chat completions.
@@ -73,9 +81,11 @@ func ProviderBaseURL(providerID string) (string, bool) {
 
 // UpstreamError reports a provider that failed or did not answer. Error() is
 // safe to log and return: it never includes the key, the URL or the body.
+// Message is the provider's own bounded sentence, when it sent one.
 type UpstreamError struct {
-	Status int
-	Err    error
+	Status  int
+	Message string
+	Err     error
 }
 
 func (e *UpstreamError) Error() string {
@@ -206,6 +216,124 @@ func (c *Client) Models(ctx context.Context, providerID, apiKey string) ([]Model
 		}
 		return finalize(models, provider.Shape), nil
 	}
+}
+
+// Ping verifies that the provider accepts the key and the model with one
+// minimal, tool-free chat request. baseURL overrides the closed table, which is
+// how a custom connection is stored; a provider outside the table with no
+// override is ErrUnknownProvider. The request is bounded only by ctx, so the
+// caller must pass a deadline.
+func (c *Client) Ping(ctx context.Context, providerID, baseURL, model, apiKey string) error {
+	providers := c.Providers
+	if providers == nil {
+		providers = DefaultProviders
+	}
+	provider, ok := providers[providerID]
+	if !ok {
+		if strings.TrimSpace(baseURL) == "" {
+			return ErrUnknownProvider
+		}
+		// An unknown provider with an explicit endpoint is expected to speak
+		// the OpenAI-compatible dialect, like most custom connections.
+		provider = Provider{Shape: OpenAICompatible}
+	}
+	if strings.TrimSpace(baseURL) != "" {
+		provider.BaseURL = strings.TrimSpace(baseURL)
+	}
+
+	endpoint := strings.TrimRight(provider.BaseURL, "/")
+	var body []byte
+	switch provider.Shape {
+	case Anthropic:
+		endpoint += "/messages"
+		body, _ = json.Marshal(map[string]any{
+			"model":      model,
+			"max_tokens": 1,
+			"messages":   []map[string]string{{"role": "user", "content": pingPrompt}},
+		})
+	case Google:
+		endpoint += "/models/" + url.PathEscape(model) + ":generateContent?key=" + url.QueryEscape(apiKey)
+		body, _ = json.Marshal(map[string]any{
+			"contents":         []map[string]any{{"parts": []map[string]string{{"text": pingPrompt}}}},
+			"generationConfig": map[string]int{"maxOutputTokens": 1},
+		})
+	default:
+		endpoint += "/chat/completions"
+		payload := map[string]any{
+			"model":    model,
+			"stream":   false,
+			"messages": []map[string]string{{"role": "user", "content": pingPrompt}},
+		}
+		// Reasoning models on the OpenAI API reject the deprecated max_tokens.
+		if providerID == "openai" {
+			payload["max_completion_tokens"] = 16
+		} else {
+			payload["max_tokens"] = 1
+		}
+		body, _ = json.Marshal(payload)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return &UpstreamError{Err: err}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	switch provider.Shape {
+	case OpenAICompatible:
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	case Anthropic:
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", "2023-06-01")
+	}
+
+	httpClient := c.HTTP
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return &UpstreamError{Err: err}
+	}
+	defer resp.Body.Close()
+
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	if readErr != nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		return &UpstreamError{Err: readErr}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return &UpstreamError{Status: resp.StatusCode, Message: providerErrorMessage(raw)}
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return &UpstreamError{Status: resp.StatusCode, Message: "el proveedor devolvió una respuesta vacía"}
+	}
+	return nil
+}
+
+// providerErrorMessage extracts the provider's own sentence from an error body
+// written in the OpenAI, Anthropic or Google shape.
+func providerErrorMessage(raw []byte) string {
+	var payload struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &payload); err == nil {
+		if message := strings.TrimSpace(payload.Error.Message); message != "" {
+			return truncateMessage(message)
+		}
+		if message := strings.TrimSpace(payload.Message); message != "" {
+			return truncateMessage(message)
+		}
+	}
+	return truncateMessage(strings.TrimSpace(string(raw)))
+}
+
+func truncateMessage(message string) string {
+	if len(message) <= maxErrorMessage {
+		return message
+	}
+	return message[:maxErrorMessage]
 }
 
 func supportsGenerateContent(methods []string) bool {
