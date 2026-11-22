@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -189,7 +190,7 @@ func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ig
 	if err != nil {
 		return false, fmt.Errorf("load GitHub App: %w", err)
 	}
-	token, _, err := app.RepositoryReadToken(ctx, cfg.Installation.ID, cfg.Repo.FullName)
+	token, expiresAt, err := app.RepositoryReadToken(ctx, cfg.Installation.ID, cfg.Repo.FullName)
 	if err != nil {
 		return false, fmt.Errorf("mint read token for repository %s: %w", cfg.Repo.FullName, err)
 	}
@@ -199,12 +200,13 @@ func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ig
 	}
 
 	run, err := t.Store.CreateReviewRun(ctx, store.ReviewRun{
-		PullRequestID: prID,
-		ProfileID:     cfg.Profile.ID,
-		HeadSHA:       cfg.PR.HeadSHA,
-		Trigger:       triggerKind,
-		Status:        store.RunQueued,
-		CloneTokenEnc: sealed,
+		PullRequestID:       prID,
+		ProfileID:           cfg.Profile.ID,
+		HeadSHA:             cfg.PR.HeadSHA,
+		Trigger:             triggerKind,
+		Status:              store.RunQueued,
+		CloneTokenEnc:       sealed,
+		CloneTokenExpiresAt: &expiresAt,
 	})
 	if err != nil {
 		// The partial unique index allows only one active run per PR. If a
@@ -247,6 +249,56 @@ func (t *Trigger) repair(ctx context.Context, run store.ReviewRun) error {
 		return fmt.Errorf("enqueue review run %d: %w", run.ID, err)
 	}
 	return nil
+}
+
+// cloneTokenRefreshWindow is how far ahead the control process renews the clone
+// token of a queued run. It is larger than the 5-minute reconcile interval, so a
+// token never reaches the worker close to expiring.
+const cloneTokenRefreshWindow = 30 * time.Minute
+
+// RefreshQueuedTokens renews the read-only clone tokens of queued runs that are
+// close to expiring. The worker cannot mint tokens (it has no GitHub App
+// credentials), so the control process does it on every reconciliation (#68).
+// One repository failing to mint does not abort the sweep: the rest of the
+// queue still gets a fresh token.
+func (t *Trigger) RefreshQueuedTokens(ctx context.Context, limit int) (int, error) {
+	if t.Apps == nil || t.Box == nil {
+		return 0, nil
+	}
+	runs, err := t.Store.QueuedRunsForTokenRefresh(ctx, time.Now().Add(cloneTokenRefreshWindow), limit)
+	if err != nil {
+		return 0, err
+	}
+	if len(runs) == 0 {
+		return 0, nil
+	}
+	app, err := t.Apps.App(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("load GitHub App: %w", err)
+	}
+
+	refreshed := 0
+	for _, run := range runs {
+		token, expiresAt, err := app.RepositoryReadToken(ctx, run.InstallationID, run.Repository)
+		if err != nil {
+			slog.Error("refresh clone token", "run_id", run.RunID, "repository", run.Repository, "error", err)
+			continue
+		}
+		sealed, err := t.Box.Seal([]byte(token))
+		if err != nil {
+			slog.Error("seal refreshed clone token", "run_id", run.RunID, "error", err)
+			continue
+		}
+		stored, err := t.Store.SetCloneToken(ctx, run.RunID, sealed, expiresAt)
+		if err != nil {
+			slog.Error("store refreshed clone token", "run_id", run.RunID, "error", err)
+			continue
+		}
+		if stored {
+			refreshed++
+		}
+	}
+	return refreshed, nil
 }
 
 func isActiveRunUniqueViolation(err error) bool {

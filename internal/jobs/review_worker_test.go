@@ -98,6 +98,24 @@ func TestReviewWorkerSnoozesSaturatedProfile(t *testing.T) {
 	}
 }
 
+// TestReviewWorkerSnoozesStaleCloneToken mirrors the capacity path: a run
+// waiting for the control process to renew its token must not burn attempts.
+func TestReviewWorkerSnoozesStaleCloneToken(t *testing.T) {
+	w := &reviewRunWorker{runner: &stubReviewRunner{
+		err: &review.CloneTokenStaleError{Wait: 30 * time.Second},
+	}}
+	job := &river.Job[ReviewRunArgs]{JobRow: &rivertype.JobRow{}, Args: ReviewRunArgs{RunID: 1}}
+
+	err := w.Work(context.Background(), job)
+	var snooze *river.JobSnoozeError
+	if !errors.As(err, &snooze) {
+		t.Fatalf("Work() error = %v, want a JobSnoozeError", err)
+	}
+	if snooze.Duration != 30*time.Second {
+		t.Errorf("snooze = %v, want 30s", snooze.Duration)
+	}
+}
+
 func TestReviewWorkerPropagatesOtherErrors(t *testing.T) {
 	boom := errors.New("boom")
 	w := &reviewRunWorker{runner: &stubReviewRunner{err: boom}}

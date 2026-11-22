@@ -526,6 +526,67 @@ func TestRunLastPassTimeoutStaysTimeout(t *testing.T) {
 	assertRunTerminal(t, f, store.RunInconclusive, "timeout")
 }
 
+// TestRunStaleCloneTokenWaitsForRefresh covers a run that waited longer than
+// the token lives: the worker cannot mint a token, so it queues the run again
+// and asks the caller to retry after the control process renews it.
+func TestRunStaleCloneTokenWaitsForRefresh(t *testing.T) {
+	f := newRunTestFixture(t)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", f.runID).
+		Update("clone_token_expires_at", time.Now().Add(-time.Minute)).Error; err != nil {
+		t.Fatalf("expire clone token: %v", err)
+	}
+
+	err := f.runner().Run(f.ctx, f.runID)
+	var stale *CloneTokenStaleError
+	if !errors.As(err, &stale) {
+		t.Fatalf("Run() error = %v, want CloneTokenStaleError", err)
+	}
+	if stale.Wait != cloneTokenWait {
+		t.Errorf("wait = %v, want %v", stale.Wait, cloneTokenWait)
+	}
+
+	run := f.loadRun(t)
+	if run.Status != store.RunQueued {
+		t.Errorf("run status = %q, want %q", run.Status, store.RunQueued)
+	}
+	if run.ErrorCode != "token_expired" || run.ErrorMessage != cloneTokenWaitMessage {
+		t.Errorf("run error = %q/%q, want token_expired/%q", run.ErrorCode, run.ErrorMessage, cloneTokenWaitMessage)
+	}
+	if run.CloneTokenEnc == "" {
+		t.Error("the run lost its clone token while waiting for the renewal")
+	}
+	if calls := f.agentCalls(t); calls != 0 {
+		t.Errorf("agent calls = %d, want none before the token is renewed", calls)
+	}
+	if got := f.jobs.published(); len(got) != 0 {
+		t.Errorf("EnqueuePublish calls = %v, want none for a queued run", got)
+	}
+}
+
+// TestRunStaleCloneTokenEndsAfterWaitBudget keeps a queued run from waiting
+// forever when the token can never be renewed.
+func TestRunStaleCloneTokenEndsAfterWaitBudget(t *testing.T) {
+	f := newRunTestFixture(t)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", f.runID).
+		Updates(map[string]any{
+			"clone_token_expires_at": time.Now().Add(-time.Minute),
+			"attempt":                maxCloneTokenWaits + 1,
+		}).Error; err != nil {
+		t.Fatalf("expire clone token: %v", err)
+	}
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := assertRunTerminal(t, f, store.RunInconclusive, "token_expired")
+	if run.ErrorMessage != cloneTokenFailedMessage {
+		t.Errorf("error message = %q, want %q", run.ErrorMessage, cloneTokenFailedMessage)
+	}
+	assertPublishedAndQueued(t, f, f.runID)
+}
+
 // TestRunCanceledContextRequeuesRun pins the deploy case: River cancels the
 // job context when the soft-stop grace period expires, and the claimed run
 // must go back to the queue instead of staying running until the stale

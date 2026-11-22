@@ -34,6 +34,21 @@ const (
 	// capacityErrorCode labels a run that never got a profile slot.
 	capacityErrorCode = "capacity"
 
+	// cloneTokenWait is how long a run sleeps when its clone token expired in
+	// the queue. The control process renews it on the next reconciliation.
+	cloneTokenWait = time.Minute
+	// maxCloneTokenWaits bounds the time spent waiting for that renewal. If it
+	// never arrives the App lost access to the repository, and the run ends with
+	// an actionable error instead of waiting forever.
+	maxCloneTokenWaits = 12
+	// cloneTokenClaimMargin is how much life a token needs when the worker
+	// claims the run. The control process renews 30 minutes ahead, so anything
+	// below this means the renewal is behind.
+	cloneTokenClaimMargin = 10 * time.Minute
+
+	cloneTokenWaitMessage   = "el token de clonado caducó en la cola; esperando a que el control lo renueve"
+	cloneTokenFailedMessage = "el token de clonado caducó y no se pudo renovar: revisa que la App siga instalada con acceso al repositorio y vuelve a encolar la revisión"
+
 	// interruptedByShutdown is stored on a run a stopping worker put back in
 	// the queue, so the next attempt is visible in the panel before it starts.
 	interruptedByShutdown = "el worker se detuvo durante la revisión; el run vuelve a la cola"
@@ -76,6 +91,17 @@ type ProfileCapacityError struct {
 
 func (e *ProfileCapacityError) Error() string {
 	return fmt.Sprintf("perfil %d sin capacidad disponible", e.ProfileID)
+}
+
+// CloneTokenStaleError reports that the run was queued again because its clone
+// token expired while it waited. The worker snoozes the job until the control
+// process renews the token.
+type CloneTokenStaleError struct {
+	Wait time.Duration
+}
+
+func (e *CloneTokenStaleError) Error() string {
+	return "token de clonado caducado; el run espera su renovación"
 }
 
 // RunnerConfig holds the worker-side settings of the review pipeline.
@@ -165,36 +191,42 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		return nil
 	}
 	r.announce(ctx, run)
+	// The shutdown can cancel the job context between the claim and the first
+	// database call. Do not start a pipeline that is already cancelled.
+	if ctx.Err() != nil {
+		return r.requeueInterrupted(ctx, run)
+	}
 
 	var cfg store.ReviewConfig
 	var outcome runOutcome
 	var retryErr error
-	cfg, err = r.Store.ReviewConfigForPR(ctx, run.PullRequestID)
-	if err != nil {
-		outcome = (&runOutcome{}).failed(fmt.Errorf("configuración de revisión: %w", err), "config")
-	} else {
-		outcome, retryErr = r.execute(ctx, run, cfg)
-	}
-
-	// River cancels the job context when the soft-stop grace period expires.
-	// The claim already stored the run as running, so leaving it there would
-	// keep it stuck until the stale watchdog. Put it back in the queue with a
-	// detached context and return the cancellation: River treats a soft stop as
-	// an interruption and makes the job available again without spending an
-	// attempt. A run that already succeeded is persisted below instead.
-	if ctx.Err() != nil && outcome.status != store.RunSucceeded {
-		persistCtx, cancel := terminalContext(ctx)
-		defer cancel()
-		if err := r.Store.RequeueReviewRun(persistCtx, run.ID, store.RunErrorInterrupted, interruptedByShutdown); err != nil {
+	staleToken := staleCloneToken(run.CloneTokenExpiresAt, time.Now())
+	if staleToken && run.Attempt <= maxCloneTokenWaits {
+		if err := r.Store.RequeueReviewRun(ctx, run.ID, "token_expired", cloneTokenWaitMessage); err != nil {
 			if errors.Is(err, store.ErrRunNotActive) {
-				// A new head superseded the run while the worker stopped.
+				// A new head superseded the run while it waited for a token.
 				return nil
 			}
-			return fmt.Errorf("requeue interrupted review run %d: %w", runID, err)
+			return fmt.Errorf("requeue review run %d for token refresh: %w", runID, err)
 		}
-		r.announce(persistCtx, run)
-		slog.Info("review run requeued after worker shutdown", "run_id", run.ID)
-		return ctx.Err()
+		r.announce(ctx, run)
+		slog.Info("review run waiting for clone token refresh", "run_id", run.ID, "attempt", run.Attempt)
+		return &CloneTokenStaleError{Wait: cloneTokenWait}
+	}
+	if staleToken {
+		outcome = (&runOutcome{}).inconclusive(errors.New(cloneTokenFailedMessage), "token_expired")
+	} else {
+		cfg, err = r.Store.ReviewConfigForPR(ctx, run.PullRequestID)
+		if err != nil {
+			outcome = (&runOutcome{}).failed(fmt.Errorf("configuración de revisión: %w", err), "config")
+		} else {
+			outcome, retryErr = r.execute(ctx, run, cfg)
+		}
+	}
+
+	// A run that already succeeded is persisted below instead of requeued.
+	if ctx.Err() != nil && outcome.status != store.RunSucceeded {
+		return r.requeueInterrupted(ctx, run)
 	}
 
 	persistCtx, cancelPersist := terminalContext(ctx)
@@ -284,6 +316,27 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		}
 	}
 	return notifyErr
+}
+
+// requeueInterrupted returns a claimed run to the queue when River cancels the
+// job context on shutdown. The claim already stored the run as running, so
+// leaving it there would keep it stuck until the stale watchdog. The write runs
+// detached from the cancellation, and returning ctx.Err() lets River treat a
+// soft stop as an interruption and make the job available again without
+// spending an attempt.
+func (r *Runner) requeueInterrupted(ctx context.Context, run store.ReviewRun) error {
+	persistCtx, cancel := terminalContext(ctx)
+	defer cancel()
+	if err := r.Store.RequeueReviewRun(persistCtx, run.ID, store.RunErrorInterrupted, interruptedByShutdown); err != nil {
+		if errors.Is(err, store.ErrRunNotActive) {
+			// A new head superseded the run while the worker stopped.
+			return nil
+		}
+		return fmt.Errorf("requeue interrupted review run %d: %w", run.ID, err)
+	}
+	r.announce(persistCtx, run)
+	slog.Info("review run requeued after worker shutdown", "run_id", run.ID)
+	return ctx.Err()
 }
 
 // execute runs the pipeline and returns the state to persist. Every early exit
@@ -646,6 +699,13 @@ func (out runOutcome) budgetExhausted(pass, passes int, all []Pass, budget time.
 			"aumenta review_timeout en Ajustes → Revisión (actual %s) para completar la revisión",
 		pass, passes, countCovered(all[done:]), budget)
 	return out.inconclusive(err, "budget_exhausted")
+}
+
+// staleCloneToken reports whether the token expires before it can finish
+// cloning. A nil expiry means the run predates the stored expiry: the clone is
+// attempted with whatever token it carries.
+func staleCloneToken(expiresAt *time.Time, now time.Time) bool {
+	return expiresAt != nil && expiresAt.Before(now.Add(cloneTokenClaimMargin))
 }
 
 func truncatedContext(ctx context.Context, err error) bool {

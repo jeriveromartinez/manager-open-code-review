@@ -73,6 +73,12 @@ func (w *reviewRunWorker) Work(ctx context.Context, job *river.Job[ReviewRunArgs
 			"attempt", job.Attempt, "wait", capacity.Wait)
 		return river.JobSnooze(capacity.Wait)
 	}
+	var staleToken *review.CloneTokenStaleError
+	if errors.As(err, &staleToken) {
+		slog.Info("review job snoozed for clone token refresh",
+			"run_id", job.Args.RunID, "attempt", job.Attempt, "wait", staleToken.Wait)
+		return river.JobSnooze(staleToken.Wait)
+	}
 	return err
 }
 

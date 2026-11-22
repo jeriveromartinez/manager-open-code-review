@@ -209,10 +209,14 @@ type ReviewRun struct {
 	ErrorCode     string         `gorm:"column:error_code"`
 	ErrorMessage  string         `gorm:"column:error_message"`
 	CloneTokenEnc string         `gorm:"column:clone_token_enc"`
-	StartedAt     *time.Time     `gorm:"column:started_at"`
-	FinishedAt    *time.Time     `gorm:"column:finished_at"`
-	CreatedAt     time.Time      `gorm:"column:created_at"`
-	UpdatedAt     time.Time      `gorm:"column:updated_at"`
+	// CloneTokenExpiresAt lets the control process renew the token of a run
+	// that waits in the queue longer than the token lives. Nil on runs created
+	// before the expiry was stored.
+	CloneTokenExpiresAt *time.Time `gorm:"column:clone_token_expires_at"`
+	StartedAt           *time.Time `gorm:"column:started_at"`
+	FinishedAt          *time.Time `gorm:"column:finished_at"`
+	CreatedAt           time.Time  `gorm:"column:created_at"`
+	UpdatedAt           time.Time  `gorm:"column:updated_at"`
 }
 
 // Finding is a review comment deduplicated by (pull request, fingerprint).
