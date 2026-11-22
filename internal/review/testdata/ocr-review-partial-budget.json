@@ -1,0 +1,310 @@
+{
+  "status": "partial",
+  "llm": {
+    "model": "fake-model"
+  },
+  "message": "Review partially complete: 3 finding(s); 9 of 12 selected item(s) failed.",
+  "summary": {
+    "files_reviewed": 12,
+    "comments": 3,
+    "total_tokens": 14880,
+    "input_tokens": 14400,
+    "output_tokens": 480,
+    "elapsed": "0s",
+    "budget_exceeded": true
+  },
+  "tool_calls": {
+    "total": 3,
+    "by_tool": {
+      "code_comment": 3
+    },
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": [
+    {
+      "path": "file1.go",
+      "content": "The changed value has no automated test. Add a unit test that asserts the new behavior.",
+      "existing_code": "\treturn 1 + 1",
+      "start_line": 4,
+      "end_line": 4,
+      "category": "test",
+      "severity": "low"
+    },
+    {
+      "path": "file1.py",
+      "content": "The changed value has no automated test. Add a unit test that asserts the new behavior.",
+      "existing_code": "    return 1 + 1",
+      "start_line": 2,
+      "end_line": 2,
+      "category": "test",
+      "severity": "low"
+    },
+    {
+      "path": "file2.go",
+      "content": "The changed value has no automated test. Add a unit test that asserts the new behavior.",
+      "existing_code": "\treturn 2 + 1",
+      "start_line": 4,
+      "end_line": 4,
+      "category": "test",
+      "severity": "low"
+    }
+  ],
+  "groups": [
+    {
+      "label": "file1.go",
+      "files": [
+        "file1.go"
+      ]
+    },
+    {
+      "label": "file1.py",
+      "files": [
+        "file1.py"
+      ]
+    },
+    {
+      "label": "file2.go",
+      "files": [
+        "file2.go"
+      ]
+    },
+    {
+      "label": "file2.py",
+      "files": [
+        "file2.py"
+      ]
+    },
+    {
+      "label": "file3.go",
+      "files": [
+        "file3.go"
+      ]
+    },
+    {
+      "label": "file3.py",
+      "files": [
+        "file3.py"
+      ]
+    },
+    {
+      "label": "file4.go",
+      "files": [
+        "file4.go"
+      ]
+    },
+    {
+      "label": "file4.py",
+      "files": [
+        "file4.py"
+      ]
+    },
+    {
+      "label": "file5.go",
+      "files": [
+        "file5.go"
+      ]
+    },
+    {
+      "label": "file5.py",
+      "files": [
+        "file5.py"
+      ]
+    },
+    {
+      "label": "file6.go",
+      "files": [
+        "file6.go"
+      ]
+    },
+    {
+      "label": "file6.py",
+      "files": [
+        "file6.py"
+      ]
+    }
+  ],
+  "warnings": [
+    {
+      "file": "file2.py",
+      "message": "stopped dispatch: used 11160 tokens + group estimate 21708 = projected 32868 exceeds budget 30000",
+      "type": "token_budget_reached"
+    }
+  ],
+  "session_id": "00000000-0000-4000-8000-000000000002",
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "run_id": "00000000-0000-4000-8000-000000000002",
+    "operation": "review",
+    "terminal_state": "partial",
+    "repository": {},
+    "input": {
+      "mode": "range",
+      "requested_from": "6877354",
+      "requested_head": "b8453d9",
+      "resolved_base": "687735460afe87b961c0ca529254af733e2b503b",
+      "resolved_head": "b8453d958715eba87486533b4048c99fc55e8ce8",
+      "exact_range": "687735460afe87b961c0ca529254af733e2b503b..b8453d958715eba87486533b4048c99fc55e8ce8",
+      "source_artifact_sha256": "c709fbece6a59aab4e08c0338f86f49d1ab678e14122fde113caf4ca400035a2"
+    },
+    "execution": {
+      "ocr_version": "v1.14.0",
+      "model": "fake-model",
+      "configured_concurrency": 1,
+      "max_tool_request_times": 100,
+      "rule_config_sha256": "77361ee3e7a3ab0b4ab3b6fbe56c09c7c02e83722fcce12db220c2af88cd9d4e",
+      "runtime_config_sha256": "7fe1a76c7a05bf4ea82587869c63f3796f5064fd300615453e2a70f34314f2fe"
+    },
+    "coverage": {
+      "selected": [
+        {
+          "item_id": "255e57ecd6732326a86f1fab1f15d64b1ad605e035f6b780479ce912e63387c9",
+          "path": "file3.py",
+          "fingerprint": "495cc2de0f60f93cb12e29c012f7942e8c41ebaa01dfa00a798b56cd08c40d66"
+        },
+        {
+          "item_id": "38ff085f142e5d1ba139752c144af58f6c36f39e4de501229ee5abd8abca25f7",
+          "path": "file5.go",
+          "fingerprint": "aa9bc2a3dd353cb59c70e46f81aaac6474d36440c985697b1633cb39c4595edc"
+        },
+        {
+          "item_id": "44e1803f721c0c7cae2b36fbfc815d2302db4eb02c4def946e59034f16dfd669",
+          "path": "file4.go",
+          "fingerprint": "08057f25491767f03bea9c8d6426909c97f2ce738d8475aafa31a013ec6981be"
+        },
+        {
+          "item_id": "66e36e3fe67712fb3faebb80e3f8513d1a3992a610f15f351a85832e624e6fd5",
+          "path": "file6.py",
+          "fingerprint": "1c714727f464f671e14d28234a734fae27ec9bdc80f1e4340a0735e261b37813"
+        },
+        {
+          "item_id": "74100d4db48bd864a87ee1406b41dfa88bc8f3a9472a6a6ee1df8474cdcb1e95",
+          "path": "file4.py",
+          "fingerprint": "56ab4db0dd3e7c6feeaf246291f7860f5bb971d55262bbbd9a33d8f45128cf05"
+        },
+        {
+          "item_id": "83d5ea751a5c3a23762f0a1ccbd029feb54976b26f7ea36d2e6a8de25e74e2ec",
+          "path": "file5.py",
+          "fingerprint": "d0b86ef86d9ec41272a00122f1738a562252f3b66612007e5c7ee8194b4bc6e3"
+        },
+        {
+          "item_id": "92aef3c8ea499408dbab8315d638f25c5e445b7eab3d8d89766e13a3cbb7f441",
+          "path": "file2.py",
+          "fingerprint": "355ea3af5c3054c1c23c3c2e524dae20b0b4f12ba87afed7f43ff7811717e971"
+        },
+        {
+          "item_id": "b3256e0cbed82fb9a1f6c440f0a35aa7625a2d6512bc0dc7556d6600a8aaf328",
+          "path": "file1.py",
+          "fingerprint": "0d0ef2c570eecf408c94014c51ec22488e48d91cd82afee7fdcdf44b79553a20"
+        },
+        {
+          "item_id": "d783a7c4d584cb20c788b65f2218f0c3daf2dfdaf11b15ee26098b213b7fddec",
+          "path": "file3.go",
+          "fingerprint": "3c253790a0398938f2b8709debb3efc620c5e695be769eb75381d14ab172af01"
+        },
+        {
+          "item_id": "d8782398b683c1ea15b4283960afb9d3a6448e84fabfac3bc8fd2f83baea8b89",
+          "path": "file1.go",
+          "fingerprint": "c2665a725ebc9d8124363cae28b43f7d17e2547f63b67a560168d0a52ed2953e"
+        },
+        {
+          "item_id": "f5fcd7739843053a308912497328b44fdc0a90066aabd5c22a37022a5b173e4b",
+          "path": "file2.go",
+          "fingerprint": "beb4850ffd3802b785fd9ebbe05e3f5ecae66348eb9e0efe1aefd91a3cd34738"
+        },
+        {
+          "item_id": "f8339f561aede44ff68e11b34eeda719a112643b5d8619c14a6df607b1061198",
+          "path": "file6.go",
+          "fingerprint": "d2fef4f1c0ec6059b37b2a44b428cb7b38185ef24ac148dce9879e65c4eb8589"
+        }
+      ],
+      "completed": [
+        {
+          "item_id": "b3256e0cbed82fb9a1f6c440f0a35aa7625a2d6512bc0dc7556d6600a8aaf328",
+          "path": "file1.py",
+          "fingerprint": "0d0ef2c570eecf408c94014c51ec22488e48d91cd82afee7fdcdf44b79553a20"
+        },
+        {
+          "item_id": "d8782398b683c1ea15b4283960afb9d3a6448e84fabfac3bc8fd2f83baea8b89",
+          "path": "file1.go",
+          "fingerprint": "c2665a725ebc9d8124363cae28b43f7d17e2547f63b67a560168d0a52ed2953e"
+        },
+        {
+          "item_id": "f5fcd7739843053a308912497328b44fdc0a90066aabd5c22a37022a5b173e4b",
+          "path": "file2.go",
+          "fingerprint": "beb4850ffd3802b785fd9ebbe05e3f5ecae66348eb9e0efe1aefd91a3cd34738"
+        }
+      ],
+      "reused": [],
+      "failed": [
+        {
+          "item_id": "255e57ecd6732326a86f1fab1f15d64b1ad605e035f6b780479ce912e63387c9",
+          "path": "file3.py",
+          "fingerprint": "495cc2de0f60f93cb12e29c012f7942e8c41ebaa01dfa00a798b56cd08c40d66",
+          "classification": "budget",
+          "reason": "aggregate token budget reached before dispatch completed"
+        },
+        {
+          "item_id": "38ff085f142e5d1ba139752c144af58f6c36f39e4de501229ee5abd8abca25f7",
+          "path": "file5.go",
+          "fingerprint": "aa9bc2a3dd353cb59c70e46f81aaac6474d36440c985697b1633cb39c4595edc",
+          "classification": "budget",
+          "reason": "aggregate token budget reached before dispatch completed"
+        },
+        {
+          "item_id": "44e1803f721c0c7cae2b36fbfc815d2302db4eb02c4def946e59034f16dfd669",
+          "path": "file4.go",
+          "fingerprint": "08057f25491767f03bea9c8d6426909c97f2ce738d8475aafa31a013ec6981be",
+          "classification": "budget",
+          "reason": "aggregate token budget reached before dispatch completed"
+        },
+        {
+          "item_id": "66e36e3fe67712fb3faebb80e3f8513d1a3992a610f15f351a85832e624e6fd5",
+          "path": "file6.py",
+          "fingerprint": "1c714727f464f671e14d28234a734fae27ec9bdc80f1e4340a0735e261b37813",
+          "classification": "budget",
+          "reason": "aggregate token budget reached before dispatch completed"
+        },
+        {
+          "item_id": "74100d4db48bd864a87ee1406b41dfa88bc8f3a9472a6a6ee1df8474cdcb1e95",
+          "path": "file4.py",
+          "fingerprint": "56ab4db0dd3e7c6feeaf246291f7860f5bb971d55262bbbd9a33d8f45128cf05",
+          "classification": "budget",
+          "reason": "aggregate token budget reached before dispatch completed"
+        },
+        {
+          "item_id": "83d5ea751a5c3a23762f0a1ccbd029feb54976b26f7ea36d2e6a8de25e74e2ec",
+          "path": "file5.py",
+          "fingerprint": "d0b86ef86d9ec41272a00122f1738a562252f3b66612007e5c7ee8194b4bc6e3",
+          "classification": "budget",
+          "reason": "aggregate token budget reached before dispatch completed"
+        },
+        {
+          "item_id": "92aef3c8ea499408dbab8315d638f25c5e445b7eab3d8d89766e13a3cbb7f441",
+          "path": "file2.py",
+          "fingerprint": "355ea3af5c3054c1c23c3c2e524dae20b0b4f12ba87afed7f43ff7811717e971",
+          "classification": "budget",
+          "reason": "aggregate token budget reached before dispatch completed"
+        },
+        {
+          "item_id": "d783a7c4d584cb20c788b65f2218f0c3daf2dfdaf11b15ee26098b213b7fddec",
+          "path": "file3.go",
+          "fingerprint": "3c253790a0398938f2b8709debb3efc620c5e695be769eb75381d14ab172af01",
+          "classification": "budget",
+          "reason": "aggregate token budget reached before dispatch completed"
+        },
+        {
+          "item_id": "f8339f561aede44ff68e11b34eeda719a112643b5d8619c14a6df607b1061198",
+          "path": "file6.go",
+          "fingerprint": "d2fef4f1c0ec6059b37b2a44b428cb7b38185ef24ac148dce9879e65c4eb8589",
+          "classification": "budget",
+          "reason": "aggregate token budget reached before dispatch completed"
+        }
+      ],
+      "waived": [],
+      "excluded": []
+    },
+    "elapsed_ms": 0
+  }
+}

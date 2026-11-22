@@ -9,6 +9,7 @@ solo contiene datos: no incluye parsers ni código de producto.
 | Herramienta | Versión / detalle |
 | --- | --- |
 | `@alibaba-group/open-code-review` (binario `ocr`) | `v1.14.0 (d29ca204) linux/amd64`, compilado el `2026-11-21T07:02:25Z` |
+| Imagen `qa-worker-ocr114:local` | `ocr 1.14.0 (d29ca204)`; usada para las capturas de `ocr review` |
 | `opencode` | `1.19.0` |
 | Node / npm | `v24.20.0` / `12.0.2` |
 | `jq` | `1.7.1` |
@@ -26,6 +27,10 @@ scripts; el binario incluido funciona igualmente y no fue necesario aprobarlo.
 
 `ocr delegate` no cambió respecto de la versión anterior, así que los fixtures
 conservan el mismo esquema; se validaron con 1.14.0 sin recapturarlos.
+
+Los fixtures de `ocr review` que se describen más abajo sí se capturaron con el
+binario 1.14.0 de `qa-worker-ocr114:local`; no se reutilizaron salidas de
+versiones anteriores.
 
 ## Repo de prueba
 
@@ -70,6 +75,66 @@ La captura de OpenCode **sí usó una credencial real**: la configuración `nvid
 del brief: un HOME vacío oculta esa credencial y la ejecución falla. No se necesita
 recapturar antes de la Task 12.
 
+## Fixtures de `ocr review` (1.14.0)
+
+Estas capturas ejercitan el comando nativo `ocr review` de 1.14.0, incluidas
+las flags `--max-tokens-budget` y `--exclude`, y el esquema JSON que consumirá
+el parser de #71. Se generaron con el binario real de `qa-worker-ocr114:local`
+y un proveedor LLM falso: no se usó ninguna credencial real ni se hizo ninguna
+llamada externa.
+
+### Proveedor falso
+
+Dentro del mismo contenedor se ejecutó un servidor Node.js compatible con
+`/v1/chat/completions` (`/tmp/fake.js`, fuera de este repo). Responde con
+`tool_calls` de `code_comment`, `task_done` y `approve_all_comments` según el
+caso, y con HTTP 500 cuando se activa el escenario de fallo. OCR se invocó con
+un entorno limpio para que no heredara claves del host:
+
+```bash
+env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp/ocrhome \
+  OCR_LLM_URL=http://127.0.0.1:18080/v1 \
+  OCR_LLM_TOKEN=test \
+  OCR_LLM_MODEL=fake-model \
+  OCR_LLM_PROTOCOL=openai \
+  OCR_LLM_TIMEOUT=60 \
+  ocr review <repo> --from <base> --to <head> --format json --audience agent
+```
+
+Los repos de prueba se crearon con `git init` dentro del contenedor (`/tmp/repo`,
+`/tmp/repo-multi` y `/tmp/repo-skipped`), nunca dentro del worktree.
+
+### Escenarios
+
+| Archivo | Repo / comando | Resultado |
+| --- | --- | --- |
+| `ocr-review-complete.json` | `/tmp/repo`, `--from 5375f11 --to 9bb6edc` | `terminal_state: complete`, 2 comentarios (`security/high` y `maintainability/low`), 4960 tokens, exit 0. |
+| `ocr-review-partial-budget.json` | `/tmp/repo-multi`, `--from 6877354 --to b8453d9 --concurrency 1 --max-tokens-budget 30000` | `terminal_state: partial`, 3 comentarios, 3 ítems `completed` y 9 `failed` con `classification: budget`, 14880 tokens, exit 0. |
+| `ocr-review-failed-provider.json` | `/tmp/repo`, mismo rango que el caso completo; el servidor falso responde HTTP 500 | `terminal_state: failed`, `status: failed`, 2 ítems `failed` con `classification: provider`, `retry_report` con 6 intentos y `status_code: 500`, exit 1. El JSON se capturó igualmente. |
+| `ocr-review-skipped.json` | `/tmp/repo-skipped`, `--from c3f6044 --to 5bce0db --exclude '**/*.go'` | `terminal_state: skipped`, `selected: []`, `excluded` con `exclude_reason: user_exclude`, 0 tokens, exit 0. |
+
+En el caso de fallo de proveedor el comando se ejecutó con `|| true` para
+conservar la salida y el código de salida real (1).
+
+### Sanitización
+
+Los cuatro JSON son salidas reales del binario, con estos valores sustituidos
+para que sean deterministas:
+
+- `session_id` y `manifest.run_id`: UUIDs fijos
+  `00000000-0000-4000-8000-000000000001` a `...0004`, uno por escenario.
+- `summary.elapsed`: `"0s"`; `manifest.elapsed_ms`: `0`.
+- `retry_report.requests[*].logical_request_id`: hash fijo terminado en `3`.
+- `retry_report.requests[*].attempts[*].duration_to_headers_ms` y
+  `observed_backoff_ms`: `0`.
+- No se encontraron rutas absolutas, hosts, URLs ni timestamps en la salida.
+
+Se conservan el esquema completo, `manifest.coverage`, `manifest.terminal_state`,
+`status`, los campos de tokens de `summary`, `groups`, `comments`, los hashes de
+commit, `item_id`/`fingerprint` y el nombre `fake-model` (identificador explícito
+del proveedor falso). Los comentarios los genera el proveedor falso; estos
+fixtures fijan la forma y los estados de `ocr review`, no la calidad del texto.
+
 ## Verificación
 
 ```bash
@@ -78,9 +143,27 @@ jq . internal/review/testdata/ocr-rule.json > /dev/null
 jq -c . internal/review/testdata/opencode-events.jsonl > /dev/null
 jq -s 'any(.[]; .type == "text" and (.part.text // "") != "")' \
   internal/review/testdata/opencode-events.jsonl
+
+for f in internal/review/testdata/ocr-review-complete.json \
+         internal/review/testdata/ocr-review-partial-budget.json \
+         internal/review/testdata/ocr-review-failed-provider.json \
+         internal/review/testdata/ocr-review-skipped.json; do
+  jq -e . "$f" > /dev/null
+done
+jq -r '[.manifest.terminal_state, (.comments // [] | length), .summary.total_tokens] | @tsv' \
+  internal/review/testdata/ocr-review-*.json
 ```
 
-Resultado: los tres archivos parsean; `jq 'keys'` devuelve
+Resultado esperado de la última orden (orden alfabético):
+
+```text
+complete	2	4960
+failed	0	0
+partial	3	14880
+skipped	0	0
+```
+
+Resultado del resto: los tres archivos parsean; `jq 'keys'` devuelve
 `excluded_count, excluded_files, from, merge_base, mode, repository,
 reviewable_count, reviewable_files, schema_version, to, total_deletions,
 total_files, total_insertions` para `ocr-preview.json` y `groups, schema_version`
@@ -98,3 +181,18 @@ para `ocr-rule.json`; el stream tiene 3 eventos y 1 evento `text` con texto.
   la línea de argumentos de cada invocación. Los tests la usan para comprobar que
   el reintento por esquema usa `--continue` y no vuelve a adjuntar el diff con
   `-f`.
+- `ocr-review-complete.json`: fija `manifest.terminal_state == "complete"`, un
+  array de 2 comentarios y las parejas `security/high` y
+  `maintainability/low`; `comments` es un array.
+- `ocr-review-partial-budget.json`: fija `manifest.terminal_state == "partial"`,
+  `summary.budget_exceeded == true`, `manifest.coverage.failed` con
+  `classification: budget` y 3 comentarios utilizables.
+- `ocr-review-failed-provider.json`: fija `status` y `manifest.terminal_state`
+  en `failed`, `comments: null`, `manifest.coverage.failed` con
+  `classification: provider` y `retry_report` con intentos HTTP 500.
+- `ocr-review-skipped.json`: fija `manifest.terminal_state == "skipped"`,
+  `comments: []`, `manifest.coverage.selected` vacío y `excluded` con
+  `exclude_reason: user_exclude`.
+- Los valores sanitizados (`session_id`, `run_id`, `elapsed`, `elapsed_ms`,
+  `logical_request_id`, duraciones y backoff) no deben usarse como aserciones;
+  los tests deben comprobar estados, cobertura, tokens y forma de los comentarios.
