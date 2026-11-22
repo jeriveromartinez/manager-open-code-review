@@ -35,6 +35,29 @@ const (
 	reviewerPrompt = `Eres un revisor de código. El diff del PR viene adjunto en el mensaje del usuario y es tu fuente principal. No explores el repositorio ni busques archivos: no uses glob, grep ni listados. Usa read solo si el diff cita un archivo concreto y necesitas contexto puntual para entender un cambio. Devuelve únicamente el JSON del esquema solicitado.`
 )
 
+// reasoningVariantSettings returns the provider options for the selected
+// variant. OpenCode 1.19 computes variants only for models it believes can
+// reason, and the generic OpenAI-compatible table omits "minimal"; writing the
+// entry explicitly is what makes the flag take effect for our config-declared
+// model. Anthropic and Google are left to OpenCode's model-specific table
+// (thinking budgets, thinking levels), so ok is false there (#65).
+func reasoningVariantSettings(providerID, variant string) (map[string]any, bool) {
+	provider, known := llmmodels.DefaultProviders[providerID]
+	if !known {
+		// OpenCode talks to providers it does not know through its
+		// OpenAI-compatible fallback.
+		return map[string]any{"reasoningEffort": variant}, true
+	}
+	switch provider.Shape {
+	case llmmodels.Anthropic, llmmodels.Google:
+		return nil, false
+	}
+	if providerID == "openrouter" {
+		return map[string]any{"reasoning": map[string]any{"effort": variant}}, true
+	}
+	return map[string]any{"reasoningEffort": variant}, true
+}
+
 // Agent runs one isolated `opencode run` invocation. Home is the temporary HOME
 // used by the child; when empty, a temporary directory is created and removed
 // automatically.
@@ -119,6 +142,13 @@ func (a *Agent) Run(ctx context.Context, prompt string, files []string) (text st
 	return text, usage, nil
 }
 
+func variantOf(profile store.LLMProfile) string {
+	if profile.Variant == nil {
+		return ""
+	}
+	return strings.TrimSpace(*profile.Variant)
+}
+
 func buildArgs(profile store.LLMProfile, dir, prompt string, files []string, continueSession bool) []string {
 	args := []string{
 		"run",
@@ -127,8 +157,8 @@ func buildArgs(profile store.LLMProfile, dir, prompt string, files []string, con
 		"--agent", reviewerAgent,
 		"--model", profile.Provider + "/" + profile.Model,
 	}
-	if profile.Variant != nil && *profile.Variant != "" {
-		args = append(args, "--variant", *profile.Variant)
+	if variant := variantOf(profile); variant != "" {
+		args = append(args, "--variant", variant)
 	}
 	if continueSession {
 		args = append(args, "--continue")
@@ -196,14 +226,24 @@ func writeOpenCodeConfig(home string, profile store.LLMProfile, steps int) error
 	} else if baseURL, ok := llmmodels.ProviderBaseURL(profile.Provider); ok {
 		options["baseURL"] = baseURL
 	}
+	// OpenCode builds `--variant` from the model's variant table, and a
+	// config-declared model defaults to "no reasoning", which yields an empty
+	// table and silently ignores the flag. Declaring reasoning support builds
+	// the provider's table; the explicit entry guarantees the selected value
+	// exists on OpenAI-compatible endpoints (#65).
+	model := map[string]any{"name": profile.Model}
+	if variant := variantOf(profile); variant != "" {
+		model["reasoning"] = true
+		if settings, ok := reasoningVariantSettings(profile.Provider, variant); ok {
+			model["variants"] = map[string]any{variant: settings}
+		}
+	}
 	provider := map[string]any{
 		"options": options,
 		// OpenCode 1.19 only runs model ids present in its catalog; declaring
 		// the selected one keeps provider-api models usable before models.dev
 		// catches up.
-		"models": map[string]any{
-			profile.Model: map[string]string{"name": profile.Model},
-		},
+		"models": map[string]any{profile.Model: model},
 	}
 
 	// The reviewer only reads the attached diff. Every other built-in tool is

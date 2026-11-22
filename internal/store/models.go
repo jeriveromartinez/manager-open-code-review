@@ -217,6 +217,7 @@ type ReviewRun struct {
 	// Nil on runs created before consumption was recorded (#73).
 	InputTokens      *int64 `gorm:"column:input_tokens"`
 	OutputTokens     *int64 `gorm:"column:output_tokens"`
+	ReasoningTokens  *int64 `gorm:"column:reasoning_tokens"` // hidden part of OutputTokens (#65)
 	CacheReadTokens  *int64 `gorm:"column:cache_read_tokens"`
 	CacheWriteTokens *int64 `gorm:"column:cache_write_tokens"`
 	TotalTokens      *int64 `gorm:"column:total_tokens"`

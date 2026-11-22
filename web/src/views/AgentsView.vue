@@ -22,17 +22,23 @@ type ProfileForm = {
   name: string
   provider: string
   model: string
+  variant: string
   base_url: string
   api_key: string
   concurrency: number
   enabled: boolean
 }
 
+// Suggested efforts. A value the model's own table does not contain is
+// silently ignored by --variant, so the free text stays but is guided (#65).
+const reasoningVariants = ['none', 'minimal', 'low', 'medium', 'high']
+
 function emptyForm(): ProfileForm {
   return {
     name: '',
     provider: '',
     model: '',
+    variant: '',
     base_url: '',
     api_key: '',
     concurrency: 1,
@@ -163,8 +169,8 @@ const policyDirty = computed(
 
 // Health checks also announce a profile; only these fields are someone's edit.
 function editableOf(profile: LLMProfile): string {
-  const { name, provider, model, base_url, concurrency, enabled, api_key_set } = profile
-  return JSON.stringify({ name, provider, model, base_url, concurrency, enabled, api_key_set })
+  const { name, provider, model, variant, base_url, concurrency, enabled, api_key_set } = profile
+  return JSON.stringify({ name, provider, model, variant, base_url, concurrency, enabled, api_key_set })
 }
 
 async function onLiveChanges(events: ReviewEvent[]): Promise<void> {
@@ -377,6 +383,7 @@ function openEdit(profile: LLMProfile): void {
     name: profile.name,
     provider: profile.provider,
     model: profile.model,
+    variant: profile.variant ?? '',
     base_url: profile.base_url ?? '',
     // La clave nunca se recibe del backend: se deja vacía para conservarla.
     api_key: '',
@@ -434,6 +441,11 @@ async function submitProfile(): Promise<void> {
     enabled: current.enabled,
     api_key: current.api_key,
   }
+  // On edit an empty variant must clear the stored one, so null is sent
+  // explicitly; on create it is simply omitted like the other optional fields.
+  const variant = current.variant.trim()
+  if (variant) body.variant = variant
+  else if (editingId.value !== null) body.variant = null
   if (tab.value === 'custom') {
     body.base_url = current.base_url.trim() || null
   }
@@ -542,6 +554,9 @@ onMounted(() => {
                     <span class="profile-table__provider">{{ profile.provider }}</span>
                     <span class="profile-table__separator" aria-hidden="true">/</span>
                     <span>{{ profile.model }}</span>
+                    <span v-if="profile.variant" class="profile-table__variant" data-profile-variant-label>
+                      ({{ profile.variant }})
+                    </span>
                   </td>
                   <td class="profile-table__health">
                     <div class="health" data-health-cell>
@@ -903,6 +918,23 @@ onMounted(() => {
                     data-profile-concurrency
                   />
                   <span class="field__hint">Solicitudes simultáneas (mínimo 1).</span>
+                </label>
+                <label class="field">
+                  <span class="field__label">Variante de razonamiento</span>
+                  <input
+                    v-model="form.variant"
+                    class="field__input"
+                    type="text"
+                    list="reasoning-variants"
+                    data-profile-variant
+                  />
+                  <datalist id="reasoning-variants">
+                    <option v-for="variant in reasoningVariants" :key="variant" :value="variant" />
+                  </datalist>
+                  <span class="field__hint">
+                    «none», «minimal» o «low» reducen los tokens de razonamiento y la latencia; el
+                    modelo debe aceptar la variante.
+                  </span>
                 </label>
                 <label class="modal__enabled">
                   <input v-model="form.enabled" type="checkbox" data-profile-enabled />

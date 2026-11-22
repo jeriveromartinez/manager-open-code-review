@@ -961,7 +961,7 @@ func TestRunLifecycle(t *testing.T) {
 		Coverage: coverage,
 		Usage:    usage,
 		Tokens: store.RunUsage{
-			Input: 123, Output: 45, CacheRead: 900, CacheWrite: 30,
+			Input: 123, Output: 45, Reasoning: 30, CacheRead: 900, CacheWrite: 30,
 			Total: 168, MaxContext: 1053,
 		},
 		Findings: []store.Finding{finding, resolvedFinding},
@@ -984,12 +984,13 @@ func TestRunLifecycle(t *testing.T) {
 	assertJSONEqual(t, "usage", datatypes.JSON(stored.Usage), `{"input_tokens":123,"output_tokens":45}`)
 	if stored.InputTokens == nil || *stored.InputTokens != 123 ||
 		stored.OutputTokens == nil || *stored.OutputTokens != 45 ||
+		stored.ReasoningTokens == nil || *stored.ReasoningTokens != 30 ||
 		stored.CacheReadTokens == nil || *stored.CacheReadTokens != 900 ||
 		stored.CacheWriteTokens == nil || *stored.CacheWriteTokens != 30 ||
 		stored.TotalTokens == nil || *stored.TotalTokens != 168 ||
 		stored.MaxContextTokens == nil || *stored.MaxContextTokens != 1053 {
-		t.Errorf("token columns = %v/%v/%v/%v/%v/%v, want 123/45/900/30/168/1053",
-			stored.InputTokens, stored.OutputTokens, stored.CacheReadTokens,
+		t.Errorf("token columns = %v/%v/%v/%v/%v/%v/%v, want 123/45/30/900/30/168/1053",
+			stored.InputTokens, stored.OutputTokens, stored.ReasoningTokens, stored.CacheReadTokens,
 			stored.CacheWriteTokens, stored.TotalTokens, stored.MaxContextTokens)
 	}
 

@@ -559,4 +559,86 @@ func TestAgentConfigDeclaresSelectedModel(t *testing.T) {
 	}
 }
 
+type generatedModel struct {
+	Name      string                    `json:"name"`
+	Reasoning bool                      `json:"reasoning"`
+	Variants  map[string]map[string]any `json:"variants"`
+}
+
+func generatedProviderModel(t *testing.T, home, provider, model string) generatedModel {
+	t.Helper()
+	var cfg struct {
+		Provider map[string]struct {
+			Models map[string]generatedModel `json:"models"`
+		} `json:"provider"`
+	}
+	if err := json.Unmarshal(readAgentConfigRaw(t, home), &cfg); err != nil {
+		t.Fatalf("decode generated config: %v", err)
+	}
+	got, ok := cfg.Provider[provider].Models[model]
+	if !ok {
+		t.Fatalf("provider.%s.models = %#v, want %s", provider, cfg.Provider[provider].Models, model)
+	}
+	return got
+}
+
+// OpenCode only builds --variant from the model's reasoning table, and a
+// config-declared model starts with none. Without the declaration the admin's
+// choice is silently ignored (#65).
+func TestAgentConfigDeclaresReasoningVariantsOnlyWhenSelected(t *testing.T) {
+	plainHome := t.TempDir()
+	plain := testAgent(t, plainHome)
+	if _, _, err := plain.Run(context.Background(), "__FAKE_ARGS__", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := generatedProviderModel(t, plainHome, "nvidia", "nemotron")
+	if got.Reasoning || len(got.Variants) != 0 {
+		t.Errorf("model without a variant = %+v, want no reasoning declaration", got)
+	}
+
+	home := t.TempDir()
+	agent := testAgent(t, home)
+	agent.Profile.Variant = stringPtr("minimal")
+	if _, _, err := agent.Run(context.Background(), "__FAKE_ARGS__", nil); err != nil {
+		t.Fatalf("Run with variant: %v", err)
+	}
+	got = generatedProviderModel(t, home, "nvidia", "nemotron")
+	if !got.Reasoning {
+		t.Error("model with a variant does not declare reasoning support")
+	}
+	settings, ok := got.Variants["minimal"]
+	if !ok || settings["reasoningEffort"] != "minimal" {
+		t.Errorf("variants = %#v, want minimal with reasoningEffort", got.Variants)
+	}
+}
+
+func TestAgentConfigUsesOpenRouterVariantShape(t *testing.T) {
+	home := t.TempDir()
+	agent := testAgent(t, home)
+	agent.Profile = store.LLMProfile{Provider: "openrouter", Model: "openai/gpt-5", Variant: stringPtr("low")}
+	if _, _, err := agent.Run(context.Background(), "__FAKE_ARGS__", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	settings := generatedProviderModel(t, home, "openrouter", "openai/gpt-5").Variants["low"]
+	reasoning, ok := settings["reasoning"].(map[string]any)
+	if !ok || reasoning["effort"] != "low" {
+		t.Errorf("variants = %#v, want reasoning.effort = low", settings)
+	}
+}
+
+// Anthropic and Google get their payload from OpenCode's model-specific table;
+// writing an OpenAI-style effort there would be rejected.
+func TestAgentConfigLeavesAnthropicVariantToOpenCode(t *testing.T) {
+	home := t.TempDir()
+	agent := testAgent(t, home)
+	agent.Profile = store.LLMProfile{Provider: "anthropic", Model: "claude-sonnet-5-5", Variant: stringPtr("low")}
+	if _, _, err := agent.Run(context.Background(), "__FAKE_ARGS__", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := generatedProviderModel(t, home, "anthropic", "claude-sonnet-5-5")
+	if !got.Reasoning || len(got.Variants) != 0 {
+		t.Errorf("model = %+v, want reasoning support and no explicit variant", got)
+	}
+}
+
 func stringPtr(s string) *string { return &s }

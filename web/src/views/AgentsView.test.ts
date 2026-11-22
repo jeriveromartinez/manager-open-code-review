@@ -577,6 +577,35 @@ describe('AgentsView', () => {
     wrapper.unmount()
   })
 
+  it('sends and clears the reasoning variant', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-open-profile]').trigger('click')
+    await wrapper.get('[data-platform="openai"]').trigger('click')
+    await wrapper.get('[data-profile-api-key]').setValue('sk-test')
+    await wrapper.get('[data-profile-variant]').setValue('minimal')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.createLLMProfile).toHaveBeenCalledWith(
+      expect.objectContaining({ variant: 'minimal' }),
+    )
+
+    await wrapper.get('[data-profile-row="11"] [data-edit-profile]').trigger('click')
+    expect((wrapper.get('[data-profile-variant]').element as HTMLInputElement).value).toBe('70b')
+    await wrapper.get('[data-profile-variant]').setValue('')
+    await wrapper.get('[data-profile-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.updateLLMProfile).toHaveBeenCalledWith(
+      11,
+      expect.objectContaining({ variant: null }),
+    )
+
+    wrapper.unmount()
+  })
+
   it('sends the model chosen from the catalog select', async () => {
     const wrapper = mountAgents()
     await flushPromises()

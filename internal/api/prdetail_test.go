@@ -34,6 +34,7 @@ func TestPRDetailIncludesRunsAndFindings(t *testing.T) {
 		CloneTokenEnc:    "sealed-clone-token",
 		InputTokens:      tokens(1200),
 		OutputTokens:     tokens(300),
+		ReasoningTokens:  tokens(250),
 		CacheReadTokens:  tokens(5000),
 		CacheWriteTokens: tokens(400),
 		TotalTokens:      tokens(6900),
@@ -75,9 +76,10 @@ func TestPRDetailIncludesRunsAndFindings(t *testing.T) {
 		t.Errorf("run leaks clone_token_enc: %v", runObj)
 	}
 	if runObj["input_tokens"] != float64(1200) || runObj["output_tokens"] != float64(300) ||
+		runObj["reasoning_tokens"] != float64(250) ||
 		runObj["cache_read_tokens"] != float64(5000) || runObj["cache_write_tokens"] != float64(400) ||
 		runObj["total_tokens"] != float64(6900) || runObj["max_context_tokens"] != float64(6600) {
-		t.Errorf("token columns = %v, want 1200/300/5000/400/6900/6600", runObj)
+		t.Errorf("token columns = %v, want 1200/300/250/5000/400/6900/6600", runObj)
 	}
 
 	findings, ok := raw["findings"].([]any)

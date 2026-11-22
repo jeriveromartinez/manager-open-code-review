@@ -596,6 +596,7 @@ func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, headSHA
 type RunUsage struct {
 	Input      int64
 	Output     int64
+	Reasoning  int64
 	CacheRead  int64
 	CacheWrite int64
 	Total      int64
@@ -642,6 +643,7 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 				"usage":              datatypes.JSON(usage),
 				"input_tokens":       c.Tokens.Input,
 				"output_tokens":      c.Tokens.Output,
+				"reasoning_tokens":   c.Tokens.Reasoning,
 				"cache_read_tokens":  c.Tokens.CacheRead,
 				"cache_write_tokens": c.Tokens.CacheWrite,
 				"total_tokens":       c.Tokens.Total,

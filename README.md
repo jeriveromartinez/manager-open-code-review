@@ -130,6 +130,8 @@ En **Agentes LLM** (solo admins), «Nuevo perfil» permite dar nombre, proveedor
 
 Para asignar el perfil, en **Política por equipo** elige el equipo y el perfil y pulsa «Guardar política». Esa política es la que usa el worker para cada PR del equipo; el perfil debe estar activo para que se generen runs.
 
+En las opciones avanzadas del perfil, **Variante de razonamiento** permite elegir `none`, `minimal`, `low`, `medium` o `high`, o dejarla vacía para usar la del modelo. OpenCode solo construye la tabla de variantes si el modelo declara que razona, y a un modelo declarado en el perfil se le supone lo contrario; por eso el worker declara `reasoning` y, en los proveedores compatibles con OpenAI, escribe la entrada de la variante elegida (`reasoning_effort`), de modo que `--variant` llega al proveedor en lugar de ignorarse. En Anthropic y Google se usa la tabla específica de OpenCode (presupuestos o niveles de pensamiento). Úsala solo con un modelo que acepte esa variante: si no la acepta, el proveedor rechaza la petición y el motivo aparece en el run y en la salud del perfil. Para medir el efecto, compara el detalle de un PR antes y después: cada run muestra **Razonamiento** junto al consumo total, y la duración está en `started_at`/`finished_at`.
+
 ### Artefactos tras la revisión
 
 En el PR aparecen:

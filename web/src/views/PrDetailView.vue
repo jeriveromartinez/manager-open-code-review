@@ -354,6 +354,10 @@ onMounted(() => {
                     <code>{{ formatTokens(run.input_tokens ?? 0) }} / {{ formatTokens(run.output_tokens ?? 0) }}</code>
                   </dd>
                 </div>
+                <div v-if="run.reasoning_tokens !== null" class="run__token" data-run-reasoning>
+                  <dt>Razonamiento</dt>
+                  <dd><code>{{ formatTokens(run.reasoning_tokens) }}</code></dd>
+                </div>
                 <div class="run__token">
                   <dt>Caché</dt>
                   <dd><code>{{ cacheShare(run) }}</code></dd>
