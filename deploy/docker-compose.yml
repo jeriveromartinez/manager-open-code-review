@@ -116,6 +116,10 @@ services:
     image: qa-control-center-worker:local
     command: ["worker"]
     restart: unless-stopped
+    # Recreating the worker must let in-flight reviews drain: SIGTERM starts a
+    # 45s soft stop and then up to 15s more to requeue whatever was cancelled.
+    # Docker's 10s default would SIGKILL the process halfway through.
+    stop_grace_period: 90s
     # Sin env_file: el worker nunca debe recibir QA_MASTER_KEY.
     environment:
       QA_DATABASE_URL: ${QA_DATABASE_URL}

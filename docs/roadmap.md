@@ -28,7 +28,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #63 | Sumar el consumo de todos los pasos y pasadas | M | — | **Hecho** (#89) |
 | #61 | Planificar pasadas por bytes (límite de 50 KB de OpenCode) | S/M | — | **Hecho** (#88) |
 | #67 | Aclarar que `review_agent_steps` es por pasada | XS | — | **Hecho** (#86) |
-| #69 | Drenar revisiones en vuelo al recrear el worker | M | — | Pendiente |
+| #69 | Drenar revisiones en vuelo al recrear el worker | M | — | **Hecho** (#91) |
 | #68 | Refrescar el token de clonado de runs en cola | S/M | — | Pendiente |
 | #73 | Registrar y mostrar el consumo real (columnas, API, panel) | M/L | #63 | Pendiente |
 | #77 | Aplicar `exclude_globs` y `extra_instructions` de la política | M | — | Pendiente |
@@ -46,7 +46,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 
 - 2026-11-21: revisados los 21 issues abiertos; #70, #78 y #64 cerrados con evidencia en `main`.
 - En `main`: roadmap #85 y Fase 1 completa (#86, #87, #88, #89).
-- En curso: Fase 2, #69 y #68 (fiabilidad de la cola); después #73 y #77.
+- En curso: Fase 2, #68 (fiabilidad de la cola); #69 queda hecho en #91. Después #73 y #77.
 
 ## Fases
 
@@ -64,7 +64,7 @@ Objetivo: exprimir lo que ya está en `main` y cerrar los huecos baratos del age
 
 Objetivo: que un deploy o una cola lenta no pierda revisiones ni gaste tokens sin publicar.
 
-- [ ] #69 Drenar el worker en el apagado: dejar de reclamar, esperar un margen acotado y, si hay que interrumpir, marcar el run terminal y reencolarlo al momento.
+- [x] #69 Drenar el worker en el apagado: dejar de reclamar, esperar un margen acotado y, si hay que interrumpir, marcar el run terminal y reencolarlo al momento.
 - [ ] #68 Refrescar el token de clonado al reclamar el run (o guardar la caducidad y renovarlo antes del clone), con reintento y error accionable.
 
 ### Fase 3 — Visibilidad, política y salud

@@ -40,3 +40,16 @@ func TestReviewClientJobTimeoutOutlivesRiverDefault(t *testing.T) {
 		})
 	}
 }
+
+// TestReviewClientSetsSoftStopTimeout pins the drain window: without a soft
+// stop River cancels a running review as soon as SIGTERM arrives, so the run
+// stays "running" until the stale watchdog (#69).
+func TestReviewClientSetsSoftStopTimeout(t *testing.T) {
+	cfg := reviewClientConfig(nil, river.NewWorkers(), nil)
+	if cfg.SoftStopTimeout != ReviewDrainTimeout {
+		t.Errorf("SoftStopTimeout = %v, want %v", cfg.SoftStopTimeout, ReviewDrainTimeout)
+	}
+	if cfg.SoftStopTimeout <= 0 {
+		t.Error("SoftStopTimeout must be positive so a stopping worker drains in-flight reviews")
+	}
+}
