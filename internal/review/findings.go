@@ -45,6 +45,35 @@ func normalizeTitle(title string) string {
 	return strings.Join(strings.Fields(strings.ToLower(title)), " ")
 }
 
+// reviewedPaths devuelve el conjunto de rutas que OCR informó como completadas
+// o reutilizadas. El manifiesto puede traer un "./" inicial; se recorta para
+// que coincida con la ruta guardada en los hallazgos.
+func reviewedPaths(coverage nativeCoverage) map[string]bool {
+	paths := make(map[string]bool, len(coverage.Completed)+len(coverage.Reused))
+	for _, group := range [][]nativeCoverageItem{coverage.Completed, coverage.Reused} {
+		for _, item := range group {
+			path := strings.TrimPrefix(strings.TrimSpace(item.Path), "./")
+			if path != "" {
+				paths[path] = true
+			}
+		}
+	}
+	return paths
+}
+
+// findingsInPaths conserva solo los hallazgos abiertos de archivos revisados.
+// Un conjunto vacío no conserva ninguno: la resolución nunca se amplía a los
+// hallazgos fuera del rango revisado.
+func findingsInPaths(open []store.Finding, paths map[string]bool) []store.Finding {
+	kept := make([]store.Finding, 0, len(open))
+	for _, f := range open {
+		if paths[f.Path] {
+			kept = append(kept, f)
+		}
+	}
+	return kept
+}
+
 // Reconcile concilia los hallazgos de una corrida con los abiertos. Los que
 // coinciden por huella se actualizan conservando su ID; los nuevos reciben un
 // ID determinista derivado de la huella. Solo con complete=true se devuelven
