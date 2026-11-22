@@ -109,6 +109,7 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/prs/{id}", s.prDetail)
 			// The run log is scoped through its pull request, so a user who
 			// cannot see the PR cannot read the log either.
+			r.Get("/review-runs", s.activeRuns)
 			r.Get("/review-runs/{id}/logs", s.reviewRunLogs)
 			r.Get("/repos", s.repos)
 			r.Get("/teams", s.teams)

@@ -27,17 +27,21 @@ type reviewRunDTO struct {
 	ErrorCode    string          `json:"error_code"`
 	ErrorMessage string          `json:"error_message"`
 	// Token columns are null on runs that predate the accounting (#73).
-	InputTokens      *int64  `json:"input_tokens"`
-	OutputTokens     *int64  `json:"output_tokens"`
-	ReasoningTokens  *int64  `json:"reasoning_tokens"`
-	CacheReadTokens  *int64  `json:"cache_read_tokens"`
-	CacheWriteTokens *int64  `json:"cache_write_tokens"`
-	TotalTokens      *int64  `json:"total_tokens"`
-	MaxContextTokens *int64  `json:"max_context_tokens"`
-	StartedAt        *string `json:"started_at"`
-	FinishedAt       *string `json:"finished_at"`
-	CreatedAt        string  `json:"created_at"`
-	UpdatedAt        string  `json:"updated_at"`
+	InputTokens      *int64 `json:"input_tokens"`
+	OutputTokens     *int64 `json:"output_tokens"`
+	ReasoningTokens  *int64 `json:"reasoning_tokens"`
+	CacheReadTokens  *int64 `json:"cache_read_tokens"`
+	CacheWriteTokens *int64 `json:"cache_write_tokens"`
+	TotalTokens      *int64 `json:"total_tokens"`
+	MaxContextTokens *int64 `json:"max_context_tokens"`
+	// Phase is empty on queued, terminal and pre-#123 runs; the panel renders
+	// "—" instead of inventing a step.
+	Phase          string  `json:"phase"`
+	PhaseStartedAt *string `json:"phase_started_at"`
+	StartedAt      *string `json:"started_at"`
+	FinishedAt     *string `json:"finished_at"`
+	CreatedAt      string  `json:"created_at"`
+	UpdatedAt      string  `json:"updated_at"`
 }
 
 func jsonObject(raw datatypes.JSON) json.RawMessage {
@@ -57,6 +61,7 @@ func reviewRunDTOOf(run store.ReviewRun) reviewRunDTO {
 		ReasoningTokens: run.ReasoningTokens,
 		CacheReadTokens: run.CacheReadTokens, CacheWriteTokens: run.CacheWriteTokens,
 		TotalTokens: run.TotalTokens, MaxContextTokens: run.MaxContextTokens,
+		Phase: run.Phase, PhaseStartedAt: formatTimePtr(run.PhaseStartedAt),
 		StartedAt: formatTimePtr(run.StartedAt), FinishedAt: formatTimePtr(run.FinishedAt),
 		CreatedAt: run.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt: run.UpdatedAt.UTC().Format(time.RFC3339),

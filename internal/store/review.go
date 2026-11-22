@@ -558,12 +558,14 @@ func (s *Store) RequeueReviewRun(ctx context.Context, id uint, errCode, errMsg s
 	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
 		Where("id = ? AND status = ?", id, RunRunning).
 		Updates(map[string]any{
-			"status":        RunQueued,
-			"attempt":       gorm.Expr("attempt + 1"),
-			"error_code":    errCode,
-			"error_message": errMsg,
-			"started_at":    nil,
-			"updated_at":    time.Now().UTC(),
+			"status":           RunQueued,
+			"attempt":          gorm.Expr("attempt + 1"),
+			"error_code":       errCode,
+			"error_message":    errMsg,
+			"started_at":       nil,
+			"phase":            "",
+			"phase_started_at": nil,
+			"updated_at":       time.Now().UTC(),
 		})
 	if res.Error != nil {
 		return fmt.Errorf("requeue review run %d: %w", id, res.Error)
@@ -670,9 +672,11 @@ func (s *Store) SupersedeActiveRuns(ctx context.Context, prID uint) error {
 	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
 		Where("pull_request_id = ? AND status IN ?", prID, []string{RunQueued, RunRunning}).
 		Updates(map[string]any{
-			"status":          RunSuperseded,
-			"clone_token_enc": "",
-			"updated_at":      time.Now().UTC(),
+			"status":           RunSuperseded,
+			"clone_token_enc":  "",
+			"phase":            "",
+			"phase_started_at": nil,
+			"updated_at":       time.Now().UTC(),
 		})
 	if res.Error != nil {
 		return fmt.Errorf("supersede runs of pull request %d: %w", prID, res.Error)
@@ -688,9 +692,11 @@ func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, headSHA
 	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
 		Where("pull_request_id = ? AND head_sha <> ? AND status IN ?", prID, headSHA, []string{RunQueued, RunRunning}).
 		Updates(map[string]any{
-			"status":          RunSuperseded,
-			"clone_token_enc": "",
-			"updated_at":      time.Now().UTC(),
+			"status":           RunSuperseded,
+			"clone_token_enc":  "",
+			"phase":            "",
+			"phase_started_at": nil,
+			"updated_at":       time.Now().UTC(),
 		})
 	if res.Error != nil {
 		return fmt.Errorf("supersede other runs of pull request %d: %w", prID, res.Error)
@@ -765,8 +771,12 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 			"total_tokens":       c.Tokens.Total,
 			"max_context_tokens": maxContext,
 			"clone_token_enc":    "",
-			"finished_at":        now,
-			"updated_at":         now,
+			// A finished run has no phase: keeping the last one would make the
+			// panel show a step that is no longer running.
+			"phase":            "",
+			"phase_started_at": nil,
+			"finished_at":      now,
+			"updated_at":       now,
 		}
 		// Only a resolved base replaces the column: an early failure has no base
 		// and must not erase one the run already knew.
@@ -810,7 +820,7 @@ func (s *Store) InterruptStaleRuns(ctx context.Context, cutoff time.Time) ([]Rev
 	const query = `
 UPDATE review_runs
 SET status = ?, error_code = ?, error_message = ?, clone_token_enc = '',
-    finished_at = ?, updated_at = ?
+    phase = '', phase_started_at = NULL, finished_at = ?, updated_at = ?
 WHERE status = ? AND COALESCE(started_at, created_at) < ?
 RETURNING *`
 
@@ -824,6 +834,27 @@ RETURNING *`
 		return nil, fmt.Errorf("interrupt review runs started before %s: %w", cutoff.UTC().Format(time.RFC3339), err)
 	}
 	return runs, nil
+}
+
+// SetReviewRunPhase records the current step of a running run and when it
+// began. A queued, finished or superseded run rejects the write with
+// ErrRunNotActive so a late phase cannot resurrect a terminal row.
+func (s *Store) SetReviewRunPhase(ctx context.Context, id uint, phase string) error {
+	now := time.Now().UTC()
+	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunRunning).
+		Updates(map[string]any{
+			"phase":            phase,
+			"phase_started_at": now,
+			"updated_at":       now,
+		})
+	if res.Error != nil {
+		return fmt.Errorf("set phase of review run %d: %w", id, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("set phase of review run %d: %w", id, ErrRunNotActive)
+	}
+	return nil
 }
 
 // ListReviewRuns returns the runs of a pull request oldest first.

@@ -6,6 +6,7 @@ import LeadView from './views/LeadView.vue'
 import LoginView from './views/LoginView.vue'
 import PrDetailView from './views/PrDetailView.vue'
 import ReposView from './views/ReposView.vue'
+import RunsView from './views/RunsView.vue'
 import SettingsView from './views/SettingsView.vue'
 import SetupView from './views/SetupView.vue'
 import TeamsView from './views/TeamsView.vue'
@@ -35,6 +36,7 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'dashboard', component: DashboardView },
+    { path: '/runs', name: 'runs', component: RunsView },
     { path: '/lead', name: 'lead', component: LeadView },
     { path: '/repos', name: 'repos', component: ReposView },
     { path: '/teams', name: 'teams', component: TeamsView },

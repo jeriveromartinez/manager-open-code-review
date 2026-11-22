@@ -19,6 +19,15 @@ const (
 	// that claimed it disappeared before writing a terminal state.
 	RunErrorInterrupted = "interrupted"
 
+	// Phases of a running review (#123). They are stable identifiers: the panel
+	// translates them and the log groups by milestone, so the values must not
+	// carry prose. Empty means the run is queued, finished or predates phases.
+	RunPhaseCloning   = "cloning"
+	RunPhasePreparing = "preparing"
+	RunPhaseReviewing = "reviewing"
+	RunPhaseChunking  = "chunking"
+	RunPhaseFinishing = "finishing"
+
 	HealthUnknown = "unknown"
 	HealthOK      = "ok"
 	HealthError   = "error"
@@ -253,11 +262,16 @@ type ReviewRun struct {
 	TotalTokens      *int64 `gorm:"column:total_tokens"`
 	// MaxContextTokens is the largest prompt of the run, used to watch the
 	// 270k context ceiling (#72).
-	MaxContextTokens *int64     `gorm:"column:max_context_tokens"`
-	StartedAt        *time.Time `gorm:"column:started_at"`
-	FinishedAt       *time.Time `gorm:"column:finished_at"`
-	CreatedAt        time.Time  `gorm:"column:created_at"`
-	UpdatedAt        time.Time  `gorm:"column:updated_at"`
+	MaxContextTokens *int64 `gorm:"column:max_context_tokens"`
+	// Phase is the current step of a running run and PhaseStartedAt when it
+	// began. Both stay empty on queued and terminal runs and on runs created
+	// before #123, which the panel renders as "—".
+	Phase          string     `gorm:"column:phase"`
+	PhaseStartedAt *time.Time `gorm:"column:phase_started_at"`
+	StartedAt      *time.Time `gorm:"column:started_at"`
+	FinishedAt     *time.Time `gorm:"column:finished_at"`
+	CreatedAt      time.Time  `gorm:"column:created_at"`
+	UpdatedAt      time.Time  `gorm:"column:updated_at"`
 }
 
 // ReviewRunLog is one line of a review run's live log. Seq orders the lines of
