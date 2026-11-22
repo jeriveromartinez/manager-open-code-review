@@ -1,6 +1,7 @@
 package review
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,18 +12,6 @@ import (
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
-
-func fakeOCRBin(t *testing.T) string {
-	t.Helper()
-	bin, err := filepath.Abs(filepath.Join("testdata", "fakeocr.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(bin); err != nil {
-		t.Fatal(err)
-	}
-	return bin
-}
 
 func TestBuildReviewArgs(t *testing.T) {
 	got := buildReviewArgs(nativeInvocation{
@@ -95,6 +84,8 @@ func TestReviewEnvIsolation(t *testing.T) {
 		"OPENROUTER_API_KEY=r",
 		"GEMINI_API_KEY=g",
 		"DASHSCOPE_API_KEY=d",
+		"GROQ_API_KEY=q",
+		"AZURE_OPENAI_API_KEY=z",
 		"OCR_LLM_URL=http://ocr",
 		"OCR_LLM_TOKEN=t",
 		"OCR_USE_ANTHROPIC=1",
@@ -117,6 +108,7 @@ func TestReviewEnvIsolation(t *testing.T) {
 	for _, unwanted := range []string{
 		"QA_LLM_API_KEY", "ANTHROPIC_", "OPENAI_", "OPENROUTER_API_KEY",
 		"GEMINI_", "DASHSCOPE_", "OCR_LLM_", "OCR_USE_ANTHROPIC",
+		"GROQ_API_KEY", "AZURE_OPENAI_API_KEY",
 		"HOME=/old-home", "XDG_CONFIG_HOME=/old-config",
 	} {
 		if strings.Contains(joined, unwanted) {
@@ -229,7 +221,11 @@ func TestStatusFromManifestCoverage(t *testing.T) {
 		code        string
 	}{
 		{name: "complete", status: "complete", want: store.RunSucceeded},
-		{name: "skipped", status: "skipped", want: store.RunSucceeded},
+		{
+			// A skipped run reviewed nothing; resolving findings would approve
+			// a PR the engine never looked at.
+			name: "skipped", status: "skipped", want: store.RunInconclusive, code: "no_coverage",
+		},
 		{
 			name: "partial budget", status: "partial", budget: true,
 			failed: []nativeCoverageItem{{Classification: "budget"}},
@@ -337,7 +333,8 @@ func TestNativeFixtures(t *testing.T) {
 		},
 		{
 			file: "ocr-review-skipped.json", state: "skipped", comments: 0,
-			reviewed: 0, skipped: 0, excluded: 1, status: store.RunSucceeded,
+			reviewed: 0, skipped: 0, excluded: 1,
+			status: store.RunInconclusive, code: "no_coverage",
 		},
 	}
 	for _, tt := range tests {
@@ -410,6 +407,35 @@ func TestNativeTitleFingerprintStable(t *testing.T) {
 	}
 }
 
+type nativeCustomProvider struct {
+	URL       string            `json:"url"`
+	Protocol  string            `json:"protocol"`
+	Model     string            `json:"model"`
+	APIKeyCmd string            `json:"api_key_cmd"`
+	ExtraBody map[string]string `json:"extra_body"`
+}
+
+type nativeConfigFile struct {
+	CustomProviders map[string]nativeCustomProvider `json:"custom_providers"`
+}
+
+func readNativeConfig(t *testing.T, home string) nativeCustomProvider {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(home, ".opencodereview", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg nativeConfigFile
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode OCR config: %v (%s)", err, raw)
+	}
+	provider, ok := cfg.CustomProviders[nativeProviderName]
+	if !ok {
+		t.Fatalf("config has no %q provider: %s", nativeProviderName, raw)
+	}
+	return provider
+}
+
 func TestNativeConfigKeepsKeyOffDisk(t *testing.T) {
 	home := t.TempDir()
 	base := "https://provider.example/v1"
@@ -421,18 +447,21 @@ func TestNativeConfigKeepsKeyOffDisk(t *testing.T) {
 	if err := writeNativeConfig(home, profile, keyPath); err != nil {
 		t.Fatalf("writeNativeConfig: %v", err)
 	}
-	configPath := filepath.Join(home, ".opencodereview", "config.json")
-	raw, err := os.ReadFile(configPath)
+	raw, err := os.ReadFile(filepath.Join(home, ".opencodereview", "config.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(raw), "sk-secret") {
 		t.Fatalf("config contains the API key: %s", raw)
 	}
-	for _, want := range []string{`"api_key_cmd"`, `"prompt_cache_key": "{ocr_session_key}"`, base, "model-x"} {
-		if !strings.Contains(string(raw), want) {
-			t.Errorf("config missing %q: %s", want, raw)
-		}
+	custom := readNativeConfig(t, home)
+	if custom.URL != base || custom.Model != "model-x" || custom.APIKeyCmd != keyPath {
+		t.Errorf("custom provider = %+v, want url %q, model model-x and the key helper", custom, base)
+	}
+	// An unknown provider uses the OpenAI-compatible dialect, so it accepts the
+	// explicit cache key.
+	if got := custom.ExtraBody["prompt_cache_key"]; got != ocrSessionKeyPlaceholder {
+		t.Errorf("prompt_cache_key = %q, want %q", got, ocrSessionKeyPlaceholder)
 	}
 
 	noEnv := exec.Command(keyPath)
@@ -454,5 +483,47 @@ func TestNativeConfigKeepsKeyOffDisk(t *testing.T) {
 	}
 	if string(out) != "sk-secret" {
 		t.Errorf("helper output = %q, want the injected key", out)
+	}
+}
+
+// TestNativeConfigPromptCachePerProtocol pins the provider dialect the cache
+// key is safe for. OCR forwards extra_body into the provider request, and
+// Anthropic rejects unknown fields, so sending the key there fails every run.
+func TestNativeConfigPromptCachePerProtocol(t *testing.T) {
+	base := "https://provider.example/v1"
+	tests := []struct {
+		name         string
+		provider     string
+		baseURL      *string
+		wantProtocol string
+		wantCache    bool
+	}{
+		{name: "unknown provider uses openai dialect", provider: "custom", baseURL: &base, wantProtocol: "openai", wantCache: true},
+		{name: "openai", provider: "openai", wantProtocol: "openai", wantCache: true},
+		{name: "groq", provider: "groq", wantProtocol: "openai", wantCache: true},
+		{name: "anthropic", provider: "anthropic", wantProtocol: "anthropic", wantCache: false},
+		{name: "google compatibility endpoint", provider: "google", wantProtocol: "openai", wantCache: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			keyPath, err := writeNativeKeyHelper(home)
+			if err != nil {
+				t.Fatalf("writeNativeKeyHelper: %v", err)
+			}
+			profile := store.LLMProfile{Provider: tt.provider, Model: "m", BaseURL: tt.baseURL}
+			if err := writeNativeConfig(home, profile, keyPath); err != nil {
+				t.Fatalf("writeNativeConfig: %v", err)
+			}
+			cfg := readNativeConfig(t, home)
+			if cfg.Protocol != tt.wantProtocol {
+				t.Errorf("protocol = %q, want %q", cfg.Protocol, tt.wantProtocol)
+			}
+			_, got := cfg.ExtraBody["prompt_cache_key"]
+			if got != tt.wantCache {
+				t.Errorf("prompt_cache_key present = %v, want %v (extra_body %v)",
+					got, tt.wantCache, cfg.ExtraBody)
+			}
+		})
 	}
 }

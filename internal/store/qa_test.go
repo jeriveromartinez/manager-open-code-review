@@ -291,6 +291,7 @@ func TestQASummaryAggregatesRunTokens(t *testing.T) {
 	legacy := f.openPR(repo.ID, 4, store.StatusReadyForHuman, false)
 	nativeMax := f.openPR(repo.ID, 5, store.StatusReadyForHuman, false)
 	other := f.openPR(hidden.ID, 6, store.StatusReadyForHuman, false)
+	zeroNative := f.openPR(repo.ID, 7, store.StatusReadyForHuman, false)
 
 	// A merged PR still spent tokens in the window.
 	tokenRun(merged, now.Add(-time.Hour), val(100), val(10), val(50), val(5), val(165), val(150))
@@ -301,6 +302,9 @@ func TestQASummaryAggregatesRunTokens(t *testing.T) {
 	// A native OCR run reports tokens but no max-context sample: it counts in
 	// the totals and is skipped by the MAX aggregate, which stays 300.
 	tokenRun(nativeMax, now.Add(-time.Hour), val(50), val(5), val(0), val(0), val(55), nil)
+	// A skipped native run recorded no usage: it must not inflate Reviews or
+	// lower Average.
+	tokenRun(zeroNative, now.Add(-time.Hour), val(0), val(0), val(0), val(0), val(0), nil)
 	tokenRun(other, now.Add(-time.Hour), val(5000), val(500), val(5000), val(500), val(11000), val(9000))
 
 	got, err := f.s.QASummary(f.ctx, qa, now, store.QAFilter{})
@@ -309,10 +313,41 @@ func TestQASummaryAggregatesRunTokens(t *testing.T) {
 	}
 	want := store.RunTokenStats{
 		Reviews: 3, Input: 350, Output: 35, CacheRead: 150,
-		CacheWrite: 15, Total: 550, MaxContext: 300,
+		CacheWrite: 15, Total: 550, MaxContext: 300, MaxContextKnown: true,
 	}
 	if got.Tokens != want {
 		t.Errorf("Tokens = %+v, want %+v", got.Tokens, want)
+	}
+}
+
+// TestQASummaryKeepsUnknownMaxContext pins the NULL aggregate: when no run in
+// the window reported a max-context sample, the aggregate must say unknown
+// instead of coalescing the MAX to a measured zero.
+func TestQASummaryKeepsUnknownMaxContext(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	team := f.team("Native")
+	qa := f.user("native-qa", false)
+	f.member(team, qa, "qa")
+	repo := f.repo(installID, installID, "acme/native-only", &team.ID, true)
+	pr := f.openPR(repo.ID, 1, store.StatusReadyForHuman, false)
+
+	run := f.run(pr, store.RunSucceeded)
+	f.exec(`UPDATE review_runs SET finished_at = $1, input_tokens = $2, output_tokens = $3,
+		cache_read_tokens = $4, cache_write_tokens = $5, total_tokens = $6,
+		max_context_tokens = NULL WHERE id = $7`,
+		time.Now().UTC().Add(-time.Hour), int64(100), int64(10), int64(0), int64(0), int64(110), run.ID)
+
+	got, err := f.s.QASummary(f.ctx, qa, time.Now().UTC(), store.QAFilter{})
+	if err != nil {
+		t.Fatalf("QASummary: %v", err)
+	}
+	if got.Tokens.Reviews != 1 || got.Tokens.Total != 110 {
+		t.Errorf("Tokens = %+v, want 1 review with 110 tokens", got.Tokens)
+	}
+	if got.Tokens.MaxContextKnown {
+		t.Errorf("MaxContextKnown = true with %d, want unknown for an all-NULL aggregate", got.Tokens.MaxContext)
 	}
 }
 

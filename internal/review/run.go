@@ -142,12 +142,9 @@ type runOutcome struct {
 	message  string
 	summary  string
 	coverage []byte
-	// excludedFiles counts the files OCR dropped because of the team's policy,
-	// reported in the coverage so the panel does not treat them as missing.
-	excludedFiles int
-	usage         []byte
-	findings      []store.Finding
-	resolved      []string
+	usage    []byte
+	findings []store.Finding
+	resolved []string
 	// tokens accumulates every model call of the run; usage is its JSON form,
 	// kept for panels that read the raw event stream.
 	tokens tokenUsage
@@ -514,7 +511,6 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	status, code := nativeOutcome(res)
 	reviewed, skipped, excluded := nativeCoverageCounts(res)
 	out.coverage = coverageJSON(reviewed, skipped, excluded)
-	out.excludedFiles = excluded
 	out.tokens = nativeTokenUsage(res)
 	out.summary = nativeSummaryText(res, status)
 	out.merged = mergeNativeFindings(res.Comments)
