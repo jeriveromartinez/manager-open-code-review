@@ -362,6 +362,13 @@ func chunkParentCommit(ctx context.Context, dir, baseSHA, headSHA, path string, 
 		return "", "", errors.New("git hash-object: blob vacío")
 	}
 
+	// P must keep head's mode: a hardcoded 100644 would turn every chunk of an
+	// executable file into a spurious mode change.
+	mode, err := headFileMode(ctx, dir, headSHA, path)
+	if err != nil {
+		return "", "", err
+	}
+
 	tmpDir, err := os.MkdirTemp("", "qa-diffchunk-")
 	if err != nil {
 		return "", "", fmt.Errorf("crear índice temporal: %w", err)
@@ -372,8 +379,9 @@ func chunkParentCommit(ctx context.Context, dir, baseSHA, headSHA, path string, 
 	if _, err := gitRawEnv(ctx, dir, "read-tree", indexEnv, nil, "read-tree", headSHA+"^{tree}"); err != nil {
 		return "", "", err
 	}
+	// La forma separada evita ambigüedades con paths que contienen comas.
 	if _, err := gitRawEnv(ctx, dir, "update-index", indexEnv, nil,
-		"update-index", "--cacheinfo", "100644,"+blob+","+path); err != nil {
+		"update-index", "--cacheinfo", mode, blob, path); err != nil {
 		return "", "", err
 	}
 	treeRaw, err := gitRawEnv(ctx, dir, "write-tree", indexEnv, nil, "write-tree")
@@ -398,6 +406,20 @@ func chunkParentCommit(ctx context.Context, dir, baseSHA, headSHA, path string, 
 	chunkSHA = strings.TrimSpace(string(chunkRaw))
 
 	return parentSHA, chunkSHA, nil
+}
+
+// headFileMode devuelve el modo con el que head registra path (100644, 100755,
+// 120000, ...), para que P conserve el modo real del archivo.
+func headFileMode(ctx context.Context, dir, headSHA, path string) (string, error) {
+	out, err := gitRaw(ctx, dir, "ls-tree", "ls-tree", headSHA, "--", path)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) < 2 || fields[1] != "blob" {
+		return "", fmt.Errorf("git ls-tree: %s no es un blob en head", path)
+	}
+	return fields[0], nil
 }
 
 // syntheticIdentityEnv fija la identidad de los commits sintéticos: un clon

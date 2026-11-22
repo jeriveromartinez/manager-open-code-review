@@ -32,6 +32,13 @@ func newChunkRepo(t *testing.T) string {
 // commitChunkFiles escribe y confirma varios archivos en un solo commit.
 func commitChunkFiles(t *testing.T, dir, message string, files map[string]string) string {
 	t.Helper()
+	return commitChunkFilesModes(t, dir, message, files, nil)
+}
+
+// commitChunkFilesModes permite marcar archivos ejecutables en el índice; el
+// bit se fija con update-index para que no dependa del filesystem del test.
+func commitChunkFilesModes(t *testing.T, dir, message string, files map[string]string, executable map[string]bool) string {
+	t.Helper()
 
 	paths := make([]string, 0, len(files))
 	for path := range files {
@@ -48,9 +55,22 @@ func commitChunkFiles(t *testing.T, dir, message string, files map[string]string
 			t.Fatal(err)
 		}
 		runGit(t, dir, "add", "--", path)
+		if executable[path] {
+			runGit(t, dir, "update-index", "--chmod=+x", "--", path)
+		}
 	}
 	runGit(t, dir, "commit", "-qm", message)
 	return runGit(t, dir, "rev-parse", "HEAD")
+}
+
+func lsTreeMode(t *testing.T, dir, sha, path string) string {
+	t.Helper()
+
+	fields := strings.Fields(runGit(t, dir, "ls-tree", sha, "--", path))
+	if len(fields) < 2 || fields[1] != "blob" {
+		t.Fatalf("ls-tree %s %s = %q, want blob", sha, path, fields)
+	}
+	return fields[0]
 }
 
 func numberedLines(n int) []string {
@@ -372,6 +392,73 @@ func TestChunkFileDiff(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestChunkFileDiffKeepsExecutableMode(t *testing.T) {
+	dir := newChunkRepo(t)
+	path := "bin/run.sh"
+	base := numberedLines(20)
+	head := append([]string(nil), base...)
+	head[1] = "changed02"
+	head[12] = "changed13"
+	head[18] = "changed19"
+
+	baseSHA := commitChunkFilesModes(t, dir, "base",
+		map[string]string{path: textLines(base)}, map[string]bool{path: true})
+	headSHA := commitChunkFilesModes(t, dir, "head",
+		map[string]string{path: textLines(head)}, map[string]bool{path: true})
+	if mode := lsTreeMode(t, dir, headSHA, path); mode != "100755" {
+		t.Fatalf("head mode = %q, want 100755", mode)
+	}
+
+	chunks, err := chunkFileDiff(context.Background(), dir, baseSHA, headSHA, path, 1)
+	if err != nil {
+		t.Fatalf("chunkFileDiff() error = %v", err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("chunkFileDiff() devolvió %d chunks, want 3", len(chunks))
+	}
+
+	for _, ch := range chunks {
+		if mode := lsTreeMode(t, dir, ch.Parent, path); mode != "100755" {
+			t.Fatalf("P mode = %q, want 100755", mode)
+		}
+		if mode := lsTreeMode(t, dir, ch.Commit, path); mode != "100755" {
+			t.Fatalf("C mode = %q, want 100755", mode)
+		}
+
+		raw := mustGitRaw(t, dir, "test-diff", "diff", "-U0", "--no-color", "--no-renames", ch.Parent, ch.Commit, "--", path)
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.HasPrefix(line, "old mode ") || strings.HasPrefix(line, "new mode ") {
+				t.Fatalf("P..C cambió el modo: %q", line)
+			}
+		}
+		assertChunkMatches(t, dir, baseSHA, headSHA, path, ch)
+	}
+}
+
+func TestChunkFileDiffPathWithComma(t *testing.T) {
+	dir := newChunkRepo(t)
+	path := "dir/a,b.txt"
+	base := numberedLines(20)
+	head := append([]string(nil), base...)
+	head[1] = "changed02"
+	head[12] = "changed13"
+	head[18] = "changed19"
+
+	baseSHA := commitChunkFiles(t, dir, "base", map[string]string{path: textLines(base)})
+	headSHA := commitChunkFiles(t, dir, "head", map[string]string{path: textLines(head)})
+
+	chunks, err := chunkFileDiff(context.Background(), dir, baseSHA, headSHA, path, 1)
+	if err != nil {
+		t.Fatalf("chunkFileDiff() error = %v", err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("chunkFileDiff() devolvió %d chunks, want 3", len(chunks))
+	}
+	for _, ch := range chunks {
+		assertChunkMatches(t, dir, baseSHA, headSHA, path, ch)
 	}
 }
 
