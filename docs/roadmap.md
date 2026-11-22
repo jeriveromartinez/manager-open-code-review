@@ -37,7 +37,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #66 | Verificar y activar caché de prompt | S | #71 | **Hecho** (#97); falta medir la tasa de acierto con el proveedor real |
 | #79 | Evaluar y subir OCR 1.14.0 | S | — | **Hecho** (#98) |
 | #71 | Usar `ocr review` nativo como motor | L | #79 (recomendado) | **Hecho** (#105) |
-| #72 | Techo de 270k, caché y esfuerzo por equipo | M/L | #71 | **Parcial** (#106; motor en esta rama): el motor aplica techo, esfuerzo y tope por equipo en cada run; faltan el troceo de #80 y la medición con datos reales |
+| #72 | Techo de 270k, caché y esfuerzo por equipo | M/L | #71 | **Parcial** (#106, #109): el motor aplica techo, esfuerzo y tope por equipo en cada run; faltan el troceo de #80 y la medición con datos reales |
 | #80 | Diffs enormes por partes sin abandonar el PR | L | #71, #72 | Pendiente |
 | #74 | Revisión incremental por push y antirrebote | L | #71 | Pendiente |
 | #76 | Seguimiento del objetivo global | — | todas | **Seguimiento** |
@@ -54,7 +54,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 - #66 hecho (#97): cada petición lleva `prompt_cache_key` estable por perfil y el banco de tokens verifica que los `cached_tokens` llegan al consumo del run. Faltan las mediciones con el proveedor real.
 - #79 hecho (#98): OCR 1.14.0 fijado en el worker; en el PR de referencia la cobertura pasa de 5 a 7 archivos revisables (4 archivos Rust de test/bench excluidos, 6 extensiones nuevas). Siguiente: #71.
 - #71 hecho (#105): el worker usa una sola invocación a `ocr review` por revisión, con argumentos y entorno del perfil, mapeo de hallazgos/estados y fixtures reales.
-- #72 parcial (#106 y motor en esta rama): ajuste global `review_context_ceiling` (270k), techo por equipo, esfuerzo y tope de gasto configurables y aplicados por el motor nativo: techo efectivo como `--max-tokens` por grupo, esfuerzo de la política como `--effort`, tope opcional como `--max-tokens-budget` y corte por presupuesto como `inconclusive`/`token_budget`. Los runs nativos guardan `max_context_tokens` NULL porque OCR 1.14 no reporta esa muestra. Quedan #80 (trocear diffs enormes) y la medición con proveedor real; el techo es por grupo, no un tope total.
+- #72 parcial (#106, #109): ajuste global `review_context_ceiling` (270k), techo por equipo, esfuerzo y tope de gasto configurables y aplicados por el motor nativo: techo efectivo como `--max-tokens` por grupo, esfuerzo de la política como `--effort`, tope opcional como `--max-tokens-budget` y corte por presupuesto como `inconclusive`/`token_budget`. Los runs nativos guardan `max_context_tokens` NULL porque OCR 1.14 no reporta esa muestra. Quedan #80 (trocear diffs enormes) y la medición con proveedor real; el techo es por grupo, no un tope total.
 
 ## Fases
 
@@ -91,7 +91,7 @@ Objetivo: dejar de pagar un bucle genérico de OpenCode y usar los controles de 
 
 - [x] #79 Evaluar OCR 1.14.0 (exclusiones y extensiones), subir la versión del worker y comparar cobertura antes/después. No bloquea #71. (#98) Cobertura del PR de referencia: 5 → 7 revisables; 4 archivos Rust de test/bench excluidos y 6 extensiones nuevas soportadas.
 - [x] #71 Una sola invocación a `ocr review` por revisión: argumentos y entorno del perfil, mapeo de hallazgos y estados, clave fuera de disco, fixtures reales. (#105)
-- [ ] #72 **Parcial**: `review_context_ceiling` global y techo por equipo aplicados como `--max-tokens` por grupo, esfuerzo de la política como `--effort`, tope de gasto opcional como `--max-tokens-budget` (corte `inconclusive`/`token_budget`), caché `{ocr_session_key}` y NULL en `max_context_tokens` cuando OCR no da muestra. Falta #80 para trocear diffs que no caben y la medición con datos reales; no es un tope del gasto total.
+- [ ] #72 **Parcial** (#109): `review_context_ceiling` global y techo por equipo aplicados como `--max-tokens` por grupo, esfuerzo de la política como `--effort`, tope de gasto opcional como `--max-tokens-budget` (corte `inconclusive`/`token_budget`), caché `{ocr_session_key}` y NULL en `max_context_tokens` cuando OCR no da muestra. Falta #80 para trocear diffs que no caben y la medición con datos reales; no es un tope del gasto total.
 - [ ] #80 Trocear diffs enormes por hunks, deduplicar hallazgos de trozos contiguos y publicar cobertura por archivo; nunca abandonar el PR entero.
 - [ ] #74 Revisión incremental `<sha revisado>..<head>` con vuelta a completa ante force-push, cambio de base o run parcial; antirrebote de 2 min.
 
