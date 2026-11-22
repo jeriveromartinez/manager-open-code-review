@@ -11,6 +11,7 @@ const live = useLiveStore()
 const links = computed(() => {
   const base = [
     { to: '/', label: 'Mi cola' },
+    { to: '/runs', label: 'Revisiones' },
     { to: '/repos', label: 'Repositorios' },
     { to: '/teams', label: 'Equipos' },
   ]

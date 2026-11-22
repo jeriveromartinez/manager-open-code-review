@@ -49,6 +49,8 @@ const detail: PRDetail = {
       trigger: 'manual',
       status: 'failed',
       attempt: 2,
+      phase: '',
+      phase_started_at: null,
       summary: 'falló la revisión',
       coverage: { reviewed_files: 2, skipped_files: 1, excluded_files: 4 },
       usage: { input_tokens: 100 },
@@ -203,9 +205,11 @@ describe('PrDetailView', () => {
     await flushPromises()
 
     const [registration] = live.registrations
-    expect(registration.types).toEqual(['pr.updated'])
+    expect(registration.types).toEqual(['pr.updated', 'run.updated'])
     expect(registration.filter!({ type: 'pr.updated', id: '42' })).toBe(true)
     expect(registration.filter!({ type: 'pr.updated', id: '43' })).toBe(false)
+    expect(registration.filter!({ type: 'run.updated', id: '9' })).toBe(true)
+    expect(registration.filter!({ type: 'run.updated', id: '10' })).toBe(false)
 
     await wrapper.get('[data-withdraw][data-finding-id="f1"]').trigger('click')
     await wrapper.get('[data-finding-reason]').setValue('falso positivo')
@@ -425,6 +429,53 @@ describe('PrDetailView', () => {
 
     expect(wrapper.find('[data-run-tokens]').exists()).toBe(false)
     expect(wrapper.get('[data-run-no-tokens]').text()).toContain('Sin datos de tokens')
+
+    wrapper.unmount()
+  })
+
+  it('shows the current phase and its elapsed time for an active run', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [
+        {
+          ...detail.runs[0],
+          status: 'running',
+          finished_at: null,
+          phase: 'reviewing',
+          phase_started_at: new Date(Date.now() - 90_000).toISOString(),
+        },
+      ],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const cell = wrapper.get('[data-run-phase-value]').text()
+    expect(cell).toContain('Revisando con OCR')
+    expect(cell).toContain('min')
+
+    wrapper.unmount()
+  })
+
+  it('labels an active run without a phase as unknown', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [{ ...detail.runs[0], status: 'queued', phase: '', phase_started_at: null }],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.get('[data-run-phase-value]').text()).toBe('—')
+
+    wrapper.unmount()
+  })
+
+  it('hides the phase for a run that already finished', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.find('[data-run-phase]').exists()).toBe(false)
 
     wrapper.unmount()
   })

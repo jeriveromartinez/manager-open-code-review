@@ -193,6 +193,27 @@ func (r *Runner) announce(ctx context.Context, run store.ReviewRun) {
 	}
 }
 
+// setPhase persists the current step of a running run and tells panels. A
+// terminal or superseded run rejects the write, which is expected when a phase
+// update races the completion: the review must never fail for it, so only a
+// real write error is logged.
+func (r *Runner) setPhase(ctx context.Context, runID uint, phase string, log *runLogSink) {
+	if err := r.Store.SetReviewRunPhase(ctx, runID, phase); err != nil {
+		if !errors.Is(err, store.ErrRunNotActive) {
+			log.Log(ctx, "worker", "", "warn", phase,
+				fmt.Sprintf("no se pudo guardar la fase: %v", err))
+		}
+		return
+	}
+	if r.Events == nil {
+		return
+	}
+	ev := events.Event{Type: "run.updated", ID: strconv.FormatUint(uint64(runID), 10)}
+	if err := r.Events.Publish(ctx, ev); err != nil {
+		slog.Warn("publish phase event", "run_id", runID, "phase", phase, "error", err)
+	}
+}
+
 // CheckProfile verifies an LLM profile with one minimal provider request. The
 // review binary is only the fallback for providers outside the closed table.
 func (r *Runner) CheckProfile(ctx context.Context, profileID uint) error {
@@ -227,6 +248,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	if ctx.Err() != nil {
 		return r.requeueInterrupted(ctx, run, log)
 	}
+	r.setPhase(ctx, run.ID, store.RunPhasePreparing, log)
 
 	var cfg store.ReviewConfig
 	var outcome runOutcome
@@ -446,6 +468,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		runCtx, cancel = context.WithTimeout(ctx, r.Cfg.Timeout)
 		defer cancel()
 	}
+	r.setPhase(runCtx, run.ID, store.RunPhaseCloning, log)
 	log.Log(runCtx, "worker", "", "info", logPhaseClone,
 		fmt.Sprintf("clonando %s (%s → %s)", cfg.Repo.FullName, baseRef, headRef))
 	mergeBase, err := Clone(runCtx, workDir, remote, baseRef, headRef, r.Cfg.FetchDepthMax)
@@ -470,6 +493,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		return out.superseded(fmt.Errorf("la ref del PR avanzó de %s a %s antes del checkout", run.HeadSHA, headSHA), "head_moved"), nil
 	}
 
+	r.setPhase(runCtx, run.ID, store.RunPhasePreparing, log)
 	excludes, dropped, err := policyExcludes(cfg.Policy.ExcludeGlobs)
 	if err != nil {
 		log.Log(runCtx, "worker", "", "error", logPhasePolicy,
@@ -592,6 +616,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		OnLog:       log.OCRLogger(runCtx, "main"),
 	}
 
+	r.setPhase(runCtx, run.ID, store.RunPhaseReviewing, log)
 	slog.Info("native OCR review started", "run_id", run.ID, "profile_id", cfg.Profile.ID, "from", fromSHA)
 	log.Log(runCtx, "worker", "main", "info", logPhaseOCR,
 		fmt.Sprintf("iniciando OCR sobre %s..%s", fromSHA, headSHA))
@@ -624,6 +649,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	// the pull request unreviewed.
 	var chunked chunkSummary
 	if paths := tooLargePaths(res); len(paths) > 0 && canChunkNativeRun(status, code) {
+		r.setPhase(runCtx, run.ID, store.RunPhaseChunking, log)
 		log.Log(runCtx, "worker", "", "info", logPhaseChunks, fmt.Sprintf(
 			"%d archivo(s) demasiado grandes para el run principal; se revisan por partes", len(paths)))
 		chunked = r.reviewTooLargeFiles(runCtx, run.ID, cfg.Profile.ID, reviewer, headSHA, paths, budget, out.tokens, log)
@@ -653,6 +679,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		out.summary = coverageSummaryText(status, reviewed, len(out.merged.Findings))
 	}
 	out.coverage = coverageJSONWithFiles(reviewed, skipped, excluded, files)
+	r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
 	log.Log(runCtx, "worker", "", "info", logPhaseFinish, fmt.Sprintf(
 		"cobertura final: %d revisados, %d omitidos, %d excluidos; %d hallazgo(s) tras deduplicar",
 		reviewed, skipped, excluded, len(out.merged.Findings)))

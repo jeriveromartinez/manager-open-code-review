@@ -86,7 +86,7 @@ describe('AppShell', () => {
 
     expect(mocks.api.me).toHaveBeenCalledTimes(1)
     expect(wrapper.get('[data-brand]').text()).toBe('QA Control Center')
-    expect(navLabels(wrapper)).toEqual(['Mi cola', 'Repositorios', 'Equipos'])
+    expect(navLabels(wrapper)).toEqual(['Mi cola', 'Revisiones', 'Repositorios', 'Equipos'])
     expect(wrapper.get('[data-nav="/repos"]').attributes('aria-current')).toBe('page')
     expect(wrapper.get('[data-nav="/"]').attributes('aria-current')).toBeUndefined()
     expect(wrapper.find('[data-page]').exists()).toBe(true)
@@ -96,7 +96,14 @@ describe('AppShell', () => {
     mocks.api.me.mockResolvedValue(me({ is_admin: true }))
     const wrapper = await mountShell()
 
-    expect(navLabels(wrapper)).toEqual(['Mi cola', 'Repositorios', 'Equipos', 'Agentes LLM', 'Ajustes'])
+    expect(navLabels(wrapper)).toEqual([
+      'Mi cola',
+      'Revisiones',
+      'Repositorios',
+      'Equipos',
+      'Agentes LLM',
+      'Ajustes',
+    ])
   })
 
   it('offers the team lead view only to leads and admins', async () => {

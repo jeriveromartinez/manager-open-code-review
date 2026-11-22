@@ -150,6 +150,12 @@ Las credenciales nunca llegan al log: se sustituyen el token de clonado, la clav
 
 `GET /api/review-runs/{id}/logs?after=<seq>&limit=<n>` (máximo 2000 líneas por página, 500 por defecto) devuelve `entries`, `next_after` y `has_more`. El run se resuelve a su PR y se aplica la misma visibilidad que en el dashboard: quien no puede ver el PR recibe 404. El evento SSE `run.log` avisa de que hay líneas nuevas. En `/prs/:id`, cada ejecución tiene **Ver log** (o **Ver log en vivo** si sigue en curso) y el panel se actualiza por SSE con un sondeo de respaldo cada 3 s; la casilla **Seguir** baja sola al final salvo que hayas subido a leer.
 
+### Revisiones en curso
+
+**Revisiones** (`/runs`, #123) lista los runs `queued` y `running` con repositorio, PR, equipo, perfil, trigger, estado, fase actual y tiempo transcurrido. Cada cambio de fase publica `run.updated` y la lista se refresca por SSE sin recargar; el reloj local avanza aunque no llegue ningún evento. El alcance es el mismo del dashboard: `GET /api/review-runs` solo devuelve runs de PRs de equipos visibles para el usuario.
+
+El worker guarda la fase en `review_runs.phase` (más `phase_started_at`): `preparing`, `cloning`, `reviewing`, `chunking` y `finishing`. Un run en cola, terminado o anterior a esta migración no tiene fase y se muestra como «—»; el detalle del PR también enseña la fase y su tiempo mientras el run sigue activo.
+
 ### Perfiles LLM
 
 En **Agentes LLM** (solo admins), «Nuevo perfil» permite dar nombre, proveedor, modelo, concurrencia (1 por defecto), activación y clave API. La clave es write-only: se cifra con `QA_WORKER_KEY` y nunca se devuelve ni se muestra. «Probar» encola una comprobación de salud en el worker, que envía una única petición de chat mínima al proveedor, sin herramientas; solo los proveedores fuera de la tabla cerrada y sin URL base usan `opencode` como respaldo. La tabla muestra `Saludable` o `Con error` con el motivo. La respuesta es asíncrona (202): vuelve a cargar la pantalla para ver el resultado final.
@@ -208,7 +214,7 @@ El binario admite `qa serve`, `qa worker`, `qa migrate`, `qa monitor` y `qa heal
 
 ## Rutas principales
 
-`GET /healthz` · `GET /api/setup/status` · `POST /api/setup/manifest` · `/setup` · `/auth/login` · `/auth/callback` · `/api/me` · `/api/stats` · `/api/prs` · `GET /api/prs/{id}` · `GET /api/review-runs/{id}/logs` · `POST /api/prs/{id}/retry` · `/api/teams` · `GET|PUT /api/teams/{id}/policy` · `GET|POST /api/llm-profiles` · `GET /api/llm-profiles/usage` · `POST /api/llm-profiles/{id}/health` · `GET /api/installations` · `POST /api/installations/{id}/sync` · `/agents` · `/prs/:id` · `GET /api/events` (SSE) · `POST /webhooks/github`. Cualquier otra ruta sirve la SPA.
+`GET /healthz` · `GET /api/setup/status` · `POST /api/setup/manifest` · `/setup` · `/auth/login` · `/auth/callback` · `/api/me` · `/api/stats` · `/api/prs` · `GET /api/prs/{id}` · `GET /api/review-runs` · `GET /api/review-runs/{id}/logs` · `POST /api/prs/{id}/retry` · `/api/teams` · `GET|PUT /api/teams/{id}/policy` · `GET|POST /api/llm-profiles` · `GET /api/llm-profiles/usage` · `POST /api/llm-profiles/{id}/health` · `GET /api/installations` · `POST /api/installations/{id}/sync` · `/agents` · `/runs` · `/prs/:id` · `GET /api/events` (SSE) · `POST /webhooks/github`. Cualquier otra ruta sirve la SPA.
 
 ## Hojas de ruta
 

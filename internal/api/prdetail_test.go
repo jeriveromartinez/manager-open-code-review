@@ -75,6 +75,14 @@ func TestPRDetailIncludesRunsAndFindings(t *testing.T) {
 	if _, ok := runObj["clone_token_enc"]; ok {
 		t.Errorf("run leaks clone_token_enc: %v", runObj)
 	}
+	// A run without a phase (queued, terminal or pre-#123) exposes an empty
+	// string and a null start so the panel can render "—".
+	if runObj["phase"] != "" {
+		t.Errorf("run phase = %v, want empty", runObj["phase"])
+	}
+	if started, ok := runObj["phase_started_at"]; !ok || started != nil {
+		t.Errorf("phase_started_at = %v (present %v), want null", started, ok)
+	}
 	if runObj["input_tokens"] != float64(1200) || runObj["output_tokens"] != float64(300) ||
 		runObj["reasoning_tokens"] != float64(250) ||
 		runObj["cache_read_tokens"] != float64(5000) || runObj["cache_write_tokens"] != float64(400) ||

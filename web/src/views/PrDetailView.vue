@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { api, type CoverageFile, type Finding, type PRDetail } from '../api'
+import { api, type CoverageFile, type Finding, type PRDetail, type ReviewRun } from '../api'
 import RunLogPanel from '../components/RunLogPanel.vue'
+import { formatElapsed, phaseLabel } from '../runPhase'
 import { cacheShare, formatTokens } from '../tokens'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { isConflict, isForbidden } from '../errors'
@@ -22,9 +23,18 @@ const reason = ref('')
 // Solo una ejecución muestra su log a la vez: el panel crece y se reinicia al
 // abrir otra, así el detalle del PR no se llena de historiales.
 const openLogRunId = ref<number | null>(null)
+// Reloj local: el tiempo en la fase actual avanza aunque no llegue ningún
+// evento, igual que el resto de vistas en vivo.
+const now = ref(new Date())
+let clock: ReturnType<typeof setInterval> | null = null
 
 function toggleLog(id: number): void {
   openLogRunId.value = openLogRunId.value === id ? null : id
+}
+
+function runPhaseText(run: ReviewRun): string {
+  if (!run.phase) return '—'
+  return `${phaseLabel(run.phase)} · ${formatElapsed(run.phase_started_at, now.value)}`
 }
 
 const severityLabels: Record<string, string> = {
@@ -256,13 +266,21 @@ async function applyAction(): Promise<void> {
 }
 
 useLiveRefresh(
-  ['pr.updated'],
+  ['pr.updated', 'run.updated'],
   () => load({ silent: true }),
-  (event) => event.id === String(prId.value),
+  (event) =>
+    event.type === 'pr.updated'
+      ? event.id === String(prId.value)
+      : (detail.value?.runs ?? []).some((run) => String(run.id) === event.id),
 )
 
 onMounted(() => {
+  clock = setInterval(() => (now.value = new Date()), 1000)
   void load()
+})
+
+onBeforeUnmount(() => {
+  if (clock !== null) clearInterval(clock)
 })
 </script>
 
@@ -374,6 +392,14 @@ onMounted(() => {
                 <div class="run__time">
                   <dt>Fin</dt>
                   <dd><code>{{ run.finished_at ?? '—' }}</code></dd>
+                </div>
+                <div
+                  v-if="run.status === 'running' || run.status === 'queued'"
+                  class="run__time"
+                  data-run-phase
+                >
+                  <dt>Fase</dt>
+                  <dd data-run-phase-value>{{ runPhaseText(run) }}</dd>
                 </div>
               </dl>
               <p v-if="run.summary" class="run__summary">{{ run.summary }}</p>

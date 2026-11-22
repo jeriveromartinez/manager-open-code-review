@@ -121,10 +121,31 @@ export type ReviewRun = {
   total_tokens: number | null
   /** Mayor prompt de la ejecución; vigila el techo de contexto (#72). */
   max_context_tokens: number | null
+  /** Fase actual de un run en curso; vacía en cola, terminado o anterior a #123. */
+  phase: string
+  phase_started_at: string | null
   started_at: string | null
   finished_at: string | null
   created_at: string
   updated_at: string
+}
+
+/** Una revisión encolada o en curso en la vista global (#123). */
+export type ActiveRun = {
+  id: number
+  pull_request_id: number
+  pr_number: number
+  pr_title: string
+  repo: string
+  team: string
+  profile: string
+  trigger: string
+  status: string
+  attempt: number
+  phase: string
+  phase_started_at: string | null
+  started_at: string | null
+  created_at: string
 }
 
 /** Una línea del log de una ejecución; el panel la muestra en vivo (#124). */
@@ -457,6 +478,7 @@ export const api = {
   readiness: () => request<Readiness>('/api/readiness'),
   prs: () => request<PRView[]>('/api/prs'),
   prDetail: (id: number) => request<PRDetail>(`/api/prs/${id}`),
+  activeRuns: () => request<{ runs: ActiveRun[] }>('/api/review-runs'),
   reviewRunLogs: (id: number, after = 0, limit = 500) =>
     request<ReviewRunLogPage>(`/api/review-runs/${id}/logs?after=${after}&limit=${limit}`),
   retryPR: (id: number) =>

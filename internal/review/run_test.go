@@ -1319,11 +1319,19 @@ func TestRunSaturatedProfileIsRequeued(t *testing.T) {
 		t.Errorf("EnqueuePublish calls = %v, want none for a requeued run", got)
 	}
 	// The claim and the return to the queue are both announced, so the panel
-	// stops showing the run as started; there is no terminal event.
+	// stops showing the run as started; there is no terminal event. Phase
+	// announcements also travel as run.updated and are not part of this
+	// sequence.
 	prEvent := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
 	want := []events.Event{prEvent, prEvent}
-	if got := f.events.orchestration(); !reflect.DeepEqual(got, want) {
-		t.Errorf("events = %+v, want the claim and the requeue %+v", got, want)
+	got := make([]events.Event, 0, len(want))
+	for _, ev := range f.events.orchestration() {
+		if ev.Type == "pr.updated" {
+			got = append(got, ev)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("pr events = %+v, want the claim and the requeue %+v", got, want)
 	}
 
 	// Releasing the slot lets the retried run go through.
@@ -1375,18 +1383,47 @@ func TestRunDuplicateDeliveryIsNoop(t *testing.T) {
 	if err := r.Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("first Run() error = %v", err)
 	}
+	afterFirst := f.events.orchestration()
 	if err := r.Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("second Run() error = %v", err)
 	}
 	if got := f.jobs.published(); len(got) != 1 {
 		t.Errorf("EnqueuePublish calls = %v, want one", got)
 	}
-	if got := len(f.events.orchestration()); got != 3 {
-		t.Errorf("events = %d, want the claim pr.updated, run.updated and pr.updated", got)
+	if got := f.events.orchestration(); !reflect.DeepEqual(got, afterFirst) {
+		t.Errorf("second delivery published %+v, want the sequence unchanged %+v", got, afterFirst)
 	}
 	wantPR := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
 	if !f.events.has(wantPR) {
 		t.Errorf("missing event %+v; got %+v", wantPR, f.events.items)
+	}
+}
+
+// The live view follows the phase columns, so every milestone must announce a
+// run.updated and a finished run must not keep the last phase.
+func TestRunAnnouncesPhasesAndClearsThem(t *testing.T) {
+	f := newRunTestFixture(t)
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	run := f.loadRun(t)
+	if run.Status != store.RunSucceeded {
+		t.Fatalf("run status = %q, want succeeded", run.Status)
+	}
+	if run.Phase != "" || run.PhaseStartedAt != nil {
+		t.Errorf("finished run kept phase %q/%v, want empty", run.Phase, run.PhaseStartedAt)
+	}
+
+	updates := 0
+	for _, ev := range f.events.snapshot() {
+		if ev.Type == "run.updated" {
+			updates++
+		}
+	}
+	// preparing, cloning, preparing, reviewing, finishing and the terminal event.
+	if updates < 4 {
+		t.Errorf("run.updated events = %d, want the phase announcements", updates)
 	}
 }
 
@@ -1407,17 +1444,30 @@ func TestClaimNotifiesThePR(t *testing.T) {
 
 	prEvent := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
 	runEvent := events.Event{Type: "run.updated", ID: strconv.FormatUint(uint64(f.runID), 10)}
-	want := []events.Event{prEvent, runEvent, prEvent}
-	if got := f.events.orchestration(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("events = %+v, want the claim first: %+v", got, want)
+	got := f.events.orchestration()
+	if len(got) < 2 || got[0] != prEvent {
+		t.Fatalf("events = %+v, want the claim pr.updated first", got)
+	}
+	lastPR, lastRun := -1, -1
+	for i, ev := range got {
+		if ev == prEvent {
+			lastPR = i
+		}
+		if ev == runEvent {
+			lastRun = i
+		}
+	}
+	if lastPR != len(got)-1 || lastRun < 0 || lastRun > lastPR {
+		t.Fatalf("events = %+v, want the terminal run.updated before the final pr.updated", got)
 	}
 
 	// The run is terminal now, so a redelivery is not claimed and stays silent.
+	before := f.events.orchestration()
 	if err := r.Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("unclaimed Run() error = %v", err)
 	}
-	if got := f.events.orchestration(); !reflect.DeepEqual(got, want) {
-		t.Errorf("events after an unclaimed run = %+v, want unchanged %+v", got, want)
+	if got := f.events.orchestration(); !reflect.DeepEqual(got, before) {
+		t.Errorf("events after an unclaimed run = %+v, want unchanged %+v", got, before)
 	}
 }
 
