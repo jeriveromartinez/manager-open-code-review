@@ -307,7 +307,10 @@ func runWorker() error {
 		return fmt.Errorf("start review client: %w", err)
 	}
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Wait for the soft stop that the signal context started, including the
+		// escalation and the detached write that requeues an interrupted run,
+		// instead of cutting it off after ten seconds.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), jobs.ReviewDrainTimeout+20*time.Second)
 		defer cancel()
 		if err := client.Stop(shutdownCtx); err != nil {
 			slog.Error("stop review client", "error", err)

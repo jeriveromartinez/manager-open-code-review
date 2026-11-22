@@ -24,6 +24,10 @@ const (
 	// WatchdogInterval is how often the worker process enqueues a stale-run
 	// sweep.
 	WatchdogInterval = 5 * time.Minute
+	// ReviewDrainTimeout is how long a stopping worker lets in-flight reviews
+	// finish before River cancels them. It is short enough for a deploy and
+	// long enough for a pass that is about to deliver its result.
+	ReviewDrainTimeout = 45 * time.Second
 	// The sweep feeds the llm_health queue, so it runs on its own queue: it must
 	// not hold the only health worker while it looks up the stale profiles.
 	llmSweepQueue = "llm_health_sweep"
@@ -182,6 +186,11 @@ func reviewClientConfig(runner *review.Runner, workers *river.Workers, queues ma
 		Queues:     queues,
 		Workers:    workers,
 		JobTimeout: jobTimeout,
+		// Without a soft stop River derives job contexts from the context
+		// passed to Start, so SIGTERM cancels a running review immediately and
+		// leaves the row "running" until the watchdog. The soft stop stops
+		// fetching and gives in-flight jobs this grace period instead.
+		SoftStopTimeout: ReviewDrainTimeout,
 		// The review process enqueues publish jobs that only the control
 		// process registers. Without this, River rejects those inserts.
 		SkipUnknownJobCheck: true,
