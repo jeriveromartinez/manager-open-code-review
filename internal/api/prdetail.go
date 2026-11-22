@@ -29,6 +29,7 @@ type reviewRunDTO struct {
 	// Token columns are null on runs that predate the accounting (#73).
 	InputTokens      *int64  `json:"input_tokens"`
 	OutputTokens     *int64  `json:"output_tokens"`
+	ReasoningTokens  *int64  `json:"reasoning_tokens"`
 	CacheReadTokens  *int64  `json:"cache_read_tokens"`
 	CacheWriteTokens *int64  `json:"cache_write_tokens"`
 	TotalTokens      *int64  `json:"total_tokens"`
@@ -53,6 +54,7 @@ func reviewRunDTOOf(run store.ReviewRun) reviewRunDTO {
 		Coverage: jsonObject(run.Coverage), Usage: jsonObject(run.Usage),
 		ErrorCode: run.ErrorCode, ErrorMessage: run.ErrorMessage,
 		InputTokens: run.InputTokens, OutputTokens: run.OutputTokens,
+		ReasoningTokens: run.ReasoningTokens,
 		CacheReadTokens: run.CacheReadTokens, CacheWriteTokens: run.CacheWriteTokens,
 		TotalTokens: run.TotalTokens, MaxContextTokens: run.MaxContextTokens,
 		StartedAt: formatTimePtr(run.StartedAt), FinishedAt: formatTimePtr(run.FinishedAt),

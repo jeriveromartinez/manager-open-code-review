@@ -91,6 +91,8 @@ export type ReviewRun = {
   /** null en ejecuciones anteriores al registro de consumo (#73). */
   input_tokens: number | null
   output_tokens: number | null
+  /** Parte oculta de output_tokens; baja al elegir una variante de bajo esfuerzo (#65). */
+  reasoning_tokens: number | null
   cache_read_tokens: number | null
   cache_write_tokens: number | null
   total_tokens: number | null

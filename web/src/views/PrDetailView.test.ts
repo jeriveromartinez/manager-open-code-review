@@ -55,6 +55,7 @@ const detail: PRDetail = {
       error_message: 'timeout contacting provider',
       input_tokens: 25000,
       output_tokens: 5000,
+      reasoning_tokens: 48000,
       cache_read_tokens: 60000,
       cache_write_tokens: 10000,
       total_tokens: 100000,
@@ -262,6 +263,7 @@ describe('PrDetailView', () => {
     expect(tokens).toContain('25.0k / 5.0k')
     expect(tokens).toContain('70 %')
     expect(tokens).toContain('41.0k')
+    expect(wrapper.get('[data-run-reasoning]').text()).toContain('48.0k')
 
     wrapper.unmount()
   })
@@ -274,6 +276,7 @@ describe('PrDetailView', () => {
           ...detail.runs[0],
           input_tokens: null,
           output_tokens: null,
+          reasoning_tokens: null,
           cache_read_tokens: null,
           cache_write_tokens: null,
           total_tokens: null,

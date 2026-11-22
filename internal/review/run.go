@@ -166,6 +166,7 @@ func (o *runOutcome) tokenTotals() store.RunUsage {
 	return store.RunUsage{
 		Input:      int64(o.tokens.Input),
 		Output:     int64(o.tokens.Output),
+		Reasoning:  int64(o.tokens.Reasoning),
 		CacheRead:  int64(o.tokens.Cache.Read),
 		CacheWrite: int64(o.tokens.Cache.Write),
 		Total:      int64(o.tokens.Total),
