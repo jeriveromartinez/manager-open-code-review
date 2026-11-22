@@ -135,7 +135,10 @@ type nativeManifest struct {
 // nativeInvocation is the input of buildReviewArgs, kept separate from the
 // executor so the argument contract is unit-testable.
 type nativeInvocation struct {
-	RepoDir        string
+	RepoDir string
+	// Commit, when set, reviews a single commit against its parent instead of
+	// the base..head range. It carries a synthetic chunk commit.
+	Commit         string
 	BaseRef        string
 	HeadRef        string
 	BackgroundFile string
@@ -151,8 +154,13 @@ func buildReviewArgs(in nativeInvocation) []string {
 	args := []string{
 		"review",
 		"--repo", in.RepoDir,
-		"--from", in.BaseRef,
-		"--to", in.HeadRef,
+	}
+	if in.Commit != "" {
+		args = append(args, "--commit", in.Commit)
+	} else {
+		args = append(args, "--from", in.BaseRef, "--to", in.HeadRef)
+	}
+	args = append(args,
 		"--format", "json",
 		"--audience", "agent",
 		"--provider", nativeProviderName,
@@ -160,7 +168,7 @@ func buildReviewArgs(in nativeInvocation) []string {
 		"--effort", in.Effort,
 		"--max-tokens", fmt.Sprint(in.MaxTokens),
 		"--background-file", in.BackgroundFile,
-	}
+	)
 	// Zero disables the optional aggregate budget; OCR rejects the flag with 0.
 	if in.TokenBudget > 0 {
 		args = append(args, "--max-tokens-budget", fmt.Sprint(in.TokenBudget))
@@ -200,6 +208,9 @@ type NativeReviewer struct {
 	Background string
 	BaseRef    string
 	HeadRef    string
+	// Commit reviews one synthetic chunk commit against its parent instead of
+	// BaseRef..HeadRef. Internal to the diff-chunking path.
+	Commit string
 	// Effort, MaxTokens and TokenBudget come from the team policy and the
 	// global settings, resolved by Runner.execute on every run.
 	Effort      string
@@ -245,6 +256,7 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 	}
 	args := buildReviewArgs(nativeInvocation{
 		RepoDir:        n.RepoDir,
+		Commit:         n.Commit,
 		BaseRef:        n.BaseRef,
 		HeadRef:        n.HeadRef,
 		BackgroundFile: backgroundPath,
