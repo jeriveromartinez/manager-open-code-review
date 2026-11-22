@@ -49,7 +49,7 @@ const detail: PRDetail = {
       status: 'failed',
       attempt: 2,
       summary: 'falló la revisión',
-      coverage: { reviewed_files: 2, skipped_files: 1 },
+      coverage: { reviewed_files: 2, skipped_files: 1, excluded_files: 4 },
       usage: { input_tokens: 100 },
       error_code: 'LLM_TIMEOUT',
       error_message: 'timeout contacting provider',
@@ -255,6 +255,7 @@ describe('PrDetailView', () => {
     expect(wrapper.get('[data-run]').text()).toContain('timeout contacting provider')
     expect(wrapper.get('[data-coverage-reviewed]').text()).toContain('2')
     expect(wrapper.get('[data-coverage-skipped]').text()).toContain('1')
+    expect(wrapper.get('[data-coverage-excluded]').text()).toContain('4')
 
     const tokens = wrapper.get('[data-run-tokens]').text()
     expect(tokens).toContain('100.0k')

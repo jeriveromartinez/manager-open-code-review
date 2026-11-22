@@ -379,6 +379,10 @@ onMounted(() => {
               <dt>Archivos omitidos</dt>
               <dd><code>{{ coverageCount('skipped_files') }}</code></dd>
             </div>
+            <div class="coverage__item" data-coverage-excluded>
+              <dt>Archivos excluidos por la política</dt>
+              <dd><code>{{ coverageCount('excluded_files') }}</code></dd>
+            </div>
           </dl>
         </section>
       </div>

@@ -1,6 +1,7 @@
 package review
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -140,9 +141,12 @@ type runOutcome struct {
 	message  string
 	summary  string
 	coverage []byte
-	usage    []byte
-	findings []store.Finding
-	resolved []string
+	// excludedFiles counts the files OCR dropped because of the team's policy,
+	// reported in the coverage so the panel does not treat them as missing.
+	excludedFiles int
+	usage         []byte
+	findings      []store.Finding
+	resolved      []string
 	// tokens accumulates every model call of the run; usage is its JSON form,
 	// kept for panels that read the raw event stream.
 	tokens tokenUsage
@@ -373,7 +377,7 @@ func (r *Runner) requeueInterrupted(ctx context.Context, run store.ReviewRun) er
 // error is only set when the run must be retried instead of finished.
 func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig) (runOutcome, error) {
 	out := runOutcome{
-		coverage: coverageJSON(0, 0),
+		coverage: coverageJSON(0, 0, 0),
 		usage:    []byte(`{}`),
 		runID:    run.ID,
 		prID:     run.PullRequestID,
@@ -418,7 +422,17 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		return out.superseded(fmt.Errorf("la ref del PR avanzó de %s a %s antes del checkout", run.HeadSHA, headSHA), "head_moved"), nil
 	}
 
-	ocr := &OCR{Bin: r.Cfg.OCRBin, RepoDir: workDir}
+	excludes, dropped, err := policyExcludes(cfg.Policy.ExcludeGlobs)
+	if err != nil {
+		return out.failed(fmt.Errorf("leer exclusiones de la política: %w", err), "config"), nil
+	}
+	if len(dropped) > 0 {
+		// OCR splits --exclude on commas without escaping, so these patterns
+		// cannot reach it intact; warn instead of applying a mangled glob.
+		slog.Warn("review excludes dropped: OCR cannot carry commas",
+			"run_id", run.ID, "patterns", dropped)
+	}
+	ocr := &OCR{Bin: r.Cfg.OCRBin, RepoDir: workDir, Excludes: excludes}
 	// El primer run no tiene BaseSHA: usar el nombre de rama no funciona en un
 	// clon shallow porque no existe como ref local. FETCH_HEAD sí tiene el SHA
 	// exacto que se acaba de pedir como base.
@@ -434,6 +448,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		return classifyOCR(ctx, out, err)
 	}
 	baseSHA := preview.MergeBase
+	out.excludedFiles = len(preview.ExcludedFiles)
 
 	paths := make([]string, 0, len(preview.ReviewableFiles))
 	for _, f := range preview.ReviewableFiles {
@@ -461,7 +476,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	}
 
 	reviewed := countCovered(passes)
-	out.coverage = coverageJSON(reviewed, len(uncovered))
+	out.coverage = coverageJSON(reviewed, len(uncovered), out.excludedFiles)
 	if len(uncovered) > 0 {
 		return out.inconclusive(
 			fmt.Errorf("cobertura incompleta: %d archivos sin revisar", len(uncovered)),
@@ -500,7 +515,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			Timeout: timeout,
 			Steps:   r.Cfg.Steps,
 		}
-		prompt := BuildPrompt(cfg.PR, pass.Rules, open, diffPath)
+		prompt := BuildPrompt(cfg.PR, pass.Rules, open, cfg.Policy.ExtraInstructions, diffPath)
 
 		text, usage, runErr := r.runAgent(ctx, agent, prompt, []string{diffPath})
 		out.tokens.addJSON(usage)
@@ -636,15 +651,43 @@ func countCovered(passes []Pass) int {
 	return len(seen)
 }
 
-func coverageJSON(reviewed, skipped int) []byte {
+func coverageJSON(reviewed, skipped, excluded int) []byte {
 	raw, err := json.Marshal(struct {
 		ReviewedFiles int `json:"reviewed_files"`
 		SkippedFiles  int `json:"skipped_files"`
-	}{reviewed, skipped})
+		ExcludedFiles int `json:"excluded_files"`
+	}{reviewed, skipped, excluded})
 	if err != nil {
 		return []byte(`{}`)
 	}
 	return raw
+}
+
+// policyExcludes builds the value of OCR's --exclude flag. OCR splits the value
+// on commas and offers no escaping, so a brace pattern or any other glob with a
+// comma cannot survive the flag: those are returned as dropped so the caller
+// warns instead of applying a mangled glob. Blank entries are ignored.
+func policyExcludes(raw []byte) (string, []string, error) {
+	var patterns []string
+	if len(bytes.TrimSpace(raw)) > 0 {
+		if err := json.Unmarshal(raw, &patterns); err != nil {
+			return "", nil, fmt.Errorf("exclude_globs no es una lista: %w", err)
+		}
+	}
+	kept := make([]string, 0, len(patterns))
+	var dropped []string
+	for _, pattern := range patterns {
+		p := strings.TrimSpace(pattern)
+		switch {
+		case p == "":
+			continue
+		case strings.Contains(p, ","):
+			dropped = append(dropped, p)
+		default:
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, ","), dropped, nil
 }
 
 func hasBlockingFinding(findings []store.Finding, threshold string) bool {
@@ -720,7 +763,7 @@ func (out runOutcome) inconclusive(err error, code string) runOutcome {
 // pass is 1-based and is also the pass that could not run.
 func (out runOutcome) budgetExhausted(pass, passes int, all []Pass, budget time.Duration) runOutcome {
 	done := pass - 1
-	out.coverage = coverageJSON(countCovered(all[:done]), countCovered(all[done:]))
+	out.coverage = coverageJSON(countCovered(all[:done]), countCovered(all[done:]), out.excludedFiles)
 	err := fmt.Errorf(
 		"presupuesto agotado en la pasada %d de %d: %d archivos sin revisar; "+
 			"aumenta review_timeout en Ajustes → Revisión (actual %s) para completar la revisión",

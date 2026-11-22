@@ -532,6 +532,28 @@ describe('AgentsView', () => {
     wrapper.unmount()
   })
 
+  it('edits extra instructions and one exclude glob per line', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    expect((wrapper.get('[data-policy-exclude]').element as HTMLTextAreaElement).value).toBe('*.pb.go')
+
+    await wrapper.get('[data-policy-extra]').setValue('  No comentes estilo  ')
+    await wrapper.get('[data-policy-exclude]').setValue('*.pb.go\n\n  vendor/**  \n')
+    await wrapper.get('[data-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.savePolicy).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        extra_instructions: 'No comentes estilo',
+        exclude_globs: ['*.pb.go', 'vendor/**'],
+      }),
+    )
+
+    wrapper.unmount()
+  })
+
   it('edits a profile without sending an api_key when the field is blank', async () => {
     const wrapper = mountAgents()
     await flushPromises()

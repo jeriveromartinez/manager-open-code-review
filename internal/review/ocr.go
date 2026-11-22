@@ -43,6 +43,9 @@ type RuleGroup struct {
 type OCR struct {
 	Bin     string
 	RepoDir string
+	// Excludes is the comma-separated value of `--exclude` (the team's
+	// exclude_globs). OCR merges it with the rule.json excludes.
+	Excludes string
 }
 
 // Preview invoca `ocr delegate preview` para el rango [baseRef, head].
@@ -70,6 +73,9 @@ func (o *OCR) run(ctx context.Context, subcommand, baseRef, head string, paths [
 		"--repo", o.RepoDir,
 		"--from", baseRef,
 		"--to", head,
+	}
+	if o.Excludes != "" {
+		args = append(args, "--exclude", o.Excludes)
 	}
 	args = append(args, paths...)
 

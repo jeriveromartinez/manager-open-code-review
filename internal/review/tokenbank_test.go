@@ -80,7 +80,7 @@ func bankPrompt(t *testing.T, diffPath string) string {
 		BaseRef: "main",
 		HeadRef: "feature",
 		HeadSHA: "0123456789abcdef",
-	}, nil, nil, diffPath)
+	}, nil, nil, "", diffPath)
 }
 
 // TestTokenBankNoReadsMakesOneRequest is the acceptance test for #70: a pass

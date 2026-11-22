@@ -85,6 +85,9 @@ const selectedTeamId = ref<number | null>(null)
 const policy = ref<QAPolicy | null>(null)
 const policyProfileId = ref<number | null>(null)
 const policyRequireGreenCI = ref(false)
+const policyExtraInstructions = ref('')
+// One glob per line: a comma inside a pattern must survive editing.
+const policyExcludeGlobs = ref('')
 const policyError = ref<string | null>(null)
 const policyMessage = ref<string | null>(null)
 // Set when someone else changed what is on screen while it had unsaved edits.
@@ -126,7 +129,16 @@ function applyPolicy(saved: QAPolicy): void {
   policy.value = saved
   policyProfileId.value = saved.llm_profile_id || null
   policyRequireGreenCI.value = saved.require_green_ci
+  policyExtraInstructions.value = saved.extra_instructions
+  policyExcludeGlobs.value = saved.exclude_globs.join('\n')
   stalePolicy.value = false
+}
+
+function parseGlobs(raw: string): string[] {
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
 }
 
 async function loadPolicy(): Promise<void> {
@@ -144,7 +156,9 @@ const policyDirty = computed(
   () =>
     policy.value !== null &&
     (policyProfileId.value !== (policy.value.llm_profile_id || null) ||
-      policyRequireGreenCI.value !== policy.value.require_green_ci),
+      policyRequireGreenCI.value !== policy.value.require_green_ci ||
+      policyExtraInstructions.value !== policy.value.extra_instructions ||
+      policyExcludeGlobs.value !== policy.value.exclude_globs.join('\n')),
 )
 
 // Health checks also announce a profile; only these fields are someone's edit.
@@ -456,17 +470,15 @@ async function savePolicy(): Promise<void> {
   const body: QAPolicyInput = {
     llm_profile_id: policyProfileId.value,
     blocking_threshold: policy.value?.blocking_threshold ?? 'major',
-    extra_instructions: policy.value?.extra_instructions ?? '',
-    exclude_globs: policy.value?.exclude_globs ?? [],
+    extra_instructions: policyExtraInstructions.value.trim(),
+    exclude_globs: parseGlobs(policyExcludeGlobs.value),
     max_files: policy.value?.max_files ?? 40,
     max_diff_lines: policy.value?.max_diff_lines ?? 3000,
     max_passes: policy.value?.max_passes ?? 4,
     require_green_ci: policyRequireGreenCI.value,
   }
   try {
-    const saved = await api.savePolicy(selectedTeamId.value, body)
-    policy.value = saved
-    policyRequireGreenCI.value = saved.require_green_ci
+    applyPolicy(await api.savePolicy(selectedTeamId.value, body))
     policyMessage.value = 'Política guardada'
   } catch {
     policyError.value = 'No se pudo guardar la política'
@@ -650,6 +662,37 @@ onMounted(() => {
               </span>
             </span>
           </label>
+
+          <div class="policy__extras">
+            <label class="field">
+              <span class="field__label">Instrucciones extra</span>
+              <textarea
+                v-model="policyExtraInstructions"
+                class="field__input"
+                rows="4"
+                data-policy-extra
+                placeholder="Ej.: no comentes estilo; sigue las convenciones del repo"
+              ></textarea>
+              <span class="field__hint">
+                Se envían al revisor como datos no confiables, en una sección aparte del diff.
+              </span>
+            </label>
+            <label class="field">
+              <span class="field__label">Archivos excluidos</span>
+              <textarea
+                v-model="policyExcludeGlobs"
+                class="field__input"
+                rows="4"
+                data-policy-exclude
+                placeholder="**/*.pb.go&#10;vendor/**"
+              ></textarea>
+              <span class="field__hint">
+                Un patrón por línea, estilo gitignore. No se envían al modelo ni generan hallazgos.
+                Los patrones con comas (por ejemplo <code>**/*.{go,js}</code>) no se pueden pasar a OCR y se ignoran.
+              </span>
+            </label>
+          </div>
+
           <p v-if="policyError" class="form-error" role="alert">{{ policyError }}</p>
           <p v-else-if="policyMessage" class="policy__message" role="status">{{ policyMessage }}</p>
         </section>
@@ -1071,6 +1114,19 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+.policy__extras {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.policy__extras .field__input {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+}
+
 .policy-ci {
   display: flex;
   align-items: flex-start;
@@ -1365,7 +1421,8 @@ onMounted(() => {
 }
 
 @media (max-width: 880px) {
-  .policy__fields {
+  .policy__fields,
+  .policy__extras {
     grid-template-columns: minmax(0, 1fr);
   }
 
