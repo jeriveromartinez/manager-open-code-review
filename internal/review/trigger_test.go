@@ -104,13 +104,14 @@ func triggerTestPEM(t *testing.T) string {
 }
 
 type triggerFixture struct {
-	t       *testing.T
-	ctx     context.Context
-	st      *store.Store
-	jobs    *triggerTestJobs
-	checks  *triggerTestChecks
-	trigger *Trigger
-	seq     int64
+	t            *testing.T
+	ctx          context.Context
+	st           *store.Store
+	jobs         *triggerTestJobs
+	checks       *triggerTestChecks
+	trigger      *Trigger
+	seq          int64
+	tokenExpires time.Time
 }
 
 type seedOpts struct {
@@ -132,6 +133,7 @@ func newTriggerFixture(t *testing.T) *triggerFixture {
 		t.Fatalf("NewBox: %v", err)
 	}
 
+	expiresAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost ||
 			!strings.HasPrefix(r.URL.Path, "/app/installations/") ||
@@ -140,7 +142,7 @@ func newTriggerFixture(t *testing.T) *triggerFixture {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"token":"read-token","expires_at":"2026-11-19T12:00:00Z"}`)
+		_, _ = fmt.Fprintf(w, `{"token":"read-token","expires_at":%q}`, expiresAt.Format(time.RFC3339))
 	}))
 	t.Cleanup(srv.Close)
 
@@ -151,11 +153,12 @@ func newTriggerFixture(t *testing.T) *triggerFixture {
 	jobs := &triggerTestJobs{}
 	checks := &triggerTestChecks{}
 	return &triggerFixture{
-		t:      t,
-		ctx:    context.Background(),
-		st:     st,
-		jobs:   jobs,
-		checks: checks,
+		t:            t,
+		ctx:          context.Background(),
+		st:           st,
+		jobs:         jobs,
+		checks:       checks,
+		tokenExpires: expiresAt,
 		trigger: &Trigger{
 			Store:  st,
 			Apps:   triggerTestApps{app: app},
@@ -259,6 +262,9 @@ func TestTriggerEnqueuesReview(t *testing.T) {
 	if string(token) != "read-token" {
 		t.Errorf("clone token = %q, want %q", token, "read-token")
 	}
+	if run.CloneTokenExpiresAt == nil || !run.CloneTokenExpiresAt.Equal(f.tokenExpires) {
+		t.Errorf("clone token expiry = %v, want %v", run.CloneTokenExpiresAt, f.tokenExpires)
+	}
 	if len(f.jobs.reviews) != 1 || f.jobs.reviews[0] != run.ID {
 		t.Errorf("EnqueueReview calls = %v, want [%d]", f.jobs.reviews, run.ID)
 	}
@@ -270,6 +276,70 @@ func TestTriggerEnqueuesReview(t *testing.T) {
 	}
 	if len(f.checks.cancelled) != 0 {
 		t.Errorf("CancelCheck calls = %v, want none", f.checks.cancelled)
+	}
+}
+
+// TestRefreshQueuedTokensRenewsExpiringRuns covers the queue backlog case: a
+// run whose token is about to expire gets a fresh one before a worker claims
+// it, while runs with a valid token are left alone.
+func TestRefreshQueuedTokensRenewsExpiringRuns(t *testing.T) {
+	f := newTriggerFixture(t)
+	stalePR := f.seed("stale", eligibleOpts())
+	freshPR := f.seed("fresh", eligibleOpts())
+	for _, pr := range []store.PullRequest{stalePR, freshPR} {
+		if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+			t.Fatalf("OnPullRequest(%d) error = %v", pr.ID, err)
+		}
+	}
+
+	staleRuns, err := f.st.ListReviewRuns(f.ctx, stalePR.ID)
+	if err != nil || len(staleRuns) != 1 {
+		t.Fatalf("stale runs = %v, err = %v", staleRuns, err)
+	}
+	freshRuns, err := f.st.ListReviewRuns(f.ctx, freshPR.ID)
+	if err != nil || len(freshRuns) != 1 {
+		t.Fatalf("fresh runs = %v, err = %v", freshRuns, err)
+	}
+	oldSealed, err := f.trigger.Box.Seal([]byte("old-token"))
+	if err != nil {
+		t.Fatalf("seal old token: %v", err)
+	}
+	nearExpiry := time.Now().Add(5 * time.Minute).UTC()
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", staleRuns[0].ID).
+		Updates(map[string]any{"clone_token_enc": oldSealed, "clone_token_expires_at": nearExpiry}).Error; err != nil {
+		t.Fatalf("simulate expiring run: %v", err)
+	}
+
+	refreshed, err := f.trigger.RefreshQueuedTokens(f.ctx, 10)
+	if err != nil {
+		t.Fatalf("RefreshQueuedTokens() error = %v", err)
+	}
+	if refreshed != 1 {
+		t.Errorf("refreshed = %d, want 1", refreshed)
+	}
+
+	renewed, err := f.st.ReviewRun(f.ctx, staleRuns[0].ID)
+	if err != nil {
+		t.Fatalf("reload stale run: %v", err)
+	}
+	token, err := f.trigger.Box.Open(renewed.CloneTokenEnc)
+	if err != nil {
+		t.Fatalf("open renewed token: %v", err)
+	}
+	if string(token) != "read-token" {
+		t.Errorf("renewed token = %q, want %q", token, "read-token")
+	}
+	if renewed.CloneTokenExpiresAt == nil || !renewed.CloneTokenExpiresAt.Equal(f.tokenExpires) {
+		t.Errorf("renewed expiry = %v, want %v", renewed.CloneTokenExpiresAt, f.tokenExpires)
+	}
+
+	untouched, err := f.st.ReviewRun(f.ctx, freshRuns[0].ID)
+	if err != nil {
+		t.Fatalf("reload fresh run: %v", err)
+	}
+	if untouched.CloneTokenEnc != freshRuns[0].CloneTokenEnc {
+		t.Error("a run with a valid token was refreshed")
 	}
 }
 

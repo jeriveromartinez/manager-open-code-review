@@ -123,7 +123,7 @@ func runServe() error {
 		Store: st, Apps: apps, Box: workerBox, Events: publisher, Checks: publisherWorker,
 	}
 	client, err := jobs.NewControlClient(st.Pool, s, jobs.ControlDeps{
-		Trigger: trigger, Publisher: publisherWorker,
+		Trigger: trigger, Publisher: publisherWorker, Tokens: trigger,
 	})
 	if err != nil {
 		return fmt.Errorf("create control client: %w", err)

@@ -713,6 +713,78 @@ func TestReviewConfigForPR(t *testing.T) {
 	}
 }
 
+// TestQueuedRunsForTokenRefreshAndSetCloneToken pins the two halves of the
+// token renewal: which queued runs need a fresh token, and that a run claimed
+// meanwhile is never overwritten.
+func TestQueuedRunsForTokenRefreshAndSetCloneToken(t *testing.T) {
+	f := newFixture(t)
+	now := time.Now().UTC()
+
+	installID := f.nextID()
+	f.installation(installID)
+	f.repo(installID, installID, "acme/tokens", nil, true)
+
+	nearRun := f.run(f.openPR(installID, 1, store.StatusPending, false), store.RunQueued)
+	farRun := f.run(f.openPR(installID, 2, store.StatusPending, false), store.RunQueued)
+	unknownRun := f.run(f.openPR(installID, 3, store.StatusPending, false), store.RunQueued)
+	runningRun := f.run(f.openPR(installID, 4, store.StatusPending, false), store.RunRunning)
+
+	db := f.s.DB.WithContext(f.ctx)
+	updates := []struct {
+		id     uint
+		expiry time.Time
+	}{
+		{nearRun.ID, now.Add(10 * time.Minute)},
+		{farRun.ID, now.Add(time.Hour)},
+		{runningRun.ID, now.Add(time.Minute)},
+	}
+	for _, u := range updates {
+		if err := db.Model(&store.ReviewRun{}).Where("id = ?", u.id).
+			Update("clone_token_expires_at", u.expiry).Error; err != nil {
+			t.Fatalf("set expiry of run %d: %v", u.id, err)
+		}
+	}
+
+	runs, err := f.s.QueuedRunsForTokenRefresh(f.ctx, now.Add(30*time.Minute), 10)
+	if err != nil {
+		t.Fatalf("QueuedRunsForTokenRefresh() error = %v", err)
+	}
+	want := map[uint]bool{nearRun.ID: true, unknownRun.ID: true}
+	if len(runs) != len(want) {
+		t.Fatalf("runs = %+v, want the near-expiry and unknown-expiry queued runs", runs)
+	}
+	for _, run := range runs {
+		if !want[run.RunID] {
+			t.Errorf("run %d should not need a refresh", run.RunID)
+		}
+		if run.InstallationID != installID || run.Repository != "acme/tokens" {
+			t.Errorf("run %d = installation %d repository %q, want %d/acme/tokens",
+				run.RunID, run.InstallationID, run.Repository, installID)
+		}
+	}
+
+	expires := now.Add(time.Hour).Truncate(time.Microsecond)
+	ok, err := f.s.SetCloneToken(f.ctx, nearRun.ID, "sealed-new", expires)
+	if err != nil || !ok {
+		t.Fatalf("SetCloneToken(queued) = %v/%v, want true", ok, err)
+	}
+	got, err := f.s.ReviewRun(f.ctx, nearRun.ID)
+	if err != nil {
+		t.Fatalf("reload run: %v", err)
+	}
+	if got.CloneTokenEnc != "sealed-new" || got.CloneTokenExpiresAt == nil || !got.CloneTokenExpiresAt.Equal(expires) {
+		t.Errorf("run token = %q expiry %v, want sealed-new/%v", got.CloneTokenEnc, got.CloneTokenExpiresAt, expires)
+	}
+
+	ok, err = f.s.SetCloneToken(f.ctx, runningRun.ID, "sealed-running", expires)
+	if err != nil {
+		t.Fatalf("SetCloneToken(running) error = %v", err)
+	}
+	if ok {
+		t.Error("SetCloneToken overwrote a run that was no longer queued")
+	}
+}
+
 func (f *fixture) run(pr store.PullRequest, status string) store.ReviewRun {
 	f.t.Helper()
 

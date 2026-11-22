@@ -33,6 +33,21 @@ const (
 
 	// capacityErrorCode labels a run that never got a profile slot.
 	capacityErrorCode = "capacity"
+
+	// cloneTokenWait is how long a run sleeps when its clone token expired in
+	// the queue. The control process renews it on the next reconciliation.
+	cloneTokenWait = time.Minute
+	// maxCloneTokenWaits bounds the time spent waiting for that renewal. If it
+	// never arrives the App lost access to the repository, and the run ends with
+	// an actionable error instead of waiting forever.
+	maxCloneTokenWaits = 12
+	// cloneTokenClaimMargin is how much life a token needs when the worker
+	// claims the run. The control process renews 30 minutes ahead, so anything
+	// below this means the renewal is behind.
+	cloneTokenClaimMargin = 10 * time.Minute
+
+	cloneTokenWaitMessage   = "el token de clonado caducó en la cola; esperando a que el control lo renueve"
+	cloneTokenFailedMessage = "el token de clonado caducó y no se pudo renovar: revisa que la App siga instalada con acceso al repositorio y vuelve a encolar la revisión"
 )
 
 // CapacityWait returns the delay before retrying a run that found no free
@@ -61,6 +76,17 @@ type ProfileCapacityError struct {
 
 func (e *ProfileCapacityError) Error() string {
 	return fmt.Sprintf("perfil %d sin capacidad disponible", e.ProfileID)
+}
+
+// CloneTokenStaleError reports that the run was queued again because its clone
+// token expired while it waited. The worker snoozes the job until the control
+// process renews the token.
+type CloneTokenStaleError struct {
+	Wait time.Duration
+}
+
+func (e *CloneTokenStaleError) Error() string {
+	return "token de clonado caducado; el run espera su renovación"
 }
 
 // RunnerConfig holds the worker-side settings of the review pipeline.
@@ -154,11 +180,28 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	var cfg store.ReviewConfig
 	var outcome runOutcome
 	var retryErr error
-	cfg, err = r.Store.ReviewConfigForPR(ctx, run.PullRequestID)
-	if err != nil {
-		outcome = (&runOutcome{}).failed(fmt.Errorf("configuración de revisión: %w", err), "config")
+	staleToken := staleCloneToken(run.CloneTokenExpiresAt, time.Now())
+	if staleToken && run.Attempt <= maxCloneTokenWaits {
+		if err := r.Store.RequeueReviewRun(ctx, run.ID, "token_expired", cloneTokenWaitMessage); err != nil {
+			if errors.Is(err, store.ErrRunNotActive) {
+				// A new head superseded the run while it waited for a token.
+				return nil
+			}
+			return fmt.Errorf("requeue review run %d for token refresh: %w", runID, err)
+		}
+		r.announce(ctx, run)
+		slog.Info("review run waiting for clone token refresh", "run_id", run.ID, "attempt", run.Attempt)
+		return &CloneTokenStaleError{Wait: cloneTokenWait}
+	}
+	if staleToken {
+		outcome = (&runOutcome{}).inconclusive(errors.New(cloneTokenFailedMessage), "token_expired")
 	} else {
-		outcome, retryErr = r.execute(ctx, run, cfg)
+		cfg, err = r.Store.ReviewConfigForPR(ctx, run.PullRequestID)
+		if err != nil {
+			outcome = (&runOutcome{}).failed(fmt.Errorf("configuración de revisión: %w", err), "config")
+		} else {
+			outcome, retryErr = r.execute(ctx, run, cfg)
+		}
 	}
 
 	if retryErr != nil {
@@ -607,6 +650,13 @@ func (out runOutcome) budgetExhausted(pass, passes int, all []Pass, budget time.
 			"aumenta review_timeout en Ajustes → Revisión (actual %s) para completar la revisión",
 		pass, passes, countCovered(all[done:]), budget)
 	return out.inconclusive(err, "budget_exhausted")
+}
+
+// staleCloneToken reports whether the token expires before it can finish
+// cloning. A nil expiry means the run predates the stored expiry: the clone is
+// attempted with whatever token it carries.
+func staleCloneToken(expiresAt *time.Time, now time.Time) bool {
+	return expiresAt != nil && expiresAt.Before(now.Add(cloneTokenClaimMargin))
 }
 
 func truncatedContext(ctx context.Context, err error) bool {

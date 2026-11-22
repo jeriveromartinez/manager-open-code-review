@@ -105,23 +105,42 @@ type ReviewTrigger interface {
 	EnqueuePending(ctx context.Context, limit int) (int, error)
 }
 
+// CloneTokenRefresher renews the clone tokens of queued review runs before
+// they expire. Only the control process can do it: the worker never holds the
+// GitHub App credentials.
+type CloneTokenRefresher interface {
+	RefreshQueuedTokens(ctx context.Context, limit int) (int, error)
+}
+
 // ControlDeps are optional dependencies of the control client. The review and
 // health workers belong to the review process; the control process only
 // enqueues their jobs and runs publication itself.
 type ControlDeps struct {
 	Trigger   ReviewTrigger
 	Publisher *publish.Worker
+	Tokens    CloneTokenRefresher
 }
 
 type reconcileWorker struct {
 	river.WorkerDefaults[ReconcileArgs]
 	syncer  *syncer.Syncer
 	trigger ReviewTrigger
+	tokens  CloneTokenRefresher
 }
 
 func (w *reconcileWorker) Work(ctx context.Context, _ *river.Job[ReconcileArgs]) error {
 	if err := w.syncer.ReconcileAll(ctx); err != nil {
 		return err
+	}
+	if w.tokens != nil {
+		refreshed, err := w.tokens.RefreshQueuedTokens(ctx, pendingBatchSize)
+		if err != nil {
+			// A GitHub failure must not stop the reconciliation: the next one
+			// retries the sweep.
+			slog.Error("refresh clone tokens", "error", err)
+		} else if refreshed > 0 {
+			slog.Info("refreshed clone tokens", "count", refreshed)
+		}
 	}
 	if w.trigger == nil {
 		return nil
@@ -237,7 +256,7 @@ func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, deps ...ControlDeps)
 
 	workers := river.NewWorkers()
 	river.AddWorker[SyncInstallationArgs](workers, &syncInstallationWorker{syncer: s})
-	river.AddWorker[ReconcileArgs](workers, &reconcileWorker{syncer: s, trigger: d.Trigger})
+	river.AddWorker[ReconcileArgs](workers, &reconcileWorker{syncer: s, trigger: d.Trigger, tokens: d.Tokens})
 	queues := map[string]river.QueueConfig{
 		controlQueue: {MaxWorkers: 4},
 	}

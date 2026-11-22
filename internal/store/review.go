@@ -483,6 +483,51 @@ func (s *Store) RequeueReviewRun(ctx context.Context, id uint, errCode, errMsg s
 	return nil
 }
 
+// QueuedCloneToken identifies a queued run whose clone token the control
+// process must renew.
+type QueuedCloneToken struct {
+	RunID          uint   `gorm:"column:run_id"`
+	InstallationID int64  `gorm:"column:installation_id"`
+	Repository     string `gorm:"column:repository"`
+}
+
+// QueuedRunsForTokenRefresh returns queued runs whose clone token expires before
+// deadline. Runs created before the expiry was stored have a nil expiry and are
+// refreshed too: minting a token again is harmless and records the expiry.
+func (s *Store) QueuedRunsForTokenRefresh(ctx context.Context, deadline time.Time, limit int) ([]QueuedCloneToken, error) {
+	var runs []QueuedCloneToken
+	err := s.DB.WithContext(ctx).Raw(`
+		SELECT rr.id AS run_id, repo.installation_id, repo.full_name AS repository
+		FROM review_runs rr
+		JOIN pull_requests pr ON pr.id = rr.pull_request_id
+		JOIN repositories repo ON repo.id = pr.repository_id
+		WHERE rr.status = ?
+		  AND (rr.clone_token_expires_at IS NULL OR rr.clone_token_expires_at < ?)
+		ORDER BY rr.id
+		LIMIT ?`, RunQueued, deadline.UTC(), limit).Scan(&runs).Error
+	if err != nil {
+		return nil, fmt.Errorf("list queued runs needing a clone token: %w", err)
+	}
+	return runs, nil
+}
+
+// SetCloneToken replaces the sealed clone token of a queued run. It reports
+// false when the run is no longer queued: the worker claimed it or a trigger
+// superseded it, and that run's token must not be overwritten.
+func (s *Store) SetCloneToken(ctx context.Context, id uint, sealed string, expiresAt time.Time) (bool, error) {
+	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunQueued).
+		Updates(map[string]any{
+			"clone_token_enc":        sealed,
+			"clone_token_expires_at": expiresAt.UTC(),
+			"updated_at":             time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return false, fmt.Errorf("set clone token of review run %d: %w", id, res.Error)
+	}
+	return res.RowsAffected > 0, nil
+}
+
 // ReviewRun loads one run by ID.
 func (s *Store) ReviewRun(ctx context.Context, id uint) (ReviewRun, error) {
 	var run ReviewRun

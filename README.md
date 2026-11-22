@@ -141,6 +141,10 @@ En el PR aparecen:
 
 En `/prs/:id` se consultan los runs, el motivo del error, la cobertura y los hallazgos por severidad. Tras push de una corrección, el resumen se edita, el hallazgo pasa a `resolved` y su hilo se cierra; esto último solo ocurre en runs `succeeded` con cobertura completa.
 
+### Token de clonado
+
+Cada run nace con un token de instalación de solo lectura que vive una hora. Mientras espera en la cola, el proceso `app` renueva el token en la reconciliación periódica cuando le quedan menos de 30 minutos; el worker no puede firmarlo (no tiene la clave de la App). Si aun así un run llega al worker con el token a punto de caducar, lo devuelve a la cola y espera la renovación sin gastar un intento. Si la App pierde el acceso al repositorio y el token no puede renovarse, el run termina en `inconclusive` con un mensaje que pide revisar la instalación y volver a encolarlo.
+
 ### `inconclusive` y reintento
 
 `inconclusive` significa que la revisión no pudo completarse con cobertura completa: fallo de `ocr` o JSON inválido, error del LLM (cuota, timeout, 5xx), salida que no valida el esquema, cobertura incompleta, token de clonado caducado, timeout o presupuesto agotado (`budget_exhausted`, con la pasada y los archivos pendientes en el mensaje). **Nunca resuelve hallazgos**: puede publicar los hallazgos de pasadas completas como comentarios nuevos, pero no cierra hilos. El check queda `action_required` y el PR pasa a `inconclusive`.
