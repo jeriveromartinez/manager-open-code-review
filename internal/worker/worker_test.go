@@ -52,7 +52,7 @@ func TestHealthReportsDependencies(t *testing.T) {
 	srv := New(Config{
 		Stats: stats,
 		Dependencies: []Dependency{
-			{Name: "ocr", Version: func(context.Context) (string, error) { return "1.13.13", nil }},
+			{Name: "ocr", Version: func(context.Context) (string, error) { return "1.14.0", nil }},
 			{Name: "opencode", Version: func(context.Context) (string, error) { return "1.19.0", nil }},
 		},
 	})
@@ -69,7 +69,7 @@ func TestHealthReportsDependencies(t *testing.T) {
 	if body.Status != "ok" {
 		t.Errorf("status = %q, want ok", body.Status)
 	}
-	if len(body.Dependencies) != 2 || body.Dependencies[0].Version != "1.13.13" {
+	if len(body.Dependencies) != 2 || body.Dependencies[0].Version != "1.14.0" {
 		t.Errorf("dependencies = %+v, want ocr and opencode with versions", body.Dependencies)
 	}
 	if stats.pingCalls != 1 {

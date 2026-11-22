@@ -38,7 +38,7 @@ Revisa también estos valores de `deploy/.env`:
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-El primer arranque construye la web y el binario con los targets `app` y `worker` de `deploy/Dockerfile`, aplica las migraciones y levanta ambos servicios. El `worker` incluye `git`, Node 24 y las herramientas fijadas `@alibaba-group/open-code-review@1.13.13` (`ocr`) y `opencode-ai@1.19.0` (`opencode`), y valida que estén disponibles al arrancar. Comprueba que la API responde:
+El primer arranque construye la web y el binario con los targets `app` y `worker` de `deploy/Dockerfile`, aplica las migraciones y levanta ambos servicios. El `worker` incluye `git`, Node 24 y las herramientas fijadas `@alibaba-group/open-code-review@1.14.0` (`ocr`) y `opencode-ai@1.19.0` (`opencode`), y valida que estén disponibles al arrancar. Comprueba que la API responde:
 
 ```sh
 curl -s localhost:8080/healthz
@@ -273,4 +273,4 @@ make test                       # go test ./... + pruebas de la web (Vitest)
 npm --prefix web run dev        # Vite con proxy /api, /auth, /setup y /webhooks
 ```
 
-> En Fase 2 el worker se construye con el target `worker`: incorpora Node 24, `ocr` 1.13.13 y `opencode` 1.19.0, ejecuta los perfiles LLM y conserva la autenticación en el volumen `opencode-data`.
+> En Fase 2 el worker se construye con el target `worker`: incorpora Node 24, `ocr` 1.14.0 y `opencode` 1.19.0, ejecuta los perfiles LLM y conserva la autenticación en el volumen `opencode-data`.

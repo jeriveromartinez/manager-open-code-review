@@ -8,7 +8,7 @@ solo contiene datos: no incluye parsers ni código de producto.
 
 | Herramienta | Versión / detalle |
 | --- | --- |
-| `@alibaba-group/open-code-review` (binario `ocr`) | `v1.13.13 (445ad9de) darwin/amd64`, compilado el `2026-11-19T02:49:35Z` |
+| `@alibaba-group/open-code-review` (binario `ocr`) | `v1.14.0 (d29ca204) linux/amd64`, compilado el `2026-11-21T07:02:25Z` |
 | `opencode` | `1.19.0` |
 | Node / npm | `v24.20.0` / `12.0.2` |
 | `jq` | `1.7.1` |
@@ -16,13 +16,16 @@ solo contiene datos: no incluye parsers ni código de producto.
 Instalación (prefijo temporal, fuera del repo):
 
 ```bash
-npm install --prefix /tmp/qa-fixtures @alibaba-group/open-code-review@1.13.13
+npm install --prefix /tmp/qa-fixtures @alibaba-group/open-code-review@1.14.0
 /tmp/qa-fixtures/node_modules/.bin/ocr --version
-# open-code-review v1.13.13 (445ad9de) darwin/amd64
+# open-code-review v1.14.0 (d29ca204) linux/amd64
 ```
 
 npm avisó de que el `postinstall` del paquete quedó bloqueado por la política de
 scripts; el binario incluido funciona igualmente y no fue necesario aprobarlo.
+
+`ocr delegate` no cambió respecto de la versión anterior, así que los fixtures
+conservan el mismo esquema; se validaron con 1.14.0 sin recapturarlos.
 
 ## Repo de prueba
 
