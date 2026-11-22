@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+// ReviewContextCeiling bounds the global input context of one review
+// conversation, mirroring Claude Code's /autocompact 270k: it limits each
+// conversation, not the total spend of a run. A team policy may override it.
+const (
+	ReviewContextCeilingDefault = 270000
+	ReviewContextCeilingMin     = 4096
+	ReviewContextCeilingMax     = 2000000
+)
+
 // Config holds the runtime configuration of the QA Control Center. Load reads
 // only what a process cannot discover by itself; everything else starts at its
 // default and is later overwritten from the settings table.
@@ -23,6 +32,7 @@ type Config struct {
 	GitHubAPIURL         string        // github_api_url, default "https://api.github.com"
 	ReviewConcurrency    int           // review_concurrency, default 2
 	ReviewAgentSteps     int           // review_agent_steps, default 8
+	ReviewContextCeiling int           // review_context_ceiling, default 270000
 	ReviewTimeout        time.Duration // review_timeout, default 20m
 	ReviewStaleAfter     time.Duration // review_stale_after, default 45m
 	LLMHealthInterval    time.Duration // llm_health_interval, default 6h
@@ -65,16 +75,17 @@ func (c Config) LLMHealthStaleAfter() time.Duration {
 // starts from it and the database overrides only what an administrator saved.
 func Default() Config {
 	return Config{
-		ListenAddr:        ":8080",
-		WebhooksEnabled:   true,
-		ReconcileInterval: 5 * time.Minute,
-		GitHubURL:         "https://github.com",
-		GitHubAPIURL:      "https://api.github.com",
-		ReviewConcurrency: 2,
-		ReviewAgentSteps:  8,
-		ReviewTimeout:     20 * time.Minute,
-		WorkspaceDir:      "/tmp/qa",
-		WorkerHealthAddr:  ":9090",
+		ListenAddr:           ":8080",
+		WebhooksEnabled:      true,
+		ReconcileInterval:    5 * time.Minute,
+		GitHubURL:            "https://github.com",
+		GitHubAPIURL:         "https://api.github.com",
+		ReviewConcurrency:    2,
+		ReviewAgentSteps:     8,
+		ReviewContextCeiling: ReviewContextCeilingDefault,
+		ReviewTimeout:        20 * time.Minute,
+		WorkspaceDir:         "/tmp/qa",
+		WorkerHealthAddr:     ":9090",
 		// A job waiting ten minutes with nothing running means the worker is
 		// not consuming, not that the queue is merely busy.
 		WorkerQueueStale: 10 * time.Minute,

@@ -309,6 +309,8 @@ export type LLMModelOption = { id: string; name: string }
 
 export type LLMModelsResponse = { models: LLMModelOption[] }
 
+export type ReviewEffort = 'low' | 'medium' | 'high'
+
 export type QAPolicy = {
   id: number
   team_id: number
@@ -320,6 +322,13 @@ export type QAPolicy = {
   max_diff_lines: number
   max_passes: number
   require_green_ci: boolean
+  /** Null inherits the global review_context_ceiling. */
+  review_context_ceiling: number | null
+  /** Read-only: the policy override, or the global setting when null. */
+  effective_context_ceiling: number
+  review_effort: ReviewEffort
+  /** 0 disables the optional total-spend cap. */
+  review_token_budget: number
   updated_at: string
 }
 
@@ -333,6 +342,9 @@ export type QAPolicyInput = Pick<
   | 'max_diff_lines'
   | 'max_passes'
   | 'require_green_ci'
+  | 'review_context_ceiling'
+  | 'review_effort'
+  | 'review_token_budget'
 >
 
 export type ReviewEvent = {

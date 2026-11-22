@@ -627,6 +627,100 @@ func TestSavePolicyDefaults(t *testing.T) {
 	}())
 }
 
+// TestSavePolicyReviewControls pins the per-team cost controls added in #72:
+// zero values become low/0/no override, an upsert preserves and clears them,
+// and the engine's documented bounds are enforced before they reach a CHECK.
+func TestSavePolicyReviewControls(t *testing.T) {
+	f := newFixture(t)
+	team := f.team("cost")
+	profile := f.llmProfile("cost-profile", true)
+
+	got, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID,
+	})
+	if err != nil {
+		t.Fatalf("SaveQAPolicy: %v", err)
+	}
+	if got.ReviewEffort != store.ReviewEffortLow || got.ReviewTokenBudget != 0 ||
+		got.ReviewContextCeiling != nil {
+		t.Errorf("zero-value controls = %q/%d/%v, want low/0/nil",
+			got.ReviewEffort, got.ReviewTokenBudget, got.ReviewContextCeiling)
+	}
+
+	ceiling := 120000
+	saved, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID,
+		ReviewContextCeiling: &ceiling, ReviewEffort: store.ReviewEffortHigh,
+		ReviewTokenBudget: 750000,
+	})
+	if err != nil {
+		t.Fatalf("SaveQAPolicy(controls): %v", err)
+	}
+	if saved.ReviewContextCeiling == nil || *saved.ReviewContextCeiling != ceiling ||
+		saved.ReviewEffort != store.ReviewEffortHigh || saved.ReviewTokenBudget != 750000 {
+		t.Errorf("saved controls = %+v, want ceiling=%d/high/750000", saved, ceiling)
+	}
+
+	// A later save is a full replacement: omitting the ceiling clears the
+	// override and the other controls take their new values.
+	cleared, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID,
+		ReviewEffort: store.ReviewEffortMedium, ReviewTokenBudget: 0,
+	})
+	if err != nil {
+		t.Fatalf("SaveQAPolicy(clear): %v", err)
+	}
+	if cleared.ID != saved.ID {
+		t.Errorf("upsert changed policy ID from %d to %d", saved.ID, cleared.ID)
+	}
+	if cleared.ReviewContextCeiling != nil || cleared.ReviewEffort != store.ReviewEffortMedium ||
+		cleared.ReviewTokenBudget != 0 {
+		t.Errorf("cleared controls = %+v, want nil/medium/0", cleared)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		policy store.QAPolicy
+	}{
+		{"unknown effort", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ReviewEffort: "extreme"}},
+		{"negative budget", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ReviewTokenBudget: -1}},
+		{"budget above max", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ReviewTokenBudget: store.ReviewTokenBudgetMax + 1}},
+		{"ceiling below min", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ReviewContextCeiling: intPtr(store.ReviewContextCeilingMin - 1)}},
+		{"ceiling above max", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ReviewContextCeiling: intPtr(store.ReviewContextCeilingMax + 1)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := f.s.SaveQAPolicy(f.ctx, tc.policy); err == nil {
+				t.Error("SaveQAPolicy accepted an out-of-range control")
+			}
+		})
+	}
+}
+
+// The GORM default tag keeps a direct zero-value insert from violating the
+// review_effort CHECK constraint, which is what makes non-API writers safe.
+func TestQAPolicyEffortColumnDefault(t *testing.T) {
+	f := newFixture(t)
+	team := f.team("direct")
+	profile := f.llmProfile("direct-profile", true)
+
+	row := store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID,
+		BlockingThreshold: "major", MaxFilesPerPass: 40, MaxDiffLinesPerPass: 3000, MaxPasses: 4,
+	}
+	if err := f.s.DB.WithContext(f.ctx).Create(&row).Error; err != nil {
+		t.Fatalf("Create(zero-value policy): %v", err)
+	}
+	loaded, err := f.s.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if loaded.ReviewEffort != store.ReviewEffortLow {
+		t.Errorf("ReviewEffort = %q, want the column default %q", loaded.ReviewEffort, store.ReviewEffortLow)
+	}
+}
+
+func intPtr(v int) *int { return &v }
+
 type configSeed struct {
 	f            *fixture
 	installation store.Installation

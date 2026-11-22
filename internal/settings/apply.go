@@ -83,6 +83,9 @@ func applyOne(cfg *config.Config, key, raw string) error {
 		return setInt(&cfg.ReviewConcurrency, key, raw)
 	case KeyReviewAgentSteps:
 		return setInt(&cfg.ReviewAgentSteps, key, raw)
+	case KeyReviewContextCeiling:
+		return setIntInRange(&cfg.ReviewContextCeiling, key, raw,
+			config.ReviewContextCeilingMin, config.ReviewContextCeilingMax)
 	case KeyFetchDepthMax:
 		return setInt(&cfg.FetchDepthMax, key, raw)
 	case KeyBackupRetention:
@@ -139,6 +142,20 @@ func setInt(dst *int, key, raw string) error {
 	}
 	if n <= 0 {
 		return &KeyError{key, "must be greater than zero"}
+	}
+	*dst = n
+	return nil
+}
+
+// setIntInRange validates an integer bounded on both ends. The engine only
+// honours the documented interval, so a value outside it must not be stored.
+func setIntInRange(dst *int, key, raw string, min, max int) error {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return &KeyError{key, "must be an integer"}
+	}
+	if n < min || n > max {
+		return &KeyError{key, fmt.Sprintf("must be between %d and %d", min, max)}
 	}
 	*dst = n
 	return nil

@@ -471,6 +471,119 @@ func TestPolicyRequireGreenCIRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPolicyReviewControls(t *testing.T) {
+	f := newSecureFixture(t)
+	profile := seedProfile(t, f, "primary", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	team := f.team("cost-team")
+	cookie := f.session(f.user("admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	// A team without a policy still renders complete controls: inherit the
+	// global ceiling, low effort and no spending cap.
+	rec := f.request(http.MethodGet, path, nil, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var current map[string]any
+	decodeJSON(t, rec, &current)
+	assertKeys(t, current, "review_context_ceiling", "effective_context_ceiling",
+		"review_effort", "review_token_budget")
+	if current["review_context_ceiling"] != nil {
+		t.Errorf("default review_context_ceiling = %v, want null", current["review_context_ceiling"])
+	}
+	if current["effective_context_ceiling"] != float64(270000) {
+		t.Errorf("default effective_context_ceiling = %v, want 270000", current["effective_context_ceiling"])
+	}
+	if current["review_effort"] != "low" {
+		t.Errorf("default review_effort = %v, want low", current["review_effort"])
+	}
+	if current["review_token_budget"] != float64(0) {
+		t.Errorf("default review_token_budget = %v, want 0", current["review_token_budget"])
+	}
+
+	body := func() map[string]any {
+		return map[string]any{
+			"llm_profile_id":         profile.ID,
+			"review_context_ceiling": 120000,
+			"review_effort":          "high",
+			"review_token_budget":    750000,
+		}
+	}
+	rec = f.request(http.MethodPut, path, body(), cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var saved map[string]any
+	decodeJSON(t, rec, &saved)
+	if saved["review_context_ceiling"] != float64(120000) ||
+		saved["effective_context_ceiling"] != float64(120000) ||
+		saved["review_effort"] != "high" || saved["review_token_budget"] != float64(750000) {
+		t.Errorf("PUT controls = %v", saved)
+	}
+	stored, err := f.st.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if stored.ReviewContextCeiling == nil || *stored.ReviewContextCeiling != 120000 ||
+		stored.ReviewEffort != "high" || stored.ReviewTokenBudget != 750000 {
+		t.Errorf("stored controls = %+v", stored)
+	}
+
+	rec = f.request(http.MethodGet, path, nil, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &current)
+	if current["review_context_ceiling"] != float64(120000) ||
+		current["effective_context_ceiling"] != float64(120000) {
+		t.Errorf("GET controls = %v, want the team override to win", current)
+	}
+
+	// An explicit null clears the override and the global value applies again.
+	clearing := body()
+	clearing["review_context_ceiling"] = nil
+	clearing["review_effort"] = "medium"
+	clearing["review_token_budget"] = 0
+	rec = f.request(http.MethodPut, path, clearing, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &saved)
+	if saved["review_context_ceiling"] != nil || saved["effective_context_ceiling"] != float64(270000) ||
+		saved["review_effort"] != "medium" || saved["review_token_budget"] != float64(0) {
+		t.Errorf("PUT clear = %v, want null/270000/medium/0", saved)
+	}
+
+	// PUT replaces the whole policy, so omitting the ceiling also clears it.
+	rec = f.request(http.MethodPut, path, body(), cookie)
+	assertStatus(t, rec, http.StatusOK)
+	omitted := map[string]any{"llm_profile_id": profile.ID, "review_effort": "low"}
+	rec = f.request(http.MethodPut, path, omitted, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &saved)
+	if saved["review_context_ceiling"] != nil || saved["effective_context_ceiling"] != float64(270000) {
+		t.Errorf("PUT without ceiling = %v, want it cleared", saved)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		field string
+		value any
+	}{
+		{"ceiling zero", "review_context_ceiling", 0},
+		{"ceiling negative", "review_context_ceiling", -1},
+		{"ceiling below min", "review_context_ceiling", 4095},
+		{"ceiling above max", "review_context_ceiling", 2000001},
+		{"effort outside enum", "review_effort", "extreme"},
+		{"budget negative", "review_token_budget", -1},
+		{"budget above max", "review_token_budget", 1000000001},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			invalid := body()
+			invalid[tc.field] = tc.value
+			rec := f.request(http.MethodPut, path, invalid, cookie)
+			assertStatus(t, rec, http.StatusBadRequest)
+			var apiErr map[string]string
+			decodeJSON(t, rec, &apiErr)
+			if want := "invalid " + tc.field; apiErr["error"] != want {
+				t.Errorf("error = %q, want %q", apiErr["error"], want)
+			}
+		})
+	}
+}
+
 func seedProfile(t *testing.T, f *secureFixture, name string, profile store.LLMProfile) store.LLMProfile {
 	t.Helper()
 	profile.Name = name

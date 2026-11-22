@@ -112,6 +112,10 @@ const policy: QAPolicy = {
   max_diff_lines: 3000,
   max_passes: 3,
   require_green_ci: true,
+  review_context_ceiling: 120000,
+  effective_context_ceiling: 120000,
+  review_effort: 'high',
+  review_token_budget: 750000,
   updated_at: hoursAgo(48),
 }
 
@@ -240,6 +244,26 @@ describe('LeadView', () => {
     expect(wrapper.get('.page-subtitle').text()).toContain('1 PRs abiertos · 1 repositorio')
     expect(wrapper.find('[data-repo="acme/web-portal"]').exists()).toBe(true)
     expect(wrapper.find('[data-repo="acme/payments-api"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows the active context ceiling, effort and spending cap', async () => {
+    const wrapper = mountLead()
+    await flushPromises()
+
+    const context = wrapper.get('[data-policy-context]')
+    expect(context.text()).toContain('120.0k')
+    expect(context.text()).toContain('esfuerzo Alto')
+    expect(context.text()).toContain('tope 750.0k tokens')
+    wrapper.unmount()
+  })
+
+  it('shows that an uncapped budget means no spending cap', async () => {
+    mocks.api.getPolicy.mockResolvedValue({ ...policy, review_token_budget: 0 })
+    const wrapper = mountLead()
+    await flushPromises()
+
+    expect(wrapper.get('[data-policy-budget]').text()).toBe('sin tope de gasto')
     wrapper.unmount()
   })
 

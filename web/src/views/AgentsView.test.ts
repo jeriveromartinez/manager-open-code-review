@@ -157,6 +157,10 @@ const policy: QAPolicy = {
   max_diff_lines: 3000,
   max_passes: 4,
   require_green_ci: false,
+  review_context_ceiling: null,
+  effective_context_ceiling: 270000,
+  review_effort: 'low',
+  review_token_budget: 0,
   updated_at: '2026-11-19T10:00:00Z',
 }
 
@@ -313,6 +317,65 @@ describe('AgentsView', () => {
     await flushPromises()
     expect(checkbox().checked).toBe(true)
     expect(wrapper.find('[data-stale-policy]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('sends the inherited defaults and turns an empty ceiling into null', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    const ceiling = wrapper.get('[data-policy-ceiling]').element as HTMLInputElement
+    expect(ceiling.value).toBe('')
+    expect(ceiling.placeholder).toBe('270000')
+    expect(wrapper.get('[data-policy-cost]').text()).toContain('270.0k')
+    expect((wrapper.get('[data-policy-effort]').element as HTMLSelectElement).value).toBe('low')
+
+    await wrapper.get('[data-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.savePolicy).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        review_context_ceiling: null,
+        review_effort: 'low',
+        review_token_budget: 0,
+      }),
+    )
+    wrapper.unmount()
+  })
+
+  it('sends numeric context controls and the selected effort', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-policy-ceiling]').setValue('150000')
+    await wrapper.get('[data-policy-effort]').setValue('high')
+    await wrapper.get('[data-policy-budget]').setValue('250000')
+    await wrapper.get('[data-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.savePolicy).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        review_context_ceiling: 150000,
+        review_effort: 'high',
+        review_token_budget: 250000,
+      }),
+    )
+    wrapper.unmount()
+  })
+
+  it('treats an edit of the context controls as unsaved work', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-policy-ceiling]').setValue('150000')
+    mocks.api.getPolicy.mockResolvedValue({ ...policy, effective_context_ceiling: 300000 })
+    await live.reload!([{ type: 'team.updated', id: '1' }])
+    await flushPromises()
+
+    expect((wrapper.get('[data-policy-ceiling]').element as HTMLInputElement).value).toBe('150000')
+    expect(wrapper.get('[data-stale-policy]').text()).toContain('Otra persona cambió esta política')
     wrapper.unmount()
   })
 
