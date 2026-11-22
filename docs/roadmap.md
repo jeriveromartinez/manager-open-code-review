@@ -30,7 +30,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #67 | Aclarar que `review_agent_steps` es por pasada | XS | — | **Hecho** (#86) |
 | #69 | Drenar revisiones en vuelo al recrear el worker | M | — | **Hecho** (#91) |
 | #68 | Refrescar el token de clonado de runs en cola | S/M | — | **Hecho** (#92) |
-| #73 | Registrar y mostrar el consumo real (columnas, API, panel) | M/L | #63 | **Parcial** (#93): columnas, detalle de PR y tile de lead; falta consumo por perfil y chequeos de salud |
+| #73 | Registrar y mostrar el consumo real (columnas, API, panel) | M/L | #63 | **Hecho** (#93, #101): columnas, detalle de PR, tile de lead y consumo por perfil con chequeos de salud |
 | #77 | Aplicar `exclude_globs` y `extra_instructions` de la política | M | — | **Hecho** (#94) |
 | #75 | Chequeos de salud sin coste de agente (una llamada, intervalo 6 h) | S/M | — | **Hecho** (#95) |
 | #65 | Controlar tokens de razonamiento y latencia | S/M | — | **Hecho** (#96); faltan las mediciones con proveedor real |
@@ -47,7 +47,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 - 2026-11-21: revisados los 21 issues abiertos; #70, #78 y #64 cerrados con evidencia en `main`.
 - En `main`: roadmap #85 y Fase 1 completa (#86, #87, #88, #89).
 - Fase 2 completa: #69 (#91) y #68 (#92). Siguiente: Fase 3, #73 y #77.
-- #73 parcial (#93): consumo real por ejecución, detalle de PR y tile de lead. Pendiente el consumo por perfil y el de los chequeos de salud.
+- #73 hecho (#93, #101): consumo real por ejecución, detalle de PR, tile de lead, consumo por perfil y chequeos de salud en `llm_health_checks`.
 - #77 hecho (#94): exclusión de archivos y instrucciones del equipo aplicadas de verdad.
 - #75 hecho (#95): chequeo de salud con una petición mínima sin herramientas, intervalo de 6 h y solo perfiles en uso. Siguiente: #65 y #66.
 - #65 hecho (#96): la variante del perfil deja de ignorarse y cada run muestra sus tokens de razonamiento.
@@ -77,7 +77,7 @@ Objetivo: que un deploy o una cola lenta no pierda revisiones ni gaste tokens si
 
 Objetivo: ver dónde se gasta y que la política del equipo se aplique de verdad.
 
-- [x] #73 Columnas estructuradas (`input/output/cache_read/cache_write/total/max_context`), migración, API y vistas de PR y lead (#93). Los runs antiguos muestran «sin datos». Pendiente el consumo por perfil y el de los chequeos de salud.
+- [x] #73 Columnas estructuradas (`input/output/cache_read/cache_write/total/max_context`), migración, API y vistas de PR y lead (#93), más consumo por perfil y chequeos de salud en `llm_health_checks` con `GET /api/llm-profiles/usage` y la columna de consumo en Agentes LLM (#101). Los runs antiguos muestran «sin datos».
 - [x] #77 Pasar `exclude_globs` a OCR y `extra_instructions` al contexto saneado; editarlos en la vista de Agentes (#94).
 - [x] #75 Sustituir el agente del chequeo de salud por una llamada mínima sin herramientas; intervalo por defecto de 6 h; solo perfiles activos y en uso. (#95)
 - [x] #65 Variante de razonamiento por perfil declarada a OpenCode (`reasoning` + entrada explícita en compatibles con OpenAI) y tokens de razonamiento por run en el panel (#96). Faltan las mediciones con proveedor real (reducción, p95 < 30 s, calidad del JSON).
@@ -101,7 +101,7 @@ Objetivo: dejar de pagar un bucle genérico de OpenCode y usar los controles de 
 
 1. Fase 1 completa (5 PRs pequeños, sin dependencias externas).
 2. #69 y #68 (dos PRs de fiabilidad).
-3. #73 y #77 (consumo y política).
+3. #73 y #77 (consumo y política), hechos.
 4. #75, #65 y #66 (salud y latencia).
 5. #79 → #71 → #72 → #80 → #74 (motor nativo).
 6. Cierre de #76.
