@@ -22,7 +22,7 @@ FROM node:24-trixie-slim AS worker
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
-    && npm i -g @alibaba-group/open-code-review@1.14.0 opencode-ai@1.19.0 \
+    && npm i -g @alibaba-group/open-code-review@1.14.1 opencode-ai@1.19.0 \
     && useradd --create-home --uid 10001 qa
 COPY --from=build /out/qa /usr/local/bin/qa
 USER qa
