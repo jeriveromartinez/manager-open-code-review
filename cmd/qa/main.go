@@ -328,6 +328,7 @@ func runWorker() error {
 	go jobs.Schedule(ctx, "review_runs_interrupt_stale", jobs.WatchdogInterval, enqueuer.EnqueueWatchdog)
 	go jobs.Schedule(ctx, "llm_health_sweep", healthInterval, enqueuer.EnqueueHealthSweep)
 	go jobs.WatchLeadership(ctx, st.Pool, "worker", leadershipPollInterval)
+	go pruneReviewRunLogs(ctx, st)
 
 	slog.Info("review worker started", "concurrency", cfg.ReviewConcurrency)
 
@@ -372,6 +373,29 @@ func runWorker() error {
 		slog.Error("stop worker health server", "error", err)
 	}
 	return nil
+}
+
+// reviewLogPruneInterval is how often the worker deletes expired run logs. The
+// logs are housekeeping, not part of a review, so a failed prune is only logged
+// and retried on the next tick.
+const reviewLogPruneInterval = 6 * time.Hour
+
+func pruneReviewRunLogs(ctx context.Context, st *store.Store) {
+	ticker := time.NewTicker(reviewLogPruneInterval)
+	defer ticker.Stop()
+	for {
+		removed, err := st.PruneReviewRunLogs(ctx, time.Now().Add(-store.ReviewLogRetention))
+		if err != nil {
+			slog.Warn("prune review run logs", "error", err)
+		} else if removed > 0 {
+			slog.Info("pruned review run logs", "rows", removed)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func runMigrate() error {

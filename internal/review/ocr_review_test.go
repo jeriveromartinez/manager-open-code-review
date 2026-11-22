@@ -1,12 +1,15 @@
 package review
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,7 +35,7 @@ func TestBuildReviewArgs(t *testing.T) {
 		"--from", "base-sha",
 		"--to", "head-sha",
 		"--format", "json",
-		"--audience", "agent",
+		"--audience", "human",
 		"--provider", nativeProviderName,
 		"--model", "model-x",
 		"--effort", "high",
@@ -525,5 +528,80 @@ func TestNativeConfigPromptCachePerProtocol(t *testing.T) {
 					got, tt.wantCache, cfg.ExtraBody)
 			}
 		})
+	}
+}
+
+// streamTestReviewer returns a reviewer wired to a fake OCR script that writes
+// the given stderr lines and then the given stdout body.
+func streamTestReviewer(t *testing.T, stderrLines []string, stdout, exitCode string) *NativeReviewer {
+	t.Helper()
+	dir := t.TempDir()
+	output := filepath.Join(dir, "output.json")
+	if err := os.WriteFile(output, []byte(stdout), 0o644); err != nil {
+		t.Fatalf("write fake output: %v", err)
+	}
+	var script strings.Builder
+	script.WriteString("#!/bin/sh\n")
+	for _, line := range stderrLines {
+		fmt.Fprintf(&script, "printf '%%s\n' %q >&2\n", line)
+	}
+	fmt.Fprintf(&script, "cat %q\n", output)
+	fmt.Fprintf(&script, "exit %s\n", exitCode)
+	bin := filepath.Join(dir, "ocr.sh")
+	if err := os.WriteFile(bin, []byte(script.String()), 0o755); err != nil {
+		t.Fatalf("write fake ocr: %v", err)
+	}
+	base := "https://provider.example/v1"
+	return &NativeReviewer{
+		Bin:       bin,
+		RepoDir:   dir,
+		Home:      filepath.Join(dir, "home"),
+		Profile:   store.LLMProfile{Provider: "custom", Model: "model-x", BaseURL: &base},
+		BaseRef:   "base-sha",
+		HeadRef:   "head-sha",
+		MaxTokens: reviewContextCeiling,
+	}
+}
+
+func TestReviewStreamsStderrLines(t *testing.T) {
+	reviewer := streamTestReviewer(t,
+		[]string{"fase: agrupando archivos", "fase: llamando al modelo"},
+		`{"status":"complete","summary":{"files_reviewed":1},"manifest":{"terminal_state":"complete"}}`,
+		"0")
+	var mu sync.Mutex
+	var lines []string
+	reviewer.OnLog = func(line string) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, line)
+	}
+
+	res, _, err := reviewer.Review(context.Background())
+	if err != nil {
+		t.Fatalf("Review() error = %v", err)
+	}
+	if res.Status != "complete" {
+		t.Errorf("status = %q, want complete", res.Status)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(lines) != 2 || lines[0] != "fase: agrupando archivos" || lines[1] != "fase: llamando al modelo" {
+		t.Fatalf("streamed lines = %q, want the two stderr lines in order", lines)
+	}
+}
+
+// A failing OCR that streams its reason on stderr must still report that reason
+// in the error; the streaming path keeps a copy for the diagnostic.
+func TestReviewStreamsStderrOnFailure(t *testing.T) {
+	reviewer := streamTestReviewer(t, []string{"proveedor caído"}, "", "1")
+	var got []string
+	reviewer.OnLog = func(line string) { got = append(got, line) }
+
+	_, _, err := reviewer.Review(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "proveedor caído") {
+		t.Fatalf("Review() error = %v, want it to carry the stderr detail", err)
+	}
+	if len(got) != 1 || got[0] != "proveedor caído" {
+		t.Errorf("streamed lines = %q, want the failure reason", got)
 	}
 }

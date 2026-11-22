@@ -1,11 +1,13 @@
 package review
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -165,7 +167,9 @@ func buildReviewArgs(in nativeInvocation) []string {
 	}
 	args = append(args,
 		"--format", "json",
-		"--audience", "agent",
+		// The human audience prints the progress of every phase on stderr while
+		// stdout stays the JSON result, which is what the run log streams.
+		"--audience", "human",
 		"--provider", nativeProviderName,
 		"--model", in.Profile.Model,
 		"--effort", in.Effort,
@@ -222,6 +226,9 @@ type NativeReviewer struct {
 	// Timeout is the whole-run budget. It bounds the context and derives
 	// --timeout; the per-request OCR_LLM_TIMEOUT keeps its own default.
 	Timeout time.Duration
+	// OnLog receives every stderr line as OCR prints it, so the review log can
+	// stream progress live. Nil keeps the buffered path used elsewhere.
+	OnLog func(line string)
 }
 
 // Review executes the native engine and returns the parsed result. A non-zero
@@ -279,9 +286,14 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 
-	runErr := cmd.Run()
+	var runErr error
+	if n.OnLog != nil {
+		runErr = runNativeStreaming(cmd, &stderr, n.OnLog)
+	} else {
+		cmd.Stderr = &stderr
+		runErr = cmd.Run()
+	}
 	if cause := ctx.Err(); cause != nil {
 		return nativeReview{}, nil, fmt.Errorf("ocr review: %w", cause)
 	}
@@ -293,6 +305,56 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 		return nativeReview{}, stdout.Bytes(), nativeExecError(runErr, stderr.String())
 	}
 	return res, stdout.Bytes(), nil
+}
+
+const (
+	// stderrScannerLimit bounds one progress line. OCR wraps its terminal output,
+	// but an unexpected single line must not abort the scan: the limit is
+	// generous and an overlong line is truncated before reaching the log.
+	stderrScannerLimit = 1 << 20
+	// maxNativeStderr bounds the stderr copy kept for the error message. Only
+	// the first bytes can reach the 500-character detail; the cap keeps a
+	// chatty child from growing the buffer without limit.
+	maxNativeStderr = 64 << 10
+)
+
+// runNativeStreaming starts cmd with its stderr piped, feeds every line to
+// onLog as it arrives and keeps a copy for the error message. Reading happens
+// before Wait, which is the only safe order for StderrPipe.
+func runNativeStreaming(cmd *exec.Cmd, stderr *bytes.Buffer, onLog func(string)) error {
+	pipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("ocr review: capturar stderr: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(pipe)
+	scanner.Buffer(make([]byte, 0, 64<<10), stderrScannerLimit)
+	for scanner.Scan() {
+		line := scanner.Text()
+		appendNativeStderr(stderr, line)
+		onLog(line)
+	}
+	if scanner.Err() != nil {
+		// The scan stopped early (for example an overlong line). Drain the pipe
+		// so the child cannot block writing into it, then wait for the exit.
+		_, _ = io.Copy(io.Discard, pipe)
+	}
+	// A read error only costs diagnostic detail; the exit code still decides.
+	return cmd.Wait()
+}
+
+func appendNativeStderr(stderr *bytes.Buffer, line string) {
+	if stderr.Len() >= maxNativeStderr {
+		return
+	}
+	room := maxNativeStderr - stderr.Len()
+	if len(line) > room {
+		line = line[:room]
+	}
+	stderr.WriteString(line)
+	stderr.WriteByte('\n')
 }
 
 func nativeExecError(runErr error, stderr string) error {

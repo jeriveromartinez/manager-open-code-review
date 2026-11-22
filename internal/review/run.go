@@ -219,10 +219,13 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		return nil
 	}
 	r.announce(ctx, run)
+	log := newRunLogSink(r.Store, r.Events, run.ID, 0)
+	log.Log(ctx, "worker", "", "info", logPhaseClaim, fmt.Sprintf(
+		"run %d reclamado: PR #%d, head %s, intento %d", run.ID, run.PullRequestID, run.HeadSHA, run.Attempt))
 	// The shutdown can cancel the job context between the claim and the first
 	// database call. Do not start a pipeline that is already cancelled.
 	if ctx.Err() != nil {
-		return r.requeueInterrupted(ctx, run)
+		return r.requeueInterrupted(ctx, run, log)
 	}
 
 	var cfg store.ReviewConfig
@@ -230,6 +233,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	var retryErr error
 	staleToken := staleCloneToken(run.CloneTokenExpiresAt, time.Now())
 	if staleToken && run.Attempt <= maxCloneTokenWaits {
+		log.Log(ctx, "worker", "", "warn", logPhasePrepare, cloneTokenWaitMessage)
 		if err := r.Store.RequeueReviewRun(ctx, run.ID, "token_expired", cloneTokenWaitMessage); err != nil {
 			if errors.Is(err, store.ErrRunNotActive) {
 				// A new head superseded the run while it waited for a token.
@@ -246,15 +250,17 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	} else {
 		cfg, err = r.Store.ReviewConfigForPR(ctx, run.PullRequestID)
 		if err != nil {
+			log.Log(ctx, "worker", "", "error", logPhasePrepare,
+				fmt.Sprintf("configuración de revisión: %v", err))
 			outcome = (&runOutcome{}).failed(fmt.Errorf("configuración de revisión: %w", err), "config")
 		} else {
-			outcome, retryErr = r.execute(ctx, run, cfg)
+			outcome, retryErr = r.execute(ctx, run, cfg, log)
 		}
 	}
 
 	// A run that already succeeded is persisted below instead of requeued.
 	if ctx.Err() != nil && outcome.status != store.RunSucceeded {
-		return r.requeueInterrupted(ctx, run)
+		return r.requeueInterrupted(ctx, run, log)
 	}
 
 	persistCtx, cancelPersist := terminalContext(ctx)
@@ -273,6 +279,8 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 			}
 			// The claim showed the run as started; it is waiting again.
 			r.announce(persistCtx, run)
+			log.Log(persistCtx, "worker", "", "warn", logPhaseOCR,
+				fmt.Sprintf("sin slots libres en el perfil %d; el run vuelve a la cola", capacity.ProfileID))
 			capacity.Wait = CapacityWait(run.Attempt)
 			slog.Info("review run waiting for profile capacity",
 				"run_id", run.ID, "profile_id", capacity.ProfileID,
@@ -312,8 +320,12 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 			// stale results would overwrite the state of the current run.
 			return nil
 		}
+		log.Log(persistCtx, "worker", "", "error", logPhaseFinish,
+			fmt.Sprintf("no se pudo guardar el resultado del run: %v", err))
 		return fmt.Errorf("complete review run %d: %w", runID, err)
 	}
+	log.Log(persistCtx, "worker", "", terminalLogLevel(outcome.status), logPhaseFinish,
+		fmt.Sprintf("run %s%s: %s", outcome.status, terminalCodeSuffix(outcome.code), outcome.message))
 
 	if outcome.status != store.RunSuperseded {
 		prStatus := store.StatusInconclusive
@@ -365,9 +377,10 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 // detached from the cancellation, and returning ctx.Err() lets River treat a
 // soft stop as an interruption and make the job available again without
 // spending an attempt.
-func (r *Runner) requeueInterrupted(ctx context.Context, run store.ReviewRun) error {
+func (r *Runner) requeueInterrupted(ctx context.Context, run store.ReviewRun, log *runLogSink) error {
 	persistCtx, cancel := terminalContext(ctx)
 	defer cancel()
+	log.Log(persistCtx, "worker", "", "warn", logPhaseFinish, interruptedByShutdown)
 	if err := r.Store.RequeueReviewRun(persistCtx, run.ID, store.RunErrorInterrupted, interruptedByShutdown); err != nil {
 		if errors.Is(err, store.ErrRunNotActive) {
 			// A new head superseded the run while the worker stopped.
@@ -383,27 +396,38 @@ func (r *Runner) requeueInterrupted(ctx context.Context, run store.ReviewRun) er
 // execute runs the pipeline and returns the state to persist. Every early exit
 // returns a terminal outcome so the caller can always complete the run. The
 // error is only set when the run must be retried instead of finished.
-func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig) (runOutcome, error) {
+func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig, log *runLogSink) (runOutcome, error) {
 	out := runOutcome{
 		coverage: coverageJSON(0, 0, 0),
 		usage:    []byte(`{}`),
 		runID:    run.ID,
 		prID:     run.PullRequestID,
 	}
+	log.Log(ctx, "worker", "", "info", logPhasePrepare, fmt.Sprintf(
+		"PR #%d %q de %s en %s", cfg.PR.Number, cfg.PR.Title, cfg.PR.AuthorLogin, cfg.Repo.FullName))
+	log.Log(ctx, "worker", "", "info", logPhasePolicy, fmt.Sprintf(
+		"perfil %d (%s/%s), esfuerzo %s", cfg.Profile.ID, cfg.Profile.Provider, cfg.Profile.Model, cfg.Policy.ReviewEffort))
 
 	open, err := r.Store.OpenFindingsForPR(ctx, run.PullRequestID)
 	if err != nil {
+		log.Log(ctx, "worker", "", "error", logPhasePrepare,
+			fmt.Sprintf("no se pudieron listar los hallazgos abiertos: %v", err))
 		return out.failed(fmt.Errorf("listar hallazgos abiertos: %w", err), "config"), nil
 	}
 	out.open = open
+	log.Log(ctx, "worker", "", "info", logPhasePrepare,
+		fmt.Sprintf("hallazgos abiertos antes de revisar: %d", len(open)))
 
 	token, err := r.boxOpen(run.CloneTokenEnc)
 	if err != nil || len(strings.TrimSpace(string(token))) == 0 {
 		if err == nil {
 			err = errors.New("token de clonado ausente")
 		}
+		log.Log(ctx, "worker", "", "error", logPhaseClone,
+			fmt.Sprintf("token de clonado: %v", err))
 		return out.inconclusive(fmt.Errorf("token de clonado: %w", err), "token_expired"), nil
 	}
+	log.AddSecret(token)
 
 	workDir := filepath.Join(r.Cfg.WorkspaceDir, fmt.Sprintf("run-%d", run.ID))
 	defer os.RemoveAll(workDir)
@@ -422,23 +446,34 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		runCtx, cancel = context.WithTimeout(ctx, r.Cfg.Timeout)
 		defer cancel()
 	}
+	log.Log(runCtx, "worker", "", "info", logPhaseClone,
+		fmt.Sprintf("clonando %s (%s → %s)", cfg.Repo.FullName, baseRef, headRef))
 	mergeBase, err := Clone(runCtx, workDir, remote, baseRef, headRef, r.Cfg.FetchDepthMax)
 	if err != nil {
+		log.Log(runCtx, "worker", "", "error", logPhaseClone, fmt.Sprintf("falló el clonado: %v", err))
 		return classifyCloneError(runCtx, out, err)
 	}
 	headSHA, err := git(runCtx, workDir, "rev-parse", "--no-pager", "rev-parse", "HEAD")
 	if err != nil {
+		log.Log(runCtx, "worker", "", "error", logPhaseClone,
+			fmt.Sprintf("no se pudo resolver el HEAD del checkout: %v", err))
 		return out.failed(fmt.Errorf("resolver HEAD del checkout: %w", err), "git_error"), nil
 	}
+	log.Log(runCtx, "worker", "", "info", logPhaseClone,
+		fmt.Sprintf("checkout listo: head %s, merge-base %s", headSHA, mergeBase))
 	if run.HeadSHA != "" && !strings.EqualFold(headSHA, run.HeadSHA) {
 		// refs/pull/<n>/head is a moving ref: a push can land between the
 		// trigger and the clone. Reviewing that code and publishing it under
 		// run.HeadSHA would approve a SHA that was never reviewed.
+		log.Log(runCtx, "worker", "", "warn", logPhaseClone,
+			fmt.Sprintf("la ref del PR avanzó de %s a %s antes del checkout", run.HeadSHA, headSHA))
 		return out.superseded(fmt.Errorf("la ref del PR avanzó de %s a %s antes del checkout", run.HeadSHA, headSHA), "head_moved"), nil
 	}
 
 	excludes, dropped, err := policyExcludes(cfg.Policy.ExcludeGlobs)
 	if err != nil {
+		log.Log(runCtx, "worker", "", "error", logPhasePolicy,
+			fmt.Sprintf("exclusiones de la política: %v", err))
 		return out.failed(fmt.Errorf("leer exclusiones de la política: %w", err), "config"), nil
 	}
 	if len(dropped) > 0 {
@@ -446,11 +481,16 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		// cannot reach it intact; warn instead of applying a mangled glob.
 		slog.Warn("review excludes dropped: OCR cannot carry commas",
 			"run_id", run.ID, "patterns", dropped)
+		log.Log(runCtx, "worker", "", "warn", logPhasePolicy,
+			fmt.Sprintf("exclusiones descartadas por contener comas: %s", strings.Join(dropped, ", ")))
 	}
 	key, err := r.boxOpen(cfg.Profile.APIKeyEnc)
 	if err != nil {
+		log.Log(runCtx, "worker", "", "error", logPhasePolicy,
+			fmt.Sprintf("no se pudo descifrar la clave del perfil %d: %v", cfg.Profile.ID, err))
 		return out.inconclusive(fmt.Errorf("descifrar clave del perfil %d: %w", cfg.Profile.ID, err), "llm_error"), nil
 	}
+	log.AddSecret(key)
 
 	// The first run has no BaseSHA, so Clone's merge-base is the reviewed base.
 	// It is already computed from the fetched refs and works on shallow clones.
@@ -461,10 +501,13 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if ocrBase == "" {
 		ocrBase, err = fetchHeadBase(workDir)
 		if err != nil {
+			log.Log(runCtx, "worker", "", "error", logPhaseClone,
+				fmt.Sprintf("no se pudo resolver la base del checkout: %v", err))
 			return out.failed(fmt.Errorf("resolver base del checkout: %w", err), "git_error"), nil
 		}
 	}
 	out.baseSHA = ocrBase
+	log.Log(runCtx, "worker", "", "info", logPhaseClone, "base de la revisión: "+ocrBase)
 
 	// A push is reviewed only from the last succeeded head when the base did
 	// not move and the new head still descends from it. A missing, failed or
@@ -488,9 +531,20 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		}
 	case errors.Is(prevErr, store.ErrNotFound):
 		// No prior complete run: the full diff is the only safe range.
+		log.Log(runCtx, "worker", "", "info", logPhasePrepare,
+			"sin run previo completado: se revisa el diff completo")
 	default:
 		slog.Warn("incremental review check failed; reviewing the full diff",
 			"run_id", run.ID, "error", prevErr)
+		log.Log(runCtx, "worker", "", "warn", logPhasePrepare,
+			fmt.Sprintf("no se pudo comprobar el run previo; se revisa el diff completo: %v", prevErr))
+	}
+	if incremental {
+		log.Log(runCtx, "worker", "", "info", logPhasePrepare,
+			fmt.Sprintf("revisión incremental desde %s", fromSHA))
+	} else {
+		log.Log(runCtx, "worker", "", "info", logPhasePrepare,
+			fmt.Sprintf("revisión completa desde %s hasta %s", fromSHA, headSHA))
 	}
 
 	timeout := r.Cfg.Timeout
@@ -514,6 +568,13 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if budget < 0 {
 		budget = 0
 	}
+	budgetText := "sin tope"
+	if budget > 0 {
+		budgetText = fmt.Sprint(budget)
+	}
+	log.Log(runCtx, "worker", "", "info", logPhasePolicy, fmt.Sprintf(
+		"política: esfuerzo %s, max_tokens %d, presupuesto %s, timeout %s",
+		effort, ceiling, budgetText, timeout.Round(time.Second)))
 	reviewer := &NativeReviewer{
 		Bin:         r.Cfg.OCRBin,
 		RepoDir:     workDir,
@@ -528,11 +589,16 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		MaxTokens:   ceiling,
 		TokenBudget: budget,
 		Timeout:     timeout,
+		OnLog:       log.OCRLogger(runCtx, "main"),
 	}
 
 	slog.Info("native OCR review started", "run_id", run.ID, "profile_id", cfg.Profile.ID, "from", fromSHA)
-	res, _, err := r.runNativeReview(runCtx, cfg.Profile.ID, reviewer)
+	log.Log(runCtx, "worker", "main", "info", logPhaseOCR,
+		fmt.Sprintf("iniciando OCR sobre %s..%s", fromSHA, headSHA))
+	started := time.Now()
+	res, _, err := r.runNativeReview(runCtx, cfg.Profile.ID, reviewer, log, "main")
 	if err != nil {
+		log.Log(runCtx, "worker", "main", "error", logPhaseOCR, fmt.Sprintf("OCR falló: %v", err))
 		var capacity *ProfileCapacityError
 		if errors.As(err, &capacity) {
 			return out, capacity
@@ -542,6 +608,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 	status, code := nativeOutcome(res)
 	reviewed, skipped, excluded := nativeCoverageCounts(res)
+	log.Log(runCtx, "worker", "main", "info", logPhaseOCR, fmt.Sprintf(
+		"OCR terminó en %s: estado %s, %d archivo(s) revisados, %d omitidos, %d excluidos, %d hallazgo(s)",
+		time.Since(started).Round(time.Second), status, reviewed, skipped, excluded, len(res.Comments)))
 	files := nativeCoverageFiles(res)
 	out.tokens = nativeTokenUsage(res)
 	out.summary = nativeSummaryText(res, status)
@@ -555,7 +624,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	// the pull request unreviewed.
 	var chunked chunkSummary
 	if paths := tooLargePaths(res); len(paths) > 0 && canChunkNativeRun(status, code) {
-		chunked = r.reviewTooLargeFiles(runCtx, run.ID, cfg.Profile.ID, reviewer, headSHA, paths, budget, out.tokens)
+		log.Log(runCtx, "worker", "", "info", logPhaseChunks, fmt.Sprintf(
+			"%d archivo(s) demasiado grandes para el run principal; se revisan por partes", len(paths)))
+		chunked = r.reviewTooLargeFiles(runCtx, run.ID, cfg.Profile.ID, reviewer, headSHA, paths, budget, out.tokens, log)
 		out.tokens.add(chunked.tokens)
 		if len(chunked.comments) > 0 {
 			comments = append(comments, chunked.comments...)
@@ -582,6 +653,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		out.summary = coverageSummaryText(status, reviewed, len(out.merged.Findings))
 	}
 	out.coverage = coverageJSONWithFiles(reviewed, skipped, excluded, files)
+	log.Log(runCtx, "worker", "", "info", logPhaseFinish, fmt.Sprintf(
+		"cobertura final: %d revisados, %d omitidos, %d excluidos; %d hallazgo(s) tras deduplicar",
+		reviewed, skipped, excluded, len(out.merged.Findings)))
 
 	switch status {
 	case store.RunSucceeded:
@@ -601,15 +675,23 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 }
 
 // runNativeReview holds one profile slot for exactly one OCR invocation.
-func (r *Runner) runNativeReview(ctx context.Context, profileID uint, reviewer *NativeReviewer) (nativeReview, []byte, error) {
+func (r *Runner) runNativeReview(ctx context.Context, profileID uint, reviewer *NativeReviewer, log *runLogSink, invocation string) (nativeReview, []byte, error) {
+	log.Log(ctx, "worker", invocation, "info", logPhaseOCR,
+		fmt.Sprintf("esperando un slot del perfil %d", profileID))
 	release, acquired, err := r.Store.AcquireProfileSlot(ctx, profileID)
 	if err != nil {
+		log.Log(ctx, "worker", invocation, "error", logPhaseOCR,
+			fmt.Sprintf("no se pudo bloquear el perfil %d: %v", profileID, err))
 		return nativeReview{}, nil, fmt.Errorf("bloquear perfil %d: %w", profileID, err)
 	}
 	if !acquired {
+		log.Log(ctx, "worker", invocation, "warn", logPhaseOCR,
+			fmt.Sprintf("el perfil %d no tiene slots libres", profileID))
 		return nativeReview{}, nil, &ProfileCapacityError{ProfileID: profileID}
 	}
 	defer release()
+	log.Log(ctx, "worker", invocation, "info", logPhaseOCR,
+		fmt.Sprintf("slot del perfil %d adquirido; ejecutando OCR", profileID))
 	return reviewer.Review(ctx)
 }
 
@@ -804,4 +886,22 @@ func truncateRunMessage(message string) string {
 		return message
 	}
 	return message[:maxRunErrorMessage]
+}
+
+func terminalLogLevel(status string) string {
+	switch status {
+	case store.RunSucceeded:
+		return "info"
+	case store.RunInconclusive:
+		return "warn"
+	default:
+		return "error"
+	}
+}
+
+func terminalCodeSuffix(code string) string {
+	if code == "" {
+		return ""
+	}
+	return " (" + code + ")"
 }
