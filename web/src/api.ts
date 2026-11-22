@@ -72,6 +72,8 @@ export type RunTokenStats = {
   total: number
   average: number
   max_context: number
+  /** False when no run in the window reported a max-context sample. */
+  max_context_known: boolean
 }
 
 /**

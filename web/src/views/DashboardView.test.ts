@@ -64,6 +64,7 @@ const summary: QASummary = {
     total: 0,
     average: 0,
     max_context: 0,
+    max_context_known: false,
   },
   validation_sla_seconds: 4 * 3600,
 }

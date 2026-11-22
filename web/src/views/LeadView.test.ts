@@ -97,6 +97,7 @@ const summary: QASummary = {
     total: 685000,
     average: 171250,
     max_context: 198000,
+    max_context_known: true,
   },
   validation_sla_seconds: 4 * 3600,
 }
@@ -197,6 +198,20 @@ describe('LeadView', () => {
     expect(tokens.get('[data-token-reviews]').text()).toBe('4')
     expect(tokens.get('[data-token-average]').text()).toBe('171.3k')
     expect(tokens.get('[data-token-max-context]').text()).toBe('198.0k')
+    expect(tokens.get('[data-token-cache]').text()).toBe('80 %')
+    wrapper.unmount()
+  })
+
+  it('labels an unknown max prompt instead of painting zero', async () => {
+    mocks.api.qaSummary.mockResolvedValue({
+      ...summary,
+      tokens: { ...summary.tokens, max_context: 0, max_context_known: false },
+    })
+
+    const wrapper = mountLead()
+    await flushPromises()
+
+    expect(wrapper.get('[data-token-max-context]').text()).toBe('—')
     wrapper.unmount()
   })
 

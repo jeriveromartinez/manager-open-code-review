@@ -119,9 +119,12 @@ func TestQASummaryEndpoint(t *testing.T) {
 		"categories", "category_window_days", "tokens", "validation_sla_seconds")
 	tokens := raw["tokens"].(map[string]any)
 	assertKeys(t, tokens, "window_days", "reviews", "input", "output", "cache_read",
-		"cache_write", "total", "average", "max_context")
+		"cache_write", "total", "average", "max_context", "max_context_known")
 	if tokens["window_days"] != float64(7) || tokens["reviews"] != float64(0) || tokens["average"] != float64(0) {
 		t.Errorf("tokens = %v, want an empty 7-day window", tokens)
+	}
+	if tokens["max_context_known"] != false {
+		t.Errorf("max_context_known = %v, want false for an empty window", tokens["max_context_known"])
 	}
 	if raw["ready_for_human"] != float64(1) {
 		t.Errorf("ready_for_human = %v, want 1", raw["ready_for_human"])
