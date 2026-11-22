@@ -84,6 +84,50 @@ func TestAgentParsesTextEvents(t *testing.T) {
 	}
 }
 
+// OpenCode reports usage per step. Keeping only the last object under-reports
+// a multi-step pass by one or two orders of magnitude.
+func TestParseEventsAggregatesEveryStep(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"step_finish","part":{"tokens":{"input":10,"output":1,"reasoning":0,"total":11,"cache":{"read":2,"write":0}}}}`,
+		`{"type":"step_finish","part":{"tokens":{"input":20,"output":2,"reasoning":5,"total":27,"cache":{"read":3,"write":1}}}}`,
+		`{"type":"text","part":{"text":"{\"ok\":true}"}}`,
+	}, "\n")
+
+	text, raw := parseEvents(strings.NewReader(stream))
+	if want := `{"ok":true}`; text != want {
+		t.Fatalf("text = %q, want %q", text, want)
+	}
+	var got tokenUsage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("usage is not JSON: %v (%s)", err, raw)
+	}
+	if got.Input != 30 || got.Output != 3 || got.Reasoning != 5 || got.Total != 38 {
+		t.Errorf("usage = %+v, want input 30, output 3, reasoning 5, total 38", got)
+	}
+	if got.Cache.Read != 5 || got.Cache.Write != 1 {
+		t.Errorf("cache = %+v, want read 5, write 1", got.Cache)
+	}
+	if got.Steps != 2 {
+		t.Errorf("steps = %d, want 2", got.Steps)
+	}
+}
+
+func TestTokenUsageAddsPasses(t *testing.T) {
+	var run tokenUsage
+	run.addJSON([]byte(`{"input":10,"output":1,"reasoning":2,"total":13,"cache":{"read":3,"write":4},"steps":2}`))
+	run.addJSON([]byte(`{"input":20,"output":5,"reasoning":6,"total":31,"cache":{"read":7,"write":8},"steps":3}`))
+
+	if run.Input != 30 || run.Output != 6 || run.Reasoning != 8 || run.Total != 44 {
+		t.Errorf("run usage = %+v, want input 30, output 6, reasoning 8, total 44", run)
+	}
+	if run.Cache.Read != 10 || run.Cache.Write != 12 {
+		t.Errorf("run cache = %+v, want read 10, write 12", run.Cache)
+	}
+	if run.Steps != 5 {
+		t.Errorf("run steps = %d, want 5", run.Steps)
+	}
+}
+
 func TestAgentErrorDetailFromEventStream(t *testing.T) {
 	raw := strings.Join([]string{
 		`{"type":"text","text":"ignored"}`,
@@ -287,6 +331,27 @@ func TestAgentConfigDeniesTools(t *testing.T) {
 	})
 }
 
+// TestAgentConfigDeclaresReviewerPrompt replaces OpenCode's default coding
+// prompt, which tells the model to explore the repository. Without an explicit
+// prompt the reviewer spends steps searching instead of reading the diff.
+func TestAgentConfigDeclaresReviewerPrompt(t *testing.T) {
+	home := t.TempDir()
+	a := testAgent(t, home)
+	if _, _, err := a.Run(context.Background(), "__FAKE_EVENTS__", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	prompt := readAgentConfig(t, home).Agent[reviewerAgent].Prompt
+	if strings.TrimSpace(prompt) == "" {
+		t.Fatalf("agent.%s.prompt is empty; OpenCode would use its coding prompt", reviewerAgent)
+	}
+	for _, want := range []string{"diff", "repositorio", "JSON"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("agent prompt = %q, want it to mention %q", prompt, want)
+		}
+	}
+}
+
 // TestAgentConfigPlatformBaseURL covers providers that OpenCode 1.19 does not
 // know from its catalog (CommandCode, for example). Without options.baseURL the
 // engine builds "undefined/chat/completions" and the health check only reports a
@@ -425,6 +490,7 @@ type generatedConfig struct {
 	Permission map[string]string `json:"permission"`
 	Agent      map[string]struct {
 		Permission map[string]string `json:"permission"`
+		Prompt     string            `json:"prompt"`
 		Steps      int               `json:"steps"`
 		Disable    bool              `json:"disable"`
 	} `json:"agent"`

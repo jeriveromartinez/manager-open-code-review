@@ -22,12 +22,12 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #78 | Banco de consumo con proveedor falso | M | #70 | **Hecho** (#83) |
 | #64 | Suprimir la generación automática de título | XS | — | **Hecho** (#81) |
 | #84 | Plantilla de PR con `Closes #` | XS | — | **Hecho** (#84) |
-| #59 | Agente solo-diff: prompt dedicado, sin exploración | S | #70 | **En revisión** (#87) |
+| #59 | Agente solo-diff: prompt dedicado, sin exploración | S | #70 | **Hecho** (#87) |
 | #60 | No reenviar el historial completo en cada paso | L | #71 | **Parcial**: menos pasos y menos herramientas; el reenvío sigue siendo intrínseco a OpenCode |
 | #62 | Presupuesto de pasos por run, no por pasada | S | #71 | **Parcial**: 8 pasos por pasada (máximo 32 por revisión); el tope por run se reevalúa con #71 |
-| #63 | Sumar el consumo de todos los pasos y pasadas | M | — | **En revisión** (#89) |
-| #61 | Planificar pasadas por bytes (límite de 50 KB de OpenCode) | S/M | — | **En revisión** (#88) |
-| #67 | Aclarar que `review_agent_steps` es por pasada | XS | — | **En revisión** (#86) |
+| #63 | Sumar el consumo de todos los pasos y pasadas | M | — | **Hecho** (#89) |
+| #61 | Planificar pasadas por bytes (límite de 50 KB de OpenCode) | S/M | — | **Hecho** (#88) |
+| #67 | Aclarar que `review_agent_steps` es por pasada | XS | — | **Hecho** (#86) |
 | #69 | Drenar revisiones en vuelo al recrear el worker | M | — | Pendiente |
 | #68 | Refrescar el token de clonado de runs en cola | S/M | — | Pendiente |
 | #73 | Registrar y mostrar el consumo real (columnas, API, panel) | M/L | #63 | Pendiente |
@@ -45,8 +45,8 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 ## Progreso
 
 - 2026-11-21: revisados los 21 issues abiertos; #70, #78 y #64 cerrados con evidencia en `main`.
-- En revisión: #85 (este roadmap), #86 (#67), #87 (#59), #88 (#61), #89 (#63).
-- Siguiente: #69 y #68 (fiabilidad de la cola), después #73 y #77.
+- En `main`: roadmap #85 y Fase 1 completa (#86, #87, #88, #89).
+- En curso: Fase 2, #69 y #68 (fiabilidad de la cola); después #73 y #77.
 
 ## Fases
 
@@ -54,11 +54,11 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 
 Objetivo: exprimir lo que ya está en `main` y cerrar los huecos baratos del agente actual mientras se prepara la migración.
 
-- [ ] #67 Aclarar la etiqueta y la ayuda de `review_agent_steps` («Pasos por pasada») y su relación con `max_passes`. (PR #86)
-- [ ] #59 Añadir `agent.qa-reviewer.prompt`: el diff completo va adjunto, no explorar el repo, responder solo el JSON. Verificar ≤4 pasos sin `grep`/`glob`. (PR #87)
-- [ ] #61 Planificar pasadas por bytes (~45 KB) además de por líneas y cubrir el caso >50 KB con test. (PR #88)
+- [x] #67 Aclarar la etiqueta y la ayuda de `review_agent_steps` («Pasos por pasada») y su relación con `max_passes`. (#86)
+- [x] #59 Añadir `agent.qa-reviewer.prompt`: el diff completo va adjunto, no explorar el repo, responder solo el JSON. (#87)
+- [x] #61 Planificar pasadas por bytes (~45 KB) además de por líneas y cubrir el caso >50 KB con test. (#88)
 - [ ] #62 Aplicar el presupuesto de pasos por run, no solo por pasada, y alinear la etiqueta del panel. Se reevalúa junto con #71; mientras tanto el tope de 8/pasada ya acota el máximo a 32.
-- [ ] #63 Sumar todos los eventos de uso de todos los pasos y pasadas; test con varios `step_finish`. (PR #89)
+- [x] #63 Sumar todos los eventos de uso de todos los pasos y pasadas; test con varios `step_finish`. (#89)
 
 ### Fase 2 — Fiabilidad de la cola
 

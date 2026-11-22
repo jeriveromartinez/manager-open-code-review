@@ -323,11 +323,16 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		return classifyOCR(ctx, out, err)
 	}
 
+	sized, err := diffSizes(ctx, workDir, baseSHA, headSHA, preview.ReviewableFiles)
+	if err != nil {
+		return out.failed(fmt.Errorf("medir diffs por archivo: %w", err), "git_error"), nil
+	}
 	passes, uncovered, err := PlanPasses(PlanInput{
-		Files:        preview.ReviewableFiles,
+		Files:        sized,
 		Groups:       groups,
 		MaxFiles:     cfg.Policy.MaxFilesPerPass,
 		MaxDiffLines: cfg.Policy.MaxDiffLinesPerPass,
+		MaxDiffBytes: maxAttachmentBytes,
 		MaxPasses:    cfg.Policy.MaxPasses,
 	})
 	if err != nil {
@@ -344,6 +349,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 	findingIndex := make(map[string]int)
 	budget := newRunBudget(r.Cfg.Timeout, nil)
+	var runUsage tokenUsage
 	for idx, pass := range passes {
 		passesLeft := len(passes) - idx - 1
 		timeout, ok := budget.timeout()
@@ -377,6 +383,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		prompt := BuildPrompt(cfg.PR, pass.Rules, open, diffPath)
 
 		text, usage, runErr := r.runAgent(ctx, agent, prompt, []string{diffPath})
+		runUsage.addJSON(usage)
 		if runErr != nil {
 			if budgetCut(runErr, passesLeft) {
 				return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
@@ -395,6 +402,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			// repeat the same exploration before it could correct the schema.
 			agent.Continue = true
 			text, usage, runErr = r.runAgent(ctx, agent, retry, nil)
+			runUsage.addJSON(usage)
 			if runErr != nil {
 				if budgetCut(runErr, passesLeft) {
 					return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
@@ -407,7 +415,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			}
 		}
 
-		out.usage = normalizeJSON(usage)
+		out.usage = runUsage.json()
 		if parsed.Summary != "" {
 			out.summary = parsed.Summary
 		}
@@ -465,6 +473,22 @@ func withCloneToken(remote string, token []byte) string {
 
 // writePassDiff executes the git diff for one pass and writes its output to a
 // temporary file inside the ephemeral workspace, attached to the agent prompt.
+// diffSizes measures each file's diff in the clone. OCR reports line counts
+// but not bytes, and OpenCode truncates a text attachment at 50 KB, so the
+// planner needs the real size before grouping files into a pass.
+func diffSizes(ctx context.Context, dir, baseSHA, headSHA string, files []PreviewFile) ([]PreviewFile, error) {
+	sized := make([]PreviewFile, len(files))
+	copy(sized, files)
+	for i := range sized {
+		out, err := git(ctx, dir, "diff", "-C", dir, "diff", "--unified=3", baseSHA, headSHA, "--", sized[i].Path)
+		if err != nil {
+			return nil, err
+		}
+		sized[i].DiffBytes = len(out)
+	}
+	return sized, nil
+}
+
 func writePassDiff(ctx context.Context, dir, baseSHA, headSHA string, files []string) (string, error) {
 	args := []string{"-C", dir, "diff", "--unified=3", baseSHA, headSHA, "--"}
 	args = append(args, files...)
@@ -499,13 +523,6 @@ func coverageJSON(reviewed, skipped int) []byte {
 		SkippedFiles  int `json:"skipped_files"`
 	}{reviewed, skipped})
 	if err != nil {
-		return []byte(`{}`)
-	}
-	return raw
-}
-
-func normalizeJSON(raw []byte) []byte {
-	if len(raw) == 0 || !json.Valid(raw) || string(raw) == "null" {
 		return []byte(`{}`)
 	}
 	return raw
