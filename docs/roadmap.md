@@ -36,7 +36,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #65 | Controlar tokens de razonamiento y latencia | S/M | — | **Hecho** (#96); faltan las mediciones con proveedor real |
 | #66 | Verificar y activar caché de prompt | S | #71 | **Hecho** (#97); falta medir la tasa de acierto con el proveedor real |
 | #79 | Evaluar y subir OCR 1.14.0 | S | — | **Hecho** (#98) |
-| #71 | Usar `ocr review` nativo como motor | L | #79 (recomendado) | Pendiente |
+| #71 | Usar `ocr review` nativo como motor | L | #79 (recomendado) | **Hecho** (#105) |
 | #72 | Techo de 270k, caché y esfuerzo por equipo | M/L | #71 | Pendiente |
 | #80 | Diffs enormes por partes sin abandonar el PR | L | #71, #72 | Pendiente |
 | #74 | Revisión incremental por push y antirrebote | L | #71 | Pendiente |
@@ -88,7 +88,7 @@ Objetivo: ver dónde se gasta y que la política del equipo se aplique de verdad
 Objetivo: dejar de pagar un bucle genérico de OpenCode y usar los controles de coste de OCR.
 
 - [x] #79 Evaluar OCR 1.14.0 (exclusiones y extensiones), subir la versión del worker y comparar cobertura antes/después. No bloquea #71. (#98) Cobertura del PR de referencia: 5 → 7 revisables; 4 archivos Rust de test/bench excluidos y 6 extensiones nuevas soportadas.
-- [ ] #71 Una sola invocación a `ocr review` por revisión: argumentos y entorno del perfil, mapeo de hallazgos y estados, clave fuera de disco, fixtures reales.
+- [x] #71 Una sola invocación a `ocr review` por revisión: argumentos y entorno del perfil, mapeo de hallazgos y estados, clave fuera de disco, fixtures reales. (#105)
 - [ ] #72 Ajuste `review_context_ceiling` (270k), caché por conversación y esfuerzo por equipo; tope de gasto opcional desactivado por defecto.
 - [ ] #80 Trocear diffs enormes por hunks, deduplicar hallazgos de trozos contiguos y publicar cobertura por archivo; nunca abandonar el PR entero.
 - [ ] #74 Revisión incremental `<sha revisado>..<head>` con vuelta a completa ante force-push, cambio de base o run parcial; antirrebote de 2 min.
