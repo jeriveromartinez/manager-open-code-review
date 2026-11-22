@@ -349,6 +349,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 	findingIndex := make(map[string]int)
 	budget := newRunBudget(r.Cfg.Timeout, nil)
+	var runUsage tokenUsage
 	for idx, pass := range passes {
 		passesLeft := len(passes) - idx - 1
 		timeout, ok := budget.timeout()
@@ -382,6 +383,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		prompt := BuildPrompt(cfg.PR, pass.Rules, open, diffPath)
 
 		text, usage, runErr := r.runAgent(ctx, agent, prompt, []string{diffPath})
+		runUsage.addJSON(usage)
 		if runErr != nil {
 			if budgetCut(runErr, passesLeft) {
 				return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
@@ -400,6 +402,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			// repeat the same exploration before it could correct the schema.
 			agent.Continue = true
 			text, usage, runErr = r.runAgent(ctx, agent, retry, nil)
+			runUsage.addJSON(usage)
 			if runErr != nil {
 				if budgetCut(runErr, passesLeft) {
 					return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
@@ -412,7 +415,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			}
 		}
 
-		out.usage = normalizeJSON(usage)
+		out.usage = runUsage.json()
 		if parsed.Summary != "" {
 			out.summary = parsed.Summary
 		}
@@ -520,13 +523,6 @@ func coverageJSON(reviewed, skipped int) []byte {
 		SkippedFiles  int `json:"skipped_files"`
 	}{reviewed, skipped})
 	if err != nil {
-		return []byte(`{}`)
-	}
-	return raw
-}
-
-func normalizeJSON(raw []byte) []byte {
-	if len(raw) == 0 || !json.Valid(raw) || string(raw) == "null" {
 		return []byte(`{}`)
 	}
 	return raw

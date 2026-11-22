@@ -458,13 +458,67 @@ func truncateDetailText(text string, max int) string {
 
 // parseEvents keeps the last contiguous block of text events and the most
 // recent token-usage object from an OpenCode JSONL stream.
+// tokenUsage aggregates the per-step usage objects OpenCode emits. OpenCode
+// reports one object per step, not a running total, so a pass that reads files
+// spends far more than its last step suggests.
+type tokenUsage struct {
+	Input     int `json:"input"`
+	Output    int `json:"output"`
+	Reasoning int `json:"reasoning"`
+	Cache     struct {
+		Read  int `json:"read"`
+		Write int `json:"write"`
+	} `json:"cache"`
+	Total int `json:"total"`
+	Steps int `json:"steps"`
+}
+
+func (u *tokenUsage) addStep(raw []byte) {
+	var step tokenUsage
+	if err := json.Unmarshal(raw, &step); err != nil {
+		return
+	}
+	u.add(step)
+	u.Steps++
+}
+
+// add merges one already-aggregated pass into the run total.
+func (u *tokenUsage) add(other tokenUsage) {
+	u.Input += other.Input
+	u.Output += other.Output
+	u.Reasoning += other.Reasoning
+	u.Cache.Read += other.Cache.Read
+	u.Cache.Write += other.Cache.Write
+	u.Total += other.Total
+	u.Steps += other.Steps
+}
+
+func (u *tokenUsage) addJSON(raw []byte) {
+	if len(raw) == 0 {
+		return
+	}
+	var part tokenUsage
+	if err := json.Unmarshal(raw, &part); err != nil {
+		return
+	}
+	u.add(part)
+}
+
+func (u *tokenUsage) json() []byte {
+	raw, err := json.Marshal(u)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
 func parseEvents(r io.Reader) (string, []byte) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 
 	var current strings.Builder
 	var last string
-	var usage []byte
+	var usage tokenUsage
 	flush := func() {
 		if block := strings.TrimSpace(current.String()); block != "" {
 			last = block
@@ -504,13 +558,16 @@ func parseEvents(r io.Reader) (string, []byte) {
 		flush()
 		switch {
 		case len(ev.Part.Tokens) > 0:
-			usage = append([]byte(nil), ev.Part.Tokens...)
+			usage.addStep(ev.Part.Tokens)
 		case len(ev.Part.Usage) > 0:
-			usage = append([]byte(nil), ev.Part.Usage...)
+			usage.addStep(ev.Part.Usage)
 		case len(ev.Usage) > 0:
-			usage = append([]byte(nil), ev.Usage...)
+			usage.addStep(ev.Usage)
 		}
 	}
 	flush()
-	return last, usage
+	if usage.Steps == 0 {
+		return last, nil
+	}
+	return last, usage.json()
 }
