@@ -1,0 +1,173 @@
+{
+  "status": "failed",
+  "llm": {
+    "model": "fake-model"
+  },
+  "message": "Review failed: 0 finding(s); 2 of 2 selected item(s) failed.",
+  "summary": {
+    "files_reviewed": 2,
+    "comments": 0,
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "elapsed": "0s"
+  },
+  "tool_calls": {
+    "total": 0,
+    "by_tool": {},
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": null,
+  "groups": [
+    {
+      "label": "small change set",
+      "files": [
+        "auth.go",
+        "main.go"
+      ]
+    }
+  ],
+  "session_id": "00000000-0000-4000-8000-000000000003",
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "run_id": "00000000-0000-4000-8000-000000000003",
+    "operation": "review",
+    "terminal_state": "failed",
+    "repository": {},
+    "input": {
+      "mode": "range",
+      "requested_from": "5375f11",
+      "requested_head": "9bb6edc",
+      "resolved_base": "5375f11ade4fc26171d6a44f4ccc3573db059ef2",
+      "resolved_head": "9bb6edcd1792061c2495326df94ce09ee2f75384",
+      "exact_range": "5375f11ade4fc26171d6a44f4ccc3573db059ef2..9bb6edcd1792061c2495326df94ce09ee2f75384",
+      "source_artifact_sha256": "c26c2e9fc523813be4b48912585a9f1d7e245e6741ec0ad1d84e0b3ab2e82da5"
+    },
+    "execution": {
+      "ocr_version": "v1.14.0",
+      "model": "fake-model",
+      "configured_concurrency": 8,
+      "max_tool_request_times": 100,
+      "rule_config_sha256": "77361ee3e7a3ab0b4ab3b6fbe56c09c7c02e83722fcce12db220c2af88cd9d4e",
+      "runtime_config_sha256": "37eee96debd47656e374d227db172318fc29ea350ec09cc7575cf42a62cbcf79"
+    },
+    "coverage": {
+      "selected": [
+        {
+          "item_id": "09fd23a0ad05c00813f62c6a849895ef3ec844e0645f507087296f05b4f06f15",
+          "path": "main.go",
+          "fingerprint": "d851221b876ca0a0bbe6c0e8d615829bbbbb14d19a5a8b3b80a96901d6a4a611"
+        },
+        {
+          "item_id": "c14432f22e4255b04061b5bbd987ae2ba9beee713ca6071b96ac44fd4dbdcbcc",
+          "path": "auth.go",
+          "fingerprint": "c75631da47502be17248ad72e220a52b5a3461b653679223baa3eb1859f665c2"
+        }
+      ],
+      "completed": [],
+      "reused": [],
+      "failed": [
+        {
+          "item_id": "09fd23a0ad05c00813f62c6a849895ef3ec844e0645f507087296f05b4f06f15",
+          "path": "main.go",
+          "fingerprint": "d851221b876ca0a0bbe6c0e8d615829bbbbb14d19a5a8b3b80a96901d6a4a611",
+          "classification": "provider",
+          "reason": "provider or subtask request failed"
+        },
+        {
+          "item_id": "c14432f22e4255b04061b5bbd987ae2ba9beee713ca6071b96ac44fd4dbdcbcc",
+          "path": "auth.go",
+          "fingerprint": "c75631da47502be17248ad72e220a52b5a3461b653679223baa3eb1859f665c2",
+          "classification": "provider",
+          "reason": "provider or subtask request failed"
+        }
+      ],
+      "waived": [],
+      "excluded": [
+        {
+          "item_id": "5513e08b2a7a2bd1474a6452d9bc1b53c9b16406f75a10e4eaf4d17e219a038c",
+          "path": "README.md",
+          "exclude_reason": "unsupported_ext"
+        }
+      ]
+    },
+    "elapsed_ms": 0
+  },
+  "retry_report": {
+    "schema_version": "ocr.llm-retry-report/v1",
+    "total_requests": 1,
+    "retried_requests": 1,
+    "total_retries": 5,
+    "recovered_requests": 0,
+    "failed_requests": 1,
+    "cancelled_requests": 0,
+    "requests": [
+      {
+        "logical_request_id": "0000000000000000000000000000000000000000000000000000000000000003",
+        "provider": "",
+        "model": "fake-model",
+        "file_path": "auth.go,main.go",
+        "task_type": "main_task",
+        "request_no": 1,
+        "outcome": "failed",
+        "attempts": [
+          {
+            "attempt": 1,
+            "outcome": "error",
+            "error_class": "provider",
+            "failure_phase": "http",
+            "status_code": 500,
+            "duration_to_headers_ms": 0
+          },
+          {
+            "attempt": 2,
+            "outcome": "error",
+            "error_class": "provider",
+            "failure_phase": "http",
+            "status_code": 500,
+            "observed_backoff_ms": 0,
+            "duration_to_headers_ms": 0
+          },
+          {
+            "attempt": 3,
+            "outcome": "error",
+            "error_class": "provider",
+            "failure_phase": "http",
+            "status_code": 500,
+            "observed_backoff_ms": 0,
+            "duration_to_headers_ms": 0
+          },
+          {
+            "attempt": 4,
+            "outcome": "error",
+            "error_class": "provider",
+            "failure_phase": "http",
+            "status_code": 500,
+            "observed_backoff_ms": 0,
+            "duration_to_headers_ms": 0
+          },
+          {
+            "attempt": 5,
+            "outcome": "error",
+            "error_class": "provider",
+            "failure_phase": "http",
+            "status_code": 500,
+            "observed_backoff_ms": 0,
+            "duration_to_headers_ms": 0
+          },
+          {
+            "attempt": 6,
+            "outcome": "error",
+            "error_class": "provider",
+            "failure_phase": "http",
+            "status_code": 500,
+            "observed_backoff_ms": 0,
+            "duration_to_headers_ms": 0
+          }
+        ]
+      }
+    ]
+  }
+}

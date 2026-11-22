@@ -1,0 +1,63 @@
+{
+  "status": "skipped",
+  "llm": {
+    "model": "fake-model"
+  },
+  "message": "Review skipped: no items were selected.",
+  "summary": {
+    "files_reviewed": 0,
+    "comments": 0,
+    "total_tokens": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "elapsed": "0s"
+  },
+  "tool_calls": {
+    "total": 0,
+    "by_tool": {},
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": [],
+  "session_id": "00000000-0000-4000-8000-000000000004",
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "run_id": "00000000-0000-4000-8000-000000000004",
+    "operation": "review",
+    "terminal_state": "skipped",
+    "repository": {},
+    "input": {
+      "mode": "range",
+      "requested_from": "c3f6044",
+      "requested_head": "5bce0db",
+      "resolved_base": "c3f6044b41bcf3a1eb3832bfca8ba3b5d26748f6",
+      "resolved_head": "5bce0db5580527a0a2a5c57fac1c215aaec90414",
+      "exact_range": "c3f6044b41bcf3a1eb3832bfca8ba3b5d26748f6..5bce0db5580527a0a2a5c57fac1c215aaec90414",
+      "source_artifact_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "execution": {
+      "ocr_version": "v1.14.0",
+      "model": "fake-model",
+      "configured_concurrency": 8,
+      "max_tool_request_times": 100,
+      "rule_config_sha256": "1cc887a4128643b96bd1f8aa007592308b9f4d56dfd14266776304366e9984cf",
+      "runtime_config_sha256": "37eee96debd47656e374d227db172318fc29ea350ec09cc7575cf42a62cbcf79"
+    },
+    "coverage": {
+      "selected": [],
+      "completed": [],
+      "reused": [],
+      "failed": [],
+      "waived": [],
+      "excluded": [
+        {
+          "item_id": "09fd23a0ad05c00813f62c6a849895ef3ec844e0645f507087296f05b4f06f15",
+          "path": "main.go",
+          "exclude_reason": "user_exclude"
+        }
+      ]
+    },
+    "elapsed_ms": 0
+  }
+}
