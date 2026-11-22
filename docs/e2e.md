@@ -43,8 +43,9 @@ Los dobles se controlan con variables de entorno (`RUN_FAKE_AGENT_FAIL`, `RUN_FA
 | `TestTokenBankNoReadsMakesOneRequest` | Una pasada sin lecturas hace una sola petición y declara solo `read`. Detecta la llamada de título y las herramientas de exploración. |
 | `TestTokenBankStopsAtStepBudget` | Con el tope por defecto, el bucle recibe el aviso de último paso en la octava petición y ninguna petición supera 270k tokens de contexto. |
 | `TestTokenBankReferenceFigures` | Reproduce el caso del diagnóstico (#76) con 12 lecturas y un diff de 30 KB; falla si el consumo total se sale del orden de magnitud esperado. |
+| `TestTokenBankSendsStablePromptCacheKey` | La clave `qa-review-<perfil>` llega al cuerpo en todos los pasos y los `cached_tokens` del proveedor se suman al consumo del run (#66). |
 
-Los tres se saltan con un mensaje claro si `opencode` no está instalado o no es 1.19.x. En el host de desarrollo suele haber otra versión, así que el banco se ejecuta dentro de la imagen del worker. Se compila el binario de test para Linux en Windows y se monta en la imagen; no hace falta PostgreSQL ni WSL:
+Los cuatro se saltan con un mensaje claro si `opencode` no está instalado o no es 1.19.x. En el host de desarrollo suele haber otra versión, así que el banco se ejecuta dentro de la imagen del worker. Se compila el binario de test para Linux en Windows y se monta en la imagen; no hace falta PostgreSQL ni WSL:
 
 ```powershell
 $env:GOOS = "linux"; $env:GOARCH = "amd64"; $env:CGO_ENABLED = "0"

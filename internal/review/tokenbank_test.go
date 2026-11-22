@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -117,6 +118,59 @@ func TestTokenBankNoReadsMakesOneRequest(t *testing.T) {
 	}
 	if requests[0].EstimatedInputTokens > 270_000 {
 		t.Errorf("first request context = %d tokens, want at most 270000", requests[0].EstimatedInputTokens)
+	}
+}
+
+// TestTokenBankSendsStablePromptCacheKey is the #66 check: OpenCode only sends
+// a prompt cache key for a fixed list of provider SDKs, so the generated config
+// opts in explicitly. Every step must reuse the same key, and the provider's
+// cached_tokens must reach the run usage instead of being lost.
+func TestTokenBankSendsStablePromptCacheKey(t *testing.T) {
+	bin := requireOpenCode119(t)
+	dir := t.TempDir()
+	writeBankFile(t, filepath.Join(dir, "main.go"), "package main\n")
+	diffPath := filepath.Join(dir, "review.patch")
+	writeBankFile(t, diffPath, bankDiff(8*1024))
+
+	provider := testutil.NewFakeProvider(t, func(req testutil.ProviderRequest) testutil.ProviderReply {
+		if req.ToolResultCount() == 0 {
+			return testutil.ProviderReply{ToolCalls: []testutil.ProviderToolCall{{
+				ID:        "read-0",
+				Name:      "read",
+				Arguments: fmt.Sprintf(`{"filePath":%q}`, filepath.Join(dir, "main.go")),
+			}}}
+		}
+		return testutil.ProviderReply{
+			Text:  `{"summary":"ok","coverage":{"reviewed_files":1,"skipped_files":0},"previous_findings":[],"findings":[]}`,
+			Usage: testutil.ProviderUsage{CachedTokens: 900},
+		}
+	})
+
+	agent := bankAgent(t, bin, provider, dir)
+	_, rawUsage, err := agent.Run(context.Background(), bankPrompt(t, diffPath), []string{diffPath})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var usage tokenUsage
+	if err := json.Unmarshal(rawUsage, &usage); err != nil {
+		t.Fatalf("decode usage %q: %v", rawUsage, err)
+	}
+
+	requests := provider.Requests()
+	if len(requests) != 2 {
+		t.Fatalf("chat requests = %d, want 2 (one read plus the answer)", len(requests))
+	}
+	key := requests[0].PromptCacheKey
+	if key == "" {
+		t.Fatal("first request has no prompt_cache_key; the model option did not reach the request body")
+	}
+	for i, req := range requests[1:] {
+		if req.PromptCacheKey != key {
+			t.Errorf("request %d cache key = %q, want the run key %q", i+1, req.PromptCacheKey, key)
+		}
+	}
+	if usage.Cache.Read != 900 {
+		t.Errorf("run cache read = %d, want the 900 cached tokens reported by the provider", usage.Cache.Read)
 	}
 }
 

@@ -142,6 +142,13 @@ func (a *Agent) Run(ctx context.Context, prompt string, files []string) (text st
 	return text, usage, nil
 }
 
+// promptCacheKey is stable across the steps of a run and across runs of the
+// same profile, so an endpoint that caches by explicit key can reuse the
+// system prompt and the tool schema.
+func promptCacheKey(profile store.LLMProfile) string {
+	return fmt.Sprintf("qa-review-%d", profile.ID)
+}
+
 func variantOf(profile store.LLMProfile) string {
 	if profile.Variant == nil {
 		return ""
@@ -226,12 +233,20 @@ func writeOpenCodeConfig(home string, profile store.LLMProfile, steps int) error
 	} else if baseURL, ok := llmmodels.ProviderBaseURL(profile.Provider); ok {
 		options["baseURL"] = baseURL
 	}
+	// The OpenAI-compatible SDK forwards unknown provider options into the
+	// request body, which is the only way to send the standard cache key to an
+	// endpoint that caches by explicit key. A stable per-profile value keeps
+	// every step of the run on the same cache while the provider hashes the
+	// prefix itself (#66).
+	model := map[string]any{
+		"name":    profile.Model,
+		"options": map[string]any{"prompt_cache_key": promptCacheKey(profile)},
+	}
 	// OpenCode builds `--variant` from the model's variant table, and a
 	// config-declared model defaults to "no reasoning", which yields an empty
 	// table and silently ignores the flag. Declaring reasoning support builds
 	// the provider's table; the explicit entry guarantees the selected value
 	// exists on OpenAI-compatible endpoints (#65).
-	model := map[string]any{"name": profile.Model}
 	if variant := variantOf(profile); variant != "" {
 		model["reasoning"] = true
 		if settings, ok := reasoningVariantSettings(profile.Provider, variant); ok {
