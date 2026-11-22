@@ -132,6 +132,10 @@ Para asignar el perfil, en **Política por equipo** elige el equipo y el perfil 
 
 En las opciones avanzadas del perfil, **Variante de razonamiento** permite elegir `none`, `minimal`, `low`, `medium` o `high`, o dejarla vacía para usar la del modelo. OpenCode solo construye la tabla de variantes si el modelo declara que razona, y a un modelo declarado en el perfil se le supone lo contrario; por eso el worker declara `reasoning` y, en los proveedores compatibles con OpenAI, escribe la entrada de la variante elegida (`reasoning_effort`), de modo que `--variant` llega al proveedor en lugar de ignorarse. En Anthropic y Google se usa la tabla específica de OpenCode (presupuestos o niveles de pensamiento). Úsala solo con un modelo que acepte esa variante: si no la acepta, el proveedor rechaza la petición y el motivo aparece en el run y en la salud del perfil. Para medir el efecto, compara el detalle de un PR antes y después: cada run muestra **Razonamiento** junto al consumo total, y la duración está en `started_at`/`finished_at`.
 
+### Caché de prompt
+
+Cada petición de revisión lleva `prompt_cache_key: qa-review-<id del perfil>` en el cuerpo. OpenCode no envía esa clave a un endpoint compatible con OpenAI por su cuenta, pero el SDK reenvía al cuerpo las opciones de modelo que no reconoce, así que la clave llega al proveedor y es la misma en todos los pasos de una pasada y entre ejecuciones del mismo perfil. Un proveedor con caché por prefijo (automática o por clave) reutiliza así el prompt del sistema, la lista de herramientas y el diff adjunto entre pasos. Si el endpoint no cachea, la clave no cambia el resultado; si rechazara parámetros desconocidos, el run fallaría con el mensaje del proveedor. La tasa se ve en **Caché** del detalle del PR (`cache_read` frente al total de entrada): si en varias pasadas se queda cerca de cero, el proveedor no cachea y la mitigación es el diseño de una petición por pasada sin lecturas y el tope de 8 pasos.
+
 ### Artefactos tras la revisión
 
 En el PR aparecen:

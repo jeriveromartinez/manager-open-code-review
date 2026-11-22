@@ -562,6 +562,7 @@ func TestAgentConfigDeclaresSelectedModel(t *testing.T) {
 type generatedModel struct {
 	Name      string                    `json:"name"`
 	Reasoning bool                      `json:"reasoning"`
+	Options   map[string]any            `json:"options"`
 	Variants  map[string]map[string]any `json:"variants"`
 }
 
@@ -638,6 +639,22 @@ func TestAgentConfigLeavesAnthropicVariantToOpenCode(t *testing.T) {
 	got := generatedProviderModel(t, home, "anthropic", "claude-sonnet-5-5")
 	if !got.Reasoning || len(got.Variants) != 0 {
 		t.Errorf("model = %+v, want reasoning support and no explicit variant", got)
+	}
+}
+
+// OpenCode does not send a prompt cache key to an OpenAI-compatible endpoint;
+// the unused model option reaches the request body and lets a key-based cache
+// reuse the stable prefix across steps (#66).
+func TestAgentConfigSendsPromptCacheKey(t *testing.T) {
+	home := t.TempDir()
+	agent := testAgent(t, home)
+	agent.Profile.ID = 7
+	if _, _, err := agent.Run(context.Background(), "__FAKE_ARGS__", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := generatedProviderModel(t, home, "nvidia", "nemotron")
+	if got.Options["prompt_cache_key"] != "qa-review-7" {
+		t.Errorf("model options = %#v, want prompt_cache_key qa-review-7", got.Options)
 	}
 }
 
