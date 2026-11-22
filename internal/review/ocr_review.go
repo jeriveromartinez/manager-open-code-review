@@ -25,8 +25,8 @@ const (
 	// nativeAPIKeyEnv carries the selected profile's key to the credential
 	// helper. It is the only credential variable the child receives.
 	nativeAPIKeyEnv = "QA_OCR_API_KEY"
-	// reviewContextCeiling is the per-group prompt ceiling OCR enforces. #72
-	// will make it configurable per team.
+	// reviewContextCeiling is the default per-group prompt ceiling OCR enforces
+	// when neither the global setting nor the team policy provides one.
 	reviewContextCeiling = 270000
 	// ocrSessionKeyPlaceholder is substituted by OCR with a value stable across
 	// the conversation of one review, so providers that cache by explicit key
@@ -142,6 +142,7 @@ type nativeInvocation struct {
 	Profile        store.LLMProfile
 	Effort         string
 	MaxTokens      int
+	TokenBudget    int64
 	Timeout        time.Duration
 }
 
@@ -158,6 +159,10 @@ func buildReviewArgs(in nativeInvocation) []string {
 		"--effort", in.Effort,
 		"--max-tokens", fmt.Sprint(in.MaxTokens),
 		"--background-file", in.BackgroundFile,
+	}
+	// Zero disables the optional aggregate budget; OCR rejects the flag with 0.
+	if in.TokenBudget > 0 {
+		args = append(args, "--max-tokens-budget", fmt.Sprint(in.TokenBudget))
 	}
 	if minutes, ok := nativeTimeoutMinutes(in.Timeout); ok {
 		args = append(args, "--timeout", fmt.Sprint(minutes))
@@ -181,20 +186,6 @@ func nativeTimeoutMinutes(budget time.Duration) (int, bool) {
 	return minutes, true
 }
 
-// nativeEffort maps the profile's reasoning variant onto OCR's effort presets.
-// #72 will make it a per-team setting; until then the default is medium.
-func nativeEffort(profile store.LLMProfile) string {
-	if profile.Variant == nil {
-		return "medium"
-	}
-	switch variant := strings.ToLower(strings.TrimSpace(*profile.Variant)); variant {
-	case "low", "medium", "high":
-		return variant
-	default:
-		return "medium"
-	}
-}
-
 // NativeReviewer runs one `ocr review` for the whole pull request.
 type NativeReviewer struct {
 	Bin      string
@@ -208,6 +199,11 @@ type NativeReviewer struct {
 	Background string
 	BaseRef    string
 	HeadRef    string
+	// Effort, MaxTokens and TokenBudget come from the team policy and the
+	// global settings, resolved by Runner.execute on every run.
+	Effort      string
+	MaxTokens   int
+	TokenBudget int64
 	// Timeout is the whole-run budget. It bounds the context and derives
 	// --timeout; the per-request OCR_LLM_TIMEOUT keeps its own default.
 	Timeout time.Duration
@@ -253,8 +249,9 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 		BackgroundFile: backgroundPath,
 		Excludes:       n.Excludes,
 		Profile:        n.Profile,
-		Effort:         nativeEffort(n.Profile),
-		MaxTokens:      reviewContextCeiling,
+		Effort:         n.Effort,
+		MaxTokens:      n.MaxTokens,
+		TokenBudget:    n.TokenBudget,
 		Timeout:        n.Timeout,
 	})
 
@@ -637,8 +634,9 @@ func nativeFailureClass(res nativeReview) string {
 	return ""
 }
 
-// nativeTokenUsage records the consumption OCR reports. OCR has no
-// max-context sample, so MaxContext stays zero and #72/#73 can fill it later.
+// nativeTokenUsage records the consumption OCR reports. OCR emits no
+// max-context sample, so MaxContext stays unset and the run stores NULL instead
+// of a measured zero.
 func nativeTokenUsage(res nativeReview) tokenUsage {
 	usage := tokenUsage{
 		Input:  res.Summary.InputTokens,

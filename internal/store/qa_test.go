@@ -289,7 +289,8 @@ func TestQASummaryAggregatesRunTokens(t *testing.T) {
 	open := f.openPR(repo.ID, 2, store.StatusReadyForHuman, false)
 	old := f.openPR(repo.ID, 3, store.StatusReadyForHuman, false)
 	legacy := f.openPR(repo.ID, 4, store.StatusReadyForHuman, false)
-	other := f.openPR(hidden.ID, 5, store.StatusReadyForHuman, false)
+	nativeMax := f.openPR(repo.ID, 5, store.StatusReadyForHuman, false)
+	other := f.openPR(hidden.ID, 6, store.StatusReadyForHuman, false)
 
 	// A merged PR still spent tokens in the window.
 	tokenRun(merged, now.Add(-time.Hour), val(100), val(10), val(50), val(5), val(165), val(150))
@@ -297,6 +298,9 @@ func TestQASummaryAggregatesRunTokens(t *testing.T) {
 	// Finished before the window and never recorded usage: neither counts.
 	tokenRun(old, now.Add(-8*24*time.Hour), val(900), val(90), val(900), val(90), val(1980), val(1000))
 	tokenRun(legacy, now.Add(-time.Hour), nil, nil, nil, nil, nil, nil)
+	// A native OCR run reports tokens but no max-context sample: it counts in
+	// the totals and is skipped by the MAX aggregate, which stays 300.
+	tokenRun(nativeMax, now.Add(-time.Hour), val(50), val(5), val(0), val(0), val(55), nil)
 	tokenRun(other, now.Add(-time.Hour), val(5000), val(500), val(5000), val(500), val(11000), val(9000))
 
 	got, err := f.s.QASummary(f.ctx, qa, now, store.QAFilter{})
@@ -304,8 +308,8 @@ func TestQASummaryAggregatesRunTokens(t *testing.T) {
 		t.Fatalf("QASummary: %v", err)
 	}
 	want := store.RunTokenStats{
-		Reviews: 2, Input: 300, Output: 30, CacheRead: 150,
-		CacheWrite: 15, Total: 495, MaxContext: 300,
+		Reviews: 3, Input: 350, Output: 35, CacheRead: 150,
+		CacheWrite: 15, Total: 550, MaxContext: 300,
 	}
 	if got.Tokens != want {
 		t.Errorf("Tokens = %+v, want %+v", got.Tokens, want)

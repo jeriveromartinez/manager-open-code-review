@@ -268,12 +268,13 @@ func runWorker() error {
 	runner := &review.Runner{
 		Store: st, Apps: nil, Box: workerBox, Events: eventsPublisher,
 		Cfg: review.RunnerConfig{
-			WorkspaceDir:  cfg.WorkspaceDir,
-			OCRBin:        cfg.OCRBin,
-			OpencodeBin:   cfg.OpencodeBin,
-			GitBaseURL:    cfg.GitBaseURL,
-			FetchDepthMax: cfg.FetchDepthMax,
-			Timeout:       cfg.ReviewTimeout,
+			WorkspaceDir:   cfg.WorkspaceDir,
+			OCRBin:         cfg.OCRBin,
+			OpencodeBin:    cfg.OpencodeBin,
+			GitBaseURL:     cfg.GitBaseURL,
+			FetchDepthMax:  cfg.FetchDepthMax,
+			ContextCeiling: cfg.ReviewContextCeiling,
+			Timeout:        cfg.ReviewTimeout,
 		},
 	}
 	checker := &review.ProfileChecker{

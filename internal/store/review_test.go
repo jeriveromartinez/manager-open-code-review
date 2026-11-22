@@ -1106,6 +1106,7 @@ func TestRunLifecycle(t *testing.T) {
 	}
 	coverage := []byte(`{"reviewed_files":2,"skipped":["generated.pb.go"]}`)
 	usage := []byte(`{"input_tokens":123,"output_tokens":45}`)
+	maxContext := int64(1053)
 	err = f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
 		Status:   store.RunSucceeded,
 		Summary:  "looks good",
@@ -1113,7 +1114,7 @@ func TestRunLifecycle(t *testing.T) {
 		Usage:    usage,
 		Tokens: store.RunUsage{
 			Input: 123, Output: 45, Reasoning: 30, CacheRead: 900, CacheWrite: 30,
-			Total: 168, MaxContext: 1053,
+			Total: 168, MaxContext: &maxContext,
 		},
 		Findings: []store.Finding{finding, resolvedFinding},
 		Resolved: []string{"finding-b"},
