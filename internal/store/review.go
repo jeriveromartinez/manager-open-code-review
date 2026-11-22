@@ -647,6 +647,22 @@ func (s *Store) RunForSHA(ctx context.Context, prID uint, headSHA string) (Revie
 	return run, nil
 }
 
+// PreviousSucceededRun returns the latest succeeded run of a pull request
+// before beforeRunID. It is the run whose head can seed an incremental review.
+func (s *Store) PreviousSucceededRun(ctx context.Context, prID, beforeRunID uint) (ReviewRun, error) {
+	var run ReviewRun
+	err := quietDB(s.DB.WithContext(ctx)).
+		Where("pull_request_id = ? AND status = ? AND id < ?", prID, RunSucceeded, beforeRunID).
+		Order("id DESC").Take(&run).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ReviewRun{}, fmt.Errorf("previous succeeded review run of pull request %d before %d: %w", prID, beforeRunID, ErrNotFound)
+	}
+	if err != nil {
+		return ReviewRun{}, fmt.Errorf("find previous succeeded review run of pull request %d before %d: %w", prID, beforeRunID, err)
+	}
+	return run, nil
+}
+
 // SupersedeActiveRuns cancels queued and running runs of a pull request so a
 // new head can be queued. Terminal runs are left untouched for the audit trail.
 // The clone token is cleared because a superseded run never publishes.
@@ -707,6 +723,10 @@ type RunCompletion struct {
 	Tokens       RunUsage
 	Findings     []Finding
 	Resolved     []string
+	// BaseSHA is the reviewed base of the run, used to decide whether the next
+	// push can be reviewed incrementally. An empty value never overwrites the
+	// base a run already carried.
+	BaseSHA string
 }
 
 // CompleteReviewRun stores a run's outcome in a single transaction: the run is
@@ -730,26 +750,32 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 		if c.Tokens.MaxContext != nil {
 			maxContext = *c.Tokens.MaxContext
 		}
+		updates := map[string]any{
+			"status":             c.Status,
+			"error_code":         c.ErrorCode,
+			"error_message":      c.ErrorMessage,
+			"summary":            c.Summary,
+			"coverage":           datatypes.JSON(coverage),
+			"usage":              datatypes.JSON(usage),
+			"input_tokens":       c.Tokens.Input,
+			"output_tokens":      c.Tokens.Output,
+			"reasoning_tokens":   c.Tokens.Reasoning,
+			"cache_read_tokens":  c.Tokens.CacheRead,
+			"cache_write_tokens": c.Tokens.CacheWrite,
+			"total_tokens":       c.Tokens.Total,
+			"max_context_tokens": maxContext,
+			"clone_token_enc":    "",
+			"finished_at":        now,
+			"updated_at":         now,
+		}
+		// Only a resolved base replaces the column: an early failure has no base
+		// and must not erase one the run already knew.
+		if c.BaseSHA != "" {
+			updates["base_sha"] = c.BaseSHA
+		}
 		res := tx.Model(&ReviewRun{}).
 			Where("id = ? AND status = ?", id, RunRunning).
-			Updates(map[string]any{
-				"status":             c.Status,
-				"error_code":         c.ErrorCode,
-				"error_message":      c.ErrorMessage,
-				"summary":            c.Summary,
-				"coverage":           datatypes.JSON(coverage),
-				"usage":              datatypes.JSON(usage),
-				"input_tokens":       c.Tokens.Input,
-				"output_tokens":      c.Tokens.Output,
-				"reasoning_tokens":   c.Tokens.Reasoning,
-				"cache_read_tokens":  c.Tokens.CacheRead,
-				"cache_write_tokens": c.Tokens.CacheWrite,
-				"total_tokens":       c.Tokens.Total,
-				"max_context_tokens": maxContext,
-				"clone_token_enc":    "",
-				"finished_at":        now,
-				"updated_at":         now,
-			})
+			Updates(updates)
 		if res.Error != nil {
 			return fmt.Errorf("complete review run %d: %w", id, res.Error)
 		}

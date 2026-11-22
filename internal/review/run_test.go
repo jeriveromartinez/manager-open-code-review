@@ -466,14 +466,111 @@ func (f *runTestFixture) hasOCRArg(t *testing.T, want string) bool {
 func (f *runTestFixture) ocrArgValue(t *testing.T, flag string) string {
 	t.Helper()
 	for _, line := range f.ocrArgs(t) {
-		args := strings.Fields(line)
-		for i, arg := range args {
-			if arg == flag && i+1 < len(args) {
-				return args[i+1]
-			}
+		if value := ocrArgInLine(line, flag); value != "" {
+			return value
 		}
 	}
 	return ""
+}
+
+// lastOCRArgValue returns the value of flag in the most recent OCR call. A test
+// with a first (full) run and a second (incremental) run needs the second one:
+// ocrArgValue would return the first match.
+func (f *runTestFixture) lastOCRArgValue(t *testing.T, flag string) string {
+	t.Helper()
+	lines := f.ocrArgs(t)
+	if len(lines) == 0 {
+		return ""
+	}
+	return ocrArgInLine(lines[len(lines)-1], flag)
+}
+
+func ocrArgInLine(line, flag string) string {
+	args := strings.Fields(line)
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// createRun queues another run for the fixture PR with the given head. An empty
+// baseSHA makes the worker resolve the base from the clone, like a real trigger.
+func (f *runTestFixture) createRun(t *testing.T, headSHA, baseSHA string) store.ReviewRun {
+	t.Helper()
+	token, err := f.box.Seal([]byte("clone-token"))
+	if err != nil {
+		t.Fatalf("seal token: %v", err)
+	}
+	run, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: f.pr.ID, ProfileID: f.policy.LLMProfileID,
+		HeadSHA: headSHA, BaseSHA: baseSHA, CloneTokenEnc: token,
+	})
+	if err != nil {
+		t.Fatalf("create review run: %v", err)
+	}
+	return run
+}
+
+// commitWorkFile adds a commit to the fixture work repo and returns its SHA.
+func (f *runTestFixture) commitWorkFile(t *testing.T, name string) string {
+	t.Helper()
+	work := filepath.Join(f.root, "work")
+	writeRunTestFile(t, filepath.Join(work, name), "package main\n")
+	runGit(t, work, "add", "-A")
+	runGit(t, work, "commit", "-qm", "advance "+name)
+	return runGit(t, work, "rev-parse", "HEAD")
+}
+
+// publishWorkHead points refs/pull/1/head at the work repo HEAD and moves the
+// stored PR head with it. Returns the published SHA.
+func (f *runTestFixture) publishWorkHead(t *testing.T) string {
+	t.Helper()
+	work := filepath.Join(f.root, "work")
+	head := runGit(t, work, "rev-parse", "HEAD")
+	// Force: the force-push case rewrites the commit, and GitHub also
+	// force-updates the moving refs/pull/<n>/head.
+	runGit(t, work, "push", "-q", "-f", f.bare, "HEAD:refs/pull/1/head")
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).
+		Where("id = ?", f.pr.ID).Update("head_sha", head).Error; err != nil {
+		t.Fatalf("update pull request head: %v", err)
+	}
+	f.pr.HeadSHA = head
+	return head
+}
+
+// advanceHead commits a new file and publishes it as the PR head.
+func (f *runTestFixture) advanceHead(t *testing.T, name string) string {
+	t.Helper()
+	f.commitWorkFile(t, name)
+	return f.publishWorkHead(t)
+}
+
+func (f *runTestFixture) updateRun(t *testing.T, runID uint, updates map[string]any) {
+	t.Helper()
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", runID).Updates(updates).Error; err != nil {
+		t.Fatalf("update run %d: %v", runID, err)
+	}
+}
+
+func (f *runTestFixture) loadFinding(t *testing.T, id string) store.Finding {
+	t.Helper()
+	var got store.Finding
+	if err := f.s.DB.WithContext(f.ctx).Where("id = ?", id).Take(&got).Error; err != nil {
+		t.Fatalf("reload finding %q: %v", id, err)
+	}
+	return got
+}
+
+// runFirst executes the fixture's first run and returns its terminal row.
+func (f *runTestFixture) runFirst(t *testing.T) store.ReviewRun {
+	t.Helper()
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("first Run() error = %v", err)
+	}
+	return assertRunTerminal(t, f, store.RunSucceeded, "")
 }
 
 func assertRunTerminal(t *testing.T, f *runTestFixture, status, code string) store.ReviewRun {
@@ -1607,5 +1704,227 @@ func TestRunSkippedDoesNotResolveFindings(t *testing.T) {
 	}
 	if pr := f.loadPR(t); pr.QAStatus != store.StatusInconclusive {
 		t.Errorf("qa_status = %q, want %q", pr.QAStatus, store.StatusInconclusive)
+	}
+}
+
+// TestRunIncrementalReviewsOnlyNewCommits fija el camino feliz: el segundo push
+// se revisa desde el head del run anterior y el run persiste el merge-base como
+// base_sha.
+func TestRunIncrementalReviewsOnlyNewCommits(t *testing.T) {
+	f := newRunTestFixture(t)
+	first := f.runFirst(t)
+	if first.BaseSHA != f.baseSHA {
+		t.Fatalf("first run base_sha = %q, want the merge-base %q", first.BaseSHA, f.baseSHA)
+	}
+	firstHead := f.headSHA
+
+	secondHead := f.advanceHead(t, "second.go")
+	second := f.createRun(t, secondHead, "")
+
+	if err := f.runner().Run(f.ctx, second.ID); err != nil {
+		t.Fatalf("second Run() error = %v", err)
+	}
+	stored, err := f.s.ReviewRun(f.ctx, second.ID)
+	if err != nil {
+		t.Fatalf("reload second run: %v", err)
+	}
+	if stored.Status != store.RunSucceeded {
+		t.Fatalf("second run status = %q, want %q (%s)", stored.Status, store.RunSucceeded, stored.ErrorMessage)
+	}
+	if got := f.lastOCRArgValue(t, "--from"); got != firstHead {
+		t.Errorf("ocr --from = %q, want the previous reviewed head %q", got, firstHead)
+	}
+	if got := f.lastOCRArgValue(t, "--to"); got != secondHead {
+		t.Errorf("ocr --to = %q, want the new head %q", got, secondHead)
+	}
+	if stored.BaseSHA != f.baseSHA {
+		t.Errorf("second run base_sha = %q, want the merge-base %q", stored.BaseSHA, f.baseSHA)
+	}
+}
+
+// TestRunIncrementalFallsBackToFullDiff covers every unsafe case: a previous
+// run that is not succeeded, without base_sha, with a different base, or whose
+// head is not an ancestor (force-push). All of them review the full diff.
+func TestRunIncrementalFallsBackToFullDiff(t *testing.T) {
+	tests := []struct {
+		name         string
+		breakFixture func(t *testing.T, f *runTestFixture, first store.ReviewRun) string
+	}{
+		{
+			name: "previous run is not succeeded",
+			breakFixture: func(t *testing.T, f *runTestFixture, first store.ReviewRun) string {
+				f.updateRun(t, first.ID, map[string]any{"status": store.RunFailed})
+				return f.advanceHead(t, "second.go")
+			},
+		},
+		{
+			name: "previous run has empty base_sha",
+			breakFixture: func(t *testing.T, f *runTestFixture, first store.ReviewRun) string {
+				f.updateRun(t, first.ID, map[string]any{"base_sha": ""})
+				return f.advanceHead(t, "second.go")
+			},
+		},
+		{
+			name: "base changed since the previous run",
+			breakFixture: func(t *testing.T, f *runTestFixture, first store.ReviewRun) string {
+				f.updateRun(t, first.ID, map[string]any{"base_sha": strings.Repeat("a", 40)})
+				return f.advanceHead(t, "second.go")
+			},
+		},
+		{
+			name: "force-push",
+			breakFixture: func(t *testing.T, f *runTestFixture, first store.ReviewRun) string {
+				work := filepath.Join(f.root, "work")
+				runGit(t, work, "commit", "--amend", "-qm", "feature rewritten")
+				return f.publishWorkHead(t)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRunTestFixture(t)
+			first := f.runFirst(t)
+			secondHead := tt.breakFixture(t, f, first)
+			second := f.createRun(t, secondHead, "")
+
+			if err := f.runner().Run(f.ctx, second.ID); err != nil {
+				t.Fatalf("second Run() error = %v", err)
+			}
+			if got := f.lastOCRArgValue(t, "--from"); got != f.baseSHA {
+				t.Errorf("ocr --from = %q, want the full base %q", got, f.baseSHA)
+			}
+			if got := f.lastOCRArgValue(t, "--to"); got != secondHead {
+				t.Errorf("ocr --to = %q, want the new head %q", got, secondHead)
+			}
+		})
+	}
+}
+
+// TestRunIncrementalKeepsFindingsOutsideReviewedPathsOpen pins the scope of
+// resolution: an incremental run only resolves findings of the files it
+// reported as covered, and a later full run still resolves the rest.
+func TestRunIncrementalKeepsFindingsOutsideReviewedPathsOpen(t *testing.T) {
+	f := newRunTestFixture(t)
+	f.runFirst(t)
+	firstHead := f.headSHA
+
+	outside := store.Finding{
+		ID: "outside-range", PullRequestID: f.pr.ID, Fingerprint: "outside-range-fp",
+		Path: "main.go", Severity: "major", Status: store.FindingOpen,
+		FirstSeenRunID: 1, LastSeenRunID: 1,
+	}
+	mustCreateRunTest(t, f.s, f.ctx, &outside)
+
+	secondHead := f.advanceHead(t, "second.go")
+	f.setOCR(t, `{
+	  "status": "complete",
+	  "summary": {"files_reviewed": 1, "comments": 0},
+	  "comments": [],
+	  "manifest": {
+	    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
+	    "coverage": {
+	      "selected": [{"path": "auth.go"}], "completed": [{"path": "auth.go"}],
+	      "reused": [], "failed": [], "waived": [], "excluded": []
+	    }
+	  }
+	}`)
+	second := f.createRun(t, secondHead, "")
+	if err := f.runner().Run(f.ctx, second.ID); err != nil {
+		t.Fatalf("incremental Run() error = %v", err)
+	}
+	if got := f.lastOCRArgValue(t, "--from"); got != firstHead {
+		t.Fatalf("ocr --from = %q, want the incremental base %q", got, firstHead)
+	}
+	if got := f.loadFinding(t, outside.ID); got.Status != store.FindingOpen || got.LastSeenRunID != outside.LastSeenRunID {
+		t.Errorf("finding outside the reviewed paths = %+v, want it untouched", got)
+	}
+
+	// Force a full review (the previous base no longer matches) and let OCR
+	// cover main.go again without re-reporting the finding.
+	f.updateRun(t, second.ID, map[string]any{"base_sha": strings.Repeat("b", 40)})
+	f.setOCR(t, runTestNativeNoFindings())
+	thirdHead := f.advanceHead(t, "third.go")
+	third := f.createRun(t, thirdHead, "")
+	if err := f.runner().Run(f.ctx, third.ID); err != nil {
+		t.Fatalf("full Run() error = %v", err)
+	}
+	if got := f.lastOCRArgValue(t, "--from"); got != f.baseSHA {
+		t.Fatalf("ocr --from = %q, want the full base %q", got, f.baseSHA)
+	}
+	got := f.loadFinding(t, outside.ID)
+	if got.Status != store.FindingResolved {
+		t.Errorf("finding status after the full run = %q, want %q", got.Status, store.FindingResolved)
+	}
+	if got.LastSeenRunID != third.ID {
+		t.Errorf("finding last_seen_run_id = %d, want the full run %d", got.LastSeenRunID, third.ID)
+	}
+}
+
+// TestRunIncrementalEmptyCoverageResolvesNothing pins that an incremental run
+// with no covered paths cannot resolve any open finding.
+func TestRunIncrementalEmptyCoverageResolvesNothing(t *testing.T) {
+	f := newRunTestFixture(t)
+	f.runFirst(t)
+	firstHead := f.headSHA
+
+	seeded := store.Finding{
+		ID: "empty-coverage", PullRequestID: f.pr.ID, Fingerprint: "empty-coverage-fp",
+		Path: "main.go", Severity: "major", Status: store.FindingOpen,
+		FirstSeenRunID: 1, LastSeenRunID: 1,
+	}
+	mustCreateRunTest(t, f.s, f.ctx, &seeded)
+
+	secondHead := f.advanceHead(t, "second.go")
+	f.setOCR(t, `{
+	  "status": "complete",
+	  "summary": {"files_reviewed": 0, "comments": 0},
+	  "comments": [],
+	  "manifest": {
+	    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
+	    "coverage": {
+	      "selected": [], "completed": [], "reused": [],
+	      "failed": [], "waived": [], "excluded": []
+	    }
+	  }
+	}`)
+	second := f.createRun(t, secondHead, "")
+	if err := f.runner().Run(f.ctx, second.ID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := f.lastOCRArgValue(t, "--from"); got != firstHead {
+		t.Fatalf("ocr --from = %q, want the incremental base %q", got, firstHead)
+	}
+	if got := f.loadFinding(t, seeded.ID); got.Status != store.FindingOpen {
+		t.Errorf("finding status = %q, want %q with empty coverage", got.Status, store.FindingOpen)
+	}
+	if got := f.loadFinding(t, seeded.ID); got.LastSeenRunID != seeded.LastSeenRunID {
+		t.Errorf("finding last_seen_run_id = %d, want %d", got.LastSeenRunID, seeded.LastSeenRunID)
+	}
+}
+
+// TestReviewedPathsTrimDotSlash pins the manifest path normalization used to
+// scope resolution.
+func TestReviewedPathsTrimDotSlash(t *testing.T) {
+	coverage := nativeCoverage{
+		Completed: []nativeCoverageItem{{Path: "./auth.go"}, {Path: "main.go"}},
+		Reused:    []nativeCoverageItem{{Path: "./pkg/x.go"}},
+	}
+	paths := reviewedPaths(coverage)
+	for _, want := range []string{"auth.go", "main.go", "pkg/x.go"} {
+		if !paths[want] {
+			t.Errorf("reviewedPaths(%+v) = %v, missing %q", coverage, paths, want)
+		}
+	}
+	if paths["./auth.go"] {
+		t.Errorf("reviewedPaths kept the ./-prefixed path: %v", paths)
+	}
+
+	open := []store.Finding{{ID: "a", Path: "auth.go"}, {ID: "b", Path: "other.go"}}
+	scoped := findingsInPaths(open, paths)
+	if len(scoped) != 1 || scoped[0].ID != "a" {
+		t.Errorf("findingsInPaths = %+v, want only the reviewed path", scoped)
+	}
+	if got := findingsInPaths(open, map[string]bool{}); len(got) != 0 {
+		t.Errorf("findingsInPaths with empty coverage = %+v, want none", got)
 	}
 }

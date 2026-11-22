@@ -1333,6 +1333,95 @@ func TestRunLifecycleLookups(t *testing.T) {
 	}
 }
 
+func TestCompleteReviewRunPersistsBaseSHA(t *testing.T) {
+	f := newFixture(t)
+
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+
+	pr := f.openPR(repo.ID, 1, store.StatusPending, false)
+	run, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: pr.ID, HeadSHA: pr.HeadSHA,
+	})
+	if err != nil {
+		t.Fatalf("CreateReviewRun: %v", err)
+	}
+	if _, ok, err := f.s.ClaimReviewRun(f.ctx, run.ID); err != nil || !ok {
+		t.Fatalf("ClaimReviewRun: ok = %v, err = %v", ok, err)
+	}
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+		Status: store.RunSucceeded, BaseSHA: "base-1",
+	}); err != nil {
+		t.Fatalf("CompleteReviewRun: %v", err)
+	}
+	stored, err := f.s.ReviewRun(f.ctx, run.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun: %v", err)
+	}
+	if stored.BaseSHA != "base-1" {
+		t.Errorf("base_sha = %q, want %q", stored.BaseSHA, "base-1")
+	}
+
+	// An empty BaseSHA must never clear a value the run already carried.
+	keepPR := f.openPR(repo.ID, 2, store.StatusPending, false)
+	keep, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: keepPR.ID, HeadSHA: keepPR.HeadSHA, BaseSHA: "keep-me",
+	})
+	if err != nil {
+		t.Fatalf("CreateReviewRun(keep): %v", err)
+	}
+	if _, ok, err := f.s.ClaimReviewRun(f.ctx, keep.ID); err != nil || !ok {
+		t.Fatalf("ClaimReviewRun(keep): ok = %v, err = %v", ok, err)
+	}
+	if err := f.s.CompleteReviewRun(f.ctx, keep.ID, store.RunCompletion{
+		Status: store.RunSucceeded,
+	}); err != nil {
+		t.Fatalf("CompleteReviewRun(keep): %v", err)
+	}
+	stored, err = f.s.ReviewRun(f.ctx, keep.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun(keep): %v", err)
+	}
+	if stored.BaseSHA != "keep-me" {
+		t.Errorf("base_sha = %q, want the stored value %q", stored.BaseSHA, "keep-me")
+	}
+}
+
+func TestPreviousSucceededRun(t *testing.T) {
+	f := newFixture(t)
+
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 1, store.StatusPending, false)
+	other := f.openPR(repo.ID, 2, store.StatusPending, false)
+
+	requireNotFound(t, func() error {
+		_, err := f.s.PreviousSucceededRun(f.ctx, pr.ID, 1_000_000)
+		return err
+	}())
+
+	first := f.run(pr, store.RunSucceeded)
+	f.run(pr, store.RunFailed)
+	latest := f.run(pr, store.RunSucceeded)
+	// A succeeded run of another PR must never be returned.
+	f.run(other, store.RunSucceeded)
+
+	got, err := f.s.PreviousSucceededRun(f.ctx, pr.ID, 1_000_000)
+	if err != nil || got.ID != latest.ID {
+		t.Fatalf("PreviousSucceededRun = %+v, %v; want run %d", got, err, latest.ID)
+	}
+	got, err = f.s.PreviousSucceededRun(f.ctx, pr.ID, latest.ID)
+	if err != nil || got.ID != first.ID {
+		t.Fatalf("PreviousSucceededRun(before latest) = %+v, %v; want run %d", got, err, first.ID)
+	}
+	requireNotFound(t, func() error {
+		_, err := f.s.PreviousSucceededRun(f.ctx, pr.ID, first.ID)
+		return err
+	}())
+}
+
 func prIDsOfRuns(runs []store.ReviewRun) []uint {
 	ids := make([]uint, 0, len(runs))
 	for _, run := range runs {

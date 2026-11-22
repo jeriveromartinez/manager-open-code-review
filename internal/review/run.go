@@ -145,6 +145,9 @@ type runOutcome struct {
 	usage    []byte
 	findings []store.Finding
 	resolved []string
+	// baseSHA is the resolved reviewed base, persisted so the next push can be
+	// reviewed incrementally when it still applies.
+	baseSHA string
 	// tokens accumulates every model call of the run; usage is its JSON form,
 	// kept for panels that read the raw event stream.
 	tokens tokenUsage
@@ -300,6 +303,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		Tokens:       outcome.tokenTotals(),
 		Findings:     outcome.findings,
 		Resolved:     outcome.resolved,
+		BaseSHA:      outcome.baseSHA,
 	}
 	if err := r.Store.CompleteReviewRun(persistCtx, runID, completion); err != nil {
 		if errors.Is(err, store.ErrRunNotActive) {
@@ -460,6 +464,34 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			return out.failed(fmt.Errorf("resolver base del checkout: %w", err), "git_error"), nil
 		}
 	}
+	out.baseSHA = ocrBase
+
+	// A push is reviewed only from the last succeeded head when the base did
+	// not move and the new head still descends from it. A missing, failed or
+	// outdated prior run, a base change or a force-push all review the full
+	// diff: resolving findings outside the range would be wrong.
+	fromSHA := ocrBase
+	incremental := false
+	prev, prevErr := r.Store.PreviousSucceededRun(runCtx, run.PullRequestID, run.ID)
+	switch {
+	case prevErr == nil:
+		if prev.BaseSHA != "" &&
+			strings.EqualFold(prev.BaseSHA, ocrBase) &&
+			prev.HeadSHA != "" &&
+			!strings.EqualFold(prev.HeadSHA, headSHA) {
+			// A shallow clone may lack the prior head: that is a failure of the
+			// ancestry check and falls back to the full review.
+			if _, err := git(runCtx, workDir, "merge-base --is-ancestor", "merge-base", "--is-ancestor", prev.HeadSHA, headSHA); err == nil {
+				fromSHA = prev.HeadSHA
+				incremental = true
+			}
+		}
+	case errors.Is(prevErr, store.ErrNotFound):
+		// No prior complete run: the full diff is the only safe range.
+	default:
+		slog.Warn("incremental review check failed; reviewing the full diff",
+			"run_id", run.ID, "error", prevErr)
+	}
 
 	timeout := r.Cfg.Timeout
 	if deadline, ok := runCtx.Deadline(); ok {
@@ -490,7 +522,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		APIKey:      string(key),
 		Excludes:    excludes,
 		Background:  buildBackground(cfg.PR, cfg.Policy.ExtraInstructions),
-		BaseRef:     ocrBase,
+		BaseRef:     fromSHA,
 		HeadRef:     headSHA,
 		Effort:      effort,
 		MaxTokens:   ceiling,
@@ -498,7 +530,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		Timeout:     timeout,
 	}
 
-	slog.Info("native OCR review started", "run_id", run.ID, "profile_id", cfg.Profile.ID)
+	slog.Info("native OCR review started", "run_id", run.ID, "profile_id", cfg.Profile.ID, "from", fromSHA)
 	res, _, err := r.runNativeReview(runCtx, cfg.Profile.ID, reviewer)
 	if err != nil {
 		var capacity *ProfileCapacityError
@@ -514,10 +546,16 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	out.tokens = nativeTokenUsage(res)
 	out.summary = nativeSummaryText(res, status)
 	out.merged = mergeNativeFindings(res.Comments)
+	if incremental {
+		// Only findings of covered files may be resolved: everything outside the
+		// reviewed range was never seen by OCR in this run. Empty coverage
+		// scopes the list to nothing instead of broadening it to the whole PR.
+		out.open = findingsInPaths(out.open, reviewedPaths(res.Manifest.Coverage))
+	}
 
 	switch status {
 	case store.RunSucceeded:
-		upserts, resolved := Reconcile(open, out.merged, run.ID, true)
+		upserts, resolved := Reconcile(out.open, out.merged, run.ID, true)
 		for i := range upserts {
 			upserts[i].PullRequestID = run.PullRequestID
 		}

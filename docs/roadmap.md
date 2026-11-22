@@ -39,7 +39,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #71 | Usar `ocr review` nativo como motor | L | #79 (recomendado) | **Hecho** (#105) |
 | #72 | Techo de 270k, caché y esfuerzo por equipo | M/L | #71 | **Parcial** (#106, #109): el motor aplica techo, esfuerzo y tope por equipo en cada run; faltan el troceo de #80 y la medición con datos reales |
 | #80 | Diffs enormes por partes sin abandonar el PR | L | #71, #72 | Pendiente |
-| #74 | Revisión incremental por push y antirrebote | L | #71 | Pendiente |
+| #74 | Revisión incremental por push y antirrebote | L | #71 | **Hecho** (#114): revisión `<head revisado>..<head>` solo cuando la base no cambió y el head desciende del anterior; vuelta al diff completo en el resto de casos y antirrebote de 2 min |
 | #76 | Seguimiento del objetivo global | — | todas | **Seguimiento** |
 
 ## Progreso
@@ -55,6 +55,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 - #79 hecho (#98): OCR 1.14.0 fijado en el worker; en el PR de referencia la cobertura pasa de 5 a 7 archivos revisables (4 archivos Rust de test/bench excluidos, 6 extensiones nuevas). Siguiente: #71.
 - #71 hecho (#105): el worker usa una sola invocación a `ocr review` por revisión, con argumentos y entorno del perfil, mapeo de hallazgos/estados y fixtures reales.
 - #72 parcial (#106, #109): ajuste global `review_context_ceiling` (270k), techo por equipo, esfuerzo y tope de gasto configurables y aplicados por el motor nativo: techo efectivo como `--max-tokens` por grupo, esfuerzo de la política como `--effort`, tope opcional como `--max-tokens-budget` y corte por presupuesto como `inconclusive`/`token_budget`. Los runs nativos guardan `max_context_tokens` NULL porque OCR 1.14 no reporta esa muestra. Quedan #80 (trocear diffs enormes) y la medición con proveedor real; el techo es por grupo, no un tope total.
+- #74 hecho (#114): cada push revisa `<head revisado>..<head>` cuando la base y la ascendencia del head anterior lo permiten; el run persiste `base_sha`, los hallazgos fuera del rango revisado siguen abiertos y cualquier force-push, cambio de base o run previo incompleto vuelve al diff completo. El antirrebote de 2 min ya estaba en `main` (#113).
 
 ## Fases
 
@@ -93,7 +94,7 @@ Objetivo: dejar de pagar un bucle genérico de OpenCode y usar los controles de 
 - [x] #71 Una sola invocación a `ocr review` por revisión: argumentos y entorno del perfil, mapeo de hallazgos y estados, clave fuera de disco, fixtures reales. (#105)
 - [ ] #72 **Parcial** (#109): `review_context_ceiling` global y techo por equipo aplicados como `--max-tokens` por grupo, esfuerzo de la política como `--effort`, tope de gasto opcional como `--max-tokens-budget` (corte `inconclusive`/`token_budget`), caché `{ocr_session_key}` y NULL en `max_context_tokens` cuando OCR no da muestra. Falta #80 para trocear diffs que no caben y la medición con datos reales; no es un tope del gasto total.
 - [ ] #80 Trocear diffs enormes por hunks, deduplicar hallazgos de trozos contiguos y publicar cobertura por archivo; nunca abandonar el PR entero.
-- [ ] #74 Revisión incremental `<sha revisado>..<head>` con vuelta a completa ante force-push, cambio de base o run parcial; antirrebote de 2 min.
+- [x] #74 Revisión incremental `<sha revisado>..<head>` con vuelta a completa ante force-push, cambio de base o run parcial; antirrebote de 2 min. (#114)
 
 ### Fase 5 — Cierre
 
