@@ -58,6 +58,8 @@ const teams = ref<Team[]>([])
 const usage = ref<LLMProfileUsage | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
+// Usage is auxiliary: its failure must not hide or hold back the profiles.
+const usageError = ref<string | null>(null)
 
 const modalOpen = ref(false)
 const editingId = ref<number | null>(null)
@@ -202,21 +204,27 @@ function editableOf(profile: LLMProfile): string {
   return JSON.stringify({ name, provider, model, variant, base_url, concurrency, enabled, api_key_set })
 }
 
+async function refreshUsage(): Promise<void> {
+  try {
+    usage.value = await api.llmProfileUsage()
+    usageError.value = null
+  } catch {
+    usageError.value = 'No se pudieron cargar los consumos de los perfiles LLM'
+  }
+}
+
 async function onLiveChanges(events: ReviewEvent[]): Promise<void> {
   const touched = (type: string, id: number | null) =>
     id !== null && events.some((event) => event.type === type && Number(event.id) === id)
 
   const editing = editingProfile.value
+  const usageRequest = refreshUsage()
   try {
-    const [profileList, usageList] = await Promise.all([
-      api.llmProfiles(),
-      api.llmProfileUsage(),
-    ])
-    profiles.value = profileList
-    usage.value = usageList
+    profiles.value = await api.llmProfiles()
   } catch {
     error.value = 'No se pudieron actualizar los perfiles LLM'
   }
+  await usageRequest
   if (modalOpen.value && editing && editingId.value === editing.id && touched('llm_profile.updated', editing.id)) {
     const fresh = profiles.value.find((profile) => profile.id === editing.id)
     if (!fresh) staleProfile.value = 'deleted'
@@ -271,15 +279,14 @@ async function focusPolicy(): Promise<void> {
 async function load(): Promise<void> {
   loading.value = true
   error.value = null
+  const usageRequest = refreshUsage()
   try {
-    const [profileList, teamList, usageList] = await Promise.all([
+    const [profileList, teamList] = await Promise.all([
       api.llmProfiles(),
       api.teams(),
-      api.llmProfileUsage(),
     ])
     profiles.value = profileList
     teams.value = teamList
-    usage.value = usageList
     const requested = requestedTeamId()
     if (requested !== null && teamList.some((team) => team.id === requested)) {
       selectedTeamId.value = requested
@@ -296,6 +303,7 @@ async function load(): Promise<void> {
   } finally {
     loading.value = false
   }
+  await usageRequest
 }
 
 function selectPlatform(platform: LLMPlatform): void {
@@ -574,6 +582,7 @@ onMounted(() => {
             </p>
           </div>
 
+          <p v-if="usageError" class="form-error" data-usage-error>{{ usageError }}</p>
           <p v-if="error" class="form-error">{{ error }}</p>
           <p v-else-if="!loading && profiles.length === 0" class="empty-state">
             No hay perfiles LLM configurados

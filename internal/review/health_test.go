@@ -176,10 +176,10 @@ func TestProfileCheckNotifies(t *testing.T) {
 func TestRunnerCheckProfilePassesEvents(t *testing.T) {
 	f := newRunTestFixture(t)
 	r := f.runner()
-	if err := r.CheckProfile(f.ctx, f.policy.LLMProfileID); err != nil {
+	if err := r.CheckProfile(f.ctx, f.healthProfile); err != nil {
 		t.Fatalf("CheckProfile() error = %v", err)
 	}
-	want := []events.Event{{Type: "llm_profile.updated", ID: strconv.FormatUint(uint64(f.policy.LLMProfileID), 10)}}
+	want := []events.Event{{Type: "llm_profile.updated", ID: strconv.FormatUint(uint64(f.healthProfile), 10)}}
 	if got := f.events.snapshot(); !reflect.DeepEqual(got, want) {
 		t.Errorf("events = %+v, want %+v", got, want)
 	}
@@ -499,5 +499,75 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"{\"ok\":true}"}}'
 		check.TotalTokens == nil || *check.TotalTokens != 12 ||
 		check.MaxContextTokens == nil || *check.MaxContextTokens != 14 {
 		t.Errorf("check = %+v, want 10/2/1/3/1/12/14", check)
+	}
+}
+
+// An OpenCode step that omits the total still reports its parts: the total is
+// derived so the check is never recorded as zero tokens (#101).
+func TestProfileCheckAgentFallbackDerivesMissingTotal(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+
+	bin := filepath.Join(t.TempDir(), "no-total-opencode.sh")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"step_finish","part":{"tokens":{"input":10,"output":2}}}'
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"{\"ok\":true}"}}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write usage binary: %v", err)
+	}
+	profile := newProbeProfile(t, s, box, "probe-agent-no-total", "nvidia", "nemotron", nil)
+
+	checker := &ProfileChecker{Store: s, Box: box, Bin: bin, Timeout: 5 * time.Second}
+	if err := checker.Check(ctx, profile.ID); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	check := latestHealthCheck(t, s, profile.ID)
+	if check.TotalTokens == nil || *check.TotalTokens != 12 {
+		t.Errorf("total tokens = %v, want 12 derived from input+output", check.TotalTokens)
+	}
+	if check.InputTokens == nil || *check.InputTokens != 10 ||
+		check.OutputTokens == nil || *check.OutputTokens != 2 {
+		t.Errorf("check = %+v, want input 10 and output 2", check)
+	}
+}
+
+// An all-zero OpenCode usage event is unknown, not zero: the check is
+// recorded with NULL token columns so it stays out of the averages (#101).
+func TestProfileCheckAgentFallbackEmptyUsageRecordsNull(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+
+	bin := filepath.Join(t.TempDir(), "empty-usage-opencode.sh")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"step_finish","part":{"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0},"total":0}}}'
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"{\"ok\":true}"}}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write usage binary: %v", err)
+	}
+	profile := newProbeProfile(t, s, box, "probe-agent-empty-usage", "nvidia", "nemotron", nil)
+
+	checker := &ProfileChecker{Store: s, Box: box, Bin: bin, Timeout: 5 * time.Second}
+	if err := checker.Check(ctx, profile.ID); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	if health := loadHealth(t, s, profile.ID); health.HealthStatus != store.HealthOK {
+		t.Fatalf("health_status = %q, want %q", health.HealthStatus, store.HealthOK)
+	}
+	check := latestHealthCheck(t, s, profile.ID)
+	if check.TotalTokens != nil || check.InputTokens != nil || check.OutputTokens != nil ||
+		check.ReasoningTokens != nil || check.CacheReadTokens != nil || check.CacheWriteTokens != nil {
+		t.Errorf("check = %+v, want NULL token columns", check)
 	}
 }

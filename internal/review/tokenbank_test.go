@@ -76,12 +76,9 @@ func writeBankFile(t *testing.T, path, content string) {
 
 func bankPrompt(t *testing.T, diffPath string) string {
 	t.Helper()
-	return BuildPrompt(store.PullRequest{
-		Title:   "Token bank",
-		BaseRef: "main",
-		HeadRef: "feature",
-		HeadSHA: "0123456789abcdef",
-	}, nil, nil, "", diffPath)
+	// The token bank only exercises Agent.Run (the health-check fallback); the
+	// pipeline itself no longer builds an OpenCode prompt.
+	return "Revisa el diff adjunto y responde solo con el JSON del esquema. Diff: " + diffPath
 }
 
 // TestTokenBankNoReadsMakesOneRequest is the acceptance test for #70: a pass

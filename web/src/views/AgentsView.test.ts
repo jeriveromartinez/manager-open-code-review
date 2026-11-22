@@ -220,6 +220,25 @@ describe('AgentsView', () => {
     wrapper.unmount()
   })
 
+  it('still refreshes the profiles when the usage aggregate fails', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    mocks.api.llmProfiles.mockResolvedValue(
+      profiles.map((profile) => ({ ...profile, name: `${profile.name} v2` })),
+    )
+    mocks.api.llmProfileUsage.mockRejectedValue(new Error('usage aggregate timed out'))
+
+    await live.reload!([{ type: 'llm_profile.updated', id: '7' }])
+    await flushPromises()
+
+    expect(wrapper.find('[data-profile-row="7"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain(`${profiles[0].name} v2`)
+    expect(wrapper.get('[data-usage-error]').text()).toContain('consumos')
+
+    wrapper.unmount()
+  })
+
   it('warns inside the dialog when the profile being edited changes elsewhere', async () => {
     const wrapper = mountAgents()
     await flushPromises()
