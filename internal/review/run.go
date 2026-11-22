@@ -143,6 +143,9 @@ type runOutcome struct {
 	usage    []byte
 	findings []store.Finding
 	resolved []string
+	// tokens accumulates every model call of the run; usage is its JSON form,
+	// kept for panels that read the raw event stream.
+	tokens tokenUsage
 
 	// Context needed to reconcile findings from passes that already completed
 	// when the run ends inconclusively.
@@ -150,6 +153,20 @@ type runOutcome struct {
 	open   []store.Finding
 	runID  uint
 	prID   uint
+}
+
+// tokenTotals flattens the aggregated usage into the columns the panel reads.
+// A run that never called the model writes zeros, which is accurate; runs that
+// predate the columns stay NULL because they are never written again.
+func (o *runOutcome) tokenTotals() store.RunUsage {
+	return store.RunUsage{
+		Input:      int64(o.tokens.Input),
+		Output:     int64(o.tokens.Output),
+		CacheRead:  int64(o.tokens.Cache.Read),
+		CacheWrite: int64(o.tokens.Cache.Write),
+		Total:      int64(o.tokens.Total),
+		MaxContext: int64(o.tokens.MaxContext),
+	}
 }
 
 // announce tells open panels that the run's pull request changed state. The
@@ -259,12 +276,24 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	if len(outcome.coverage) == 0 {
 		outcome.coverage = []byte(`{}`)
 	}
+	if outcome.tokens.Steps > 0 {
+		outcome.usage = outcome.tokens.json()
+	}
 	if len(outcome.usage) == 0 {
 		outcome.usage = []byte(`{}`)
 	}
-	if err := r.Store.CompleteReviewRun(persistCtx, runID, outcome.status, outcome.code,
-		truncateRunMessage(outcome.message), outcome.summary, outcome.coverage,
-		outcome.usage, outcome.findings, outcome.resolved); err != nil {
+	completion := store.RunCompletion{
+		Status:       outcome.status,
+		ErrorCode:    outcome.code,
+		ErrorMessage: truncateRunMessage(outcome.message),
+		Summary:      outcome.summary,
+		Coverage:     outcome.coverage,
+		Usage:        outcome.usage,
+		Tokens:       outcome.tokenTotals(),
+		Findings:     outcome.findings,
+		Resolved:     outcome.resolved,
+	}
+	if err := r.Store.CompleteReviewRun(persistCtx, runID, completion); err != nil {
 		if errors.Is(err, store.ErrRunNotActive) {
 			// A new head superseded this run while it was executing. The
 			// trigger already cancelled its check; persisting or publishing
@@ -441,7 +470,6 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 	findingIndex := make(map[string]int)
 	budget := newRunBudget(r.Cfg.Timeout, nil)
-	var runUsage tokenUsage
 	for idx, pass := range passes {
 		passesLeft := len(passes) - idx - 1
 		timeout, ok := budget.timeout()
@@ -475,7 +503,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		prompt := BuildPrompt(cfg.PR, pass.Rules, open, diffPath)
 
 		text, usage, runErr := r.runAgent(ctx, agent, prompt, []string{diffPath})
-		runUsage.addJSON(usage)
+		out.tokens.addJSON(usage)
 		if runErr != nil {
 			if budgetCut(runErr, passesLeft) {
 				return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
@@ -494,7 +522,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			// repeat the same exploration before it could correct the schema.
 			agent.Continue = true
 			text, usage, runErr = r.runAgent(ctx, agent, retry, nil)
-			runUsage.addJSON(usage)
+			out.tokens.addJSON(usage)
 			if runErr != nil {
 				if budgetCut(runErr, passesLeft) {
 					return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
@@ -507,7 +535,6 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			}
 		}
 
-		out.usage = runUsage.json()
 		if parsed.Summary != "" {
 			out.summary = parsed.Summary
 		}

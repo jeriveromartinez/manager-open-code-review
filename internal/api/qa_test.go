@@ -116,7 +116,13 @@ func TestQASummaryEndpoint(t *testing.T) {
 	decodeJSON(t, rec, &raw)
 	assertKeys(t, raw, "ready_for_human", "inconclusive", "runs_running", "runs_queued",
 		"untriaged", "confirmed", "false_positive", "precision_window_days",
-		"categories", "category_window_days", "validation_sla_seconds")
+		"categories", "category_window_days", "tokens", "validation_sla_seconds")
+	tokens := raw["tokens"].(map[string]any)
+	assertKeys(t, tokens, "window_days", "reviews", "input", "output", "cache_read",
+		"cache_write", "total", "average", "max_context")
+	if tokens["window_days"] != float64(7) || tokens["reviews"] != float64(0) || tokens["average"] != float64(0) {
+		t.Errorf("tokens = %v, want an empty 7-day window", tokens)
+	}
 	if raw["ready_for_human"] != float64(1) {
 		t.Errorf("ready_for_human = %v, want 1", raw["ready_for_human"])
 	}

@@ -11,6 +11,7 @@ import type { DotTone } from '../dots'
 import { isForbidden } from '../errors'
 import { blockedAt, decisionRows, thresholds, type Threshold } from '../leadPanel'
 import { formatWait, isOverSla, qaBucket, waitMinutes } from '../qaQueue'
+import { formatTokens } from '../tokens'
 import { useSessionStore } from '../stores/session'
 
 const session = useSessionStore()
@@ -87,6 +88,10 @@ const byRepo = computed(() =>
     tone: (index === 0 ? 'bad' : 'on') as DotTone,
   })),
 )
+
+// Runs created before the accounting existed have no usage, so `reviews` only
+// counts the ones with data and the window stays 7 days on the server.
+const tokenStats = computed(() => summary.value?.tokens ?? null)
 
 const decisions = computed(() => decisionRows(prs.value, slaSeconds.value, now.value))
 
@@ -355,6 +360,32 @@ onBeforeUnmount(() => {
                 </li>
               </ul>
               <p v-else class="tile__empty">El equipo no tiene repositorios asignados.</p>
+            </article>
+
+            <article class="tile" data-tile="tokens">
+              <h2 class="tile__title">
+                <span class="tile__index">07</span>Tokens del equipo · {{ tokenStats?.window_days ?? 7 }} días
+              </h2>
+              <p class="policy__headline">
+                {{ tokenStats ? formatTokens(tokenStats.total) : '—' }} <span class="caption">tokens</span>
+              </p>
+              <dl class="stats tile__foot">
+                <div>
+                  <dt class="caption">Ejecuciones con datos</dt>
+                  <dd data-token-reviews>{{ tokenStats?.reviews ?? 0 }}</dd>
+                </div>
+                <div>
+                  <dt class="caption">Media por revisión</dt>
+                  <dd data-token-average>{{ tokenStats ? formatTokens(tokenStats.average) : '—' }}</dd>
+                </div>
+                <div>
+                  <dt class="caption">Mayor prompt</dt>
+                  <dd data-token-max-context>{{ tokenStats ? formatTokens(tokenStats.max_context) : '—' }}</dd>
+                </div>
+              </dl>
+              <p v-if="tokenStats && tokenStats.reviews === 0" class="tile__empty">
+                Aún no hay ejecuciones con consumo registrado en este periodo.
+              </p>
             </article>
           </section>
         </div>

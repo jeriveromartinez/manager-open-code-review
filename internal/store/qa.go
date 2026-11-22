@@ -16,7 +16,10 @@ const (
 	// CategoryWindow is how far back confirmed findings count toward the
 	// recurring categories.
 	CategoryWindow = 30 * 24 * time.Hour
-	topCategories  = 5
+	// TokenWindow is how far back finished review runs count toward the token
+	// consumption tile.
+	TokenWindow   = 7 * 24 * time.Hour
+	topCategories = 5
 )
 
 // QASummary is the QA engineer's overview of the pull requests they can see.
@@ -35,6 +38,21 @@ type QASummary struct {
 	// ConfirmedByRepo counts confirmed findings per repository inside
 	// CategoryWindow, most first: where a lead's team keeps shipping defects.
 	ConfirmedByRepo []RepoCount
+	// Tokens aggregates the runs finished inside TokenWindow.
+	Tokens RunTokenStats
+}
+
+// RunTokenStats is the token consumption of the review runs finished inside
+// TokenWindow. Reviews counts only runs that recorded usage, so a run created
+// before the accounting existed does not dilute the average.
+type RunTokenStats struct {
+	Reviews    int
+	Input      int64
+	Output     int64
+	CacheRead  int64
+	CacheWrite int64
+	Total      int64
+	MaxContext int64
 }
 
 // CategoryCount is how many confirmed findings share a category.
@@ -178,6 +196,23 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time, f QAFilter
 		Scan(&out.ConfirmedByRepo).Error
 	if err != nil {
 		return QASummary{}, fmt.Errorf("count confirmed findings by repository: %w", err)
+	}
+
+	// Runs of merged pull requests still consumed tokens, so this uses the
+	// broader history scope and not the open queue.
+	err = s.DB.WithContext(ctx).Table("review_runs rr").
+		Where("rr.finished_at >= ? AND rr.total_tokens IS NOT NULL AND rr.pull_request_id IN (?)",
+			now.Add(-TokenWindow), scopedIDs).
+		Select(`COUNT(*) AS reviews,
+			COALESCE(SUM(rr.input_tokens), 0) AS input,
+			COALESCE(SUM(rr.output_tokens), 0) AS output,
+			COALESCE(SUM(rr.cache_read_tokens), 0) AS cache_read,
+			COALESCE(SUM(rr.cache_write_tokens), 0) AS cache_write,
+			COALESCE(SUM(rr.total_tokens), 0) AS total,
+			COALESCE(MAX(rr.max_context_tokens), 0) AS max_context`).
+		Scan(&out.Tokens).Error
+	if err != nil {
+		return QASummary{}, fmt.Errorf("count review token usage: %w", err)
 	}
 	return out, nil
 }

@@ -54,6 +54,17 @@ const summary: QASummary = {
   ],
   confirmed_by_repo: [],
   category_window_days: 30,
+  tokens: {
+    window_days: 7,
+    reviews: 0,
+    input: 0,
+    output: 0,
+    cache_read: 0,
+    cache_write: 0,
+    total: 0,
+    average: 0,
+    max_context: 0,
+  },
   validation_sla_seconds: 4 * 3600,
 }
 

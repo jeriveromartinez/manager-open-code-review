@@ -213,10 +213,20 @@ type ReviewRun struct {
 	// that waits in the queue longer than the token lives. Nil on runs created
 	// before the expiry was stored.
 	CloneTokenExpiresAt *time.Time `gorm:"column:clone_token_expires_at"`
-	StartedAt           *time.Time `gorm:"column:started_at"`
-	FinishedAt          *time.Time `gorm:"column:finished_at"`
-	CreatedAt           time.Time  `gorm:"column:created_at"`
-	UpdatedAt           time.Time  `gorm:"column:updated_at"`
+	// Structured token consumption, summed over every model call of the run.
+	// Nil on runs created before consumption was recorded (#73).
+	InputTokens      *int64 `gorm:"column:input_tokens"`
+	OutputTokens     *int64 `gorm:"column:output_tokens"`
+	CacheReadTokens  *int64 `gorm:"column:cache_read_tokens"`
+	CacheWriteTokens *int64 `gorm:"column:cache_write_tokens"`
+	TotalTokens      *int64 `gorm:"column:total_tokens"`
+	// MaxContextTokens is the largest prompt of the run, used to watch the
+	// 270k context ceiling (#72).
+	MaxContextTokens *int64     `gorm:"column:max_context_tokens"`
+	StartedAt        *time.Time `gorm:"column:started_at"`
+	FinishedAt       *time.Time `gorm:"column:finished_at"`
+	CreatedAt        time.Time  `gorm:"column:created_at"`
+	UpdatedAt        time.Time  `gorm:"column:updated_at"`
 }
 
 // Finding is a review comment deduplicated by (pull request, fingerprint).
