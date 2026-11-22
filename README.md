@@ -124,6 +124,14 @@ Se revisa un PR cuando no es borrador ni de un fork, su repositorio está habili
 
 El Dashboard avisa a los administradores de los eslabones que faltan para que se ejecute una revisión —sin equipos, sin perfiles LLM, repositorios habilitados sin equipo, equipos sin política y perfiles sin salud reciente— y cada aviso enlaza con la pantalla donde se resuelve. Un PR en `pending` indica además si la revisión está programada o bloqueada, y en ese caso el motivo concreto (borrador, fork, sin equipo, sin política o perfil deshabilitado).
 
+### Motor nativo OCR
+
+Cada run ejecuta una sola invocación de `ocr review` sobre el rango `base..head`; ya no hay pasadas de OpenCode ni presupuesto por pasada. El worker escribe una configuración aislada por run (HOME/XDG temporales), inyecta solo la clave del perfil mediante un helper `api_key_cmd` y usa el proveedor custom `qa-review` para fijar el endpoint y la `prompt_cache_key = {ocr_session_key}` sin escribir la clave en disco.
+
+La variante de razonamiento del perfil se traduce en `--effort` (`low`, `medium` o `high`; vacía o desconocida usa `medium`) y el techo de contexto actual es `--max-tokens 270000`, pendiente de configurar por equipo en #72. El `review_timeout` global limita el proceso completo y se traduce en `--timeout` (minutos, redondeado hacia arriba). Las instrucciones del equipo se añaden al Markdown de `--background-file`, delimitadas como datos.
+
+El estado del run se deriva del JSON y del manifiesto, no del código de salida: `complete` y `skipped` son `succeeded`; `partial` con todos los fallos `budget` es `inconclusive`/`token_budget`, y con cualquier otro fallo `inconclusive`/`coverage_incomplete`; `failed` distingue `timeout`, configuración (`config`) y proveedor (`llm_error`). La cobertura sale de los arrays de `manifest.coverage` (`completed`+`reused` revisados, `failed`+`waived` omitidos, `excluded` excluidos).
+
 ### Perfiles LLM
 
 En **Agentes LLM** (solo admins), «Nuevo perfil» permite dar nombre, proveedor, modelo, concurrencia (1 por defecto), activación y clave API. La clave es write-only: se cifra con `QA_WORKER_KEY` y nunca se devuelve ni se muestra. «Probar» encola una comprobación de salud en el worker, que envía una única petición de chat mínima al proveedor, sin herramientas; solo los proveedores fuera de la tabla cerrada y sin URL base usan `opencode` como respaldo. La tabla muestra `Saludable` o `Con error` con el motivo. La respuesta es asíncrona (202): vuelve a cargar la pantalla para ver el resultado final.

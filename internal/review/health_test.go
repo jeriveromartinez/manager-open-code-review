@@ -176,10 +176,10 @@ func TestProfileCheckNotifies(t *testing.T) {
 func TestRunnerCheckProfilePassesEvents(t *testing.T) {
 	f := newRunTestFixture(t)
 	r := f.runner()
-	if err := r.CheckProfile(f.ctx, f.policy.LLMProfileID); err != nil {
+	if err := r.CheckProfile(f.ctx, f.healthProfile); err != nil {
 		t.Fatalf("CheckProfile() error = %v", err)
 	}
-	want := []events.Event{{Type: "llm_profile.updated", ID: strconv.FormatUint(uint64(f.policy.LLMProfileID), 10)}}
+	want := []events.Event{{Type: "llm_profile.updated", ID: strconv.FormatUint(uint64(f.healthProfile), 10)}}
 	if got := f.events.snapshot(); !reflect.DeepEqual(got, want) {
 		t.Errorf("events = %+v, want %+v", got, want)
 	}
