@@ -88,8 +88,9 @@ llamada externa.
 Dentro del mismo contenedor se ejecutó un servidor Node.js compatible con
 `/v1/chat/completions` (`/tmp/fake.js`, fuera de este repo). Responde con
 `tool_calls` de `code_comment`, `task_done` y `approve_all_comments` según el
-caso, y con HTTP 500 cuando se activa el escenario de fallo. OCR se invocó con
-un entorno limpio para que no heredara claves del host:
+caso. En el escenario de caché devuelve `usage` con `prompt_tokens_details`;
+en el de timeout duerme 20 s sin responder; en el de fallo responde HTTP 500.
+OCR se invocó con un entorno limpio para que no heredara claves del host:
 
 ```bash
 env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp/ocrhome \
@@ -98,31 +99,63 @@ env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp/ocrhome \
   OCR_LLM_MODEL=fake-model \
   OCR_LLM_PROTOCOL=openai \
   OCR_LLM_TIMEOUT=60 \
-  ocr review <repo> --from <base> --to <head> --format json --audience agent
+  ocr review --repo <repo> --from <base> --to <head> --format json --audience agent
 ```
 
+Para el escenario de timeout se cambió `OCR_LLM_TIMEOUT` a `2` (segundos); el
+resto del entorno fue idéntico.
+
 Los repos de prueba se crearon con `git init` dentro del contenedor (`/tmp/repo`,
-`/tmp/repo-multi` y `/tmp/repo-skipped`), nunca dentro del worktree.
+`/tmp/repo-multi` y `/tmp/repo-skipped`), nunca dentro del worktree. Los dos
+fixtures nuevos reutilizan `/tmp/repo` con un rango reducido (`696a494..d529080`).
 
 ### Escenarios
 
 | Archivo | Repo / comando | Resultado |
 | --- | --- | --- |
 | `ocr-review-complete.json` | `/tmp/repo`, `--from 5375f11 --to 9bb6edc` | `terminal_state: complete`, 2 comentarios (`security/high` y `maintainability/low`), 4960 tokens, exit 0. |
+| `ocr-review-complete-cache.json` | `/tmp/repo`, `--from 696a494 --to d529080`; `usage` por respuesta: 5000 `prompt_tokens`, 3000 `prompt_tokens_details.cached_tokens`, 1000 `prompt_tokens_details.cache_creation_tokens` | `terminal_state: complete`, 2 comentarios, `total_tokens: 20640`, `cache_read_tokens: 12000`, `cache_write_tokens: 4000`, exit 0. |
 | `ocr-review-partial-budget.json` | `/tmp/repo-multi`, `--from 6877354 --to b8453d9 --concurrency 1 --max-tokens-budget 30000` | `terminal_state: partial`, 3 comentarios, 3 ítems `completed` y 9 `failed` con `classification: budget`, 14880 tokens, exit 0. |
 | `ocr-review-failed-provider.json` | `/tmp/repo`, mismo rango que el caso completo; el servidor falso responde HTTP 500 | `terminal_state: failed`, `status: failed`, 2 ítems `failed` con `classification: provider`, `retry_report` con 6 intentos y `status_code: 500`, exit 1. El JSON se capturó igualmente. |
 | `ocr-review-skipped.json` | `/tmp/repo-skipped`, `--from c3f6044 --to 5bce0db --exclude '**/*.go'` | `terminal_state: skipped`, `selected: []`, `excluded` con `exclude_reason: user_exclude`, 0 tokens, exit 0. |
+| `ocr-review-timeout.json` | `/tmp/repo`, mismo rango que el caso de caché; el servidor falso duerme 20 s y `OCR_LLM_TIMEOUT=2` | `terminal_state: failed`, `status: failed`, 2 ítems `failed` con `classification: timeout`, `retry_report` con 1 request, 0 reintentos y `failure_phase: context`, exit 1. El JSON se capturó igualmente. |
 
-En el caso de fallo de proveedor el comando se ejecutó con `|| true` para
-conservar la salida y el código de salida real (1).
+En los casos de fallo de proveedor y de timeout el comando se ejecutó con
+`|| true` para conservar la salida y el código de salida real (1).
+
+### Caché de tokens
+
+OCR 1.14.0 sí expone los tokens de caché en `summary`: mapea
+`usage.prompt_tokens_details.cached_tokens` a `summary.cache_read_tokens` y
+`usage.prompt_tokens_details.cache_creation_tokens` a
+`summary.cache_write_tokens`. Los valores se suman entre las peticiones de la
+revisión: 4 peticiones × 3000 / 1000 dieron `12000` / `4000`, mientras que
+`input_tokens` sumó 4 × 5000 = 20000. Cuando el proveedor no envía
+`prompt_tokens_details` (caso `ocr-review-complete.json`), ambos campos se
+omiten del `summary`, que es lo que hizo pensar que solo existían en el
+esquema inferido. El fixture de caché fija los campos con valores no cero.
+
+### Timeout frente a fallo de proveedor
+
+El timeout de una petición no se confunde con un HTTP 500. En
+`ocr-review-timeout.json` cada ítem falla con `classification: timeout` y
+`reason: "LLM request timed out; configure OCR_LLM_TIMEOUT or provider timeout_sec"`;
+el `retry_report` tiene un único request con un único intento
+(`outcome: error`, `error_class: timeout`, `failure_phase: context`,
+`duration_to_headers_ms` sanitizado) y sin `status_code` ni reintentos, porque
+el timeout no se reintenta. En `ocr-review-failed-provider.json`, en cambio,
+`classification` es `provider`, `failure_phase` es `http`, hay `status_code: 500`
+y 5 reintentos. Ambos terminan en `terminal_state: failed` y exit 1, de modo que
+la distinción para el mapeo de estados de #71 está en `classification`,
+`error_class`, `failure_phase` y el número de intentos.
 
 ### Sanitización
 
-Los cuatro JSON son salidas reales del binario, con estos valores sustituidos
+Los seis JSON son salidas reales del binario, con estos valores sustituidos
 para que sean deterministas:
 
 - `session_id` y `manifest.run_id`: UUIDs fijos
-  `00000000-0000-4000-8000-000000000001` a `...0004`, uno por escenario.
+  `00000000-0000-4000-8000-000000000001` a `...0006`, uno por escenario.
 - `summary.elapsed`: `"0s"`; `manifest.elapsed_ms`: `0`.
 - `retry_report.requests[*].logical_request_id`: hash fijo terminado en `3`.
 - `retry_report.requests[*].attempts[*].duration_to_headers_ms` y
@@ -144,23 +177,30 @@ jq -c . internal/review/testdata/opencode-events.jsonl > /dev/null
 jq -s 'any(.[]; .type == "text" and (.part.text // "") != "")' \
   internal/review/testdata/opencode-events.jsonl
 
-for f in internal/review/testdata/ocr-review-complete.json \
-         internal/review/testdata/ocr-review-partial-budget.json \
-         internal/review/testdata/ocr-review-failed-provider.json \
-         internal/review/testdata/ocr-review-skipped.json; do
+for f in internal/review/testdata/ocr-review-*.json; do
   jq -e . "$f" > /dev/null
 done
-jq -r '[.manifest.terminal_state, (.comments // [] | length), .summary.total_tokens] | @tsv' \
+jq -e '.summary.cache_read_tokens == 12000 and .summary.cache_write_tokens == 4000' \
+  internal/review/testdata/ocr-review-complete-cache.json
+jq -e '[.manifest.coverage.failed[].classification] | length == 2 and all(. == "timeout")' \
+  internal/review/testdata/ocr-review-timeout.json
+jq -e '.retry_report.requests[0].attempts[0] |
+  .error_class == "timeout" and .failure_phase == "context"' \
+  internal/review/testdata/ocr-review-timeout.json
+jq -r '[input_filename | split("/")[-1], .manifest.terminal_state,
+  (.comments // [] | length), .summary.total_tokens] | @tsv' \
   internal/review/testdata/ocr-review-*.json
 ```
 
 Resultado esperado de la última orden (orden alfabético):
 
 ```text
-complete	2	4960
-failed	0	0
-partial	3	14880
-skipped	0	0
+ocr-review-complete-cache.json	complete	2	20640
+ocr-review-complete.json	complete	2	4960
+ocr-review-failed-provider.json	failed	0	0
+ocr-review-partial-budget.json	partial	3	14880
+ocr-review-skipped.json	skipped	0	0
+ocr-review-timeout.json	failed	0	0
 ```
 
 Resultado del resto: los tres archivos parsean; `jq 'keys'` devuelve
@@ -183,7 +223,16 @@ para `ocr-rule.json`; el stream tiene 3 eventos y 1 evento `text` con texto.
   `-f`.
 - `ocr-review-complete.json`: fija `manifest.terminal_state == "complete"`, un
   array de 2 comentarios y las parejas `security/high` y
-  `maintainability/low`; `comments` es un array.
+  `maintainability/low`; `comments` es un array. No incluye campos de caché
+  porque el proveedor no devolvió `prompt_tokens_details`.
+- `ocr-review-complete-cache.json`: fija `manifest.terminal_state == "complete"`,
+  `summary.cache_read_tokens == 12000` y `summary.cache_write_tokens == 4000`
+  con `input_tokens == 20000`; los campos de caché solo aparecen cuando el
+  proveedor envía `prompt_tokens_details`.
+- `ocr-review-timeout.json`: fija `status` y `manifest.terminal_state` en
+  `failed`, `comments: null`, los 2 ítems de `manifest.coverage.failed` con
+  `classification: timeout`, y `retry_report` con un intento
+  `error_class: timeout` / `failure_phase: context` sin reintentos.
 - `ocr-review-partial-budget.json`: fija `manifest.terminal_state == "partial"`,
   `summary.budget_exceeded == true`, `manifest.coverage.failed` con
   `classification: budget` y 3 comentarios utilizables.
