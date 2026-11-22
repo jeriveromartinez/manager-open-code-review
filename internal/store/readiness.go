@@ -40,11 +40,14 @@ func (s *Store) ReadinessReport(ctx context.Context, staleAfter time.Duration) (
 	}
 	report.TeamsWithoutPolicy = int(teamsWithoutPolicy)
 
+	// Only a profile a policy points at can block a review; an unused one is
+	// never checked and must not keep the readiness banner up forever.
 	cutoff := time.Now().UTC().Add(-staleAfter)
 	var unhealthyProfiles int64
 	if err := db.Model(&LLMProfile{}).
 		Where("enabled = ?", true).
 		Where("health_status <> ? OR health_checked_at IS NULL OR health_checked_at < ?", HealthOK, cutoff).
+		Where("EXISTS (SELECT 1 FROM qa_policies q WHERE q.llm_profile_id = llm_profiles.id)").
 		Count(&unhealthyProfiles).Error; err != nil {
 		return ReadinessReport{}, fmt.Errorf("count unhealthy llm profiles: %w", err)
 	}

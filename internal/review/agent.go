@@ -340,6 +340,8 @@ func describeAgentError(name string, data agentErrorData) string {
 		detail = fmt.Sprintf("el modelo %q no está soportado por el proveedor; revisa el modelo o la capacidad solicitada", agentModelLabel(data))
 	case name == "ProviderNotFoundError":
 		detail = fmt.Sprintf("proveedor %q desconocido; providerID debe ser uno de los IDs de proveedor soportados por OpenCode", agentProviderLabel(data))
+	case status == 404:
+		detail = fmt.Sprintf("el modelo %q no existe en el proveedor; revisa el modelo configurado en el perfil", agentModelLabel(data))
 	case isNetworkFailure(message):
 		detail = "fallo de red/DNS al conectar con el proveedor: " + message
 	case reason == "authentication" || status == 401 || status == 403:

@@ -25,7 +25,7 @@ type Config struct {
 	ReviewAgentSteps     int           // review_agent_steps, default 8
 	ReviewTimeout        time.Duration // review_timeout, default 20m
 	ReviewStaleAfter     time.Duration // review_stale_after, default 45m
-	LLMHealthInterval    time.Duration // llm_health_interval, default 30m
+	LLMHealthInterval    time.Duration // llm_health_interval, default 6h
 	WorkspaceDir         string        // workspace_dir, default "/tmp/qa"
 	WorkerHealthAddr     string        // worker_health_addr, default ":9090"
 	WorkerQueueStale     time.Duration // worker_queue_stale_after, default 10m
@@ -52,11 +52,11 @@ func (c Config) RequireMasterKey() error {
 
 // LLMHealthStaleAfter is when a profile's health verdict counts as stale: two
 // sweep intervals, so one delayed cycle does not mark every profile as stale.
-// The zero Config used by tests falls back to the same 30m default as Load.
+// The zero Config used by tests falls back to the same 6h default as Load.
 func (c Config) LLMHealthStaleAfter() time.Duration {
 	interval := c.LLMHealthInterval
 	if interval <= 0 {
-		interval = 30 * time.Minute
+		interval = 6 * time.Hour
 	}
 	return 2 * interval
 }
@@ -90,9 +90,9 @@ func Default() Config {
 		// A review budget is 20m plus the River retry window, so a shorter
 		// threshold would fail healthy runs on a slow LLM.
 		ReviewStaleAfter: 45 * time.Minute,
-		// A provider credential changes rarely, so half an hour is frequent
-		// enough to notice a broken key without polling the provider.
-		LLMHealthInterval: 30 * time.Minute,
+		// A provider credential changes rarely and the probe is a single tiny
+		// request, so six hours is frequent enough without polling the provider.
+		LLMHealthInterval: 6 * time.Hour,
 		BackupRetention:   7,
 		// Half a working day: a PR ready in the morning is validated before
 		// the end of the day.

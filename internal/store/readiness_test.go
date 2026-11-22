@@ -118,11 +118,21 @@ func TestReadinessReportUnhealthyProfiles(t *testing.T) {
 	now := time.Now().UTC()
 	recentError := now.Add(-time.Minute)
 	staleOK := now.Add(-2 * time.Hour)
-	createReadinessProfile(t, f, "recent-error", true, store.HealthError, &recentError)
-	createReadinessProfile(t, f, "never-checked", true, store.HealthUnknown, nil)
-	createReadinessProfile(t, f, "stale-ok", true, store.HealthOK, &staleOK)
+	broken := createReadinessProfile(t, f, "recent-error", true, store.HealthError, &recentError)
+	never := createReadinessProfile(t, f, "never-checked", true, store.HealthUnknown, nil)
+	stale := createReadinessProfile(t, f, "stale-ok", true, store.HealthOK, &staleOK)
 	createReadinessProfile(t, f, "disabled-error", false, store.HealthError, &recentError)
 	createReadinessProfile(t, f, "fresh-ok", true, store.HealthOK, &recentError)
+	// Unused profiles are never swept, so they cannot block readiness forever.
+	createReadinessProfile(t, f, "unused-unknown", true, store.HealthUnknown, nil)
+	for _, profile := range []store.LLMProfile{broken, never, stale} {
+		team := f.team("uses-" + profile.Name)
+		if err := f.s.DB.WithContext(f.ctx).Create(&store.QAPolicy{
+			TeamID: team.ID, LLMProfileID: profile.ID,
+		}).Error; err != nil {
+			t.Fatalf("create qa policy for %q: %v", profile.Name, err)
+		}
+	}
 
 	report, err := f.s.ReadinessReport(f.ctx, readinessStaleAfter)
 	if err != nil {

@@ -7,17 +7,20 @@ import (
 )
 
 // StaleLLMProfiles returns the profiles that need a health check: enabled ones
-// whose last check is older than the given age, plus the ones never checked.
-// A profile in error is also returned, so a recovered provider is noticed
-// without an admin pressing the button.
+// used by at least one QA policy whose last check is older than the given age,
+// plus the ones never checked. A profile in error is also returned, so a
+// recovered provider is noticed without an admin pressing the button. Profiles
+// no policy references are skipped: checking them only spends quota.
 func (s *Store) StaleLLMProfiles(ctx context.Context, olderThan time.Time) ([]LLMProfile, error) {
+	const query = `
+SELECT p.* FROM llm_profiles p
+WHERE p.enabled = true
+  AND (p.health_checked_at IS NULL OR p.health_checked_at < ?)
+  AND EXISTS (SELECT 1 FROM qa_policies q WHERE q.llm_profile_id = p.id)
+ORDER BY p.health_checked_at NULLS FIRST, p.id`
+
 	var profiles []LLMProfile
-	err := s.DB.WithContext(ctx).
-		Where("enabled = ?", true).
-		Where("health_checked_at IS NULL OR health_checked_at < ?", olderThan).
-		Order("health_checked_at NULLS FIRST, id").
-		Find(&profiles).Error
-	if err != nil {
+	if err := s.DB.WithContext(ctx).Raw(query, olderThan).Scan(&profiles).Error; err != nil {
 		return nil, fmt.Errorf("list stale llm profiles: %w", err)
 	}
 	return profiles, nil

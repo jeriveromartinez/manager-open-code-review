@@ -278,8 +278,7 @@ func runWorker() error {
 		},
 	}
 	checker := &review.ProfileChecker{
-		Store: st, Box: workerBox, Bin: cfg.OpencodeBin, Timeout: cfg.ReviewTimeout,
-		Events: eventsPublisher,
+		Store: st, Box: workerBox, Bin: cfg.OpencodeBin, Events: eventsPublisher,
 	}
 	watchdog := &review.Watchdog{
 		Store: st, Events: eventsPublisher, StaleAfter: cfg.ReviewStaleAfter,

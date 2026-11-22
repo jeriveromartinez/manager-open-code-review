@@ -2,6 +2,7 @@ package llmmodels_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -189,5 +190,199 @@ func TestDefaultProviderTable(t *testing.T) {
 	sort.Strings(got)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("providers = %v, want %v", got, want)
+	}
+}
+
+func TestPingOpenAICompatibleSendsOneMinimalRequest(t *testing.T) {
+	type wireMessage struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+	var gotMethod, gotPath, gotAuth string
+	var got struct {
+		Model    string        `json:"model"`
+		Stream   bool          `json:"stream"`
+		MaxToken int           `json:"max_tokens"`
+		Tools    []any         `json:"tools"`
+		Messages []wireMessage `json:"messages"`
+	}
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		gotMethod, gotPath, gotAuth = r.Method, r.URL.Path, r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"pong"}}]}`)
+	}))
+	defer server.Close()
+
+	client := &llmmodels.Client{HTTP: server.Client(), Providers: map[string]llmmodels.Provider{
+		"groq": {BaseURL: server.URL, Shape: llmmodels.OpenAICompatible},
+	}}
+	if err := client.Ping(context.Background(), "groq", "", "fake-model", "sk-ping"); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if requests != 1 {
+		t.Errorf("requests = %d, want one", requests)
+	}
+	if gotMethod != http.MethodPost || gotPath != "/chat/completions" {
+		t.Errorf("request = %s %s, want POST /chat/completions", gotMethod, gotPath)
+	}
+	if gotAuth != "Bearer sk-ping" {
+		t.Errorf("Authorization = %q", gotAuth)
+	}
+	if got.Model != "fake-model" || got.Stream {
+		t.Errorf("model = %q stream = %v", got.Model, got.Stream)
+	}
+	if got.MaxToken != 1 {
+		t.Errorf("max_tokens = %d, want 1", got.MaxToken)
+	}
+	if len(got.Tools) != 0 {
+		t.Errorf("tools = %v, want none", got.Tools)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].Role != "user" || got.Messages[0].Content != "ping" {
+		t.Errorf("messages = %+v, want one user ping", got.Messages)
+	}
+}
+
+func TestPingUsesCompletionTokensForOpenAI(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"pong"}}]}`)
+	}))
+	defer server.Close()
+
+	client := &llmmodels.Client{HTTP: server.Client(), Providers: map[string]llmmodels.Provider{
+		"openai": {BaseURL: server.URL, Shape: llmmodels.OpenAICompatible},
+	}}
+	if err := client.Ping(context.Background(), "openai", "", "gpt-5", "sk"); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if _, ok := got["max_completion_tokens"]; !ok {
+		t.Errorf("request = %v, want max_completion_tokens", got)
+	}
+	if _, ok := got["max_tokens"]; ok {
+		t.Errorf("request = %v, must not send the deprecated max_tokens", got)
+	}
+}
+
+func TestPingAnthropic(t *testing.T) {
+	var gotKey, gotVersion, gotPath string
+	var got struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+		Messages  []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("x-api-key")
+		gotVersion = r.Header.Get("anthropic-version")
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		io.WriteString(w, `{"content":[{"type":"text","text":"pong"}]}`)
+	}))
+	defer server.Close()
+
+	client := &llmmodels.Client{HTTP: server.Client(), Providers: map[string]llmmodels.Provider{
+		"anthropic": {BaseURL: server.URL, Shape: llmmodels.Anthropic},
+	}}
+	if err := client.Ping(context.Background(), "anthropic", "", "claude-x", "sk-ant"); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if gotPath != "/messages" || gotKey != "sk-ant" || gotVersion != "2023-06-01" {
+		t.Errorf("request path=%q key=%q version=%q", gotPath, gotKey, gotVersion)
+	}
+	if got.Model != "claude-x" || got.MaxTokens != 1 || len(got.Messages) != 1 || got.Messages[0].Content != "ping" {
+		t.Errorf("body = %+v, want one minimal message", got)
+	}
+}
+
+func TestPingGoogle(t *testing.T) {
+	var gotPath, gotKey string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotKey = r.URL.Path, r.URL.Query().Get("key")
+		io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"pong"}]}}]}`)
+	}))
+	defer server.Close()
+
+	client := &llmmodels.Client{HTTP: server.Client(), Providers: map[string]llmmodels.Provider{
+		"google": {BaseURL: server.URL, Shape: llmmodels.Google},
+	}}
+	if err := client.Ping(context.Background(), "google", "", "gemini-x", "sk-google"); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if gotPath != "/models/gemini-x:generateContent" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotKey != "sk-google" {
+		t.Errorf("key = %q", gotKey)
+	}
+}
+
+func TestPingReportsProviderMessage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, `{"error":{"message":"invalid api key"}}`)
+	}))
+	defer server.Close()
+
+	client := &llmmodels.Client{HTTP: server.Client(), Providers: map[string]llmmodels.Provider{
+		"groq": {BaseURL: server.URL, Shape: llmmodels.OpenAICompatible},
+	}}
+	err := client.Ping(context.Background(), "groq", "", "m", "sk")
+	var upstream *llmmodels.UpstreamError
+	if !errors.As(err, &upstream) {
+		t.Fatalf("err = %v, want UpstreamError", err)
+	}
+	if upstream.Status != http.StatusUnauthorized || upstream.Message != "invalid api key" {
+		t.Errorf("upstream = %+v, want 401 with the provider sentence", upstream)
+	}
+}
+
+func TestPingUnknownProvider(t *testing.T) {
+	client := &llmmodels.Client{}
+	if err := client.Ping(context.Background(), "acme", "", "m", "sk"); !errors.Is(err, llmmodels.ErrUnknownProvider) {
+		t.Fatalf("err = %v, want ErrUnknownProvider", err)
+	}
+}
+
+func TestPingUnknownProviderWithBaseURLUsesOpenAIShape(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		io.WriteString(w, `{"choices":[]}`)
+	}))
+	defer server.Close()
+
+	client := &llmmodels.Client{HTTP: server.Client()}
+	if err := client.Ping(context.Background(), "acme", server.URL, "m", "sk"); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if gotPath != "/chat/completions" {
+		t.Errorf("path = %q, want the OpenAI-compatible one", gotPath)
+	}
+}
+
+func TestPingRejectsEmptyOKBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := &llmmodels.Client{HTTP: server.Client(), Providers: map[string]llmmodels.Provider{
+		"groq": {BaseURL: server.URL, Shape: llmmodels.OpenAICompatible},
+	}}
+	err := client.Ping(context.Background(), "groq", "", "m", "sk")
+	var upstream *llmmodels.UpstreamError
+	if !errors.As(err, &upstream) || upstream.Message == "" {
+		t.Fatalf("err = %v, want UpstreamError with a message", err)
 	}
 }
