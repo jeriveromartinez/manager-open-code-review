@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { api, type Finding, type PRDetail } from '../api'
+import { api, type CoverageFile, type Finding, type PRDetail } from '../api'
 import { cacheShare, formatTokens } from '../tokens'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { isConflict, isForbidden } from '../errors'
@@ -106,6 +106,35 @@ function triageNote(finding: Finding): string {
 function coverageCount(key: string): number {
   const value = latestRun.value?.coverage?.[key]
   return typeof value === 'number' ? value : 0
+}
+
+// `files` llega solo con las ejecuciones nuevas; sin lista no se pinta nada.
+const coverageFiles = computed<CoverageFile[]>(() => {
+  const files = latestRun.value?.coverage?.files
+  return Array.isArray(files) && files.length > 0 ? files : []
+})
+
+function coverageFileLabel(file: CoverageFile): string {
+  switch (file.status) {
+    case 'reviewed':
+      return 'Revisado'
+    case 'reviewed_by_parts':
+      return typeof file.chunks === 'number'
+        ? `Revisado por partes (${file.chunks} ${file.chunks === 1 ? 'trozo' : 'trozos'})`
+        : 'Revisado por partes'
+    case 'not_reviewed':
+      return file.reason ? `No revisado: ${file.reason}` : 'No revisado'
+    case 'excluded':
+      return file.reason ? `Excluido: ${file.reason}` : 'Excluido'
+    default:
+      return file.status
+  }
+}
+
+function coverageFileTone(status: string): string {
+  if (status === 'reviewed' || status === 'reviewed_by_parts') return 'badge--ok'
+  if (status === 'not_reviewed') return 'badge--bad'
+  return 'badge--muted'
 }
 
 function runTone(status: string): string {
@@ -388,6 +417,20 @@ onMounted(() => {
               <dd><code>{{ coverageCount('excluded_files') }}</code></dd>
             </div>
           </dl>
+
+          <ul
+            v-if="coverageFiles.length > 0"
+            class="coverage-files"
+            aria-label="Cobertura por archivo"
+            data-coverage-files
+          >
+            <li v-for="file in coverageFiles" :key="file.path" class="coverage-files__item" data-coverage-file>
+              <code class="coverage-files__path">{{ file.path }}</code>
+              <span class="badge" :class="coverageFileTone(file.status)" data-coverage-file-status>
+                {{ coverageFileLabel(file) }}
+              </span>
+            </li>
+          </ul>
         </section>
       </div>
 
@@ -747,6 +790,38 @@ onMounted(() => {
 
 .coverage dd code {
   font-size: 16px;
+}
+
+.coverage-files {
+  display: flex;
+  flex-direction: column;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  border: var(--rule-hair) solid var(--border);
+  list-style: none;
+}
+
+.coverage-files__item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-2) var(--space-4);
+}
+
+.coverage-files__item + .coverage-files__item {
+  border-top: var(--rule-hair) solid var(--border);
+}
+
+.coverage-files__path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.coverage-files__item .badge {
+  flex: none;
+  font-size: 11px;
 }
 
 .severity {
