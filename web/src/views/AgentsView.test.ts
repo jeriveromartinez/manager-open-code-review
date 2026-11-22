@@ -158,6 +158,7 @@ const policy: QAPolicy = {
   max_passes: 4,
   require_green_ci: false,
   review_context_ceiling: null,
+  global_context_ceiling: 270000,
   effective_context_ceiling: 270000,
   review_effort: 'low',
   review_token_budget: 0,
@@ -211,7 +212,7 @@ describe('AgentsView', () => {
     const wrapper = mountAgents()
     await flushPromises()
 
-    expect(live.types).toEqual(['llm_profile.updated', 'team.updated'])
+    expect(live.types).toEqual(['llm_profile.updated', 'team.updated', 'settings.updated'])
     mocks.api.llmProfiles.mockResolvedValue(profiles.map((profile) => ({ ...profile, name: `${profile.name} v2` })))
     await live.reload!([{ type: 'llm_profile.updated', id: '7' }])
     await flushPromises()
@@ -360,6 +361,40 @@ describe('AgentsView', () => {
         review_token_budget: 0,
       }),
     )
+    wrapper.unmount()
+  })
+
+  it('shows the global ceiling in the hint even when a team override wins', async () => {
+    mocks.api.getPolicy.mockResolvedValue({
+      ...policy,
+      review_context_ceiling: 120000,
+      global_context_ceiling: 270000,
+      effective_context_ceiling: 120000,
+    })
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    expect(wrapper.get('[data-policy-cost]').text()).toContain('270.0k')
+    expect(wrapper.get('[data-policy-cost]').text()).not.toContain('120.0k')
+    expect((wrapper.get('[data-policy-ceiling]').element as HTMLInputElement).placeholder).toBe('270000')
+    wrapper.unmount()
+  })
+
+  it('refreshes the policy when the global settings change elsewhere', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    mocks.api.getPolicy.mockResolvedValue({
+      ...policy,
+      global_context_ceiling: 300000,
+      effective_context_ceiling: 300000,
+    })
+    await live.reload!([{ type: 'settings.updated', id: '' }])
+    await flushPromises()
+
+    expect(mocks.api.getPolicy).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-policy-cost]').text()).toContain('300.0k')
+    expect((wrapper.get('[data-policy-ceiling]').element as HTMLInputElement).placeholder).toBe('300000')
     wrapper.unmount()
   })
 

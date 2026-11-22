@@ -484,13 +484,15 @@ func TestPolicyReviewControls(t *testing.T) {
 	assertStatus(t, rec, http.StatusOK)
 	var current map[string]any
 	decodeJSON(t, rec, &current)
-	assertKeys(t, current, "review_context_ceiling", "effective_context_ceiling",
-		"review_effort", "review_token_budget")
+	assertKeys(t, current, "review_context_ceiling", "global_context_ceiling",
+		"effective_context_ceiling", "review_effort", "review_token_budget")
 	if current["review_context_ceiling"] != nil {
 		t.Errorf("default review_context_ceiling = %v, want null", current["review_context_ceiling"])
 	}
-	if current["effective_context_ceiling"] != float64(270000) {
-		t.Errorf("default effective_context_ceiling = %v, want 270000", current["effective_context_ceiling"])
+	if current["global_context_ceiling"] != float64(270000) ||
+		current["effective_context_ceiling"] != float64(270000) {
+		t.Errorf("default ceilings = %v/%v, want 270000/270000",
+			current["global_context_ceiling"], current["effective_context_ceiling"])
 	}
 	if current["review_effort"] != "low" {
 		t.Errorf("default review_effort = %v, want low", current["review_effort"])
@@ -512,6 +514,7 @@ func TestPolicyReviewControls(t *testing.T) {
 	var saved map[string]any
 	decodeJSON(t, rec, &saved)
 	if saved["review_context_ceiling"] != float64(120000) ||
+		saved["global_context_ceiling"] != float64(270000) ||
 		saved["effective_context_ceiling"] != float64(120000) ||
 		saved["review_effort"] != "high" || saved["review_token_budget"] != float64(750000) {
 		t.Errorf("PUT controls = %v", saved)
@@ -529,6 +532,7 @@ func TestPolicyReviewControls(t *testing.T) {
 	assertStatus(t, rec, http.StatusOK)
 	decodeJSON(t, rec, &current)
 	if current["review_context_ceiling"] != float64(120000) ||
+		current["global_context_ceiling"] != float64(270000) ||
 		current["effective_context_ceiling"] != float64(120000) {
 		t.Errorf("GET controls = %v, want the team override to win", current)
 	}
@@ -553,8 +557,32 @@ func TestPolicyReviewControls(t *testing.T) {
 	rec = f.request(http.MethodPut, path, omitted, cookie)
 	assertStatus(t, rec, http.StatusOK)
 	decodeJSON(t, rec, &saved)
-	if saved["review_context_ceiling"] != nil || saved["effective_context_ceiling"] != float64(270000) {
+	if saved["review_context_ceiling"] != nil || saved["global_context_ceiling"] != float64(270000) ||
+		saved["effective_context_ceiling"] != float64(270000) {
 		t.Errorf("PUT without ceiling = %v, want it cleared", saved)
+	}
+
+	// The global ceiling comes from the stored settings, not from the startup
+	// config: a saved change must move the inherited value and leave a team
+	// override untouched.
+	if err := f.st.SaveSettings(f.ctx, nil, map[string]string{"review_context_ceiling": "300000"}); err != nil {
+		t.Fatalf("SaveSettings: %v", err)
+	}
+	rec = f.request(http.MethodPut, path, body(), cookie)
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &saved)
+	if saved["review_context_ceiling"] != float64(120000) ||
+		saved["global_context_ceiling"] != float64(300000) ||
+		saved["effective_context_ceiling"] != float64(120000) {
+		t.Errorf("PUT after global change = %v, want 120000/300000/120000", saved)
+	}
+
+	rec = f.request(http.MethodPut, path, omitted, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &saved)
+	if saved["review_context_ceiling"] != nil || saved["global_context_ceiling"] != float64(300000) ||
+		saved["effective_context_ceiling"] != float64(300000) {
+		t.Errorf("PUT inherited = %v, want null/300000/300000", saved)
 	}
 
 	for _, tc := range []struct {

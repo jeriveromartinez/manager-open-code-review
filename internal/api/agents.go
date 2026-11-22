@@ -441,17 +441,18 @@ type qaPolicyResponse struct {
 	MaxPasses               int      `json:"max_passes"`
 	RequireGreenCI          bool     `json:"require_green_ci"`
 	ReviewContextCeiling    *int     `json:"review_context_ceiling"`
+	GlobalContextCeiling    int      `json:"global_context_ceiling"`
 	EffectiveContextCeiling int      `json:"effective_context_ceiling"`
 	ReviewEffort            string   `json:"review_effort"`
 	ReviewTokenBudget       int64    `json:"review_token_budget"`
 	UpdatedAt               string   `json:"updated_at"`
 }
 
-// effectiveContextCeiling returns the global setting as the next start would
-// load it. Reading the stored overrides keeps the panel honest right after a
-// save, even though this process keeps its startup config until the restart the
+// globalContextCeiling returns the global setting as the next start would load
+// it. Reading the stored overrides keeps the panel honest right after a save,
+// even though this process keeps its startup config until the restart the
 // setting asks for.
-func (s *server) effectiveContextCeiling(ctx context.Context) int {
+func (s *server) globalContextCeiling(ctx context.Context) int {
 	ceiling := s.Cfg.ReviewContextCeiling
 	stored, err := s.Store.Settings(ctx)
 	if err == nil {
@@ -466,7 +467,7 @@ func (s *server) effectiveContextCeiling(ctx context.Context) int {
 	return ceiling
 }
 
-func qaPolicyDTO(p store.QAPolicy, effectiveCeiling int) qaPolicyResponse {
+func qaPolicyDTO(p store.QAPolicy, globalCeiling int) qaPolicyResponse {
 	var globs []string
 	if err := json.Unmarshal(p.ExcludeGlobs, &globs); err != nil {
 		globs = []string{}
@@ -478,7 +479,7 @@ func qaPolicyDTO(p store.QAPolicy, effectiveCeiling int) qaPolicyResponse {
 	if effort == "" {
 		effort = store.ReviewEffortLow
 	}
-	effective := effectiveCeiling
+	effective := globalCeiling
 	if p.ReviewContextCeiling != nil {
 		effective = *p.ReviewContextCeiling
 	}
@@ -488,7 +489,8 @@ func qaPolicyDTO(p store.QAPolicy, effectiveCeiling int) qaPolicyResponse {
 		ExcludeGlobs: globs, MaxFiles: p.MaxFilesPerPass,
 		MaxDiffLines: p.MaxDiffLinesPerPass, MaxPasses: p.MaxPasses,
 		RequireGreenCI:       p.RequireGreenCI,
-		ReviewContextCeiling: p.ReviewContextCeiling, EffectiveContextCeiling: effective,
+		ReviewContextCeiling: p.ReviewContextCeiling,
+		GlobalContextCeiling: globalCeiling, EffectiveContextCeiling: effective,
 		ReviewEffort: effort, ReviewTokenBudget: p.ReviewTokenBudget,
 		UpdatedAt: p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
@@ -507,11 +509,12 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	policy, err := s.Store.QAPolicyForTeam(r.Context(), teamID)
 	if errors.Is(err, store.ErrNotFound) {
+		global := s.globalContextCeiling(r.Context())
 		writeJSON(w, http.StatusOK, qaPolicyResponse{
 			TeamID: teamID, BlockingThreshold: "major", ExcludeGlobs: []string{},
 			MaxFiles: 40, MaxDiffLines: 3000, MaxPasses: 4,
-			EffectiveContextCeiling: s.effectiveContextCeiling(r.Context()),
-			ReviewEffort:            store.ReviewEffortLow,
+			GlobalContextCeiling: global, EffectiveContextCeiling: global,
+			ReviewEffort: store.ReviewEffortLow,
 		})
 		return
 	}
@@ -519,7 +522,7 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "load qa policy")
 		return
 	}
-	writeJSON(w, http.StatusOK, qaPolicyDTO(policy, s.effectiveContextCeiling(r.Context())))
+	writeJSON(w, http.StatusOK, qaPolicyDTO(policy, s.globalContextCeiling(r.Context())))
 }
 
 var validBlockingThresholds = map[string]bool{
@@ -660,5 +663,5 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(uint64(teamID), 10)})
-	writeJSON(w, http.StatusOK, qaPolicyDTO(saved, s.effectiveContextCeiling(r.Context())))
+	writeJSON(w, http.StatusOK, qaPolicyDTO(saved, s.globalContextCeiling(r.Context())))
 }
