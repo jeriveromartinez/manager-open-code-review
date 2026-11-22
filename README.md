@@ -13,7 +13,7 @@ Se despliega con **una sola imagen** en tres contenedores, más un cuarto opcion
 | `monitor` | `qa monitor` | Opcional (perfil `monitor`): sondea `/healthz` y `/metrics` del worker y avisa por log y webhook |
 | `postgres` | `postgres:17` | Estado, cola River y eventos `LISTEN/NOTIFY` |
 
-El Dockerfile produce dos targets: `app` (mínimo) y `worker` (con `git`, Node 24, `ocr` 1.13.13 y `opencode` 1.19.0). `app` publica en GitHub con la GitHub App; el worker nunca tiene su clave privada ni tokens de escritura, y clona con un token de solo lectura. `QA_MASTER_KEY` cifra la configuración de la App y la usa solo `app`; `QA_WORKER_KEY` cifra las API keys y los tokens de clonado, y la comparten `app` y `worker`.
+El Dockerfile produce dos targets: `app` (mínimo) y `worker` (con `git`, Node 24, `ocr` 1.14.0 y `opencode` 1.19.0). `app` publica en GitHub con la GitHub App; el worker nunca tiene su clave privada ni tokens de escritura, y clona con un token de solo lectura. `QA_MASTER_KEY` cifra la configuración de la App y la usa solo `app`; `QA_WORKER_KEY` cifra las API keys y los tokens de clonado, y la comparten `app` y `worker`.
 
 ## Inicio rápido
 

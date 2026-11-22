@@ -19,7 +19,7 @@ func healthyObservation() monitor.Observation {
 				OK:   true,
 			},
 			Dependencies: []monitor.DependencyStatus{
-				{Name: "ocr", OK: true, Version: "1.13.13"},
+				{Name: "ocr", OK: true, Version: "1.14.0"},
 				{Name: "opencode", OK: true, Version: "1.19.0"},
 			},
 		},

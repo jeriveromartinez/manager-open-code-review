@@ -37,7 +37,7 @@ func (s workerStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 const (
 	okHealth = `{"status":"ok","uptime_seconds":42,"database":{"name":"postgres","ok":true},` +
-		`"dependencies":[{"name":"ocr","ok":true,"version":"1.13.13"},{"name":"opencode","ok":true,"version":"1.19.0"}]}`
+		`"dependencies":[{"name":"ocr","ok":true,"version":"1.14.0"},{"name":"opencode","ok":true,"version":"1.19.0"}]}`
 	degradedHealth = `{"status":"degraded","uptime_seconds":42,"database":{"name":"postgres","ok":true},` +
 		`"dependencies":[{"name":"ocr","ok":false,"error":"gone"}]}`
 	idleMetrics   = `{"queue":{"available":0,"running":0,"scheduled":0,"discarded":0,"oldest_available_seconds":0},"runs":{"succeeded":0,"failed":0,"inconclusive":0,"duration_p95_seconds":0},"stalled":false}`
