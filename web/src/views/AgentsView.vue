@@ -780,8 +780,7 @@ onMounted(() => {
                 <span class="field__hint">
                   Vacío hereda el techo global
                   ({{ formatTokens(policy?.global_context_ceiling ?? 270000) }} tokens). Se aplica a
-                  cada conversación, no al total del run; el motor lo aplicará cuando integre
-                  estos controles (#72).
+                  cada conversación, no al total del run.
                 </span>
               </label>
               <label class="field">
