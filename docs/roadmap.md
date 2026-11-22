@@ -32,7 +32,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #68 | Refrescar el token de clonado de runs en cola | S/M | — | **Hecho** (#92) |
 | #73 | Registrar y mostrar el consumo real (columnas, API, panel) | M/L | #63 | **Parcial** (#93): columnas, detalle de PR y tile de lead; falta consumo por perfil y chequeos de salud |
 | #77 | Aplicar `exclude_globs` y `extra_instructions` de la política | M | — | **Hecho** (#94) |
-| #75 | Chequeos de salud sin coste de agente (una llamada, intervalo 6 h) | S/M | — | Pendiente |
+| #75 | Chequeos de salud sin coste de agente (una llamada, intervalo 6 h) | S/M | — | **Hecho** (#95) |
 | #65 | Controlar tokens de razonamiento y latencia | S/M | — | Pendiente |
 | #66 | Verificar y activar caché de prompt | S | #71 | Pendiente |
 | #79 | Evaluar y subir OCR 1.14.0 | S | — | Pendiente |
@@ -48,7 +48,8 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 - En `main`: roadmap #85 y Fase 1 completa (#86, #87, #88, #89).
 - Fase 2 completa: #69 (#91) y #68 (#92). Siguiente: Fase 3, #73 y #77.
 - #73 parcial (#93): consumo real por ejecución, detalle de PR y tile de lead. Pendiente el consumo por perfil y el de los chequeos de salud.
-- #77 hecho (#94): exclusión de archivos y instrucciones del equipo aplicadas de verdad. Siguiente: #75, #65 y #66.
+- #77 hecho (#94): exclusión de archivos y instrucciones del equipo aplicadas de verdad.
+- #75 hecho (#95): chequeo de salud con una petición mínima sin herramientas, intervalo de 6 h y solo perfiles en uso. Siguiente: #65 y #66.
 
 ## Fases
 
@@ -75,7 +76,7 @@ Objetivo: ver dónde se gasta y que la política del equipo se aplique de verdad
 
 - [x] #73 Columnas estructuradas (`input/output/cache_read/cache_write/total/max_context`), migración, API y vistas de PR y lead (#93). Los runs antiguos muestran «sin datos». Pendiente el consumo por perfil y el de los chequeos de salud.
 - [x] #77 Pasar `exclude_globs` a OCR y `extra_instructions` al contexto saneado; editarlos en la vista de Agentes (#94).
-- [ ] #75 Sustituir el agente del chequeo de salud por una llamada mínima sin herramientas; intervalo por defecto de 6 h; solo perfiles activos y en uso.
+- [x] #75 Sustituir el agente del chequeo de salud por una llamada mínima sin herramientas; intervalo por defecto de 6 h; solo perfiles activos y en uso. (#95)
 - [ ] #65 Medir y bajar los tokens de razonamiento: modelo sin razonamiento o variante de bajo esfuerzo, con la calidad del JSON intacta.
 - [ ] #66 Verificar la caché de prompt en CommandCode y documentar el resultado; si no la soporta, apoyarse en el diseño de una petición por pasada.
 
