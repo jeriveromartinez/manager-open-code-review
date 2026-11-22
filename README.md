@@ -56,6 +56,8 @@ Todo lo demás —escucha, reconciliación, revisión, worker, alertas y backups
 
 `review_stale_after` es el umbral del vigilante de runs huérfanos: al arrancar y cada 5 minutos, los runs en `running` cuya hora de inicio supera ese umbral pasan a `failed` con código `interrupted`, se publica el check como `action_required` y el PR queda `inconclusive`. Debe superar `review_timeout` (más el margen de reintentos), o matará revisiones sanas.
 
+`review_context_ceiling` (270000 por defecto, entre 4096 y 2000000) es el máximo de tokens de entrada de **cada conversación** con el modelo, no el gasto total de la revisión. Es el equivalente a `/autocompact 270k`: al acercarse al techo el motor compacta el historial y sigue, y lo que no cabe se reparte entre subtareas. Cada equipo puede sustituirlo con su propio techo en la política; el motor nativo ya usa `prompt_cache_key`, pero la aplicación de estos valores por el motor sigue pendiente.
+
 El worker expone salud y métricas en `worker_health_addr` (`:9090` por defecto):
 
 | Ruta | Contenido |
@@ -139,6 +141,8 @@ En **Agentes LLM** (solo admins), «Nuevo perfil» permite dar nombre, proveedor
 La columna **Consumo · 7 días** suma, por perfil, los tokens de las revisiones terminadas en la ventana (`review_runs.total_tokens`) y los de los chequeos de salud (`llm_health_checks.total_tokens`): muestra el total, entrada/salida, el porcentaje servido desde caché y cuántos chequeos y ejecuciones registraron uso. `GET /api/llm-profiles/usage` (solo admins) devuelve ese agregado con `has_data` y campos de tokens `null` cuando no hay datos: «sin datos» no es un cero medido y los promedios solo dividen entre las ejecuciones y chequeos que sí registraron uso.
 
 Para asignar el perfil, en **Política por equipo** elige el equipo y el perfil y pulsa «Guardar política». Esa política es la que usa el worker para cada PR del equipo; el perfil debe estar activo para que se generen runs.
+
+El bloque **Contexto y coste** de la política guarda tres controles por equipo. El **techo de contexto** vacío hereda `review_context_ceiling`; un valor entre 4096 y 2000000 lo sustituye. El **esfuerzo** es la profundidad de la revisión (`low`/`medium`/`high`, 1/2/3 rondas), no la variante de razonamiento del perfil. El **tope de gasto** (`review_token_budget`) está desactivado en 0; si se activa, un corte deja el run `inconclusive` con los hallazgos parciales publicados. El panel solo configura y valida estos valores: su uso real por el motor sigue pendiente.
 
 En las opciones avanzadas del perfil, **Variante de razonamiento** permite elegir `none`, `minimal`, `low`, `medium` o `high`, o dejarla vacía para usar la del modelo. OpenCode solo construye la tabla de variantes si el modelo declara que razona, y a un modelo declarado en el perfil se le supone lo contrario; por eso el worker declara `reasoning` y, en los proveedores compatibles con OpenAI, escribe la entrada de la variante elegida (`reasoning_effort`), de modo que `--variant` llega al proveedor en lugar de ignorarse. En Anthropic y Google se usa la tabla específica de OpenCode (presupuestos o niveles de pensamiento). Úsala solo con un modelo que acepte esa variante: si no la acepta, el proveedor rechaza la petición y el motivo aparece en el run y en la salud del perfil. Para medir el efecto, compara el detalle de un PR antes y después: cada run muestra **Razonamiento** junto al consumo total, y la duración está en `started_at`/`finished_at`.
 

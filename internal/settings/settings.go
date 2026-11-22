@@ -15,6 +15,7 @@ const (
 	KeyListenAddr           = "listen_addr"
 	KeyReviewConcurrency    = "review_concurrency"
 	KeyReviewAgentSteps     = "review_agent_steps"
+	KeyReviewContextCeiling = "review_context_ceiling"
 	KeyReviewTimeout        = "review_timeout"
 	KeyReviewStaleAfter     = "review_stale_after"
 	KeyLLMHealthInterval    = "llm_health_interval"
@@ -109,6 +110,12 @@ func Fields() []Field {
 			Label: "Pasos por pasada",
 			Help:  "Máximo de pasos del agente opencode en cada pasada. La revisión puede encadenar varias pasadas (hasta max_passes).",
 			Kind:  "int", Default: "8", Restart: "worker",
+		},
+		{
+			Key: KeyReviewContextCeiling, Group: GroupReview,
+			Label: "Techo de contexto",
+			Help:  "Máximo de tokens de entrada por conversación con el modelo. Cada equipo puede sustituirlo en su política. No es el gasto total de la revisión.",
+			Kind:  "int", Default: "270000", Restart: "worker",
 		},
 		{
 			Key: KeyReviewTimeout, Group: GroupReview,
@@ -210,7 +217,7 @@ func Fields() []Field {
 }
 
 func Defaults() map[string]string {
-	out := make(map[string]string, 23)
+	out := make(map[string]string, 25)
 	for _, field := range Fields() {
 		out[field.Key] = field.Default
 	}
@@ -229,6 +236,7 @@ func ToMap(cfg config.Config) map[string]string {
 		KeyListenAddr:           cfg.ListenAddr,
 		KeyReviewConcurrency:    strconv.Itoa(cfg.ReviewConcurrency),
 		KeyReviewAgentSteps:     strconv.Itoa(cfg.ReviewAgentSteps),
+		KeyReviewContextCeiling: strconv.Itoa(cfg.ReviewContextCeiling),
 		KeyReviewTimeout:        cfg.ReviewTimeout.String(),
 		KeyReviewStaleAfter:     cfg.ReviewStaleAfter.String(),
 		KeyLLMHealthInterval:    cfg.LLMHealthInterval.String(),

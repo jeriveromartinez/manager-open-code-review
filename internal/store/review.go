@@ -38,7 +38,32 @@ const (
 	policyDefaultMaxFiles     = 40
 	policyDefaultMaxDiffLines = 3000
 	policyDefaultMaxPasses    = 4
+	policyDefaultReviewEffort = ReviewEffortLow
 )
+
+// Review effort values and policy bounds shared by validation and the API. The
+// context ceiling is the per-conversation input limit, not the run's total
+// spend; the token budget is the optional total cap (#72).
+const (
+	ReviewEffortLow    = "low"
+	ReviewEffortMedium = "medium"
+	ReviewEffortHigh   = "high"
+
+	ReviewContextCeilingMin = 4096
+	ReviewContextCeilingMax = 2000000
+	ReviewTokenBudgetMax    = 1000000000
+)
+
+// ValidReviewEffort reports whether effort is one of the three values the
+// engine understands.
+func ValidReviewEffort(effort string) bool {
+	switch effort {
+	case ReviewEffortLow, ReviewEffortMedium, ReviewEffortHigh:
+		return true
+	default:
+		return false
+	}
+}
 
 // ReviewConfig is the complete configuration that applies to one pull request.
 type ReviewConfig struct {
@@ -353,6 +378,21 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 	if p.MaxPasses == 0 {
 		p.MaxPasses = policyDefaultMaxPasses
 	}
+	if p.ReviewEffort == "" {
+		p.ReviewEffort = policyDefaultReviewEffort
+	}
+	if !ValidReviewEffort(p.ReviewEffort) {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid review effort %q", p.TeamID, p.ReviewEffort)
+	}
+	if p.ReviewContextCeiling != nil &&
+		(*p.ReviewContextCeiling < ReviewContextCeilingMin || *p.ReviewContextCeiling > ReviewContextCeilingMax) {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid review context ceiling %d",
+			p.TeamID, *p.ReviewContextCeiling)
+	}
+	if p.ReviewTokenBudget < 0 || p.ReviewTokenBudget > ReviewTokenBudgetMax {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid review token budget %d",
+			p.TeamID, p.ReviewTokenBudget)
+	}
 	globs := bytes.TrimSpace(p.ExcludeGlobs)
 	if len(globs) == 0 || bytes.Equal(globs, []byte("null")) {
 		p.ExcludeGlobs = datatypes.JSON([]byte(`[]`))
@@ -369,7 +409,8 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		DoUpdates: clause.AssignmentColumns([]string{
 			"llm_profile_id", "blocking_threshold", "extra_instructions", "exclude_globs",
 			"max_files_per_pass", "max_diff_lines_per_pass", "max_passes",
-			"require_green_ci", "updated_at",
+			"require_green_ci", "review_context_ceiling", "review_effort",
+			"review_token_budget", "updated_at",
 		}),
 	}).Create(&p).Error
 	if err != nil {

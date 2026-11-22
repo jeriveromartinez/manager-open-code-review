@@ -9,6 +9,7 @@ import {
   type LLMProfileUsage,
   type QAPolicy,
   type QAPolicyInput,
+  type ReviewEffort,
   type ReviewEvent,
   type Team,
 } from '../api'
@@ -100,6 +101,10 @@ const policyRequireGreenCI = ref(false)
 const policyExtraInstructions = ref('')
 // One glob per line: a comma inside a pattern must survive editing.
 const policyExcludeGlobs = ref('')
+// Empty means "inherit the global review_context_ceiling".
+const policyContextCeiling = ref<number | ''>('')
+const policyReviewEffort = ref<ReviewEffort>('low')
+const policyReviewTokenBudget = ref(0)
 const policyError = ref<string | null>(null)
 const policyMessage = ref<string | null>(null)
 // Set when someone else changed what is on screen while it had unsaved edits.
@@ -157,6 +162,9 @@ function applyPolicy(saved: QAPolicy): void {
   policyRequireGreenCI.value = saved.require_green_ci
   policyExtraInstructions.value = saved.extra_instructions
   policyExcludeGlobs.value = saved.exclude_globs.join('\n')
+  policyContextCeiling.value = saved.review_context_ceiling ?? ''
+  policyReviewEffort.value = saved.review_effort || 'low'
+  policyReviewTokenBudget.value = saved.review_token_budget ?? 0
   stalePolicy.value = false
 }
 
@@ -184,7 +192,10 @@ const policyDirty = computed(
     (policyProfileId.value !== (policy.value.llm_profile_id || null) ||
       policyRequireGreenCI.value !== policy.value.require_green_ci ||
       policyExtraInstructions.value !== policy.value.extra_instructions ||
-      policyExcludeGlobs.value !== policy.value.exclude_globs.join('\n')),
+      policyExcludeGlobs.value !== policy.value.exclude_globs.join('\n') ||
+      policyContextCeiling.value !== (policy.value.review_context_ceiling ?? '') ||
+      policyReviewEffort.value !== (policy.value.review_effort || 'low') ||
+      policyReviewTokenBudget.value !== (policy.value.review_token_budget ?? 0)),
 )
 
 // Health checks also announce a profile; only these fields are someone's edit.
@@ -515,6 +526,7 @@ async function savePolicy(): Promise<void> {
   if (selectedTeamId.value === null || policyProfileId.value === null) return
   policyError.value = null
   policyMessage.value = null
+  const ceiling = policyContextCeiling.value
   const body: QAPolicyInput = {
     llm_profile_id: policyProfileId.value,
     blocking_threshold: policy.value?.blocking_threshold ?? 'major',
@@ -524,6 +536,9 @@ async function savePolicy(): Promise<void> {
     max_diff_lines: policy.value?.max_diff_lines ?? 3000,
     max_passes: policy.value?.max_passes ?? 4,
     require_green_ci: policyRequireGreenCI.value,
+    review_context_ceiling: ceiling === '' ? null : ceiling,
+    review_effort: policyReviewEffort.value,
+    review_token_budget: Number(policyReviewTokenBudget.value) || 0,
   }
   try {
     applyPolicy(await api.savePolicy(selectedTeamId.value, body))
@@ -734,6 +749,55 @@ onMounted(() => {
               </span>
             </span>
           </label>
+
+          <div class="policy__cost" data-policy-cost>
+            <h3 class="policy__section-title">Contexto y coste</h3>
+            <div class="policy__cost-fields">
+              <label class="field">
+                <span class="field__label">Esfuerzo</span>
+                <select v-model="policyReviewEffort" class="field__input" data-policy-effort>
+                  <option value="low">Bajo · 1 ronda</option>
+                  <option value="medium">Medio · 2 rondas</option>
+                  <option value="high">Alto · 3 rondas</option>
+                </select>
+                <span class="field__hint">
+                  Profundidad de la revisión, no la variante de razonamiento del perfil LLM.
+                </span>
+              </label>
+              <label class="field">
+                <span class="field__label">Techo de contexto</span>
+                <input
+                  v-model="policyContextCeiling"
+                  class="field__input"
+                  type="number"
+                  min="4096"
+                  max="2000000"
+                  data-policy-ceiling
+                  :placeholder="String(policy?.effective_context_ceiling ?? 270000)"
+                />
+                <span class="field__hint">
+                  Vacío hereda el techo global
+                  ({{ formatTokens(policy?.effective_context_ceiling ?? 270000) }} tokens). Se aplica a
+                  cada conversación, no al total del run.
+                </span>
+              </label>
+              <label class="field">
+                <span class="field__label">Tope de gasto</span>
+                <input
+                  v-model.number="policyReviewTokenBudget"
+                  class="field__input"
+                  type="number"
+                  min="0"
+                  max="1000000000"
+                  data-policy-budget
+                />
+                <span class="field__hint">
+                  0 = sin tope. Un corte deja el run inconcluso con los hallazgos parciales
+                  publicados.
+                </span>
+              </label>
+            </div>
+          </div>
 
           <div class="policy__extras">
             <label class="field">
@@ -1229,6 +1293,27 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+.policy__cost {
+  padding-top: var(--space-3);
+  border-top: var(--rule-hair) solid var(--border);
+}
+
+.policy__section-title {
+  font-size: 14px;
+}
+
+.policy__cost-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-3);
+}
+
+.policy__cost-fields .field__input {
+  width: 100%;
+  min-width: 0;
+}
+
 .policy__extras {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1537,6 +1622,7 @@ onMounted(() => {
 
 @media (max-width: 880px) {
   .policy__fields,
+  .policy__cost-fields,
   .policy__extras {
     grid-template-columns: minmax(0, 1fr);
   }

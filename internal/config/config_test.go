@@ -279,6 +279,9 @@ func TestLoadReviewDefaults(t *testing.T) {
 	if cfg.ReviewAgentSteps != 8 {
 		t.Errorf("ReviewAgentSteps = %d, want 8", cfg.ReviewAgentSteps)
 	}
+	if cfg.ReviewContextCeiling != 270000 {
+		t.Errorf("ReviewContextCeiling = %d, want 270000", cfg.ReviewContextCeiling)
+	}
 	if cfg.ReviewTimeout != 20*time.Minute {
 		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 20*time.Minute)
 	}

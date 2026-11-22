@@ -24,6 +24,9 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 		{"garbage duration", KeyReconcileInterval, "pronto", KeyReconcileInterval},
 		{"negative int", KeyReviewConcurrency, "-1", KeyReviewConcurrency},
 		{"garbage int", KeyFetchDepthMax, "muchos", KeyFetchDepthMax},
+		{"context ceiling below range", KeyReviewContextCeiling, "4095", KeyReviewContextCeiling},
+		{"context ceiling above range", KeyReviewContextCeiling, "2000001", KeyReviewContextCeiling},
+		{"context ceiling garbage", KeyReviewContextCeiling, "270k", KeyReviewContextCeiling},
 		{"retention above the backup script's range", KeyBackupRetention, "1000", KeyBackupRetention},
 		{"bad bool", KeyWebhooksEnabled, "si", KeyWebhooksEnabled},
 		{"relative url", KeyPublicURL, "/solo-ruta", KeyPublicURL},
@@ -127,6 +130,7 @@ func TestApplySetsEveryField(t *testing.T) {
 		KeyListenAddr:           ":9091",
 		KeyReviewConcurrency:    "4",
 		KeyReviewAgentSteps:     "60",
+		KeyReviewContextCeiling: "300000",
 		KeyReviewTimeout:        "30m",
 		KeyReviewStaleAfter:     "90m",
 		KeyLLMHealthInterval:    "10m",
@@ -160,7 +164,8 @@ func TestApplySetsEveryField(t *testing.T) {
 		cfg.MonitorInterval != 30*time.Second || cfg.QAValidationSLA != 6*time.Hour {
 		t.Error("one of the durations was not applied")
 	}
-	if cfg.ReviewConcurrency != 4 || cfg.ReviewAgentSteps != 60 || cfg.FetchDepthMax != 900 || cfg.BackupRetention != 14 {
+	if cfg.ReviewConcurrency != 4 || cfg.ReviewAgentSteps != 60 || cfg.ReviewContextCeiling != 300000 ||
+		cfg.FetchDepthMax != 900 || cfg.BackupRetention != 14 {
 		t.Error("one of the integers was not applied")
 	}
 	if cfg.WorkerHealthURL != "http://worker:9090" || cfg.GitHubURL != "https://ghe.example.com" ||
@@ -177,8 +182,8 @@ func TestApplySetsEveryField(t *testing.T) {
 func TestDefaultsAndFieldsAgree(t *testing.T) {
 	valid := map[string]bool{"": true, "app": true, "worker": true, "monitor": true}
 	fields := Fields()
-	if len(fields) != 24 {
-		t.Fatalf("Fields() has %d keys, want 24", len(fields))
+	if len(fields) != 25 {
+		t.Fatalf("Fields() has %d keys, want 25", len(fields))
 	}
 	seen := map[string]bool{}
 	for _, field := range fields {

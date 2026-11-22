@@ -207,8 +207,15 @@ type QAPolicy struct {
 	MaxDiffLinesPerPass int            `gorm:"column:max_diff_lines_per_pass"`
 	MaxPasses           int            `gorm:"column:max_passes"`
 	RequireGreenCI      bool           `gorm:"column:require_green_ci"`
-	CreatedAt           time.Time      `gorm:"column:created_at"`
-	UpdatedAt           time.Time      `gorm:"column:updated_at"`
+	// ReviewContextCeiling overrides the global review_context_ceiling for this
+	// team. Nil inherits the global setting.
+	ReviewContextCeiling *int   `gorm:"column:review_context_ceiling"`
+	ReviewEffort         string `gorm:"column:review_effort;default:low"`
+	// ReviewTokenBudget is the optional cap on the run's total tokens. Zero
+	// disables it.
+	ReviewTokenBudget int64     `gorm:"column:review_token_budget"`
+	CreatedAt         time.Time `gorm:"column:created_at"`
+	UpdatedAt         time.Time `gorm:"column:updated_at"`
 }
 
 // ReviewRun is one execution of the review pipeline for a pull request. At

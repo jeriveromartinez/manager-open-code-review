@@ -6,7 +6,14 @@ import DotLoader from '../components/DotLoader.vue'
 import DotRing from '../components/DotRing.vue'
 import KpiCard from '../components/KpiCard.vue'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
-import { api, type PRView, type QAPolicy, type QASummary, type Repository } from '../api'
+import {
+  api,
+  type PRView,
+  type QAPolicy,
+  type QASummary,
+  type Repository,
+  type ReviewEffort,
+} from '../api'
 import type { DotTone } from '../dots'
 import { isForbidden } from '../errors'
 import { blockedAt, decisionRows, thresholds, type Threshold } from '../leadPanel'
@@ -34,6 +41,21 @@ const thresholdLabels: Record<Threshold, string> = {
   minor: 'Menor',
   nit: 'Nit',
 }
+
+const effortLabels: Record<ReviewEffort, string> = {
+  low: 'Bajo',
+  medium: 'Medio',
+  high: 'Alto',
+}
+
+const effortLabel = computed(() =>
+  policy.value ? (effortLabels[policy.value.review_effort] ?? policy.value.review_effort) : '',
+)
+
+const budgetLabel = computed(() => {
+  const budget = policy.value?.review_token_budget ?? 0
+  return budget === 0 ? 'sin tope de gasto' : `tope ${formatTokens(budget)} tokens`
+})
 
 const team = computed(() => teams.value.find((item) => item.id === teamId.value) ?? null)
 const slaSeconds = computed(() => summary.value?.validation_sla_seconds ?? 0)
@@ -271,6 +293,11 @@ onBeforeUnmount(() => {
                 </p>
                 <p class="tile__hint">
                   {{ policy.max_passes }} pases como máximo · CI verde {{ policy.require_green_ci ? 'requerido' : 'no requerido' }}
+                </p>
+                <p class="tile__hint" data-policy-context>
+                  Techo {{ formatTokens(policy.effective_context_ceiling) }} tokens · esfuerzo
+                  <span data-policy-effort>{{ effortLabel }}</span> ·
+                  <span data-policy-budget>{{ budgetLabel }}</span>
                 </p>
                 <table class="simulation">
                   <caption class="caption">PRs abiertos que quedarían bloqueados con cada umbral</caption>

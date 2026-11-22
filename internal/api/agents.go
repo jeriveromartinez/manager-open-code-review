@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -10,7 +11,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/jeriveromartinez/qa-control-center/internal/config"
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
+	"github.com/jeriveromartinez/qa-control-center/internal/settings"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
@@ -427,20 +430,43 @@ func (s *server) enqueueLLMHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 type qaPolicyResponse struct {
-	ID                uint     `json:"id"`
-	TeamID            uint     `json:"team_id"`
-	LLMProfileID      uint     `json:"llm_profile_id"`
-	BlockingThreshold string   `json:"blocking_threshold"`
-	ExtraInstructions string   `json:"extra_instructions"`
-	ExcludeGlobs      []string `json:"exclude_globs"`
-	MaxFiles          int      `json:"max_files"`
-	MaxDiffLines      int      `json:"max_diff_lines"`
-	MaxPasses         int      `json:"max_passes"`
-	RequireGreenCI    bool     `json:"require_green_ci"`
-	UpdatedAt         string   `json:"updated_at"`
+	ID                      uint     `json:"id"`
+	TeamID                  uint     `json:"team_id"`
+	LLMProfileID            uint     `json:"llm_profile_id"`
+	BlockingThreshold       string   `json:"blocking_threshold"`
+	ExtraInstructions       string   `json:"extra_instructions"`
+	ExcludeGlobs            []string `json:"exclude_globs"`
+	MaxFiles                int      `json:"max_files"`
+	MaxDiffLines            int      `json:"max_diff_lines"`
+	MaxPasses               int      `json:"max_passes"`
+	RequireGreenCI          bool     `json:"require_green_ci"`
+	ReviewContextCeiling    *int     `json:"review_context_ceiling"`
+	EffectiveContextCeiling int      `json:"effective_context_ceiling"`
+	ReviewEffort            string   `json:"review_effort"`
+	ReviewTokenBudget       int64    `json:"review_token_budget"`
+	UpdatedAt               string   `json:"updated_at"`
 }
 
-func qaPolicyDTO(p store.QAPolicy) qaPolicyResponse {
+// effectiveContextCeiling returns the global setting as the next start would
+// load it. Reading the stored overrides keeps the panel honest right after a
+// save, even though this process keeps its startup config until the restart the
+// setting asks for.
+func (s *server) effectiveContextCeiling(ctx context.Context) int {
+	ceiling := s.Cfg.ReviewContextCeiling
+	stored, err := s.Store.Settings(ctx)
+	if err == nil {
+		next := config.Default()
+		if err := settings.Apply(&next, stored); err == nil {
+			ceiling = next.ReviewContextCeiling
+		}
+	}
+	if ceiling <= 0 {
+		ceiling = config.ReviewContextCeilingDefault
+	}
+	return ceiling
+}
+
+func qaPolicyDTO(p store.QAPolicy, effectiveCeiling int) qaPolicyResponse {
 	var globs []string
 	if err := json.Unmarshal(p.ExcludeGlobs, &globs); err != nil {
 		globs = []string{}
@@ -448,13 +474,23 @@ func qaPolicyDTO(p store.QAPolicy) qaPolicyResponse {
 	if globs == nil {
 		globs = []string{}
 	}
+	effort := p.ReviewEffort
+	if effort == "" {
+		effort = store.ReviewEffortLow
+	}
+	effective := effectiveCeiling
+	if p.ReviewContextCeiling != nil {
+		effective = *p.ReviewContextCeiling
+	}
 	return qaPolicyResponse{
 		ID: p.ID, TeamID: p.TeamID, LLMProfileID: p.LLMProfileID,
 		BlockingThreshold: p.BlockingThreshold, ExtraInstructions: p.ExtraInstructions,
 		ExcludeGlobs: globs, MaxFiles: p.MaxFilesPerPass,
 		MaxDiffLines: p.MaxDiffLinesPerPass, MaxPasses: p.MaxPasses,
-		RequireGreenCI: p.RequireGreenCI,
-		UpdatedAt:      p.UpdatedAt.UTC().Format(time.RFC3339),
+		RequireGreenCI:       p.RequireGreenCI,
+		ReviewContextCeiling: p.ReviewContextCeiling, EffectiveContextCeiling: effective,
+		ReviewEffort: effort, ReviewTokenBudget: p.ReviewTokenBudget,
+		UpdatedAt: p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -474,6 +510,8 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, qaPolicyResponse{
 			TeamID: teamID, BlockingThreshold: "major", ExcludeGlobs: []string{},
 			MaxFiles: 40, MaxDiffLines: 3000, MaxPasses: 4,
+			EffectiveContextCeiling: s.effectiveContextCeiling(r.Context()),
+			ReviewEffort:            store.ReviewEffortLow,
 		})
 		return
 	}
@@ -481,7 +519,7 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "load qa policy")
 		return
 	}
-	writeJSON(w, http.StatusOK, qaPolicyDTO(policy))
+	writeJSON(w, http.StatusOK, qaPolicyDTO(policy, s.effectiveContextCeiling(r.Context())))
 }
 
 var validBlockingThresholds = map[string]bool{
@@ -567,6 +605,36 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A null or omitted ceiling clears the team override: PUT replaces the whole
+	// policy, so inheriting the global value is expressed by leaving it out.
+	if value, present := raw["review_context_ceiling"]; present {
+		var ceiling *int
+		if err := json.Unmarshal(value, &ceiling); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid review_context_ceiling")
+			return
+		}
+		if ceiling != nil &&
+			(*ceiling < store.ReviewContextCeilingMin || *ceiling > store.ReviewContextCeilingMax) {
+			writeAPIError(w, http.StatusBadRequest, "invalid review_context_ceiling")
+			return
+		}
+		policy.ReviewContextCeiling = ceiling
+	}
+	if value, present := raw["review_effort"]; present {
+		if err := json.Unmarshal(value, &policy.ReviewEffort); err != nil ||
+			(policy.ReviewEffort != "" && !store.ValidReviewEffort(policy.ReviewEffort)) {
+			writeAPIError(w, http.StatusBadRequest, "invalid review_effort")
+			return
+		}
+	}
+	if value, present := raw["review_token_budget"]; present {
+		if err := json.Unmarshal(value, &policy.ReviewTokenBudget); err != nil ||
+			policy.ReviewTokenBudget < 0 || policy.ReviewTokenBudget > store.ReviewTokenBudgetMax {
+			writeAPIError(w, http.StatusBadRequest, "invalid review_token_budget")
+			return
+		}
+	}
+
 	if !confirmed && policy.LLMProfileID != 0 {
 		profile, err := s.Store.LLMProfile(r.Context(), policy.LLMProfileID)
 		if err != nil {
@@ -592,5 +660,5 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(uint64(teamID), 10)})
-	writeJSON(w, http.StatusOK, qaPolicyDTO(saved))
+	writeJSON(w, http.StatusOK, qaPolicyDTO(saved, s.effectiveContextCeiling(r.Context())))
 }
