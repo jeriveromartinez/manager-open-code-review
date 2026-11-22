@@ -139,6 +139,7 @@ func NewRouter(d Deps) http.Handler {
 				r.Post("/teams", s.createTeam)
 
 				r.Get("/llm-profiles", s.llmProfiles)
+				r.Get("/llm-profiles/usage", s.llmProfileUsage)
 				r.Post("/llm-profiles", s.createLLMProfile)
 				r.Post("/llm-profiles/models", s.llmModels)
 				r.Patch("/llm-profiles/{id}", s.patchLLMProfile)

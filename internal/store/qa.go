@@ -216,3 +216,107 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time, f QAFilter
 	}
 	return out, nil
 }
+
+// ProfileTokenStats is the token consumption attributed to one LLM profile
+// inside TokenWindow: review runs plus health checks. Runs and Checks count
+// only the executions that recorded usage, so every profile with HasData has
+// a meaningful total. Tokens stay zero when HasData is false, which the panel
+// must render as "sin datos" instead of a real zero.
+type ProfileTokenStats struct {
+	ProfileID  uint
+	Name       string
+	Provider   string
+	Model      string
+	Runs       int
+	Checks     int
+	Input      int64
+	Output     int64
+	CacheRead  int64
+	CacheWrite int64
+	Total      int64
+}
+
+// HasData reports whether at least one run or check recorded usage.
+func (p ProfileTokenStats) HasData() bool { return p.Runs+p.Checks > 0 }
+
+// ProfileTokenUsage aggregates the token consumption of every LLM profile over
+// TokenWindow: review runs grouped by profile_id plus the profile's health
+// checks. Profiles with no recorded usage are still returned with HasData
+// false, so the panel can distinguish "nothing yet" from a measured zero.
+func (s *Store) ProfileTokenUsage(ctx context.Context, now time.Time) ([]ProfileTokenStats, error) {
+	out := []ProfileTokenStats{}
+	err := s.DB.WithContext(ctx).Table("llm_profiles").
+		Select("id AS profile_id, name, provider, model").
+		Order("id").
+		Scan(&out).Error
+	if err != nil {
+		return nil, fmt.Errorf("list profiles for token usage: %w", err)
+	}
+
+	type tokenRow struct {
+		ProfileID  uint
+		N          int
+		Input      int64
+		Output     int64
+		CacheRead  int64
+		CacheWrite int64
+		Total      int64
+	}
+	since := now.Add(-TokenWindow)
+
+	var runRows []tokenRow
+	err = s.DB.WithContext(ctx).Table("review_runs").
+		Where("finished_at >= ? AND total_tokens IS NOT NULL", since).
+		Select(`profile_id, COUNT(*) AS n,
+			COALESCE(SUM(input_tokens), 0) AS input,
+			COALESCE(SUM(output_tokens), 0) AS output,
+			COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
+			COALESCE(SUM(cache_write_tokens), 0) AS cache_write,
+			COALESCE(SUM(total_tokens), 0) AS total`).
+		Group("profile_id").
+		Scan(&runRows).Error
+	if err != nil {
+		return nil, fmt.Errorf("count review tokens by profile: %w", err)
+	}
+
+	var checkRows []tokenRow
+	err = s.DB.WithContext(ctx).Table("llm_health_checks").
+		Where("checked_at >= ? AND total_tokens IS NOT NULL", since).
+		Select(`profile_id, COUNT(*) AS n,
+			COALESCE(SUM(input_tokens), 0) AS input,
+			COALESCE(SUM(output_tokens), 0) AS output,
+			COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
+			COALESCE(SUM(cache_write_tokens), 0) AS cache_write,
+			COALESCE(SUM(total_tokens), 0) AS total`).
+		Group("profile_id").
+		Scan(&checkRows).Error
+	if err != nil {
+		return nil, fmt.Errorf("count health-check tokens by profile: %w", err)
+	}
+
+	byProfile := make(map[uint]*ProfileTokenStats, len(out))
+	for i := range out {
+		byProfile[out[i].ProfileID] = &out[i]
+	}
+	add := func(rows []tokenRow, runs bool) {
+		for _, row := range rows {
+			stats := byProfile[row.ProfileID]
+			if stats == nil {
+				continue
+			}
+			if runs {
+				stats.Runs = row.N
+			} else {
+				stats.Checks = row.N
+			}
+			stats.Input += row.Input
+			stats.Output += row.Output
+			stats.CacheRead += row.CacheRead
+			stats.CacheWrite += row.CacheWrite
+			stats.Total += row.Total
+		}
+	}
+	add(runRows, true)
+	add(checkRows, false)
+	return out, nil
+}

@@ -614,3 +614,113 @@ func TestProfilesExposeHealthAge(t *testing.T) {
 		t.Errorf("never-checked health_stale = %v, want true", byName["never"]["health_stale"])
 	}
 }
+
+func (f *secureFixture) createProfile(name string) store.LLMProfile {
+	f.t.Helper()
+	profile, err := f.st.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: name, Provider: "anthropic", Model: "claude-test",
+		APIKeyEnc: "sealed", Concurrency: 1, Enabled: true,
+	})
+	if err != nil {
+		f.t.Fatalf("CreateLLMProfile(%q): %v", name, err)
+	}
+	return profile
+}
+
+func TestProfileUsageRequiresAdmin(t *testing.T) {
+	f := newSecureFixture(t)
+	dev := f.user("usage-dev", false)
+
+	assertStatus(t, f.request(http.MethodGet, "/api/llm-profiles/usage", nil, f.session(dev)), http.StatusForbidden)
+	assertStatus(t, f.request(http.MethodGet, "/api/llm-profiles/usage", nil, nil), http.StatusUnauthorized)
+}
+
+func TestProfileUsageEmptyState(t *testing.T) {
+	f := newSecureFixture(t)
+	admin := f.user("usage-admin", true)
+	profile := f.createProfile("usage-empty")
+
+	rec := f.request(http.MethodGet, "/api/llm-profiles/usage", nil, f.session(admin))
+	assertStatus(t, rec, http.StatusOK)
+	var raw map[string]any
+	decodeJSON(t, rec, &raw)
+
+	assertKeys(t, raw, "window_days", "has_data", "profiles")
+	if raw["window_days"] != float64(7) {
+		t.Errorf("window_days = %v, want 7", raw["window_days"])
+	}
+	if raw["has_data"] != false {
+		t.Errorf("has_data = %v, want false", raw["has_data"])
+	}
+	profiles := raw["profiles"].([]any)
+	if len(profiles) != 1 {
+		t.Fatalf("profiles = %v, want one entry", profiles)
+	}
+	entry := profiles[0].(map[string]any)
+	assertKeys(t, entry, "profile_id", "name", "provider", "model", "has_data",
+		"runs", "checks", "input_tokens", "output_tokens", "cache_read_tokens",
+		"cache_write_tokens", "total_tokens", "average_tokens")
+	if uint(entry["profile_id"].(float64)) != profile.ID {
+		t.Errorf("profile_id = %v, want %d", entry["profile_id"], profile.ID)
+	}
+	if entry["has_data"] != false || entry["total_tokens"] != nil {
+		t.Errorf("entry = %v, want no data and a null total", entry)
+	}
+}
+
+func TestProfileUsageAggregatesRunsAndChecks(t *testing.T) {
+	f := newSecureFixture(t)
+	admin := f.user("usage-admin", true)
+	profile := f.createProfile("usage-data")
+
+	inst := f.installation(2101)
+	repo := f.repo(2101, inst.ID, "acme/usage", nil, true)
+	pr := f.pr(repo.ID, 1, store.StatusReadyForHuman)
+	finished := time.Now().UTC().Add(-time.Hour)
+	total := int64(300)
+	input := int64(240)
+	output := int64(10)
+	cacheRead := int64(50)
+	run := store.ReviewRun{
+		PullRequestID: pr.ID, ProfileID: profile.ID, Status: store.RunSucceeded,
+		FinishedAt: &finished, TotalTokens: &total, InputTokens: &input,
+		OutputTokens: &output, CacheReadTokens: &cacheRead,
+	}
+	if err := f.st.DB.WithContext(f.ctx).Create(&run).Error; err != nil {
+		t.Fatalf("create review run: %v", err)
+	}
+	if err := f.st.RecordLLMHealth(f.ctx, profile.ID, store.HealthOK, "", &store.HealthUsage{
+		Input: 10, Output: 1, Total: 11,
+	}); err != nil {
+		t.Fatalf("RecordLLMHealth: %v", err)
+	}
+
+	rec := f.request(http.MethodGet, "/api/llm-profiles/usage", nil, f.session(admin))
+	assertStatus(t, rec, http.StatusOK)
+	var raw map[string]any
+	decodeJSON(t, rec, &raw)
+
+	if raw["has_data"] != true {
+		t.Errorf("has_data = %v, want true", raw["has_data"])
+	}
+	profiles := raw["profiles"].([]any)
+	if len(profiles) != 1 {
+		t.Fatalf("profiles = %v, want one", profiles)
+	}
+	entry := profiles[0].(map[string]any)
+	if entry["runs"] != float64(1) || entry["checks"] != float64(1) {
+		t.Errorf("counts = %v runs / %v checks, want 1 / 1", entry["runs"], entry["checks"])
+	}
+	if entry["total_tokens"] != float64(311) {
+		t.Errorf("total_tokens = %v, want 311", entry["total_tokens"])
+	}
+	if entry["input_tokens"] != float64(250) || entry["output_tokens"] != float64(11) {
+		t.Errorf("input/output = %v/%v, want 250/11", entry["input_tokens"], entry["output_tokens"])
+	}
+	if entry["cache_read_tokens"] != float64(50) {
+		t.Errorf("cache_read_tokens = %v, want 50", entry["cache_read_tokens"])
+	}
+	if entry["average_tokens"] != float64(155) {
+		t.Errorf("average_tokens = %v, want 155 (311/2)", entry["average_tokens"])
+	}
+}

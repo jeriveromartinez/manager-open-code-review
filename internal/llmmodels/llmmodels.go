@@ -218,12 +218,34 @@ func (c *Client) Models(ctx context.Context, providerID, apiKey string) ([]Model
 	}
 }
 
+// Usage is the token accounting a provider reports for one chat request. A nil
+// *Usage means the provider returned none, which is different from a request
+// that cost zero tokens. MaxContext is the prompt size of the request, the
+// figure that counts against the model context ceiling.
+type Usage struct {
+	Input      int64
+	Output     int64
+	Reasoning  int64
+	CacheRead  int64
+	CacheWrite int64
+	Total      int64
+	MaxContext int64
+}
+
 // Ping verifies that the provider accepts the key and the model with one
 // minimal, tool-free chat request. baseURL overrides the closed table, which is
 // how a custom connection is stored; a provider outside the table with no
 // override is ErrUnknownProvider. The request is bounded only by ctx, so the
 // caller must pass a deadline.
 func (c *Client) Ping(ctx context.Context, providerID, baseURL, model, apiKey string) error {
+	_, err := c.PingUsage(ctx, providerID, baseURL, model, apiKey)
+	return err
+}
+
+// PingUsage is Ping plus the token usage the provider reported. Usage parsing
+// never turns a successful probe into a failure: an absent or unreadable usage
+// block yields a nil Usage and a nil error.
+func (c *Client) PingUsage(ctx context.Context, providerID, baseURL, model, apiKey string) (*Usage, error) {
 	providers := c.Providers
 	if providers == nil {
 		providers = DefaultProviders
@@ -231,7 +253,7 @@ func (c *Client) Ping(ctx context.Context, providerID, baseURL, model, apiKey st
 	provider, ok := providers[providerID]
 	if !ok {
 		if strings.TrimSpace(baseURL) == "" {
-			return ErrUnknownProvider
+			return nil, ErrUnknownProvider
 		}
 		// An unknown provider with an explicit endpoint is expected to speak
 		// the OpenAI-compatible dialect, like most custom connections.
@@ -275,7 +297,7 @@ func (c *Client) Ping(ctx context.Context, providerID, baseURL, model, apiKey st
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return &UpstreamError{Err: err}
+		return nil, &UpstreamError{Err: err}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	switch provider.Shape {
@@ -292,21 +314,163 @@ func (c *Client) Ping(ctx context.Context, providerID, baseURL, model, apiKey st
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return &UpstreamError{Err: err}
+		return nil, &UpstreamError{Err: err}
 	}
 	defer resp.Body.Close()
 
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 	if readErr != nil && resp.StatusCode >= 200 && resp.StatusCode <= 299 {
-		return &UpstreamError{Err: readErr}
+		return nil, &UpstreamError{Err: readErr}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return &UpstreamError{Status: resp.StatusCode, Message: providerErrorMessage(raw)}
+		return nil, &UpstreamError{Status: resp.StatusCode, Message: providerErrorMessage(raw)}
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return &UpstreamError{Status: resp.StatusCode, Message: "el proveedor devolvió una respuesta vacía"}
+		return nil, &UpstreamError{Status: resp.StatusCode, Message: "el proveedor devolvió una respuesta vacía"}
 	}
-	return nil
+	return parseUsage(provider.Shape, raw), nil
+}
+
+// parseUsage reads the token accounting of a successful response. Each shape
+// nests usage differently; an unknown or empty block returns nil.
+func parseUsage(shape Shape, raw []byte) *Usage {
+	switch shape {
+	case Anthropic:
+		return parseAnthropicUsage(raw)
+	case Google:
+		return parseGoogleUsage(raw)
+	default:
+		return parseOpenAIUsage(raw)
+	}
+}
+
+func parseOpenAIUsage(raw []byte) *Usage {
+	var payload struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || noUsageValue(payload.Usage) {
+		return nil
+	}
+	var wire struct {
+		PromptTokens             int64 `json:"prompt_tokens"`
+		CompletionTokens         int64 `json:"completion_tokens"`
+		TotalTokens              int64 `json:"total_tokens"`
+		ReasoningTokens          int64 `json:"reasoning_tokens"`
+		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		PromptTokensDetails      struct {
+			CachedTokens        int64 `json:"cached_tokens"`
+			CacheWriteTokens    int64 `json:"cache_write_tokens"`
+			CacheCreationTokens int64 `json:"cache_creation_tokens"`
+		} `json:"prompt_tokens_details"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int64 `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
+	}
+	if err := json.Unmarshal(payload.Usage, &wire); err != nil {
+		return nil
+	}
+	usage := &Usage{
+		Input:      wire.PromptTokens,
+		Output:     wire.CompletionTokens,
+		Reasoning:  firstNonZero(wire.CompletionTokensDetails.ReasoningTokens, wire.ReasoningTokens),
+		CacheRead:  firstNonZero(wire.PromptTokensDetails.CachedTokens, wire.CacheReadInputTokens),
+		CacheWrite: firstNonZero(wire.PromptTokensDetails.CacheWriteTokens, wire.PromptTokensDetails.CacheCreationTokens, wire.CacheCreationInputTokens),
+		Total:      wire.TotalTokens,
+		// prompt_tokens already includes the cached part.
+		MaxContext: wire.PromptTokens,
+	}
+	if usage.Total == 0 {
+		usage.Total = usage.Input + usage.Output
+	}
+	if usage.MaxContext == 0 {
+		usage.MaxContext = usage.Input + usage.CacheRead + usage.CacheWrite
+	}
+	return nonEmptyUsage(usage)
+}
+
+func parseAnthropicUsage(raw []byte) *Usage {
+	var payload struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || noUsageValue(payload.Usage) {
+		return nil
+	}
+	var wire struct {
+		InputTokens              int64 `json:"input_tokens"`
+		OutputTokens             int64 `json:"output_tokens"`
+		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	}
+	if err := json.Unmarshal(payload.Usage, &wire); err != nil {
+		return nil
+	}
+	usage := &Usage{
+		Input:      wire.InputTokens,
+		Output:     wire.OutputTokens,
+		CacheRead:  wire.CacheReadInputTokens,
+		CacheWrite: wire.CacheCreationInputTokens,
+	}
+	// Anthropic reports cached input outside input_tokens and omits a total.
+	usage.Total = usage.Input + usage.Output + usage.CacheRead + usage.CacheWrite
+	usage.MaxContext = usage.Input + usage.CacheRead + usage.CacheWrite
+	return nonEmptyUsage(usage)
+}
+
+func parseGoogleUsage(raw []byte) *Usage {
+	var payload struct {
+		UsageMetadata json.RawMessage `json:"usageMetadata"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil || noUsageValue(payload.UsageMetadata) {
+		return nil
+	}
+	var wire struct {
+		PromptTokenCount        int64 `json:"promptTokenCount"`
+		CandidatesTokenCount    int64 `json:"candidatesTokenCount"`
+		TotalTokenCount         int64 `json:"totalTokenCount"`
+		CachedContentTokenCount int64 `json:"cachedContentTokenCount"`
+		ThoughtsTokenCount      int64 `json:"thoughtsTokenCount"`
+	}
+	if err := json.Unmarshal(payload.UsageMetadata, &wire); err != nil {
+		return nil
+	}
+	usage := &Usage{
+		Input:     wire.PromptTokenCount,
+		Output:    wire.CandidatesTokenCount,
+		Reasoning: wire.ThoughtsTokenCount,
+		CacheRead: wire.CachedContentTokenCount,
+		Total:     wire.TotalTokenCount,
+		// promptTokenCount already includes the cached content.
+		MaxContext: wire.PromptTokenCount,
+	}
+	if usage.Total == 0 {
+		usage.Total = usage.Input + usage.Output
+	}
+	return nonEmptyUsage(usage)
+}
+
+func noUsageValue(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
+// nonEmptyUsage treats an empty usage object as no data so it never dilutes an
+// average as a zero-token check.
+func nonEmptyUsage(usage *Usage) *Usage {
+	if usage.Input == 0 && usage.Output == 0 && usage.CacheRead == 0 &&
+		usage.CacheWrite == 0 && usage.Total == 0 {
+		return nil
+	}
+	return usage
+}
+
+func firstNonZero(values ...int64) int64 {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 // providerErrorMessage extracts the provider's own sentence from an error body

@@ -162,6 +162,56 @@ func (s *Store) SetLLMHealth(ctx context.Context, id uint, status, message strin
 	return nil
 }
 
+// HealthUsage is the token accounting of one health check. A nil *HealthUsage
+// means the check recorded none: the probe failed or the provider did not
+// report usage, which must not count as zero in an average.
+type HealthUsage struct {
+	Input      int64
+	Output     int64
+	Reasoning  int64
+	CacheRead  int64
+	CacheWrite int64
+	Total      int64
+	MaxContext int64
+}
+
+// RecordLLMHealth stores the verdict on the profile and appends the check to
+// the history in one transaction. Usage is stored as NULL when nil, so the
+// check is visible but excluded from token averages.
+func (s *Store) RecordLLMHealth(ctx context.Context, id uint, status, message string, usage *HealthUsage) error {
+	checkedAt := time.Now().UTC()
+	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&LLMProfile{}).Where("id = ?", id).Updates(map[string]any{
+			"health_status":     status,
+			"health_checked_at": checkedAt,
+			"health_error":      message,
+		})
+		if res.Error != nil {
+			return fmt.Errorf("set llm profile %d health: %w", id, res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("set llm profile %d health: %w", id, ErrNotFound)
+		}
+
+		check := LLMHealthCheck{
+			ProfileID: id, Status: status, ErrorMessage: message, CheckedAt: checkedAt,
+		}
+		if usage != nil {
+			input, output, reasoning := usage.Input, usage.Output, usage.Reasoning
+			cacheRead, cacheWrite := usage.CacheRead, usage.CacheWrite
+			total, maxContext := usage.Total, usage.MaxContext
+			check.InputTokens, check.OutputTokens, check.ReasoningTokens = &input, &output, &reasoning
+			check.CacheReadTokens, check.CacheWriteTokens = &cacheRead, &cacheWrite
+			check.TotalTokens, check.MaxContextTokens = &total, &maxContext
+		}
+		if err := tx.Create(&check).Error; err != nil {
+			return fmt.Errorf("record llm profile %d health check: %w", id, err)
+		}
+		return nil
+	})
+	return err
+}
+
 // profileSlotNamespace occupies the high 16 bits of the 64-bit advisory keys
 // used for profile slots. The old exclusive LockProfile used bare profile IDs
 // (high bits zero)
