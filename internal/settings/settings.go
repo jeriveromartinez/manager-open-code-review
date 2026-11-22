@@ -107,9 +107,13 @@ func Fields() []Field {
 			Kind:  "int", Default: "2", Restart: "worker",
 		},
 		{
+			// The key keeps its historical name so stored rows and
+			// QA_REVIEW_AGENT_STEPS keep working. Reviews run the native OCR
+			// engine and no longer use agent steps, so it only bounds the
+			// OpenCode fallback of the provider health probe.
 			Key: KeyReviewAgentSteps, Group: GroupReview,
-			Label: "Pasos por pasada",
-			Help:  "Máximo de pasos del agente opencode en cada pasada. La revisión puede encadenar varias pasadas (hasta max_passes).",
+			Label: "Pasos del chequeo de salud",
+			Help:  "Máximo de pasos de opencode en el chequeo de salud de los proveedores que no admiten una petición directa. La revisión ya no usa pasos del agente.",
 			Kind:  "int", Default: "8", Restart: "worker",
 		},
 		{

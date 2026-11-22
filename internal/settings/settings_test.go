@@ -39,18 +39,23 @@ func TestFieldsCarryHumanMetadata(t *testing.T) {
 	}
 }
 
-// The value is applied inside the pass loop, so the panel must not present it
-// as a per-review limit.
-func TestReviewAgentStepsLabelSaysPerPass(t *testing.T) {
+// Reviews no longer run the OpenCode agent, so the historical key now bounds
+// only the health probe fallback. The panel must say that instead of promising
+// a per-pass review budget.
+func TestReviewAgentStepsLabelDescribesHealthProbe(t *testing.T) {
 	for _, field := range Fields() {
 		if field.Key != KeyReviewAgentSteps {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(field.Label), "pasada") {
-			t.Errorf("label = %q, want it to say the limit applies per pass", field.Label)
+		if !strings.Contains(strings.ToLower(field.Label), "salud") {
+			t.Errorf("label = %q, want it to name the health check", field.Label)
 		}
-		if !strings.Contains(field.Help, "max_passes") {
-			t.Errorf("help = %q, want it to explain the relationship with max_passes", field.Help)
+		help := strings.ToLower(field.Help)
+		if !strings.Contains(help, "salud") || !strings.Contains(help, "opencode") {
+			t.Errorf("help = %q, want it to explain the opencode health probe limit", field.Help)
+		}
+		if strings.Contains(strings.ToLower(field.Label), "pasada") || strings.Contains(help, "max_passes") {
+			t.Errorf("label/help still describe a per-pass review budget: %q / %q", field.Label, field.Help)
 		}
 		return
 	}

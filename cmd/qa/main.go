@@ -280,6 +280,7 @@ func runWorker() error {
 	}
 	checker := &review.ProfileChecker{
 		Store: st, Box: workerBox, Bin: cfg.OpencodeBin, Events: eventsPublisher,
+		Steps: cfg.ReviewAgentSteps,
 	}
 	watchdog := &review.Watchdog{
 		Store: st, Events: eventsPublisher, StaleAfter: cfg.ReviewStaleAfter,
