@@ -59,6 +59,21 @@ func (p *runTestEvents) snapshot() []events.Event {
 	return append([]events.Event(nil), p.items...)
 }
 
+// orchestration drops the run.log notifications. They are throttled and
+// unrelated to the state transitions these tests assert, so the sequences stay
+// about claim, requeue and terminal events.
+func (p *runTestEvents) orchestration() []events.Event {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]events.Event, 0, len(p.items))
+	for _, item := range p.items {
+		if item.Type != "run.log" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
 type runTestJobs struct {
 	mu      sync.Mutex
 	review  []uint
@@ -312,6 +327,11 @@ for arg in "$@"; do
     fi
     prev="$arg"
 done
+if [ -n "${RUN_FAKE_OCR_PROGRESS:-}" ]; then
+    printf 'fase: recopilando archivos\n' >&2
+    printf 'clave en uso: %%s\n' "$QA_OCR_API_KEY" >&2
+    printf 'remoto https://x-access-token:secreto-en-url@example.invalid/acme/origin.git\n' >&2
+fi
 if [ -n "${RUN_FAKE_OCR_SLEEP:-}" ]; then
     sleep "$RUN_FAKE_OCR_SLEEP"
 fi
@@ -1302,7 +1322,7 @@ func TestRunSaturatedProfileIsRequeued(t *testing.T) {
 	// stops showing the run as started; there is no terminal event.
 	prEvent := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
 	want := []events.Event{prEvent, prEvent}
-	if got := f.events.snapshot(); !reflect.DeepEqual(got, want) {
+	if got := f.events.orchestration(); !reflect.DeepEqual(got, want) {
 		t.Errorf("events = %+v, want the claim and the requeue %+v", got, want)
 	}
 
@@ -1361,7 +1381,7 @@ func TestRunDuplicateDeliveryIsNoop(t *testing.T) {
 	if got := f.jobs.published(); len(got) != 1 {
 		t.Errorf("EnqueuePublish calls = %v, want one", got)
 	}
-	if got := f.events.len(); got != 3 {
+	if got := len(f.events.orchestration()); got != 3 {
 		t.Errorf("events = %d, want the claim pr.updated, run.updated and pr.updated", got)
 	}
 	wantPR := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
@@ -1388,7 +1408,7 @@ func TestClaimNotifiesThePR(t *testing.T) {
 	prEvent := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)}
 	runEvent := events.Event{Type: "run.updated", ID: strconv.FormatUint(uint64(f.runID), 10)}
 	want := []events.Event{prEvent, runEvent, prEvent}
-	if got := f.events.snapshot(); !reflect.DeepEqual(got, want) {
+	if got := f.events.orchestration(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("events = %+v, want the claim first: %+v", got, want)
 	}
 
@@ -1396,7 +1416,7 @@ func TestClaimNotifiesThePR(t *testing.T) {
 	if err := r.Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("unclaimed Run() error = %v", err)
 	}
-	if got := f.events.snapshot(); !reflect.DeepEqual(got, want) {
+	if got := f.events.orchestration(); !reflect.DeepEqual(got, want) {
 		t.Errorf("events after an unclaimed run = %+v, want unchanged %+v", got, want)
 	}
 }

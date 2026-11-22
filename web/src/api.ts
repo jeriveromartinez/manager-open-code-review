@@ -127,6 +127,25 @@ export type ReviewRun = {
   updated_at: string
 }
 
+/** Una línea del log de una ejecución; el panel la muestra en vivo (#124). */
+export type ReviewRunLogEntry = {
+  seq: number
+  ts: string
+  source: string
+  invocation: string
+  level: string
+  phase: string
+  line: string
+}
+
+/** Una página del log. `next_after` es el `seq` que se pide en el siguiente sondeo. */
+export type ReviewRunLogPage = {
+  run_id: number
+  entries: ReviewRunLogEntry[]
+  next_after: number
+  has_more: boolean
+}
+
 export type Finding = {
   id: string
   fingerprint: string
@@ -438,6 +457,8 @@ export const api = {
   readiness: () => request<Readiness>('/api/readiness'),
   prs: () => request<PRView[]>('/api/prs'),
   prDetail: (id: number) => request<PRDetail>(`/api/prs/${id}`),
+  reviewRunLogs: (id: number, after = 0, limit = 500) =>
+    request<ReviewRunLogPage>(`/api/review-runs/${id}/logs?after=${after}&limit=${limit}`),
   retryPR: (id: number) =>
     request<{ status: string }>(`/api/prs/${id}/retry`, { method: 'POST' }),
   withdrawFinding: (prId: number, findingId: string, reason?: string) =>
@@ -492,6 +513,7 @@ export const LIVE_EVENT_TYPES = [
   'pr.updated',
   'repo.updated',
   'run.updated',
+  'run.log',
   'team.updated',
   'llm_profile.updated',
   'settings.updated',

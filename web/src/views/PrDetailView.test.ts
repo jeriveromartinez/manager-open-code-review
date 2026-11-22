@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     retryPR: vi.fn(),
     withdrawFinding: vi.fn(),
     confirmFinding: vi.fn(),
+    reviewRunLogs: vi.fn(),
   },
 }))
 
@@ -145,6 +146,56 @@ describe('PrDetailView', () => {
     mocks.api.retryPR.mockResolvedValue({ status: 'queued' })
     mocks.api.withdrawFinding.mockResolvedValue({ ...detail.findings[0], status: 'withdrawn' })
     mocks.api.confirmFinding.mockResolvedValue({ ...detail.findings[0], status: 'open' })
+    mocks.api.reviewRunLogs.mockResolvedValue({
+      run_id: 9,
+      entries: [
+        {
+          seq: 1,
+          ts: '2026-11-19T09:00:01Z',
+          source: 'worker',
+          invocation: '',
+          level: 'info',
+          phase: 'ocr',
+          line: 'fase: agrupando archivos',
+        },
+        {
+          seq: 2,
+          ts: '2026-11-19T09:00:02Z',
+          source: 'ocr',
+          invocation: 'main',
+          level: 'error',
+          phase: 'ocr',
+          line: 'proveedor caído',
+        },
+      ],
+      next_after: 2,
+      has_more: false,
+    })
+  })
+
+  it('opens the live log of a run and tails it', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.find('[data-run-log]').exists()).toBe(false)
+    await wrapper.get('[data-run-log-toggle]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.reviewRunLogs).toHaveBeenCalledWith(9, 0, 500)
+    const lines = wrapper.findAll('[data-run-log-line]')
+    expect(lines).toHaveLength(2)
+    expect(lines[0].text()).toContain('fase: agrupando archivos')
+    expect(lines[1].classes()).toContain('is-error')
+    expect(wrapper.get('[data-run-log-count]').text()).toContain('2 líneas')
+
+    const logRegistration = live.registrations.find((item) => item.types.includes('run.log'))
+    expect(logRegistration).toBeDefined()
+    expect(logRegistration!.filter!({ type: 'run.log', id: '9' })).toBe(true)
+    expect(logRegistration!.filter!({ type: 'run.log', id: '10' })).toBe(false)
+
+    await wrapper.get('[data-run-log-toggle]').trigger('click')
+    expect(wrapper.find('[data-run-log]').exists()).toBe(false)
+    wrapper.unmount()
   })
 
   it('refreshes on events for this PR only and keeps an open dialog', async () => {

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, type CoverageFile, type Finding, type PRDetail } from '../api'
+import RunLogPanel from '../components/RunLogPanel.vue'
 import { cacheShare, formatTokens } from '../tokens'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { isConflict, isForbidden } from '../errors'
@@ -18,6 +19,13 @@ const refreshError = ref<string | null>(null)
 const acting = ref<string | null>(null)
 const confirming = ref<{ finding: Finding; action: 'withdraw' | 'confirm' } | null>(null)
 const reason = ref('')
+// Solo una ejecución muestra su log a la vez: el panel crece y se reinicia al
+// abrir otra, así el detalle del PR no se llena de historiales.
+const openLogRunId = ref<number | null>(null)
+
+function toggleLog(id: number): void {
+  openLogRunId.value = openLogRunId.value === id ? null : id
+}
 
 const severityLabels: Record<string, string> = {
   blocker: 'Bloqueantes',
@@ -372,6 +380,26 @@ onMounted(() => {
               <p v-if="run.error_message" class="run__error">
                 <code>{{ run.error_code }}</code>: {{ run.error_message }}
               </p>
+              <button
+                class="button button--ghost run__log-toggle"
+                type="button"
+                data-run-log-toggle
+                @click="toggleLog(run.id)"
+              >
+                {{
+                  openLogRunId === run.id
+                    ? 'Ocultar log'
+                    : run.status === 'running' || run.status === 'queued'
+                      ? 'Ver log en vivo'
+                      : 'Ver log'
+                }}
+              </button>
+              <RunLogPanel
+                v-if="openLogRunId === run.id"
+                :key="run.id"
+                :run-id="run.id"
+                :live="run.status === 'running' || run.status === 'queued'"
+              />
               <dl v-if="run.total_tokens !== null" class="run__tokens" data-run-tokens>
                 <div class="run__token">
                   <dt>Tokens</dt>
@@ -740,6 +768,11 @@ onMounted(() => {
 
 .run__no-tokens {
   color: var(--text-faint);
+  font-size: 13px;
+}
+
+.run__log-toggle {
+  align-self: flex-start;
   font-size: 13px;
 }
 

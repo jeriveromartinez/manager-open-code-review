@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -220,7 +221,7 @@ func chunkByteBudget(maxTokens int) int {
 // reviewTooLargeFiles reviews each path by synthetic chunks sequentially. A
 // failing chunk is recorded and the loop continues: the rest of the PR and the
 // chunks that did succeed keep their findings.
-func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint, reviewer *NativeReviewer, headSHA string, paths []string, budget int64, mainUsage tokenUsage) chunkSummary {
+func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint, reviewer *NativeReviewer, headSHA string, paths []string, budget int64, mainUsage tokenUsage, log *runLogSink) chunkSummary {
 	summary := newChunkSummary()
 	maxBytes := chunkByteBudget(reviewer.MaxTokens)
 	stopBudget := false
@@ -228,11 +229,15 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 	for _, path := range paths {
 		if stopBudget {
 			summary.markNotReviewed(path, "token_budget")
+			log.Log(ctx, "worker", "", "warn", logPhaseChunks,
+				fmt.Sprintf("%s no se revisó: se agotó el presupuesto de tokens", path))
 			slog.Info("chunked too-large file", "run_id", runID, "path", path, "chunks", 0, "failures", 1)
 			continue
 		}
 		if ctx.Err() != nil {
 			summary.markNotReviewed(path, "timeout")
+			log.Log(ctx, "worker", "", "warn", logPhaseChunks,
+				fmt.Sprintf("%s no se revisó: la revisión se agotó", path))
 			slog.Info("chunked too-large file", "run_id", runID, "path", path, "chunks", 0, "failures", 1)
 			continue
 		}
@@ -240,29 +245,39 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 		chunks, err := chunkFileDiff(ctx, reviewer.RepoDir, reviewer.BaseRef, headSHA, path, maxBytes)
 		if err != nil {
 			slog.Warn("chunk diff failed", "run_id", runID, "path", path, "error", err)
+			log.Log(ctx, "worker", "", "error", logPhaseChunks,
+				fmt.Sprintf("no se pudo dividir %s en trozos: %v", path, err))
 			summary.markNotReviewed(path, "chunk_error")
 			slog.Info("chunked too-large file", "run_id", runID, "path", path, "chunks", 0, "failures", 1)
 			continue
 		}
 		if len(chunks) == 0 {
+			log.Log(ctx, "worker", "", "warn", logPhaseChunks,
+				fmt.Sprintf("%s sigue siendo demasiado grande incluso por trozos", path))
 			summary.markNotReviewed(path, "too_large")
 			slog.Info("chunked too-large file", "run_id", runID, "path", path, "chunks", 0, "failures", 1)
 			continue
 		}
 
+		log.Log(ctx, "worker", "", "info", logPhaseChunks,
+			fmt.Sprintf("revisando %s por partes: %d trozo(s)", path, len(chunks)))
 		failures := 0
 		reason := ""
-		for _, ch := range chunks {
+		for i, ch := range chunks {
+			invocation := fmt.Sprintf("chunk %d/%d", i+1, len(chunks))
 			if ctx.Err() != nil {
 				failures++
 				if reason == "" {
 					reason = "timeout"
 				}
+				log.Log(ctx, "worker", invocation, "warn", logPhaseChunks,
+					fmt.Sprintf("trozo %d/%d de %s no ejecutado: la revisión se agotó", i+1, len(chunks), path))
 				break
 			}
 
 			chunkReviewer := *reviewer
 			chunkReviewer.Commit = ch.Commit
+			chunkReviewer.OnLog = log.OCRLogger(ctx, invocation)
 			if budget > 0 {
 				remaining := budget - int64(mainUsage.Total) - int64(summary.tokens.Total)
 				if remaining <= 0 {
@@ -271,13 +286,20 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 						reason = "token_budget"
 					}
 					stopBudget = true
+					log.Log(ctx, "worker", invocation, "warn", logPhaseChunks,
+						fmt.Sprintf("trozo %d/%d de %s no ejecutado: presupuesto de tokens agotado", i+1, len(chunks), path))
 					break
 				}
 				chunkReviewer.TokenBudget = remaining
 			}
 
-			chunkRes, _, reviewErr := r.runNativeReview(ctx, profileID, &chunkReviewer)
+			log.Log(ctx, "worker", invocation, "info", logPhaseChunks,
+				fmt.Sprintf("iniciando trozo %d/%d de %s", i+1, len(chunks), path))
+			started := time.Now()
+			chunkRes, _, reviewErr := r.runNativeReview(ctx, profileID, &chunkReviewer, log, invocation)
 			finishChunk(ctx, &summary, path, chunkRes, reviewErr, &failures, &reason)
+			log.Log(ctx, "worker", invocation, chunkLogLevel(reviewErr), logPhaseChunks, chunkLogLine(
+				path, i+1, len(chunks), chunkRes, reviewErr, time.Since(started)))
 		}
 
 		if failures == 0 {
@@ -286,16 +308,41 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 				Status: coverageReviewedByParts,
 				Chunks: len(chunks),
 			}
+			log.Log(ctx, "worker", "", "info", logPhaseChunks,
+				fmt.Sprintf("%s revisado por completo en %d trozo(s)", path, len(chunks)))
 		} else {
 			if reason == "" {
 				reason = "provider"
 			}
 			summary.markNotReviewed(path, reason)
+			log.Log(ctx, "worker", "", "warn", logPhaseChunks,
+				fmt.Sprintf("%s quedó sin revisar (%s): %d trozo(s) fallaron", path, reason, failures))
 		}
 		slog.Info("chunked too-large file",
 			"run_id", runID, "path", path, "chunks", len(chunks), "failures", failures)
 	}
 	return summary
+}
+
+// chunkLogLevel reports a failed chunk as an error and a successful one as
+// info, so the panel can colour the line without parsing it.
+func chunkLogLevel(reviewErr error) string {
+	if reviewErr != nil {
+		return "error"
+	}
+	return "info"
+}
+
+// chunkLogLine summarizes one chunk result for the run log.
+func chunkLogLine(path string, index, total int, res nativeReview, reviewErr error, elapsed time.Duration) string {
+	prefix := fmt.Sprintf("trozo %d/%d de %s: ", index, total, path)
+	if reviewErr != nil {
+		return fmt.Sprintf("%sfalló en %s: %v", prefix, elapsed.Round(time.Second), reviewErr)
+	}
+	status, code := nativeOutcome(res)
+	suffix := terminalCodeSuffix(code)
+	return fmt.Sprintf("%sterminó en %s con estado %s%s y %d hallazgo(s)",
+		prefix, elapsed.Round(time.Second), status, suffix, len(res.Comments))
 }
 
 // finishChunk records one chunk result: usage always counts, a successful chunk

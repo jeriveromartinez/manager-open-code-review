@@ -142,6 +142,14 @@ El estado del run se deriva del JSON y del manifiesto, no del código de salida:
 
 **Revisión incremental.** En un push nuevo el worker revisa solo `<head revisado anterior>..<head nuevo>` cuando el `base_sha` del último run `succeeded` coincide con el merge-base actual y el head nuevo desciende de ese head anterior (`git merge-base --is-ancestor`). Cada run persiste su `base_sha` para poder hacer la comprobación. Si no hay un run anterior, el anterior no terminó en `succeeded`, no guardó `base_sha`, cambió la base, hubo force-push o el head anterior no está en el clon shallow, vuelve a revisar el diff completo del PR. En un run incremental solo se resuelven hallazgos abiertos de archivos presentes como `completed` o `reused` en la cobertura; los hallazgos fuera del rango revisado permanecen abiertos y una cobertura vacía no resuelve ninguno.
 
+### Log en vivo de la revisión
+
+Cada run escribe un log en `review_run_logs` (#124). El worker registra los hitos del ciclo de vida —reclamo, clonado, base e incremental, política, espera de slot del perfil, inicio y fin de OCR, plan de trozos y cada trozo, cobertura y estado final— y, además, cada línea que OCR imprime en stderr: las invocaciones usan `--audience human` con `--format json`, así el JSON sigue llegando por stdout y el progreso en vivo por stderr. Las líneas se ordenan por `seq`, llevan `source` (`worker` u `ocr`), `invocation` (`main` o `chunk N/M`), `level` y `phase`, y se guardan en el momento, sin esperar al final del run.
+
+Las credenciales nunca llegan al log: se sustituyen el token de clonado, la clave del perfil y las credenciales embebidas en una URL (`https://usuario:secreto@…`), y se eliminan los códigos ANSI. Cada run tiene un tope de 10 MB; al alcanzarlo se escribe una única línea de aviso y se dejan de registrar líneas. La retención es de 30 días y el worker borra las filas caducadas cada 6 horas.
+
+`GET /api/review-runs/{id}/logs?after=<seq>&limit=<n>` (máximo 2000 líneas por página, 500 por defecto) devuelve `entries`, `next_after` y `has_more`. El run se resuelve a su PR y se aplica la misma visibilidad que en el dashboard: quien no puede ver el PR recibe 404. El evento SSE `run.log` avisa de que hay líneas nuevas. En `/prs/:id`, cada ejecución tiene **Ver log** (o **Ver log en vivo** si sigue en curso) y el panel se actualiza por SSE con un sondeo de respaldo cada 3 s; la casilla **Seguir** baja sola al final salvo que hayas subido a leer.
+
 ### Perfiles LLM
 
 En **Agentes LLM** (solo admins), «Nuevo perfil» permite dar nombre, proveedor, modelo, concurrencia (1 por defecto), activación y clave API. La clave es write-only: se cifra con `QA_WORKER_KEY` y nunca se devuelve ni se muestra. «Probar» encola una comprobación de salud en el worker, que envía una única petición de chat mínima al proveedor, sin herramientas; solo los proveedores fuera de la tabla cerrada y sin URL base usan `opencode` como respaldo. La tabla muestra `Saludable` o `Con error` con el motivo. La respuesta es asíncrona (202): vuelve a cargar la pantalla para ver el resultado final.
@@ -200,7 +208,7 @@ El binario admite `qa serve`, `qa worker`, `qa migrate`, `qa monitor` y `qa heal
 
 ## Rutas principales
 
-`GET /healthz` · `GET /api/setup/status` · `POST /api/setup/manifest` · `/setup` · `/auth/login` · `/auth/callback` · `/api/me` · `/api/stats` · `/api/prs` · `GET /api/prs/{id}` · `POST /api/prs/{id}/retry` · `/api/teams` · `GET|PUT /api/teams/{id}/policy` · `GET|POST /api/llm-profiles` · `GET /api/llm-profiles/usage` · `POST /api/llm-profiles/{id}/health` · `GET /api/installations` · `POST /api/installations/{id}/sync` · `/agents` · `/prs/:id` · `GET /api/events` (SSE) · `POST /webhooks/github`. Cualquier otra ruta sirve la SPA.
+`GET /healthz` · `GET /api/setup/status` · `POST /api/setup/manifest` · `/setup` · `/auth/login` · `/auth/callback` · `/api/me` · `/api/stats` · `/api/prs` · `GET /api/prs/{id}` · `GET /api/review-runs/{id}/logs` · `POST /api/prs/{id}/retry` · `/api/teams` · `GET|PUT /api/teams/{id}/policy` · `GET|POST /api/llm-profiles` · `GET /api/llm-profiles/usage` · `POST /api/llm-profiles/{id}/health` · `GET /api/installations` · `POST /api/installations/{id}/sync` · `/agents` · `/prs/:id` · `GET /api/events` (SSE) · `POST /webhooks/github`. Cualquier otra ruta sirve la SPA.
 
 ## Hojas de ruta
 

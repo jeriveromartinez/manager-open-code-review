@@ -106,29 +106,33 @@ type prDetailResponse struct {
 	Findings []findingDTO   `json:"findings"`
 }
 
+// visiblePRView returns the caller's view of a pull request, or writes the
+// response and returns false when it is outside their visibility scope. The
+// detail and the run-log endpoints share it so the rule cannot drift; a PR
+// outside the scope is reported as missing so its existence is not disclosed.
+func (s *server) visiblePRView(w http.ResponseWriter, r *http.Request, id uint) (*store.PRView, bool) {
+	user, _ := auth.UserFrom(r.Context())
+	views, err := s.Store.ListVisiblePullRequests(r.Context(), user, store.PRFilter{})
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "list pull requests")
+		return nil, false
+	}
+	for i := range views {
+		if views[i].ID == id {
+			return &views[i], true
+		}
+	}
+	writeAPIError(w, http.StatusNotFound, "pull request not found")
+	return nil, false
+}
+
 func (s *server) prDetail(w http.ResponseWriter, r *http.Request) {
 	id, ok := parseUintID(w, r)
 	if !ok {
 		return
 	}
-	user, _ := auth.UserFrom(r.Context())
-
-	// Reuse the dashboard's visibility scope. A PR outside that scope is
-	// reported as missing so its existence is not disclosed.
-	views, err := s.Store.ListVisiblePullRequests(r.Context(), user, store.PRFilter{})
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "list pull requests")
-		return
-	}
-	var view *store.PRView
-	for i := range views {
-		if views[i].ID == id {
-			view = &views[i]
-			break
-		}
-	}
-	if view == nil {
-		writeAPIError(w, http.StatusNotFound, "pull request not found")
+	view, ok := s.visiblePRView(w, r, id)
+	if !ok {
 		return
 	}
 
