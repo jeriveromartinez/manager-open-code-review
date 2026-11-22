@@ -1553,4 +1553,59 @@ func TestRunNativeStoresNullMaxContext(t *testing.T) {
 	if run.MaxContextTokens != nil {
 		t.Errorf("max_context_tokens = %d, want NULL for a native run", *run.MaxContextTokens)
 	}
+	var usage map[string]any
+	if err := json.Unmarshal(run.Usage, &usage); err != nil {
+		t.Fatalf("decode usage: %v (%s)", err, run.Usage)
+	}
+	if value, ok := usage["max_context"]; ok {
+		t.Errorf("usage JSON emits max_context = %v, want the key omitted: %s", value, run.Usage)
+	}
+}
+
+// TestRunSkippedDoesNotResolveFindings pins the skipped terminal state: OCR
+// selected no files (all excluded or unsupported), so the engine cannot claim
+// they are gone and open findings must survive the re-review.
+func TestRunSkippedDoesNotResolveFindings(t *testing.T) {
+	f := newRunTestFixture(t)
+	seed := store.Finding{
+		ID: "open-across-skip", PullRequestID: f.pr.ID, Fingerprint: "open-across-skip-fp",
+		Path: "main.go", Severity: "major", Status: store.FindingOpen,
+		FirstSeenRunID: 1, LastSeenRunID: 1,
+	}
+	mustCreateRunTest(t, f.s, f.ctx, &seed)
+	raw, err := os.ReadFile(filepath.Join("testdata", "ocr-review-skipped.json"))
+	if err != nil {
+		t.Fatalf("read skipped fixture: %v", err)
+	}
+	f.setOCR(t, string(raw))
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := assertRunTerminal(t, f, store.RunInconclusive, "no_coverage")
+	var coverage struct {
+		ReviewedFiles int `json:"reviewed_files"`
+		SkippedFiles  int `json:"skipped_files"`
+		ExcludedFiles int `json:"excluded_files"`
+	}
+	if err := json.Unmarshal(run.Coverage, &coverage); err != nil {
+		t.Fatalf("decode coverage: %v", err)
+	}
+	if coverage.ReviewedFiles != 0 || coverage.ExcludedFiles != 1 {
+		t.Errorf("coverage = %+v, want 0 reviewed / 1 excluded", coverage)
+	}
+
+	var got store.Finding
+	if err := f.s.DB.WithContext(f.ctx).Where("id = ?", seed.ID).Take(&got).Error; err != nil {
+		t.Fatalf("reload seeded finding: %v", err)
+	}
+	if got.Status != store.FindingOpen {
+		t.Errorf("seeded finding status = %q, want %q", got.Status, store.FindingOpen)
+	}
+	if got.LastSeenRunID != seed.LastSeenRunID {
+		t.Errorf("seeded finding last_seen_run_id = %d, want %d", got.LastSeenRunID, seed.LastSeenRunID)
+	}
+	if pr := f.loadPR(t); pr.QAStatus != store.StatusInconclusive {
+		t.Errorf("qa_status = %q, want %q", pr.QAStatus, store.StatusInconclusive)
+	}
 }

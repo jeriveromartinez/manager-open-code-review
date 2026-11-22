@@ -44,15 +44,19 @@ type QASummary struct {
 
 // RunTokenStats is the token consumption of the review runs finished inside
 // TokenWindow. Reviews counts only runs that recorded usage, so a run created
-// before the accounting existed does not dilute the average.
+// before the accounting existed or a skipped/failed native run with zero tokens
+// does not dilute the average. MaxContextKnown is false when no run reported a
+// max-context sample; MaxContext is then the wire default, not a measured
+// ceiling, and consumers must not average it.
 type RunTokenStats struct {
-	Reviews    int
-	Input      int64
-	Output     int64
-	CacheRead  int64
-	CacheWrite int64
-	Total      int64
-	MaxContext int64
+	Reviews         int
+	Input           int64
+	Output          int64
+	CacheRead       int64
+	CacheWrite      int64
+	Total           int64
+	MaxContext      int64
+	MaxContextKnown bool
 }
 
 // CategoryCount is how many confirmed findings share a category.
@@ -200,8 +204,19 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time, f QAFilter
 
 	// Runs of merged pull requests still consumed tokens, so this uses the
 	// broader history scope and not the open queue.
+	var tokens struct {
+		Reviews    int
+		Input      int64
+		Output     int64
+		CacheRead  int64
+		CacheWrite int64
+		Total      int64
+		MaxContext *int64
+	}
 	err = s.DB.WithContext(ctx).Table("review_runs rr").
-		Where("rr.finished_at >= ? AND rr.total_tokens IS NOT NULL AND rr.pull_request_id IN (?)",
+		// A zero total is not a measured run: skipped or failed native runs and
+		// legacy rows without usage must not raise Reviews or lower Average.
+		Where("rr.finished_at >= ? AND rr.total_tokens > 0 AND rr.pull_request_id IN (?)",
 			now.Add(-TokenWindow), scopedIDs).
 		Select(`COUNT(*) AS reviews,
 			COALESCE(SUM(rr.input_tokens), 0) AS input,
@@ -209,10 +224,22 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time, f QAFilter
 			COALESCE(SUM(rr.cache_read_tokens), 0) AS cache_read,
 			COALESCE(SUM(rr.cache_write_tokens), 0) AS cache_write,
 			COALESCE(SUM(rr.total_tokens), 0) AS total,
-			COALESCE(MAX(rr.max_context_tokens), 0) AS max_context`).
-		Scan(&out.Tokens).Error
+			MAX(rr.max_context_tokens) AS max_context`).
+		Scan(&tokens).Error
 	if err != nil {
 		return QASummary{}, fmt.Errorf("count review token usage: %w", err)
+	}
+	out.Tokens = RunTokenStats{
+		Reviews:    tokens.Reviews,
+		Input:      tokens.Input,
+		Output:     tokens.Output,
+		CacheRead:  tokens.CacheRead,
+		CacheWrite: tokens.CacheWrite,
+		Total:      tokens.Total,
+	}
+	if tokens.MaxContext != nil {
+		out.Tokens.MaxContext = *tokens.MaxContext
+		out.Tokens.MaxContextKnown = true
 	}
 	return out, nil
 }

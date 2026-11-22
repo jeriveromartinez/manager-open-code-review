@@ -530,8 +530,10 @@ type tokenUsage struct {
 	Steps int `json:"steps"`
 	// MaxContext is the largest prompt of the run: every step re-sends the
 	// whole history, so the step with the most input is the one that can hit
-	// the model context ceiling (#72).
-	MaxContext int `json:"max_context"`
+	// the model context ceiling (#72). The native engine reports no sample, so
+	// zero means unknown and the key is omitted instead of emitting a fake 0
+	// that consumers could average.
+	MaxContext int `json:"max_context,omitempty"`
 }
 
 func (u *tokenUsage) addStep(raw []byte) {
