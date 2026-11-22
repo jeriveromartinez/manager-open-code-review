@@ -542,16 +542,46 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 	status, code := nativeOutcome(res)
 	reviewed, skipped, excluded := nativeCoverageCounts(res)
-	out.coverage = coverageJSON(reviewed, skipped, excluded)
+	files := nativeCoverageFiles(res)
 	out.tokens = nativeTokenUsage(res)
 	out.summary = nativeSummaryText(res, status)
-	out.merged = mergeNativeFindings(res.Comments)
-	if incremental {
-		// Only findings of covered files may be resolved: everything outside the
-		// reviewed range was never seen by OCR in this run. Empty coverage
-		// scopes the list to nothing instead of broadening it to the whole PR.
-		out.open = findingsInPaths(out.open, reviewedPaths(res.Manifest.Coverage))
+
+	comments := append([]nativeComment(nil), res.Comments...)
+	out.merged = mergeNativeFindings(comments)
+	scopePaths := reviewedPaths(res.Manifest.Coverage)
+
+	// OCR excludes oversized files from the main run. Review each of them by
+	// complete hunks in independent conversations instead of leaving the rest of
+	// the pull request unreviewed.
+	var chunked chunkSummary
+	if paths := tooLargePaths(res); len(paths) > 0 && canChunkNativeRun(status, code) {
+		chunked = r.reviewTooLargeFiles(runCtx, run.ID, cfg.Profile.ID, reviewer, headSHA, paths, budget, out.tokens)
+		out.tokens.add(chunked.tokens)
+		if len(chunked.comments) > 0 {
+			comments = append(comments, chunked.comments...)
+			out.merged = mergeNativeFindings(comments)
+		}
+		if len(chunked.statuses) > 0 {
+			files = overlayCoverage(files, chunked.statuses)
+			status, code = chunkedRunStatus(status, code, chunked)
+			for path := range chunked.reviewedPaths() {
+				scopePaths[path] = true
+			}
+		}
 	}
+
+	// Only findings of covered files may be resolved on an incremental run:
+	// everything outside the reviewed range was never seen by OCR. Empty
+	// coverage scopes the list to nothing instead of broadening it to the PR.
+	if incremental {
+		out.open = findingsInPaths(out.open, scopePaths)
+	}
+
+	if len(files) > 0 {
+		reviewed, skipped, excluded = coverageCountsFromFiles(files)
+		out.summary = coverageSummaryText(status, reviewed, len(out.merged.Findings))
+	}
+	out.coverage = coverageJSONWithFiles(reviewed, skipped, excluded, files)
 
 	switch status {
 	case store.RunSucceeded:
@@ -564,7 +594,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		out.resolved = resolved
 		return out, nil
 	case store.RunInconclusive:
-		return out.inconclusive(errors.New(nativeStatusMessage(res, code)), code), nil
+		return out.inconclusive(errors.New(chunkedInconclusiveMessage(res, code, reviewed, skipped)), code), nil
 	default:
 		return out.failed(errors.New(nativeStatusMessage(res, code)), code), nil
 	}
@@ -600,15 +630,7 @@ func withCloneToken(remote string, token []byte) string {
 }
 
 func coverageJSON(reviewed, skipped, excluded int) []byte {
-	raw, err := json.Marshal(struct {
-		ReviewedFiles int `json:"reviewed_files"`
-		SkippedFiles  int `json:"skipped_files"`
-		ExcludedFiles int `json:"excluded_files"`
-	}{reviewed, skipped, excluded})
-	if err != nil {
-		return []byte(`{}`)
-	}
-	return raw
+	return coverageJSONWithFiles(reviewed, skipped, excluded, nil)
 }
 
 // policyExcludes builds the value of OCR's --exclude flag. OCR splits the value
