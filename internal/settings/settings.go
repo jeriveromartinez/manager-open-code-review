@@ -114,7 +114,7 @@ func Fields() []Field {
 		{
 			Key: KeyReviewContextCeiling, Group: GroupReview,
 			Label: "Techo de contexto",
-			Help:  "Máximo de tokens de entrada por conversación con el modelo. Cada equipo puede sustituirlo en su política. No es el gasto total de la revisión. El motor lo aplicará cuando integre estos controles (#72).",
+			Help:  "Máximo de tokens de entrada por conversación con el modelo. Cada equipo puede sustituirlo en su política. No es el gasto total de la revisión.",
 			Kind:  "int", Default: "270000", Restart: "worker",
 		},
 		{
