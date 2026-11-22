@@ -29,6 +29,10 @@ const (
 	// enough. Every step re-sends the whole history; raising this multiplies
 	// the cost of the pass instead of improving it.
 	defaultReviewerSteps = 8
+	// reviewerPrompt replaces OpenCode's default coding-agent system prompt,
+	// which encourages exploring the repository. The review diff is already
+	// part of the first user message.
+	reviewerPrompt = `Eres un revisor de código. El diff del PR viene adjunto en el mensaje del usuario y es tu fuente principal. No explores el repositorio ni busques archivos: no uses glob, grep ni listados. Usa read solo si el diff cita un archivo concreto y necesitas contexto puntual para entender un cambio. Devuelve únicamente el JSON del esquema solicitado.`
 )
 
 // Agent runs one isolated `opencode run` invocation. Home is the temporary HOME
@@ -238,6 +242,7 @@ func writeOpenCodeConfig(home string, profile store.LLMProfile, steps int) error
 			reviewerAgent: map[string]any{
 				"description": "Solo lectura: revisa el diff sin modificar el repo",
 				"mode":        "primary",
+				"prompt":      reviewerPrompt,
 				"permission":  permission,
 				"steps":       steps,
 			},

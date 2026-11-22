@@ -287,6 +287,27 @@ func TestAgentConfigDeniesTools(t *testing.T) {
 	})
 }
 
+// TestAgentConfigDeclaresReviewerPrompt replaces OpenCode's default coding
+// prompt, which tells the model to explore the repository. Without an explicit
+// prompt the reviewer spends steps searching instead of reading the diff.
+func TestAgentConfigDeclaresReviewerPrompt(t *testing.T) {
+	home := t.TempDir()
+	a := testAgent(t, home)
+	if _, _, err := a.Run(context.Background(), "__FAKE_EVENTS__", nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	prompt := readAgentConfig(t, home).Agent[reviewerAgent].Prompt
+	if strings.TrimSpace(prompt) == "" {
+		t.Fatalf("agent.%s.prompt is empty; OpenCode would use its coding prompt", reviewerAgent)
+	}
+	for _, want := range []string{"diff", "repositorio", "JSON"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("agent prompt = %q, want it to mention %q", prompt, want)
+		}
+	}
+}
+
 // TestAgentConfigPlatformBaseURL covers providers that OpenCode 1.19 does not
 // know from its catalog (CommandCode, for example). Without options.baseURL the
 // engine builds "undefined/chat/completions" and the health check only reports a
@@ -425,6 +446,7 @@ type generatedConfig struct {
 	Permission map[string]string `json:"permission"`
 	Agent      map[string]struct {
 		Permission map[string]string `json:"permission"`
+		Prompt     string            `json:"prompt"`
 		Steps      int               `json:"steps"`
 		Disable    bool              `json:"disable"`
 	} `json:"agent"`
