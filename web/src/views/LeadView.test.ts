@@ -113,6 +113,7 @@ const policy: QAPolicy = {
   max_passes: 3,
   require_green_ci: true,
   review_context_ceiling: 120000,
+  global_context_ceiling: 120000,
   effective_context_ceiling: 120000,
   review_effort: 'high',
   review_token_budget: 750000,
@@ -255,6 +256,22 @@ describe('LeadView', () => {
     expect(context.text()).toContain('120.0k')
     expect(context.text()).toContain('esfuerzo Alto')
     expect(context.text()).toContain('tope 750.0k tokens')
+    wrapper.unmount()
+  })
+
+  it('shows the global ceiling when the team inherits it', async () => {
+    mocks.api.getPolicy.mockResolvedValue({
+      ...policy,
+      review_context_ceiling: null,
+      global_context_ceiling: 270000,
+      effective_context_ceiling: 270000,
+    })
+    const wrapper = mountLead()
+    await flushPromises()
+
+    const context = wrapper.get('[data-policy-context]')
+    expect(context.text()).toContain('270.0k')
+    expect(context.text()).not.toContain('120.0k')
     wrapper.unmount()
   })
 

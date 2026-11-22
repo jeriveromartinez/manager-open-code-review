@@ -233,7 +233,9 @@ async function onLiveChanges(events: ReviewEvent[]): Promise<void> {
 
   const team = selectedTeamId.value
   const resync = events.some((event) => event.type === 'resync')
-  if (team === null || !(resync || touched('team.updated', team))) return
+  // A global ceiling change alters the value an inherited override resolves to.
+  const globalChanged = events.some((event) => event.type === 'settings.updated')
+  if (team === null || !(resync || globalChanged || touched('team.updated', team))) return
   let server: QAPolicy
   try {
     server = await api.getPolicy(team)
@@ -256,7 +258,7 @@ function reloadProfile(): void {
   if (fresh) openEdit(fresh)
 }
 
-useLiveRefresh(['llm_profile.updated', 'team.updated'], onLiveChanges)
+useLiveRefresh(['llm_profile.updated', 'team.updated', 'settings.updated'], onLiveChanges)
 
 function requestedTeamId(): number | null {
   const raw = new URLSearchParams(window.location.search).get('team')
@@ -773,12 +775,13 @@ onMounted(() => {
                   min="4096"
                   max="2000000"
                   data-policy-ceiling
-                  :placeholder="String(policy?.effective_context_ceiling ?? 270000)"
+                  :placeholder="String(policy?.global_context_ceiling ?? 270000)"
                 />
                 <span class="field__hint">
                   Vacío hereda el techo global
-                  ({{ formatTokens(policy?.effective_context_ceiling ?? 270000) }} tokens). Se aplica a
-                  cada conversación, no al total del run.
+                  ({{ formatTokens(policy?.global_context_ceiling ?? 270000) }} tokens). Se aplica a
+                  cada conversación, no al total del run; el motor lo aplicará cuando integre
+                  estos controles (#72).
                 </span>
               </label>
               <label class="field">

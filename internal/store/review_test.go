@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/pressly/goose/v3"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -716,6 +718,61 @@ func TestQAPolicyEffortColumnDefault(t *testing.T) {
 	}
 	if loaded.ReviewEffort != store.ReviewEffortLow {
 		t.Errorf("ReviewEffort = %q, want the column default %q", loaded.ReviewEffort, store.ReviewEffortLow)
+	}
+}
+
+// The API validates these bounds first, so only a direct writer reaches the
+// CHECKs. Pinning them keeps a hand-written UPDATE from storing a value the
+// engine cannot honour.
+func TestQAPolicyReviewControlChecks(t *testing.T) {
+	f := newFixture(t)
+	team := f.team("checks")
+	profile := f.llmProfile("checks-profile", true)
+	if _, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID,
+	}); err != nil {
+		t.Fatalf("SaveQAPolicy: %v", err)
+	}
+
+	reject := func(label, constraint, query string, args ...any) {
+		t.Helper()
+		err := f.s.DB.WithContext(f.ctx).Exec(query, args...).Error
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.ConstraintName != constraint {
+			t.Fatalf("%s: error = %v, want constraint %q", label, err, constraint)
+		}
+	}
+	reject("ceiling below min", "qa_policies_review_context_ceiling_check",
+		"UPDATE qa_policies SET review_context_ceiling = ? WHERE team_id = ?", store.ReviewContextCeilingMin-1, team.ID)
+	reject("ceiling above max", "qa_policies_review_context_ceiling_check",
+		"UPDATE qa_policies SET review_context_ceiling = ? WHERE team_id = ?", store.ReviewContextCeilingMax+1, team.ID)
+	reject("unknown effort", "qa_policies_review_effort_check",
+		"UPDATE qa_policies SET review_effort = ? WHERE team_id = ?", "extreme", team.ID)
+	reject("negative budget", "qa_policies_review_token_budget_check",
+		"UPDATE qa_policies SET review_token_budget = ? WHERE team_id = ?", -1, team.ID)
+	reject("budget above max", "qa_policies_review_token_budget_check",
+		"UPDATE qa_policies SET review_token_budget = ? WHERE team_id = ?", store.ReviewTokenBudgetMax+1, team.ID)
+}
+
+// The Down section has to remove the columns, not only the constraints: a
+// rollback that leaves them makes the previous revision fail its own inserts.
+func TestReviewPolicyControlsMigrationDown(t *testing.T) {
+	s := testutil.NewStore(t)
+	sqlDB, err := s.DB.DB()
+	if err != nil {
+		t.Fatalf("sql.DB: %v", err)
+	}
+	goose.SetBaseFS(os.DirFS("."))
+	if err := goose.SetDialect("postgres"); err != nil {
+		t.Fatalf("goose dialect: %v", err)
+	}
+	if err := goose.DownToContext(context.Background(), sqlDB, "migrations", 9); err != nil {
+		t.Fatalf("migrate down to 00009: %v", err)
+	}
+	for _, column := range []string{"review_context_ceiling", "review_effort", "review_token_budget"} {
+		if s.DB.Migrator().HasColumn("qa_policies", column) {
+			t.Errorf("column %q still exists after Down", column)
+		}
 	}
 }
 

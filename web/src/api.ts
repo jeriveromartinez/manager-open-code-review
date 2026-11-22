@@ -324,6 +324,8 @@ export type QAPolicy = {
   require_green_ci: boolean
   /** Null inherits the global review_context_ceiling. */
   review_context_ceiling: number | null
+  /** Read-only: the stored global review_context_ceiling setting. */
+  global_context_ceiling: number
   /** Read-only: the policy override, or the global setting when null. */
   effective_context_ceiling: number
   review_effort: ReviewEffort
