@@ -108,7 +108,7 @@ func Fields() []Field {
 			Key: KeyReviewAgentSteps, Group: GroupReview,
 			Label: "Pasos por revisión",
 			Help:  "Máximo de pasos del agente opencode en una revisión.",
-			Kind:  "int", Default: "40", Restart: "worker",
+			Kind:  "int", Default: "8", Restart: "worker",
 		},
 		{
 			Key: KeyReviewTimeout, Group: GroupReview,

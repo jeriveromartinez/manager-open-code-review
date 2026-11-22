@@ -16,6 +16,13 @@
 
 set -eu
 
+if [ -n "${RUN_FAKE_AGENT_ARGV:-}" ]; then
+    # The prompt argument spans several lines; flatten it so each invocation
+    # stays on a single line for the tests that read this file.
+    printf '%s' "$*" | tr '\n' ' ' >>"$RUN_FAKE_AGENT_ARGV"
+    printf '\n' >>"$RUN_FAKE_AGENT_ARGV"
+fi
+
 if [ -n "${RUN_FAKE_AGENT_CONFIG_OUT:-}" ]; then
     cp "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.jsonc" "$RUN_FAKE_AGENT_CONFIG_OUT" 2>/dev/null || true
 fi

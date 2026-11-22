@@ -364,9 +364,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			return out.inconclusive(fmt.Errorf("descifrar clave del perfil %d: %w", cfg.Profile.ID, err), "llm_error"), nil
 		}
 		agent := &Agent{
-			Bin:     r.Cfg.OpencodeBin,
-			Dir:     workDir,
-			Home:    filepath.Join(workDir, "home"),
+			Bin: r.Cfg.OpencodeBin,
+			Dir: workDir,
+			// Each pass gets its own HOME so a schema retry can resume this
+			// pass with --continue without picking up an earlier pass.
+			Home:    filepath.Join(workDir, fmt.Sprintf("home-pass-%d", idx+1)),
 			Profile: cfg.Profile,
 			APIKey:  string(key),
 			Timeout: timeout,
@@ -374,7 +376,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		}
 		prompt := BuildPrompt(cfg.PR, pass.Rules, open, diffPath)
 
-		text, usage, runErr := r.runAgent(ctx, agent, prompt, diffPath)
+		text, usage, runErr := r.runAgent(ctx, agent, prompt, []string{diffPath})
 		if runErr != nil {
 			if budgetCut(runErr, passesLeft) {
 				return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
@@ -389,7 +391,10 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			if !ok {
 				return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
 			}
-			text, usage, runErr = r.runAgent(ctx, agent, retry, diffPath)
+			// Reuse the session that already read the diff: a fresh run would
+			// repeat the same exploration before it could correct the schema.
+			agent.Continue = true
+			text, usage, runErr = r.runAgent(ctx, agent, retry, nil)
 			if runErr != nil {
 				if budgetCut(runErr, passesLeft) {
 					return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
@@ -427,9 +432,10 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	return out, nil
 }
 
-// runAgent holds one profile slot for exactly one agent invocation. Agent.Run
-// adds the `-f` flag for the attached diff path.
-func (r *Runner) runAgent(ctx context.Context, agent *Agent, prompt, diffPath string) (string, []byte, error) {
+// runAgent holds one profile slot for exactly one agent invocation. files are
+// attached with `-f`; the schema retry passes none because the continued
+// session already has the diff.
+func (r *Runner) runAgent(ctx context.Context, agent *Agent, prompt string, files []string) (string, []byte, error) {
 	release, acquired, err := r.Store.AcquireProfileSlot(ctx, agent.Profile.ID)
 	if err != nil {
 		return "", nil, fmt.Errorf("bloquear perfil %d: %w", agent.Profile.ID, err)
@@ -438,7 +444,7 @@ func (r *Runner) runAgent(ctx context.Context, agent *Agent, prompt, diffPath st
 		return "", nil, &ProfileCapacityError{ProfileID: agent.Profile.ID}
 	}
 	defer release()
-	return agent.Run(ctx, prompt, []string{diffPath})
+	return agent.Run(ctx, prompt, files)
 }
 
 func (r *Runner) boxOpen(sealed string) ([]byte, error) {

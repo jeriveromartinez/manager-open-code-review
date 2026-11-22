@@ -91,3 +91,7 @@ para `ocr-rule.json`; el stream tiene 3 eventos y 1 evento `text` con texto.
 - `opencode-events.jsonl` contiene IDs de sesión/parte y timestamps reales de la
   ejecución; los tests deben comprobar la estructura (`type`, `part.text`), no esos
   valores.
+- `fakeopencode-review.sh` acepta `RUN_FAKE_AGENT_ARGV` para añadir a ese archivo
+  la línea de argumentos de cada invocación. Los tests la usan para comprobar que
+  el reintento por esquema usa `--continue` y no vuelve a adjuntar el diff con
+  `-f`.

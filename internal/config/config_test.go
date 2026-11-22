@@ -276,8 +276,8 @@ func TestLoadReviewDefaults(t *testing.T) {
 	if cfg.ReviewConcurrency != 2 {
 		t.Errorf("ReviewConcurrency = %d, want 2", cfg.ReviewConcurrency)
 	}
-	if cfg.ReviewAgentSteps != 40 {
-		t.Errorf("ReviewAgentSteps = %d, want 40", cfg.ReviewAgentSteps)
+	if cfg.ReviewAgentSteps != 8 {
+		t.Errorf("ReviewAgentSteps = %d, want 8", cfg.ReviewAgentSteps)
 	}
 	if cfg.ReviewTimeout != 20*time.Minute {
 		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 20*time.Minute)

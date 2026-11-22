@@ -100,21 +100,22 @@ func (j *runTestJobs) reviews() []uint {
 }
 
 type runTestFixture struct {
-	s        *store.Store
-	box      *crypto.Box
-	ctx      context.Context
-	root     string
-	bare     string
-	baseSHA  string
-	headSHA  string
-	pr       store.PullRequest
-	runID    uint
-	ocrBin   string
-	agentBin string
-	calls    string
-	events   *runTestEvents
-	jobs     *runTestJobs
-	policy   store.QAPolicy
+	s         *store.Store
+	box       *crypto.Box
+	ctx       context.Context
+	root      string
+	bare      string
+	baseSHA   string
+	headSHA   string
+	pr        store.PullRequest
+	runID     uint
+	ocrBin    string
+	agentBin  string
+	calls     string
+	agentArgv string
+	events    *runTestEvents
+	jobs      *runTestJobs
+	policy    store.QAPolicy
 }
 
 func writeRunTestFile(t *testing.T, path, content string) {
@@ -209,6 +210,7 @@ func newRunTestFixture(t *testing.T) *runTestFixture {
 		baseSHA: baseSHA, headSHA: headSHA,
 		pr: pr, runID: run.ID, events: &runTestEvents{}, jobs: &runTestJobs{},
 		policy: policy, calls: filepath.Join(root, "agent-calls.txt"),
+		agentArgv: filepath.Join(root, "agent-argv.txt"),
 	}
 	f.setOCR(t, runTestPreview(baseSHA, []string{"auth.go", "main.go"}),
 		runTestRules([]string{"auth.go", "main.go"}), false)
@@ -292,6 +294,7 @@ func (f *runTestFixture) setAgent(t *testing.T, output string, fail bool) {
 	}
 	writeRunTestFile(t, filepath.Join(dir, "output.json"), output)
 	t.Setenv("RUN_FAKE_AGENT_CALLS", f.calls)
+	t.Setenv("RUN_FAKE_AGENT_ARGV", f.agentArgv)
 	f.agentBin = bin
 	if fail {
 		t.Setenv("RUN_FAKE_AGENT_FAIL", "1")
@@ -343,6 +346,18 @@ func (f *runTestFixture) agentCalls(t *testing.T) int {
 		t.Fatalf("read agent calls: %v", err)
 	}
 	return len(strings.Split(strings.TrimSpace(string(data)), "\n"))
+}
+
+func (f *runTestFixture) agentArgs(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(f.agentArgv)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read agent argv: %v", err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
 }
 
 func assertRunTerminal(t *testing.T, f *runTestFixture, status, code string) store.ReviewRun {
@@ -807,6 +822,19 @@ func TestRunRetriesSchemaOnceThenSucceeds(t *testing.T) {
 	assertRunTerminal(t, f, store.RunSucceeded, "")
 	if got := f.agentCalls(t); got != 2 {
 		t.Errorf("agent calls = %d, want 2 (one retry)", got)
+	}
+	args := f.agentArgs(t)
+	if len(args) != 2 {
+		t.Fatalf("recorded agent argv = %d, want 2", len(args))
+	}
+	if !strings.Contains(args[0], " -f ") {
+		t.Errorf("first call did not attach the diff: %q", args[0])
+	}
+	if !strings.Contains(args[1], " --continue ") {
+		t.Errorf("retry did not continue the session: %q", args[1])
+	}
+	if strings.Contains(args[1], " -f ") {
+		t.Errorf("retry attached the diff again: %q", args[1])
 	}
 }
 
