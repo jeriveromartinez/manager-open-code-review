@@ -14,6 +14,9 @@ type PreviewFile struct {
 	Status     string `json:"status"`
 	Insertions int    `json:"insertions"`
 	Deletions  int    `json:"deletions"`
+	// DiffBytes is measured from the clone, not reported by OCR; it bounds a
+	// pass to what OpenCode can attach without truncating.
+	DiffBytes int `json:"-"`
 }
 
 // ExcludedFile es un archivo descartado por `ocr delegate preview`.

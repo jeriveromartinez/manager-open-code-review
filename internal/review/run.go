@@ -323,11 +323,16 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		return classifyOCR(ctx, out, err)
 	}
 
+	sized, err := diffSizes(ctx, workDir, baseSHA, headSHA, preview.ReviewableFiles)
+	if err != nil {
+		return out.failed(fmt.Errorf("medir diffs por archivo: %w", err), "git_error"), nil
+	}
 	passes, uncovered, err := PlanPasses(PlanInput{
-		Files:        preview.ReviewableFiles,
+		Files:        sized,
 		Groups:       groups,
 		MaxFiles:     cfg.Policy.MaxFilesPerPass,
 		MaxDiffLines: cfg.Policy.MaxDiffLinesPerPass,
+		MaxDiffBytes: maxAttachmentBytes,
 		MaxPasses:    cfg.Policy.MaxPasses,
 	})
 	if err != nil {
@@ -465,6 +470,22 @@ func withCloneToken(remote string, token []byte) string {
 
 // writePassDiff executes the git diff for one pass and writes its output to a
 // temporary file inside the ephemeral workspace, attached to the agent prompt.
+// diffSizes measures each file's diff in the clone. OCR reports line counts
+// but not bytes, and OpenCode truncates a text attachment at 50 KB, so the
+// planner needs the real size before grouping files into a pass.
+func diffSizes(ctx context.Context, dir, baseSHA, headSHA string, files []PreviewFile) ([]PreviewFile, error) {
+	sized := make([]PreviewFile, len(files))
+	copy(sized, files)
+	for i := range sized {
+		out, err := git(ctx, dir, "diff", "-C", dir, "diff", "--unified=3", baseSHA, headSHA, "--", sized[i].Path)
+		if err != nil {
+			return nil, err
+		}
+		sized[i].DiffBytes = len(out)
+	}
+	return sized, nil
+}
+
 func writePassDiff(ctx context.Context, dir, baseSHA, headSHA string, files []string) (string, error) {
 	args := []string{"-C", dir, "diff", "--unified=3", baseSHA, headSHA, "--"}
 	args = append(args, files...)
