@@ -117,6 +117,7 @@ const policy: QAPolicy = {
   effective_context_ceiling: 120000,
   review_effort: 'high',
   review_token_budget: 750000,
+  prompt_cache: true,
   updated_at: hoursAgo(48),
 }
 
@@ -281,6 +282,23 @@ describe('LeadView', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-policy-budget]').text()).toBe('sin tope de gasto')
+    wrapper.unmount()
+  })
+
+  it('shows that prompt caching is active', async () => {
+    const wrapper = mountLead()
+    await flushPromises()
+
+    expect(wrapper.get('[data-policy-cache]').text()).toBe('caché activa')
+    wrapper.unmount()
+  })
+
+  it('says prompt caching is unavailable for the profile', async () => {
+    mocks.api.getPolicy.mockResolvedValue({ ...policy, prompt_cache: false })
+    const wrapper = mountLead()
+    await flushPromises()
+
+    expect(wrapper.get('[data-policy-cache]').text()).toBe('caché no disponible')
     wrapper.unmount()
   })
 

@@ -297,7 +297,8 @@ onBeforeUnmount(() => {
                 <p class="tile__hint" data-policy-context>
                   Techo {{ formatTokens(policy.effective_context_ceiling) }} tokens · esfuerzo
                   <span data-policy-effort>{{ effortLabel }}</span> ·
-                  <span data-policy-budget>{{ budgetLabel }}</span>
+                  <span data-policy-budget>{{ budgetLabel }}</span> ·
+                  <span data-policy-cache>{{ policy.prompt_cache ? 'caché activa' : 'caché no disponible' }}</span>
                 </p>
                 <table class="simulation">
                   <caption class="caption">PRs abiertos que quedarían bloqueados con cada umbral</caption>

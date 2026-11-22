@@ -13,6 +13,7 @@ import (
 
 	"github.com/jeriveromartinez/qa-control-center/internal/config"
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
+	"github.com/jeriveromartinez/qa-control-center/internal/llmmodels"
 	"github.com/jeriveromartinez/qa-control-center/internal/settings"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -445,6 +446,7 @@ type qaPolicyResponse struct {
 	EffectiveContextCeiling int      `json:"effective_context_ceiling"`
 	ReviewEffort            string   `json:"review_effort"`
 	ReviewTokenBudget       int64    `json:"review_token_budget"`
+	PromptCache             bool     `json:"prompt_cache"`
 	UpdatedAt               string   `json:"updated_at"`
 }
 
@@ -467,7 +469,24 @@ func (s *server) globalContextCeiling(ctx context.Context) int {
 	return ceiling
 }
 
-func qaPolicyDTO(p store.QAPolicy, globalCeiling int) qaPolicyResponse {
+// policyPromptCache reports whether the policy's profile accepts an explicit
+// prompt cache key. A policy without a profile, or one whose profile was
+// deleted, cannot use the cache.
+func (s *server) policyPromptCache(ctx context.Context, profileID uint) (bool, error) {
+	if profileID == 0 {
+		return false, nil
+	}
+	profile, err := s.Store.LLMProfile(ctx, profileID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return llmmodels.SupportsPromptCache(profile.Provider), nil
+}
+
+func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicyResponse {
 	var globs []string
 	if err := json.Unmarshal(p.ExcludeGlobs, &globs); err != nil {
 		globs = []string{}
@@ -492,7 +511,8 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int) qaPolicyResponse {
 		ReviewContextCeiling: p.ReviewContextCeiling,
 		GlobalContextCeiling: globalCeiling, EffectiveContextCeiling: effective,
 		ReviewEffort: effort, ReviewTokenBudget: p.ReviewTokenBudget,
-		UpdatedAt: p.UpdatedAt.UTC().Format(time.RFC3339),
+		PromptCache: promptCache,
+		UpdatedAt:   p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -522,7 +542,12 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "load qa policy")
 		return
 	}
-	writeJSON(w, http.StatusOK, qaPolicyDTO(policy, s.globalContextCeiling(r.Context())))
+	promptCache, err := s.policyPromptCache(r.Context(), policy.LLMProfileID)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "load qa policy profile")
+		return
+	}
+	writeJSON(w, http.StatusOK, qaPolicyDTO(policy, s.globalContextCeiling(r.Context()), promptCache))
 }
 
 var validBlockingThresholds = map[string]bool{
@@ -663,5 +688,10 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(uint64(teamID), 10)})
-	writeJSON(w, http.StatusOK, qaPolicyDTO(saved, s.globalContextCeiling(r.Context())))
+	promptCache, err := s.policyPromptCache(r.Context(), saved.LLMProfileID)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "load qa policy profile")
+		return
+	}
+	writeJSON(w, http.StatusOK, qaPolicyDTO(saved, s.globalContextCeiling(r.Context()), promptCache))
 }

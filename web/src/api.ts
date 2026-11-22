@@ -352,6 +352,8 @@ export type QAPolicy = {
   review_effort: ReviewEffort
   /** 0 disables the optional total-spend cap. */
   review_token_budget: number
+  /** Read-only: whether the profile accepts an explicit prompt cache key. */
+  prompt_cache: boolean
   updated_at: string
 }
 
