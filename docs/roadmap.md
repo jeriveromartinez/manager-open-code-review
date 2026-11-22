@@ -33,7 +33,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #73 | Registrar y mostrar el consumo real (columnas, API, panel) | M/L | #63 | **Parcial** (#93): columnas, detalle de PR y tile de lead; falta consumo por perfil y chequeos de salud |
 | #77 | Aplicar `exclude_globs` y `extra_instructions` de la política | M | — | **Hecho** (#94) |
 | #75 | Chequeos de salud sin coste de agente (una llamada, intervalo 6 h) | S/M | — | **Hecho** (#95) |
-| #65 | Controlar tokens de razonamiento y latencia | S/M | — | Pendiente |
+| #65 | Controlar tokens de razonamiento y latencia | S/M | — | **Hecho** (#96); faltan las mediciones con proveedor real |
 | #66 | Verificar y activar caché de prompt | S | #71 | Pendiente |
 | #79 | Evaluar y subir OCR 1.14.0 | S | — | Pendiente |
 | #71 | Usar `ocr review` nativo como motor | L | #79 (recomendado) | Pendiente |
@@ -50,6 +50,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 - #73 parcial (#93): consumo real por ejecución, detalle de PR y tile de lead. Pendiente el consumo por perfil y el de los chequeos de salud.
 - #77 hecho (#94): exclusión de archivos y instrucciones del equipo aplicadas de verdad.
 - #75 hecho (#95): chequeo de salud con una petición mínima sin herramientas, intervalo de 6 h y solo perfiles en uso. Siguiente: #65 y #66.
+- #65 hecho (#96): la variante del perfil deja de ignorarse y cada run muestra sus tokens de razonamiento. Siguiente: #66.
 
 ## Fases
 
@@ -77,7 +78,7 @@ Objetivo: ver dónde se gasta y que la política del equipo se aplique de verdad
 - [x] #73 Columnas estructuradas (`input/output/cache_read/cache_write/total/max_context`), migración, API y vistas de PR y lead (#93). Los runs antiguos muestran «sin datos». Pendiente el consumo por perfil y el de los chequeos de salud.
 - [x] #77 Pasar `exclude_globs` a OCR y `extra_instructions` al contexto saneado; editarlos en la vista de Agentes (#94).
 - [x] #75 Sustituir el agente del chequeo de salud por una llamada mínima sin herramientas; intervalo por defecto de 6 h; solo perfiles activos y en uso. (#95)
-- [ ] #65 Medir y bajar los tokens de razonamiento: modelo sin razonamiento o variante de bajo esfuerzo, con la calidad del JSON intacta.
+- [x] #65 Variante de razonamiento por perfil declarada a OpenCode (`reasoning` + entrada explícita en compatibles con OpenAI) y tokens de razonamiento por run en el panel (#96). Faltan las mediciones con proveedor real (reducción, p95 < 30 s, calidad del JSON).
 - [ ] #66 Verificar la caché de prompt en CommandCode y documentar el resultado; si no la soporta, apoyarse en el diseño de una petición por pasada.
 
 ### Fase 4 — Motor nativo OCR
