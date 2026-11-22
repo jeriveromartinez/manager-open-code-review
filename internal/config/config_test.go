@@ -285,6 +285,9 @@ func TestLoadReviewDefaults(t *testing.T) {
 	if cfg.ReviewTimeout != 20*time.Minute {
 		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 20*time.Minute)
 	}
+	if cfg.ReviewDebounce != 2*time.Minute {
+		t.Errorf("ReviewDebounce = %v, want %v", cfg.ReviewDebounce, 2*time.Minute)
+	}
 	if cfg.ReviewStaleAfter != 45*time.Minute {
 		t.Errorf("ReviewStaleAfter = %v, want %v", cfg.ReviewStaleAfter, 45*time.Minute)
 	}

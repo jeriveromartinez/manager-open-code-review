@@ -31,6 +31,14 @@ import (
 
 const e2eCheckID int64 = 555
 
+// e2eTriggerJobs adapts runTestJobs to the trigger enqueue contract without
+// making the runner fake implement a debounce path it never uses.
+type e2eTriggerJobs struct{ *runTestJobs }
+
+func (e2eTriggerJobs) EnqueueReviewTrigger(context.Context, uint, string, time.Duration) error {
+	return nil
+}
+
 func TestE2EFlow(t *testing.T) {
 	t.Run("success publishes summary, inline comments, check and status", testE2ESuccess)
 	t.Run("timeout ends inconclusive without resolving findings", testE2ETimeout)
@@ -556,7 +564,7 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 		runner:         runner,
 		worker:         worker,
 		trigger: &Trigger{
-			Store: f.s, Apps: apps, Jobs: f.jobs, Checks: worker, Box: f.box,
+			Store: f.s, Apps: apps, Jobs: e2eTriggerJobs{f.jobs}, Checks: worker, Box: f.box,
 		},
 		gh:        gh,
 		publisher: publisher,

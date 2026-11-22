@@ -68,6 +68,20 @@ func (ReviewRunArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{Queue: reviewQueue, MaxAttempts: 3}
 }
 
+// ReviewTriggerArgs runs a debounced trigger once the captured head has been
+// quiet for the configured wait. A newer push inserts its own job, so an older
+// one that fires late no-ops.
+type ReviewTriggerArgs struct {
+	PRID    uint   `json:"pr_id"`
+	HeadSHA string `json:"head_sha"`
+}
+
+func (ReviewTriggerArgs) Kind() string { return "review_trigger" }
+
+func (ReviewTriggerArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{Queue: controlQueue, MaxAttempts: 3}
+}
+
 // PublishReviewArgs publishes the artefacts of a finished review run. Its
 // worker is registered by the control client, which owns publication.
 type PublishReviewArgs struct {
@@ -100,9 +114,11 @@ func (w *syncInstallationWorker) Work(ctx context.Context, job *river.Job[SyncIn
 	return w.syncer.SyncInstallation(ctx, job.Args.InstallationID)
 }
 
-// ReviewTrigger is the slice of review.Trigger needed by the reconciler.
+// ReviewTrigger is the slice of review.Trigger needed by the reconciler and
+// the debounced-trigger worker.
 type ReviewTrigger interface {
 	EnqueuePending(ctx context.Context, limit int) (int, error)
+	FireDebounced(ctx context.Context, prID uint, headSHA string) error
 }
 
 // CloneTokenRefresher renews the clone tokens of queued review runs before
@@ -119,6 +135,15 @@ type ControlDeps struct {
 	Trigger   ReviewTrigger
 	Publisher *publish.Worker
 	Tokens    CloneTokenRefresher
+}
+
+type reviewTriggerWorker struct {
+	river.WorkerDefaults[ReviewTriggerArgs]
+	trigger ReviewTrigger
+}
+
+func (w *reviewTriggerWorker) Work(ctx context.Context, job *river.Job[ReviewTriggerArgs]) error {
+	return w.trigger.FireDebounced(ctx, job.Args.PRID, job.Args.HeadSHA)
 }
 
 type reconcileWorker struct {
@@ -179,6 +204,7 @@ type Enqueuer interface {
 type FullEnqueuer interface {
 	Enqueuer
 	EnqueueReview(ctx context.Context, runID uint) error
+	EnqueueReviewTrigger(ctx context.Context, prID uint, headSHA string, delay time.Duration) error
 	EnqueuePublish(ctx context.Context, runID uint) error
 	EnqueueLLMHealth(ctx context.Context, profileID uint) error
 	EnqueueReconcile(ctx context.Context) error
@@ -200,6 +226,17 @@ func (e clientEnqueuer) EnqueueSync(ctx context.Context, installationID int64) e
 func (e clientEnqueuer) EnqueueReview(ctx context.Context, runID uint) error {
 	if _, err := e.client.Insert(ctx, ReviewRunArgs{RunID: runID}, nil); err != nil {
 		return fmt.Errorf("enqueue review run %d: %w", runID, err)
+	}
+	return nil
+}
+
+func (e clientEnqueuer) EnqueueReviewTrigger(ctx context.Context, prID uint, headSHA string, delay time.Duration) error {
+	opts := river.InsertOpts{
+		ScheduledAt: time.Now().Add(delay),
+		UniqueOpts:  river.UniqueOpts{ByArgs: true},
+	}
+	if _, err := e.client.Insert(ctx, ReviewTriggerArgs{PRID: prID, HeadSHA: headSHA}, &opts); err != nil {
+		return fmt.Errorf("schedule review trigger of pull request %d at %q: %w", prID, headSHA, err)
 	}
 	return nil
 }
@@ -257,6 +294,9 @@ func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, deps ...ControlDeps)
 	workers := river.NewWorkers()
 	river.AddWorker[SyncInstallationArgs](workers, &syncInstallationWorker{syncer: s})
 	river.AddWorker[ReconcileArgs](workers, &reconcileWorker{syncer: s, trigger: d.Trigger, tokens: d.Tokens})
+	if d.Trigger != nil {
+		river.AddWorker[ReviewTriggerArgs](workers, &reviewTriggerWorker{trigger: d.Trigger})
+	}
 	queues := map[string]river.QueueConfig{
 		controlQueue: {MaxWorkers: 4},
 	}

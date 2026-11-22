@@ -17,6 +17,7 @@ const (
 	KeyReviewAgentSteps     = "review_agent_steps"
 	KeyReviewContextCeiling = "review_context_ceiling"
 	KeyReviewTimeout        = "review_timeout"
+	KeyReviewDebounce       = "review_debounce"
 	KeyReviewStaleAfter     = "review_stale_after"
 	KeyLLMHealthInterval    = "llm_health_interval"
 	KeyFetchDepthMax        = "fetch_depth_max"
@@ -124,6 +125,12 @@ func Fields() []Field {
 			Kind:  "duration", Unit: "m", Default: "20m", Restart: "worker",
 		},
 		{
+			Key: KeyReviewDebounce, Group: GroupReview,
+			Label: "Espera antes de revisar",
+			Help:  "Agrupa pushes seguidos de un PR: la revisión arranca cuando el head lleva quieto este tiempo.",
+			Kind:  "duration", Unit: "m", Default: "2m", Restart: "app",
+		},
+		{
 			Key: KeyReviewStaleAfter, Group: GroupReview,
 			Label: "Umbral de runs huérfanos",
 			Help:  "Los runs en curso más antiguos que esto se marcan como interrumpidos. Debe superar el tiempo máximo.",
@@ -217,7 +224,7 @@ func Fields() []Field {
 }
 
 func Defaults() map[string]string {
-	out := make(map[string]string, 25)
+	out := make(map[string]string, 26)
 	for _, field := range Fields() {
 		out[field.Key] = field.Default
 	}
@@ -238,6 +245,7 @@ func ToMap(cfg config.Config) map[string]string {
 		KeyReviewAgentSteps:     strconv.Itoa(cfg.ReviewAgentSteps),
 		KeyReviewContextCeiling: strconv.Itoa(cfg.ReviewContextCeiling),
 		KeyReviewTimeout:        cfg.ReviewTimeout.String(),
+		KeyReviewDebounce:       cfg.ReviewDebounce.String(),
 		KeyReviewStaleAfter:     cfg.ReviewStaleAfter.String(),
 		KeyLLMHealthInterval:    cfg.LLMHealthInterval.String(),
 		KeyFetchDepthMax:        strconv.Itoa(cfg.FetchDepthMax),

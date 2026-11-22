@@ -122,6 +122,7 @@ func runServe() error {
 	trigger := &review.Trigger{
 		Store: st, Apps: apps, Box: workerBox, Events: publisher, Checks: publisherWorker,
 	}
+	trigger.Debounce = cfg.ReviewDebounce
 	client, err := jobs.NewControlClient(st.Pool, s, jobs.ControlDeps{
 		Trigger: trigger, Publisher: publisherWorker, Tokens: trigger,
 	})

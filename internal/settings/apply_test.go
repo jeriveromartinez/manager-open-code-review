@@ -17,6 +17,8 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 		want string
 	}{
 		{"zero duration", KeyReviewTimeout, "0s", KeyReviewTimeout},
+		{"zero debounce", KeyReviewDebounce, "0s", KeyReviewDebounce},
+		{"negative debounce", KeyReviewDebounce, "-1m", KeyReviewDebounce},
 		{"zero monitor interval", KeyMonitorInterval, "0s", KeyMonitorInterval},
 		{"negative monitor interval", KeyMonitorInterval, "-1m", KeyMonitorInterval},
 		{"zero renotify window", KeyMonitorRenotifyAfter, "0s", KeyMonitorRenotifyAfter},
@@ -132,6 +134,7 @@ func TestApplySetsEveryField(t *testing.T) {
 		KeyReviewAgentSteps:     "60",
 		KeyReviewContextCeiling: "300000",
 		KeyReviewTimeout:        "30m",
+		KeyReviewDebounce:       "45s",
 		KeyReviewStaleAfter:     "90m",
 		KeyLLMHealthInterval:    "10m",
 		KeyFetchDepthMax:        "900",
@@ -159,6 +162,7 @@ func TestApplySetsEveryField(t *testing.T) {
 		t.Error("WebhooksEnabled = true, want false")
 	}
 	if cfg.ReconcileInterval != 2*time.Minute || cfg.ReviewTimeout != 30*time.Minute ||
+		cfg.ReviewDebounce != 45*time.Second ||
 		cfg.ReviewStaleAfter != 90*time.Minute || cfg.LLMHealthInterval != 10*time.Minute ||
 		cfg.WorkerQueueStale != 20*time.Minute || cfg.MonitorRenotifyAfter != 5*time.Minute ||
 		cfg.MonitorInterval != 30*time.Second || cfg.QAValidationSLA != 6*time.Hour {
@@ -182,8 +186,8 @@ func TestApplySetsEveryField(t *testing.T) {
 func TestDefaultsAndFieldsAgree(t *testing.T) {
 	valid := map[string]bool{"": true, "app": true, "worker": true, "monitor": true}
 	fields := Fields()
-	if len(fields) != 25 {
-		t.Fatalf("Fields() has %d keys, want 25", len(fields))
+	if len(fields) != 26 {
+		t.Fatalf("Fields() has %d keys, want 26", len(fields))
 	}
 	seen := map[string]bool{}
 	for _, field := range fields {
@@ -206,6 +210,7 @@ func TestRestartNamesTheProcessThatReadsTheKey(t *testing.T) {
 		KeyMonitorRenotifyAfter: "monitor",
 		KeyAlertWebhookURL:      "monitor",
 		KeyBackupRetention:      "",
+		KeyReviewDebounce:       "app",
 		KeyQAValidationSLA:      "app",
 	}
 	for _, field := range Fields() {
