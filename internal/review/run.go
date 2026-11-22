@@ -33,7 +33,22 @@ const (
 
 	// capacityErrorCode labels a run that never got a profile slot.
 	capacityErrorCode = "capacity"
+
+	// interruptedByShutdown is stored on a run a stopping worker put back in
+	// the queue, so the next attempt is visible in the panel before it starts.
+	interruptedByShutdown = "el worker se detuvo durante la revisión; el run vuelve a la cola"
+
+	// terminalWriteTimeout bounds the writes done after River cancels the job
+	// context on shutdown. They run detached from that cancellation so the
+	// run never stays "running" until the stale watchdog.
+	terminalWriteTimeout = 15 * time.Second
 )
+
+// terminalContext returns a context that survives the job cancellation River
+// applies when a soft stop exceeds its grace period.
+func terminalContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), terminalWriteTimeout)
+}
 
 // CapacityWait returns the delay before retrying a run that found no free
 // profile slot, growing with the attempts already spent addressing the same
@@ -161,10 +176,34 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		outcome, retryErr = r.execute(ctx, run, cfg)
 	}
 
+	// River cancels the job context when the soft-stop grace period expires.
+	// The claim already stored the run as running, so leaving it there would
+	// keep it stuck until the stale watchdog. Put it back in the queue with a
+	// detached context and return the cancellation: River treats a soft stop as
+	// an interruption and makes the job available again without spending an
+	// attempt. A run that already succeeded is persisted below instead.
+	if ctx.Err() != nil && outcome.status != store.RunSucceeded {
+		persistCtx, cancel := terminalContext(ctx)
+		defer cancel()
+		if err := r.Store.RequeueReviewRun(persistCtx, run.ID, store.RunErrorInterrupted, interruptedByShutdown); err != nil {
+			if errors.Is(err, store.ErrRunNotActive) {
+				// A new head superseded the run while the worker stopped.
+				return nil
+			}
+			return fmt.Errorf("requeue interrupted review run %d: %w", runID, err)
+		}
+		r.announce(persistCtx, run)
+		slog.Info("review run requeued after worker shutdown", "run_id", run.ID)
+		return ctx.Err()
+	}
+
+	persistCtx, cancelPersist := terminalContext(ctx)
+	defer cancelPersist()
+
 	if retryErr != nil {
 		var capacity *ProfileCapacityError
 		if errors.As(retryErr, &capacity) && run.Attempt <= maxCapacityWaits {
-			if err := r.Store.RequeueReviewRun(ctx, run.ID, capacityErrorCode, capacity.Error()); err != nil {
+			if err := r.Store.RequeueReviewRun(persistCtx, run.ID, capacityErrorCode, capacity.Error()); err != nil {
 				if errors.Is(err, store.ErrRunNotActive) {
 					// A new head superseded the run while it waited for a slot;
 					// there is nothing left to retry.
@@ -173,7 +212,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 				return fmt.Errorf("requeue review run %d: %w", runID, err)
 			}
 			// The claim showed the run as started; it is waiting again.
-			r.announce(ctx, run)
+			r.announce(persistCtx, run)
 			capacity.Wait = CapacityWait(run.Attempt)
 			slog.Info("review run waiting for profile capacity",
 				"run_id", run.ID, "profile_id", capacity.ProfileID,
@@ -191,7 +230,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	if len(outcome.usage) == 0 {
 		outcome.usage = []byte(`{}`)
 	}
-	if err := r.Store.CompleteReviewRun(ctx, runID, outcome.status, outcome.code,
+	if err := r.Store.CompleteReviewRun(persistCtx, runID, outcome.status, outcome.code,
 		truncateRunMessage(outcome.message), outcome.summary, outcome.coverage,
 		outcome.usage, outcome.findings, outcome.resolved); err != nil {
 		if errors.Is(err, store.ErrRunNotActive) {
@@ -207,7 +246,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		prStatus := store.StatusInconclusive
 		if outcome.status == store.RunSucceeded {
 			prStatus = store.StatusReadyForHuman
-			open, err := r.Store.OpenFindingsForPR(ctx, run.PullRequestID)
+			open, err := r.Store.OpenFindingsForPR(persistCtx, run.PullRequestID)
 			if err != nil {
 				return fmt.Errorf("list open findings of pull request %d: %w", run.PullRequestID, err)
 			}
@@ -215,7 +254,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 				prStatus = store.StatusChangesRequested
 			}
 		}
-		if err := r.Store.SetPRStatus(ctx, run.PullRequestID, prStatus); err != nil {
+		if err := r.Store.SetPRStatus(persistCtx, run.PullRequestID, prStatus); err != nil {
 			return fmt.Errorf("set QA status of pull request %d: %w", run.PullRequestID, err)
 		}
 	}
@@ -234,13 +273,13 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 			})
 		}
 		for _, ev := range notifications {
-			if err := r.Events.Publish(ctx, ev); err != nil && notifyErr == nil {
+			if err := r.Events.Publish(persistCtx, ev); err != nil && notifyErr == nil {
 				notifyErr = fmt.Errorf("publish %s for run %d: %w", ev.Type, runID, err)
 			}
 		}
 	}
 	if r.Jobs != nil {
-		if err := r.Jobs.EnqueuePublish(ctx, runID); err != nil && notifyErr == nil {
+		if err := r.Jobs.EnqueuePublish(persistCtx, runID); err != nil && notifyErr == nil {
 			notifyErr = fmt.Errorf("enqueue publish for run %d: %w", runID, err)
 		}
 	}

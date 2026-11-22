@@ -147,6 +147,12 @@ En `/prs/:id` se consultan los runs, el motivo del error, la cobertura y los hal
 
 Para reintentar, abre el detalle del PR y pulsa **Reintentar** (admin o lead del equipo). Se crea un run con trigger `retry` para el mismo SHA, se reactiva el check y se encola de nuevo. Comprueba antes la causa (por ejemplo, un modelo inválido en el perfil): la reconciliación no reencola automáticamente un SHA que ya terminó en `failed` o `inconclusive`.
 
+### Reinicio y despliegue del worker
+
+Un `docker compose up -d` o un `docker stop` del worker inicia un apagado ordenado: deja de reclamar runs nuevos, espera hasta 45 s (`jobs.ReviewDrainTimeout`) a que terminen las revisiones en curso y, si alguna no termina, cancela el trabajo y la devuelve a la cola antes de salir. El run vuelve a `queued` con código `interrupted` («el worker se detuvo durante la revisión; el run vuelve a la cola») y el worker nuevo lo retoma al arrancar, sin esperar los 45 min del watchdog ni tocar el PR. Los tokens consumidos por el intento interrumpido no se recuperan: esa revisión se repite desde el principio.
+
+`deploy/docker-compose.yml` fija `stop_grace_period: 90s` en el worker: el margen por defecto de Docker (10 s) manda `SIGKILL` antes de que el apagado ordenado llegue a completarse. Si despliegas el worker fuera de compose, dale al proceso ese mismo margen entre `SIGTERM` y `SIGKILL`.
+
 ## Desarrollo
 
 ```sh

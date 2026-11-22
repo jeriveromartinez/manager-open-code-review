@@ -526,6 +526,55 @@ func TestRunLastPassTimeoutStaysTimeout(t *testing.T) {
 	assertRunTerminal(t, f, store.RunInconclusive, "timeout")
 }
 
+// TestRunCanceledContextRequeuesRun pins the deploy case: River cancels the
+// job context when the soft-stop grace period expires, and the claimed run
+// must go back to the queue instead of staying running until the stale
+// watchdog.
+func TestRunCanceledContextRequeuesRun(t *testing.T) {
+	f := newRunTestFixture(t)
+	paths := []string{"auth.go"}
+	f.setOCR(t, runTestPreview(f.baseSHA, paths), runTestRules(paths), false)
+	f.setAgent(t, runTestOutput("auth.go"), false)
+	t.Setenv("RUN_FAKE_AGENT_SLEEP_ON_CALL", "1")
+
+	ctx, cancel := context.WithCancel(f.ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- f.runner().Run(ctx, f.runID) }()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for f.agentCalls(t) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the fake agent was never invoked")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the job context was cancelled")
+	}
+
+	run := f.loadRun(t)
+	if run.Status != store.RunQueued {
+		t.Errorf("run status = %q, want %q (error %q: %q)", run.Status, store.RunQueued, run.ErrorCode, run.ErrorMessage)
+	}
+	if run.ErrorCode != store.RunErrorInterrupted {
+		t.Errorf("error_code = %q, want %q", run.ErrorCode, store.RunErrorInterrupted)
+	}
+	if run.FinishedAt != nil {
+		t.Errorf("finished_at = %v, want nil for a run back in the queue", run.FinishedAt)
+	}
+	if got := f.jobs.published(); len(got) != 0 {
+		t.Errorf("EnqueuePublish calls = %v, want none for a requeued run", got)
+	}
+}
+
 func TestRunBudgetShrinksWithEachPass(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
