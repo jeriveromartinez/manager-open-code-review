@@ -37,7 +37,10 @@ type ProfileChecker struct {
 	Bin string
 	// Timeout bounds one check. Zero means defaultHealthTimeout.
 	Timeout time.Duration
-	Events  events.Publisher
+	// Steps bounds the OpenCode fallback used for providers outside the closed
+	// table. Zero means defaultReviewerSteps.
+	Steps  int
+	Events events.Publisher
 }
 
 // Check decrypts the profile key, sends one minimal tool-free request and
@@ -121,6 +124,7 @@ func (c *ProfileChecker) probeAgent(ctx context.Context, profile store.LLMProfil
 		Home:    filepath.Join(work, "home"),
 		Profile: profile,
 		APIKey:  string(key),
+		Steps:   c.Steps,
 	}
 	text, raw, err := agent.Run(ctx, healthPrompt, nil)
 	if err != nil {

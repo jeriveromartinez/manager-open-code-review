@@ -502,6 +502,41 @@ printf '%s\n' '{"type":"text","part":{"type":"text","text":"{\"ok\":true}"}}'
 	}
 }
 
+// The configured review_agent_steps is the only remaining agent budget, and it
+// must bound the health probe instead of the silent default. The fake binary
+// fails unless the value reached the generated OpenCode config.
+func TestProfileCheckAgentFallbackUsesConfiguredSteps(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+
+	bin := filepath.Join(t.TempDir(), "steps-opencode.sh")
+	script := `#!/bin/sh
+set -eu
+steps=$(sed -n 's/.*"steps": \([0-9][0-9]*\).*/\1/p' "$HOME/.config/opencode/opencode.jsonc")
+if [ "$steps" != "17" ]; then
+	printf 'agent steps = %s, want 17\n' "$steps" >&2
+	exit 1
+fi
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"{\"ok\":true}"}}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write steps binary: %v", err)
+	}
+	profile := newProbeProfile(t, s, box, "probe-agent-steps", "nvidia", "nemotron", nil)
+
+	checker := &ProfileChecker{Store: s, Box: box, Bin: bin, Steps: 17, Timeout: 5 * time.Second}
+	if err := checker.Check(ctx, profile.ID); err != nil {
+		t.Fatalf("Check with configured steps: %v", err)
+	}
+	if health := loadHealth(t, s, profile.ID); health.HealthStatus != store.HealthOK {
+		t.Fatalf("health_status = %q, want %q", health.HealthStatus, store.HealthOK)
+	}
+}
+
 // An OpenCode step that omits the total still reports its parts: the total is
 // derived so the check is never recorded as zero tokens (#101).
 func TestProfileCheckAgentFallbackDerivesMissingTotal(t *testing.T) {
