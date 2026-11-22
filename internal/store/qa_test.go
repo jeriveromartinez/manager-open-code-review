@@ -398,3 +398,96 @@ func TestListVisiblePullRequestsReportsTheTeam(t *testing.T) {
 		t.Errorf("acme/orphan team = %d, want none", *got)
 	}
 }
+
+// TestProfileTokenUsageGroupsRunsAndChecks pins the per-profile aggregate:
+// finished runs and health checks inside TokenWindow are summed by profile,
+// out-of-window and NULL rows are ignored, and a profile with nothing recorded
+// is still returned with HasData false (#73).
+func TestProfileTokenUsageGroupsRunsAndChecks(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/usage", nil, true)
+	pr := f.openPR(repo.ID, 1, store.StatusReadyForHuman, false)
+
+	alpha := f.llmProfile("usage-alpha", true)
+	beta := f.llmProfile("usage-beta", true)
+	unused := f.llmProfile("usage-unused", true)
+	now := time.Now().UTC()
+	val := func(v int64) *int64 { return &v }
+
+	tokenRun := func(profileID uint, finishedAt time.Time, input, output, cacheRead, cacheWrite, total, maxContext *int64) {
+		run := f.run(pr, store.RunSucceeded)
+		f.exec(`UPDATE review_runs SET profile_id = $1, finished_at = $2, input_tokens = $3,
+			output_tokens = $4, cache_read_tokens = $5, cache_write_tokens = $6,
+			total_tokens = $7, max_context_tokens = $8 WHERE id = $9`,
+			profileID, finishedAt, input, output, cacheRead, cacheWrite, total, maxContext, run.ID)
+	}
+
+	// Alpha: two runs in the window; a legacy NULL run and an old run must not
+	// count or dilute the average.
+	tokenRun(alpha.ID, now.Add(-time.Hour), val(100), val(10), val(50), val(5), val(165), val(150))
+	tokenRun(alpha.ID, now.Add(-2*time.Hour), val(200), val(20), val(100), val(10), val(330), val(300))
+	tokenRun(alpha.ID, now.Add(-time.Hour), nil, nil, nil, nil, nil, nil)
+	tokenRun(alpha.ID, now.Add(-8*24*time.Hour), val(900), val(90), val(0), val(0), val(990), val(900))
+	// Beta: one measured run only.
+	tokenRun(beta.ID, now.Add(-3*time.Hour), val(40), val(4), val(10), val(2), val(56), val(50))
+
+	// Alpha also spent tokens in a health check; a failed check and an old
+	// check carry no usable total.
+	health := func(profileID uint, checkedAt time.Time, usage *store.HealthUsage) {
+		check := store.LLMHealthCheck{ProfileID: profileID, Status: store.HealthOK, CheckedAt: checkedAt}
+		if usage != nil {
+			input, output := usage.Input, usage.Output
+			cacheRead, cacheWrite := usage.CacheRead, usage.CacheWrite
+			total, maxContext := usage.Total, usage.MaxContext
+			check.InputTokens, check.OutputTokens = &input, &output
+			check.CacheReadTokens, check.CacheWriteTokens = &cacheRead, &cacheWrite
+			check.TotalTokens, check.MaxContextTokens = &total, &maxContext
+		}
+		if err := f.s.DB.WithContext(f.ctx).Create(&check).Error; err != nil {
+			t.Fatalf("create health check: %v", err)
+		}
+	}
+	health(alpha.ID, now.Add(-time.Minute), &store.HealthUsage{Input: 10, Output: 1, Total: 11, MaxContext: 10})
+	health(alpha.ID, now.Add(-2*time.Minute), nil)
+	health(beta.ID, now.Add(-8*24*time.Hour), &store.HealthUsage{Input: 500, Total: 500})
+
+	got, err := f.s.ProfileTokenUsage(f.ctx, now)
+	if err != nil {
+		t.Fatalf("ProfileTokenUsage: %v", err)
+	}
+	byName := make(map[string]store.ProfileTokenStats, len(got))
+	for _, entry := range got {
+		byName[entry.Name] = entry
+	}
+
+	wantAlpha := store.ProfileTokenStats{
+		ProfileID: alpha.ID, Name: alpha.Name, Provider: alpha.Provider, Model: alpha.Model,
+		Runs: 2, Checks: 1, Input: 310, Output: 31, CacheRead: 150,
+		CacheWrite: 15, Total: 506,
+	}
+	if got := byName[alpha.Name]; got != wantAlpha {
+		t.Errorf("alpha = %+v, want %+v", got, wantAlpha)
+	}
+	if !byName[alpha.Name].HasData() {
+		t.Error("alpha HasData = false, want true")
+	}
+
+	wantBeta := store.ProfileTokenStats{
+		ProfileID: beta.ID, Name: beta.Name, Provider: beta.Provider, Model: beta.Model,
+		Runs: 1, Checks: 0, Input: 40, Output: 4, CacheRead: 10,
+		CacheWrite: 2, Total: 56,
+	}
+	if got := byName[beta.Name]; got != wantBeta {
+		t.Errorf("beta = %+v, want %+v", got, wantBeta)
+	}
+
+	empty, ok := byName[unused.Name]
+	if !ok {
+		t.Fatalf("unused profile missing from %+v", got)
+	}
+	if empty.HasData() || empty.Runs != 0 || empty.Checks != 0 || empty.Total != 0 {
+		t.Errorf("unused = %+v, want no data", empty)
+	}
+}

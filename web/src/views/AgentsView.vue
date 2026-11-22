@@ -5,6 +5,8 @@ import {
   type LLMProfile,
   type LLMProfileInput,
   type LLMProfilePatch,
+  type LLMProfileTokenStats,
+  type LLMProfileUsage,
   type QAPolicy,
   type QAPolicyInput,
   type ReviewEvent,
@@ -12,6 +14,7 @@ import {
 } from '../api'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { useSessionStore } from '../stores/session'
+import { cacheShare, formatTokens } from '../tokens'
 import { llmPlatforms, type LLMPlatform, type LLMPlatformModel } from '../llmPlatforms'
 
 type ProfileTab = 'platform' | 'custom'
@@ -51,6 +54,7 @@ const isAdmin = computed(() => session.me?.is_admin === true)
 
 const profiles = ref<LLMProfile[]>([])
 const teams = ref<Team[]>([])
+const usage = ref<LLMProfileUsage | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 
@@ -131,6 +135,20 @@ async function refreshProfiles(): Promise<void> {
   profiles.value = await api.llmProfiles()
 }
 
+function usageFor(profileId: number): LLMProfileTokenStats | null {
+  return usage.value?.profiles.find((entry) => entry.profile_id === profileId) ?? null
+}
+
+function usageCacheShare(profileId: number): string {
+  const entry = usageFor(profileId)
+  if (!entry) return '—'
+  return cacheShare({
+    total_tokens: entry.total_tokens,
+    cache_read_tokens: entry.cache_read_tokens,
+    cache_write_tokens: entry.cache_write_tokens,
+  })
+}
+
 function applyPolicy(saved: QAPolicy): void {
   policy.value = saved
   policyProfileId.value = saved.llm_profile_id || null
@@ -179,7 +197,12 @@ async function onLiveChanges(events: ReviewEvent[]): Promise<void> {
 
   const editing = editingProfile.value
   try {
-    profiles.value = await api.llmProfiles()
+    const [profileList, usageList] = await Promise.all([
+      api.llmProfiles(),
+      api.llmProfileUsage(),
+    ])
+    profiles.value = profileList
+    usage.value = usageList
   } catch {
     error.value = 'No se pudieron actualizar los perfiles LLM'
   }
@@ -238,9 +261,14 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
-    const [profileList, teamList] = await Promise.all([api.llmProfiles(), api.teams()])
+    const [profileList, teamList, usageList] = await Promise.all([
+      api.llmProfiles(),
+      api.teams(),
+      api.llmProfileUsage(),
+    ])
     profiles.value = profileList
     teams.value = teamList
+    usage.value = usageList
     const requested = requestedTeamId()
     if (requested !== null && teamList.some((team) => team.id === requested)) {
       selectedTeamId.value = requested
@@ -543,6 +571,7 @@ onMounted(() => {
                   <th scope="col">Proveedor / modelo</th>
                   <th scope="col">Salud</th>
                   <th scope="col">Estado</th>
+                  <th scope="col">Consumo · {{ usage?.window_days ?? 7 }} días</th>
                   <th scope="col">Clave API</th>
                   <th scope="col" class="profile-table__actions-head">Acciones</th>
                 </tr>
@@ -580,6 +609,25 @@ onMounted(() => {
                   </td>
                   <td class="profile-table__state">
                     {{ profile.enabled ? 'Activado' : 'Desactivado' }}
+                  </td>
+                  <td class="profile-table__usage" data-profile-usage>
+                    <template v-if="usageFor(profile.id)?.has_data">
+                      <span class="profile-table__usage-total" data-profile-usage-total>
+                        {{ formatTokens(usageFor(profile.id)?.total_tokens ?? 0) }} tokens
+                      </span>
+                      <span class="profile-table__usage-detail" data-profile-usage-io>
+                        {{ formatTokens(usageFor(profile.id)?.input_tokens ?? 0) }} entrada /
+                        {{ formatTokens(usageFor(profile.id)?.output_tokens ?? 0) }} salida
+                      </span>
+                      <span class="profile-table__usage-detail" data-profile-usage-cache>
+                        caché {{ usageCacheShare(profile.id) }} ·
+                        {{ usageFor(profile.id)?.checks ?? 0 }} chequeos ·
+                        {{ usageFor(profile.id)?.runs ?? 0 }} ejecuciones
+                      </span>
+                    </template>
+                    <span v-else class="profile-table__usage-empty" data-profile-usage-empty>
+                      sin datos
+                    </span>
                   </td>
                   <td class="profile-table__key">
                     {{ profile.api_key_set ? 'Clave configurada' : 'Sin clave' }}
@@ -1086,6 +1134,32 @@ onMounted(() => {
 .profile-table__key {
   font-size: 13px;
   white-space: nowrap;
+}
+
+.profile-table__usage {
+  min-width: 190px;
+}
+
+.profile-table__usage-total,
+.profile-table__usage-detail {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.profile-table__usage-total {
+  color: var(--text);
+}
+
+.profile-table__usage-detail {
+  color: var(--text-muted);
+}
+
+.profile-table__usage-empty {
+  color: var(--text-faint);
+  font-size: 13px;
 }
 
 .profile-table__actions-head,

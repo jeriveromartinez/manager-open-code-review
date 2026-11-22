@@ -278,6 +278,33 @@ export type LLMProfileInput = {
 
 export type LLMProfilePatch = Partial<LLMProfileInput>
 
+/**
+ * Consumo de un perfil LLM en la ventana de tokens. Los campos de tokens son
+ * `null` cuando el perfil no registró uso: «sin datos» no es un cero medido.
+ */
+export type LLMProfileTokenStats = {
+  profile_id: number
+  name: string
+  provider: string
+  model: string
+  has_data: boolean
+  runs: number
+  checks: number
+  input_tokens: number | null
+  output_tokens: number | null
+  cache_read_tokens: number | null
+  cache_write_tokens: number | null
+  total_tokens: number | null
+  average_tokens: number | null
+}
+
+/** Consumo por perfil de ejecuciones y chequeos de salud (solo admins). */
+export type LLMProfileUsage = {
+  window_days: number
+  has_data: boolean
+  profiles: LLMProfileTokenStats[]
+}
+
 export type LLMModelOption = { id: string; name: string }
 
 export type LLMModelsResponse = { models: LLMModelOption[] }
@@ -384,6 +411,7 @@ export const api = {
       method: 'POST',
     }),
   llmProfiles: () => request<LLMProfile[]>('/api/llm-profiles'),
+  llmProfileUsage: () => request<LLMProfileUsage>('/api/llm-profiles/usage'),
   createLLMProfile: (body: LLMProfileInput) =>
     request<LLMProfile>('/api/llm-profiles', { method: 'POST', body }),
   updateLLMProfile: (id: number, patch: LLMProfilePatch) =>

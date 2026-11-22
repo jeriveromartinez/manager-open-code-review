@@ -175,6 +175,25 @@ type LLMProfile struct {
 	UpdatedAt       time.Time  `gorm:"column:updated_at"`
 }
 
+// LLMHealthCheck is one append-only probe of an LLM profile. The profile row
+// keeps only the latest verdict, so this history carries the token usage of
+// every check outside a review. Token columns stay NULL when the provider did
+// not report usage or the probe failed (#73).
+type LLMHealthCheck struct {
+	ID               uint      `gorm:"column:id;primaryKey"`
+	ProfileID        uint      `gorm:"column:profile_id"`
+	Status           string    `gorm:"column:status"`
+	ErrorMessage     string    `gorm:"column:error_message"`
+	InputTokens      *int64    `gorm:"column:input_tokens"`
+	OutputTokens     *int64    `gorm:"column:output_tokens"`
+	ReasoningTokens  *int64    `gorm:"column:reasoning_tokens"`
+	CacheReadTokens  *int64    `gorm:"column:cache_read_tokens"`
+	CacheWriteTokens *int64    `gorm:"column:cache_write_tokens"`
+	TotalTokens      *int64    `gorm:"column:total_tokens"`
+	MaxContextTokens *int64    `gorm:"column:max_context_tokens"`
+	CheckedAt        time.Time `gorm:"column:checked_at"`
+}
+
 // QAPolicy holds the review settings of a team. ExcludeGlobs is a JSON array of
 // path patterns stored in a jsonb column.
 type QAPolicy struct {

@@ -386,3 +386,104 @@ func TestPingRejectsEmptyOKBody(t *testing.T) {
 		t.Fatalf("err = %v, want UpstreamError with a message", err)
 	}
 }
+
+// TestPingUsageParsesProviderShapes pins the token accounting of the three
+// response dialects a health check can receive (#73). The figures must land in
+// the structured fields so a check can be counted in the profile average.
+func TestPingUsageParsesProviderShapes(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider string
+		shape    llmmodels.Shape
+		body     string
+		want     llmmodels.Usage
+	}{
+		{
+			name:     "openai compatible",
+			provider: "groq",
+			shape:    llmmodels.OpenAICompatible,
+			body: `{"choices":[{"message":{"content":"pong"}}],"usage":{
+				"prompt_tokens":120,"completion_tokens":8,"total_tokens":128,
+				"prompt_tokens_details":{"cached_tokens":40},
+				"completion_tokens_details":{"reasoning_tokens":3}}}`,
+			want: llmmodels.Usage{
+				Input: 120, Output: 8, Reasoning: 3, CacheRead: 40,
+				Total: 128, MaxContext: 120,
+			},
+		},
+		{
+			name:     "anthropic",
+			provider: "anthropic",
+			shape:    llmmodels.Anthropic,
+			body: `{"content":[{"type":"text","text":"pong"}],"usage":{
+				"input_tokens":15,"output_tokens":4,
+				"cache_read_input_tokens":90,"cache_creation_input_tokens":20}}`,
+			want: llmmodels.Usage{
+				Input: 15, Output: 4, CacheRead: 90, CacheWrite: 20,
+				Total: 129, MaxContext: 125,
+			},
+		},
+		{
+			name:     "google",
+			provider: "google",
+			shape:    llmmodels.Google,
+			body: `{"candidates":[{"content":{"parts":[{"text":"pong"}]}}],
+				"usageMetadata":{"promptTokenCount":70,"candidatesTokenCount":5,
+				"cachedContentTokenCount":30,"thoughtsTokenCount":2,"totalTokenCount":107}}`,
+			want: llmmodels.Usage{
+				Input: 70, Output: 5, Reasoning: 2, CacheRead: 30,
+				Total: 107, MaxContext: 70,
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+
+			client := &llmmodels.Client{HTTP: server.Client(), Providers: map[string]llmmodels.Provider{
+				tc.provider: {BaseURL: server.URL, Shape: tc.shape},
+			}}
+			got, err := client.PingUsage(context.Background(), tc.provider, "", "m", "sk")
+			if err != nil {
+				t.Fatalf("PingUsage: %v", err)
+			}
+			if got == nil || *got != tc.want {
+				t.Fatalf("usage = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A provider that reports no usage must still pass the check and yield nil,
+// which is not the same as a zero-token request.
+func TestPingUsageWithoutUsageIsUnknownNotAnError(t *testing.T) {
+	bodies := map[string]string{
+		"no usage key":     `{"choices":[{"message":{"content":"pong"}}]}`,
+		"null usage":       `{"usage":null}`,
+		"empty usage":      `{"usage":{}}`,
+		"unparseable body": `not json`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, body)
+			}))
+			defer server.Close()
+
+			client := &llmmodels.Client{HTTP: server.Client(), Providers: map[string]llmmodels.Provider{
+				"groq": {BaseURL: server.URL, Shape: llmmodels.OpenAICompatible},
+			}}
+			usage, err := client.PingUsage(context.Background(), "groq", "", "m", "sk")
+			if err != nil {
+				t.Fatalf("PingUsage: %v", err)
+			}
+			if usage != nil {
+				t.Fatalf("usage = %+v, want nil for unknown usage", usage)
+			}
+		})
+	}
+}

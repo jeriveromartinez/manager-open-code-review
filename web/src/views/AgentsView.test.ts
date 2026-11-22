@@ -6,6 +6,7 @@ import type { LLMProfile, Me, QAPolicy, Team } from '../api'
 const mocks = vi.hoisted(() => ({
   api: {
     llmProfiles: vi.fn(),
+    llmProfileUsage: vi.fn(),
     createLLMProfile: vi.fn(),
     updateLLMProfile: vi.fn(),
     checkLLMHealth: vi.fn(),
@@ -169,6 +170,11 @@ describe('AgentsView', () => {
     mocks.session.me = admin
     mocks.session.load.mockResolvedValue(null)
     mocks.api.llmProfiles.mockResolvedValue(profiles.map((profile) => ({ ...profile })))
+    mocks.api.llmProfileUsage.mockResolvedValue({
+      window_days: 7,
+      has_data: false,
+      profiles: [],
+    })
     mocks.api.createLLMProfile.mockResolvedValue({ ...profiles[0] })
     mocks.api.updateLLMProfile.mockResolvedValue({ ...profiles[1] })
     mocks.api.checkLLMHealth.mockResolvedValue({ status: 'queued' })
@@ -738,6 +744,61 @@ describe('AgentsView', () => {
     const cell = wrapper.get('[data-profile-row="12"] [data-health-cell]')
     expect(cell.text()).toContain('nunca comprobado')
     expect(cell.find('[data-health-stale]').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('shows the token consumption of each profile and sin datos when absent', async () => {
+    mocks.api.llmProfileUsage.mockResolvedValue({
+      window_days: 7,
+      has_data: true,
+      profiles: [
+        {
+          profile_id: 7,
+          name: 'GPT principal',
+          provider: 'openai',
+          model: 'gpt-5',
+          has_data: true,
+          runs: 4,
+          checks: 2,
+          input_tokens: 300000,
+          output_tokens: 20000,
+          cache_read_tokens: 80000,
+          cache_write_tokens: 0,
+          total_tokens: 400000,
+          average_tokens: 66666,
+        },
+        {
+          profile_id: 11,
+          name: 'Local llama',
+          provider: 'ollama',
+          model: 'llama3',
+          has_data: false,
+          runs: 0,
+          checks: 0,
+          input_tokens: null,
+          output_tokens: null,
+          cache_read_tokens: null,
+          cache_write_tokens: null,
+          total_tokens: null,
+          average_tokens: null,
+        },
+      ],
+    })
+
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    const used = wrapper.get('[data-profile-row="7"] [data-profile-usage]')
+    expect(used.get('[data-profile-usage-total]').text()).toContain('400.0k')
+    expect(used.get('[data-profile-usage-io]').text()).toContain('300.0k')
+    expect(used.get('[data-profile-usage-io]').text()).toContain('20.0k')
+    expect(used.get('[data-profile-usage-cache]').text()).toContain('20 %')
+    expect(used.get('[data-profile-usage-cache]').text()).toContain('2 chequeos')
+    expect(used.get('[data-profile-usage-cache]').text()).toContain('4 ejecuciones')
+
+    const empty = wrapper.get('[data-profile-row="11"] [data-profile-usage]')
+    expect(empty.get('[data-profile-usage-empty]').text()).toContain('sin datos')
 
     wrapper.unmount()
   })

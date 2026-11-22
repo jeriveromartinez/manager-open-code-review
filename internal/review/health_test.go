@@ -341,3 +341,163 @@ func TestProfileCheckReportsNetworkAndTimeout(t *testing.T) {
 		}
 	})
 }
+
+func latestHealthCheck(t *testing.T, s *store.Store, profileID uint) store.LLMHealthCheck {
+	t.Helper()
+	var check store.LLMHealthCheck
+	err := s.DB.WithContext(context.Background()).Table("llm_health_checks").
+		Where("profile_id = ?", profileID).Order("id DESC").First(&check).Error
+	if err != nil {
+		t.Fatalf("load health check for profile %d: %v", profileID, err)
+	}
+	return check
+}
+
+// TestProfileCheckRecordsUsage pins the per-check accounting: the usage of the
+// minimal ping lands in the append-only history with the provider's naming
+// already mapped to the structured columns (#73).
+func TestProfileCheckRecordsUsage(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+
+	provider := testutil.NewFakeProvider(t, func(testutil.ProviderRequest) testutil.ProviderReply {
+		return testutil.ProviderReply{
+			Text: `{"ok":true}`,
+			Usage: testutil.ProviderUsage{
+				PromptTokens: 120, CompletionTokens: 8, TotalTokens: 128,
+				CachedTokens: 40, ReasoningTokens: 3,
+			},
+		}
+	})
+	base := provider.URL()
+	profile := newProbeProfile(t, s, box, "probe-usage", "nvidia", "nemotron", &base)
+
+	checker := &ProfileChecker{Store: s, Box: box, Timeout: 5 * time.Second}
+	if err := checker.Check(ctx, profile.ID); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	check := latestHealthCheck(t, s, profile.ID)
+	if check.Status != store.HealthOK {
+		t.Errorf("status = %q, want %q", check.Status, store.HealthOK)
+	}
+	if check.InputTokens == nil || *check.InputTokens != 120 {
+		t.Errorf("input tokens = %v, want 120", check.InputTokens)
+	}
+	if check.OutputTokens == nil || *check.OutputTokens != 8 {
+		t.Errorf("output tokens = %v, want 8", check.OutputTokens)
+	}
+	if check.ReasoningTokens == nil || *check.ReasoningTokens != 3 {
+		t.Errorf("reasoning tokens = %v, want 3", check.ReasoningTokens)
+	}
+	if check.CacheReadTokens == nil || *check.CacheReadTokens != 40 {
+		t.Errorf("cache read tokens = %v, want 40", check.CacheReadTokens)
+	}
+	if check.TotalTokens == nil || *check.TotalTokens != 128 {
+		t.Errorf("total tokens = %v, want 128", check.TotalTokens)
+	}
+	if check.MaxContextTokens == nil || *check.MaxContextTokens != 120 {
+		t.Errorf("max context = %v, want 120", check.MaxContextTokens)
+	}
+}
+
+// A provider that omits usage still passes the check; the history records the
+// check with NULL tokens so it does not enter an average as zero.
+func TestProfileCheckRecordsUnknownUsageAsNull(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer server.Close()
+	base := server.URL
+	profile := newProbeProfile(t, s, box, "probe-no-usage", "nvidia", "nemotron", &base)
+
+	checker := &ProfileChecker{Store: s, Box: box, Timeout: 5 * time.Second}
+	if err := checker.Check(ctx, profile.ID); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if health := loadHealth(t, s, profile.ID); health.HealthStatus != store.HealthOK {
+		t.Fatalf("health_status = %q, want %q", health.HealthStatus, store.HealthOK)
+	}
+	check := latestHealthCheck(t, s, profile.ID)
+	if check.TotalTokens != nil || check.InputTokens != nil || check.OutputTokens != nil {
+		t.Errorf("check = %+v, want NULL token columns", check)
+	}
+}
+
+// A failed probe records the check but no usage: NULL, never zero.
+func TestProfileCheckFailureRecordsNoUsage(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+
+	provider := testutil.NewFakeProvider(t, func(testutil.ProviderRequest) testutil.ProviderReply {
+		return testutil.ProviderReply{Status: http.StatusInternalServerError, Body: "provider down"}
+	})
+	base := provider.URL()
+	profile := newProbeProfile(t, s, box, "probe-failure-usage", "nvidia", "nemotron", &base)
+
+	checker := &ProfileChecker{Store: s, Box: box, Timeout: 5 * time.Second}
+	if err := checker.Check(ctx, profile.ID); err == nil {
+		t.Fatal("Check returned nil error for a failing provider")
+	}
+
+	check := latestHealthCheck(t, s, profile.ID)
+	if check.Status != store.HealthError {
+		t.Errorf("status = %q, want %q", check.Status, store.HealthError)
+	}
+	if check.TotalTokens != nil || check.InputTokens != nil {
+		t.Errorf("check = %+v, want no usage on a failed probe", check)
+	}
+}
+
+// OpenCode is the fallback for providers outside the closed table; its raw
+// usage JSON must reach the same structured columns.
+func TestProfileCheckAgentFallbackRecordsUsage(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	if err != nil {
+		t.Fatalf("new box: %v", err)
+	}
+
+	bin := filepath.Join(t.TempDir(), "usage-opencode.sh")
+	script := `#!/bin/sh
+printf '%s\n' '{"type":"step_finish","part":{"tokens":{"input":10,"output":2,"reasoning":1,"total":12,"cache":{"read":3,"write":1}}}}'
+printf '%s\n' '{"type":"text","part":{"type":"text","text":"{\"ok\":true}"}}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write usage binary: %v", err)
+	}
+	// No base URL and an unknown provider: the checker uses the agent binary.
+	profile := newProbeProfile(t, s, box, "probe-agent-usage", "nvidia", "nemotron", nil)
+
+	checker := &ProfileChecker{Store: s, Box: box, Bin: bin, Timeout: 5 * time.Second}
+	if err := checker.Check(ctx, profile.ID); err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+
+	check := latestHealthCheck(t, s, profile.ID)
+	if check.InputTokens == nil || *check.InputTokens != 10 ||
+		check.OutputTokens == nil || *check.OutputTokens != 2 ||
+		check.ReasoningTokens == nil || *check.ReasoningTokens != 1 ||
+		check.CacheReadTokens == nil || *check.CacheReadTokens != 3 ||
+		check.CacheWriteTokens == nil || *check.CacheWriteTokens != 1 ||
+		check.TotalTokens == nil || *check.TotalTokens != 12 ||
+		check.MaxContextTokens == nil || *check.MaxContextTokens != 14 {
+		t.Errorf("check = %+v, want 10/2/1/3/1/12/14", check)
+	}
+}

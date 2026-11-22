@@ -124,6 +124,67 @@ func (s *server) llmProfiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// profileTokenStatsResponse is one profile's consumption in the window. Token
+// fields are null when the profile recorded no usage, so the panel can show
+// "sin datos" instead of a measured zero.
+type profileTokenStatsResponse struct {
+	ProfileID  uint   `json:"profile_id"`
+	Name       string `json:"name"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	HasData    bool   `json:"has_data"`
+	Runs       int    `json:"runs"`
+	Checks     int    `json:"checks"`
+	Input      *int64 `json:"input_tokens"`
+	Output     *int64 `json:"output_tokens"`
+	CacheRead  *int64 `json:"cache_read_tokens"`
+	CacheWrite *int64 `json:"cache_write_tokens"`
+	Total      *int64 `json:"total_tokens"`
+	Average    *int64 `json:"average_tokens"`
+}
+
+// profileTokenUsageResponse is the admin-only per-profile consumption of
+// review runs and health checks over TokenWindow.
+type profileTokenUsageResponse struct {
+	WindowDays int                         `json:"window_days"`
+	HasData    bool                        `json:"has_data"`
+	Profiles   []profileTokenStatsResponse `json:"profiles"`
+}
+
+func (s *server) llmProfileUsage(w http.ResponseWriter, r *http.Request) {
+	stats, err := s.Store.ProfileTokenUsage(r.Context(), time.Now().UTC())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "compute llm profile usage")
+		return
+	}
+
+	profiles := make([]profileTokenStatsResponse, 0, len(stats))
+	hasData := false
+	for _, p := range stats {
+		entry := profileTokenStatsResponse{
+			ProfileID: p.ProfileID, Name: p.Name, Provider: p.Provider, Model: p.Model,
+			HasData: p.HasData(), Runs: p.Runs, Checks: p.Checks,
+		}
+		if p.HasData() {
+			hasData = true
+			input, output := p.Input, p.Output
+			cacheRead, cacheWrite := p.CacheRead, p.CacheWrite
+			total := p.Total
+			average := total / int64(p.Runs+p.Checks)
+			entry.Input, entry.Output = &input, &output
+			entry.CacheRead, entry.CacheWrite = &cacheRead, &cacheWrite
+			entry.Total, entry.Average = &total, &average
+		}
+		profiles = append(profiles, entry)
+	}
+
+	writeJSON(w, http.StatusOK, profileTokenUsageResponse{
+		WindowDays: int(store.TokenWindow / (24 * time.Hour)),
+		HasData:    hasData,
+		Profiles:   profiles,
+	})
+}
+
 func (s *server) createLLMProfile(w http.ResponseWriter, r *http.Request) {
 	raw, ok := decodeRawBody(w, r)
 	if !ok {
