@@ -1,10 +1,16 @@
 package review
 
+// maxAttachmentBytes leaves a margin under OpenCode's 50 KB text attachment
+// cap. A larger pass is silently truncated, and the agent then spends steps
+// reading the rest with offset calls.
+const maxAttachmentBytes = 45 * 1024
+
 // Pass es una pasada de revisión: archivos, reglas que comparten y líneas de diff.
 type Pass struct {
 	Files     []string
 	Rules     []RuleGroup
 	DiffLines int
+	DiffBytes int
 }
 
 // PlanInput son los archivos revisables, sus reglas y los presupuestos de la pasada.
@@ -13,6 +19,7 @@ type PlanInput struct {
 	Groups       []RuleGroup
 	MaxFiles     int
 	MaxDiffLines int
+	MaxDiffBytes int
 	MaxPasses    int
 }
 
@@ -74,11 +81,25 @@ func PlanPasses(in PlanInput) ([]Pass, []PreviewFile, error) {
 			if in.MaxFiles <= 0 || in.MaxDiffLines <= 0 || lines > in.MaxDiffLines {
 				continue
 			}
-			if len(cur.Files) > 0 && (len(cur.Files) >= in.MaxFiles || cur.DiffLines+lines > in.MaxDiffLines) {
+			if in.MaxDiffBytes > 0 && f.DiffBytes > in.MaxDiffBytes {
+				// A single file over the attachment cap still gets its own
+				// pass: dropping it would leave the PR uncovered. Splitting
+				// its hunks is #80.
+				flush(&cur, b.rules)
+				cur.Files = append(cur.Files, p)
+				cur.DiffLines += lines
+				cur.DiffBytes += f.DiffBytes
+				flush(&cur, b.rules)
+				continue
+			}
+			if len(cur.Files) > 0 && (len(cur.Files) >= in.MaxFiles ||
+				cur.DiffLines+lines > in.MaxDiffLines ||
+				(in.MaxDiffBytes > 0 && cur.DiffBytes+f.DiffBytes > in.MaxDiffBytes)) {
 				flush(&cur, b.rules)
 			}
 			cur.Files = append(cur.Files, p)
 			cur.DiffLines += lines
+			cur.DiffBytes += f.DiffBytes
 		}
 		if len(passes) < in.MaxPasses {
 			flush(&cur, b.rules)

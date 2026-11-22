@@ -137,6 +137,49 @@ func TestPlanRespectsDiffLineBudget(t *testing.T) {
 	}
 }
 
+// OpenCode attaches at most 50 KB of text. A pass must fit under that cap or
+// the model never sees the rest of the diff in its first message.
+func TestPlanRespectsDiffByteBudget(t *testing.T) {
+	const max = 45 * 1024
+	files := []PreviewFile{
+		{Path: "a.go", Insertions: 1, DiffBytes: 20 * 1024},
+		{Path: "b.go", Insertions: 1, DiffBytes: 20 * 1024},
+		{Path: "c.go", Insertions: 1, DiffBytes: 20 * 1024},
+		{Path: "huge.go", Insertions: 1, DiffBytes: 60 * 1024},
+	}
+	passes, uncovered, err := PlanPasses(PlanInput{
+		Files:        files,
+		Groups:       []RuleGroup{{Rules: "R1", Files: allPaths(files)}},
+		MaxFiles:     10,
+		MaxDiffLines: 1000,
+		MaxDiffBytes: max,
+		MaxPasses:    10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"a.go", "b.go"}, {"c.go"}, {"huge.go"}}
+	if len(passes) != len(want) {
+		t.Fatalf("pasadas = %d, quiere %d: %+v", len(passes), len(want), passes)
+	}
+	for i, pass := range passes {
+		if !equalStrings(pass.Files, want[i]) {
+			t.Errorf("pasada %d = %v, quiere %v", i, pass.Files, want[i])
+		}
+		if i < 2 && pass.DiffBytes > max {
+			t.Errorf("pasada %d excede MaxDiffBytes: %d > %d", i, pass.DiffBytes, max)
+		}
+	}
+	// A lone file over the cap gets its own pass instead of being dropped;
+	// chunking its hunks is #80.
+	if len(passes[2].Files) != 1 || passes[2].Files[0] != "huge.go" {
+		t.Errorf("pasada del archivo enorme = %v, quiere [huge.go]", passes[2].Files)
+	}
+	if len(uncovered) != 0 {
+		t.Errorf("sin cubrir = %v, quiere vacío", pathsOf(uncovered))
+	}
+}
+
 func TestPlanNoDuplicateFilesAcrossGroups(t *testing.T) {
 	files := []PreviewFile{
 		{Path: "a.go", Insertions: 1},
