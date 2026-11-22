@@ -20,7 +20,8 @@ import (
 const (
 	// nativeProviderName is the per-run custom provider written to OCR's
 	// config. A custom provider is the only shape that lets us set extra_body
-	// (the prompt cache key) and keep the API key out of the file.
+	// (the prompt cache key on OpenAI-compatible profiles) and keep the API key
+	// out of the file.
 	nativeProviderName = "qa-review"
 	// nativeAPIKeyEnv carries the selected profile's key to the credential
 	// helper. It is the only credential variable the child receives.
@@ -354,6 +355,16 @@ func nativeEndpoint(profile store.LLMProfile) (url, protocol string, err error) 
 	}
 }
 
+// nativeSupportsPromptCache reports whether OCR can forward an explicit cache
+// key to the profile. Only the OpenAI-compatible dialect accepts unknown body
+// fields; Anthropic's /v1/messages rejects them and Google's compatibility
+// layer is not guaranteed to pass them through. Unknown providers use the
+// OpenAI-compatible protocol resolved by nativeEndpoint.
+func nativeSupportsPromptCache(profile store.LLMProfile) bool {
+	provider, ok := llmmodels.DefaultProviders[profile.Provider]
+	return !ok || provider.Shape == llmmodels.OpenAICompatible
+}
+
 // writeNativeConfig writes the isolated OCR configuration. The custom provider
 // is the only shape that exposes extra_body, which is how the prompt cache key
 // reaches providers that support an explicit key.
@@ -362,16 +373,19 @@ func writeNativeConfig(home string, profile store.LLMProfile, keyPath string) er
 	if err != nil {
 		return fmt.Errorf("review: %w", err)
 	}
+	custom := map[string]any{
+		"url":         baseURL,
+		"protocol":    protocol,
+		"model":       profile.Model,
+		"api_key_cmd": keyPath,
+	}
+	if nativeSupportsPromptCache(profile) {
+		custom["extra_body"] = map[string]string{"prompt_cache_key": ocrSessionKeyPlaceholder}
+	}
 	cfg := map[string]any{
 		"provider": nativeProviderName,
 		"custom_providers": map[string]any{
-			nativeProviderName: map[string]any{
-				"url":         baseURL,
-				"protocol":    protocol,
-				"model":       profile.Model,
-				"api_key_cmd": keyPath,
-				"extra_body":  map[string]string{"prompt_cache_key": ocrSessionKeyPlaceholder},
-			},
+			nativeProviderName: custom,
 		},
 	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
@@ -419,6 +433,8 @@ func blockedReviewEnv(name string) bool {
 	}
 	for _, prefix := range []string{
 		"ANTHROPIC_", "OPENAI_", "OPENROUTER_", "GEMINI_", "DASHSCOPE_", "OCR_LLM_",
+		"GROQ_", "MISTRAL_", "DEEPSEEK_", "XAI_", "ARK_", "TENCENT_", "SPARK_",
+		"NOVITA_", "AZURE_OPENAI_",
 	} {
 		if strings.HasPrefix(name, prefix) {
 			return true
@@ -567,8 +583,13 @@ func nativeOutcome(res nativeReview) (status, code string) {
 		state = strings.ToLower(strings.TrimSpace(res.Manifest.TerminalState))
 	}
 	switch state {
-	case "complete", "skipped":
+	case "complete":
 		return store.RunSucceeded, ""
+	case "skipped":
+		// OCR selected no files (all excluded or unsupported). Keeping the
+		// succeeded status would make the run resolve every open finding even
+		// though nothing was reviewed; inconclusive preserves them.
+		return store.RunInconclusive, "no_coverage"
 	case "partial":
 		if nativeBudgetOnly(res) {
 			return store.RunInconclusive, "token_budget"
@@ -674,8 +695,16 @@ func plural(n int, singular, pluralForm string) string {
 }
 
 func nativeStatusMessage(res nativeReview, code string) string {
-	reviewed, skipped, _ := nativeCoverageCounts(res)
+	reviewed, skipped, excluded := nativeCoverageCounts(res)
 	switch code {
+	case "no_coverage":
+		message := fmt.Sprintf(
+			"OCR no revisó ningún archivo: %d excluido(s) por la política o sin soporte, %d omitido(s); "+
+				"los hallazgos abiertos se conservan", excluded, skipped)
+		if detail := strings.TrimSpace(res.Message); detail != "" {
+			message += ": " + detail
+		}
+		return message
 	case "token_budget":
 		return fmt.Sprintf(
 			"se alcanzó el tope de gasto de OCR: se publican los hallazgos disponibles; "+
