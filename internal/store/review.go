@@ -683,7 +683,8 @@ func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, headSHA
 }
 
 // RunUsage is the structured token consumption of one review run, summed over
-// every model call. MaxContext is the largest prompt of the run.
+// every model call. MaxContext is the largest prompt of the run; nil means the
+// engine reported no sample, which is stored as NULL rather than a fake zero.
 type RunUsage struct {
 	Input      int64
 	Output     int64
@@ -691,7 +692,7 @@ type RunUsage struct {
 	CacheRead  int64
 	CacheWrite int64
 	Total      int64
-	MaxContext int64
+	MaxContext *int64
 }
 
 // RunCompletion is the terminal state of a review run, persisted together with
@@ -723,6 +724,12 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 			usage = []byte(`{}`)
 		}
 		now := time.Now().UTC()
+		// An untyped nil interface makes the column NULL; a typed nil pointer
+		// would depend on how the driver treats it.
+		var maxContext any
+		if c.Tokens.MaxContext != nil {
+			maxContext = *c.Tokens.MaxContext
+		}
 		res := tx.Model(&ReviewRun{}).
 			Where("id = ? AND status = ?", id, RunRunning).
 			Updates(map[string]any{
@@ -738,7 +745,7 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 				"cache_read_tokens":  c.Tokens.CacheRead,
 				"cache_write_tokens": c.Tokens.CacheWrite,
 				"total_tokens":       c.Tokens.Total,
-				"max_context_tokens": c.Tokens.MaxContext,
+				"max_context_tokens": maxContext,
 				"clone_token_enc":    "",
 				"finished_at":        now,
 				"updated_at":         now,

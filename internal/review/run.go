@@ -109,6 +109,9 @@ func (e *CloneTokenStaleError) Error() string {
 type RunnerConfig struct {
 	WorkspaceDir, OCRBin, OpencodeBin, GitBaseURL string
 	FetchDepthMax                                 int
+	// ContextCeiling is the global review_context_ceiling. A team policy can
+	// override it per run.
+	ContextCeiling int
 	// Timeout is the whole-run budget. It bounds the execution context and
 	// derives OCR's own concurrent-task timeout.
 	Timeout time.Duration
@@ -159,17 +162,23 @@ type runOutcome struct {
 
 // tokenTotals flattens the aggregated usage into the columns the panel reads.
 // A run that never called the model writes zeros, which is accurate; runs that
-// predate the columns stay NULL because they are never written again.
+// predate the columns stay NULL because they are never written again. MaxContext
+// stays nil when the engine reported no sample (native OCR), so the column is
+// NULL and the averages skip it instead of counting a fake zero.
 func (o *runOutcome) tokenTotals() store.RunUsage {
-	return store.RunUsage{
+	usage := store.RunUsage{
 		Input:      int64(o.tokens.Input),
 		Output:     int64(o.tokens.Output),
 		Reasoning:  int64(o.tokens.Reasoning),
 		CacheRead:  int64(o.tokens.Cache.Read),
 		CacheWrite: int64(o.tokens.Cache.Write),
 		Total:      int64(o.tokens.Total),
-		MaxContext: int64(o.tokens.MaxContext),
 	}
+	if o.tokens.MaxContext > 0 {
+		maxContext := int64(o.tokens.MaxContext)
+		usage.MaxContext = &maxContext
+	}
+	return usage
 }
 
 // announce tells open panels that the run's pull request changed state. The
@@ -459,17 +468,37 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if deadline, ok := runCtx.Deadline(); ok {
 		timeout = time.Until(deadline)
 	}
+	// The policy is read on every run, so a team change applies to the next
+	// review without restarting the worker.
+	ceiling := r.Cfg.ContextCeiling
+	if cfg.Policy.ReviewContextCeiling != nil {
+		ceiling = *cfg.Policy.ReviewContextCeiling
+	}
+	if ceiling <= 0 {
+		ceiling = reviewContextCeiling
+	}
+	effort := strings.ToLower(strings.TrimSpace(cfg.Policy.ReviewEffort))
+	if !store.ValidReviewEffort(effort) {
+		effort = store.ReviewEffortLow
+	}
+	budget := cfg.Policy.ReviewTokenBudget
+	if budget < 0 {
+		budget = 0
+	}
 	reviewer := &NativeReviewer{
-		Bin:        r.Cfg.OCRBin,
-		RepoDir:    workDir,
-		Home:       filepath.Join(workDir, "home-ocr"),
-		Profile:    cfg.Profile,
-		APIKey:     string(key),
-		Excludes:   excludes,
-		Background: buildBackground(cfg.PR, cfg.Policy.ExtraInstructions),
-		BaseRef:    ocrBase,
-		HeadRef:    headSHA,
-		Timeout:    timeout,
+		Bin:         r.Cfg.OCRBin,
+		RepoDir:     workDir,
+		Home:        filepath.Join(workDir, "home-ocr"),
+		Profile:     cfg.Profile,
+		APIKey:      string(key),
+		Excludes:    excludes,
+		Background:  buildBackground(cfg.PR, cfg.Policy.ExtraInstructions),
+		BaseRef:     ocrBase,
+		HeadRef:     headSHA,
+		Effort:      effort,
+		MaxTokens:   ceiling,
+		TokenBudget: budget,
+		Timeout:     timeout,
 	}
 
 	slog.Info("native OCR review started", "run_id", run.ID, "profile_id", cfg.Profile.ID)

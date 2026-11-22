@@ -462,6 +462,20 @@ func (f *runTestFixture) hasOCRArg(t *testing.T, want string) bool {
 	return false
 }
 
+// ocrArgValue returns the value following flag in the recorded OCR argv.
+func (f *runTestFixture) ocrArgValue(t *testing.T, flag string) string {
+	t.Helper()
+	for _, line := range f.ocrArgs(t) {
+		args := strings.Fields(line)
+		for i, arg := range args {
+			if arg == flag && i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+	}
+	return ""
+}
+
 func assertRunTerminal(t *testing.T, f *runTestFixture, status, code string) store.ReviewRun {
 	t.Helper()
 	run := f.loadRun(t)
@@ -1432,5 +1446,111 @@ func TestRunAppliesPolicyExcludesAndExtraInstructions(t *testing.T) {
 	}
 	if got := f.ocrCalls(t); got != 1 {
 		t.Errorf("ocr calls = %d, want 1", got)
+	}
+}
+
+// TestRunContextCeilingPrecedence pins the effective --max-tokens: the team
+// policy wins, otherwise the global setting, and an unset/invalid global falls
+// back to the 270k default.
+func TestRunContextCeilingPrecedence(t *testing.T) {
+	ceiling := func(v int) *int { return &v }
+	tests := []struct {
+		name   string
+		global int
+		policy *int
+		want   string
+	}{
+		{name: "policy overrides the global ceiling", global: 200000, policy: ceiling(100000), want: "100000"},
+		{name: "team inherits the global ceiling", global: 300000, want: "300000"},
+		{name: "invalid settings fall back to the default", global: 0, want: "270000"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newRunTestFixture(t)
+			if tt.policy != nil {
+				if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+					Where("id = ?", f.policy.ID).
+					Update("review_context_ceiling", *tt.policy).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			runner := f.runner()
+			runner.Cfg.ContextCeiling = tt.global
+			if err := runner.Run(f.ctx, f.runID); err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+			assertRunTerminal(t, f, store.RunSucceeded, "")
+			if got := f.ocrArgValue(t, "--max-tokens"); got != tt.want {
+				t.Errorf("--max-tokens = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRunAppliesPolicyEffortAndBudget pins that the team effort and the optional
+// spend cap reach OCR, and that the profile reasoning variant no longer selects
+// the review effort.
+func TestRunAppliesPolicyEffortAndBudget(t *testing.T) {
+	f := newRunTestFixture(t)
+	variant := "low"
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.LLMProfile{}).
+		Where("id = ?", f.policy.LLMProfileID).Update("variant", variant).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).Updates(map[string]any{
+		"review_effort":       store.ReviewEffortHigh,
+		"review_token_budget": int64(400000),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+	if got := f.ocrArgValue(t, "--effort"); got != store.ReviewEffortHigh {
+		t.Errorf("--effort = %q, want %q (the policy, not the profile variant)", got, store.ReviewEffortHigh)
+	}
+	if got := f.ocrArgValue(t, "--max-tokens-budget"); got != "400000" {
+		t.Errorf("--max-tokens-budget = %q, want 400000", got)
+	}
+}
+
+// TestRunBudgetDisabledByDefault pins that effort defaults to low even when the
+// profile declares a reasoning variant, and that budget 0 omits the flag.
+func TestRunBudgetDisabledByDefault(t *testing.T) {
+	f := newRunTestFixture(t)
+	variant := "high"
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.LLMProfile{}).
+		Where("id = ?", f.policy.LLMProfileID).Update("variant", variant).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+	if got := f.ocrArgValue(t, "--effort"); got != store.ReviewEffortLow {
+		t.Errorf("--effort = %q, want %q (the policy default)", got, store.ReviewEffortLow)
+	}
+	if f.hasOCRArg(t, "--max-tokens-budget") {
+		t.Errorf("ocr argv = %v, want no --max-tokens-budget when the budget is disabled", f.ocrArgs(t))
+	}
+}
+
+// TestRunNativeStoresNullMaxContext pins the "unknown is NULL, not 0"
+// invariant: native OCR reports no max-context sample.
+func TestRunNativeStoresNullMaxContext(t *testing.T) {
+	f := newRunTestFixture(t)
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+	if run.TotalTokens == nil || *run.TotalTokens != 150 {
+		t.Fatalf("total_tokens = %v, want 150", run.TotalTokens)
+	}
+	if run.MaxContextTokens != nil {
+		t.Errorf("max_context_tokens = %d, want NULL for a native run", *run.MaxContextTokens)
 	}
 }

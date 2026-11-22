@@ -34,6 +34,7 @@ func TestBuildReviewArgs(t *testing.T) {
 		Profile:        store.LLMProfile{Model: "model-x"},
 		Effort:         "high",
 		MaxTokens:      reviewContextCeiling,
+		TokenBudget:    500000,
 		Timeout:        90 * time.Second,
 	})
 	want := []string{
@@ -48,6 +49,7 @@ func TestBuildReviewArgs(t *testing.T) {
 		"--effort", "high",
 		"--max-tokens", "270000",
 		"--background-file", "/work/run-1/home-ocr/background.md",
+		"--max-tokens-budget", "500000",
 		"--timeout", "2",
 		"--exclude", "vendor/**,**/*.pb.go",
 	}
@@ -55,15 +57,31 @@ func TestBuildReviewArgs(t *testing.T) {
 		t.Fatalf("args =\n%q\nwant\n%q", got, want)
 	}
 
-	withoutTimeout := buildReviewArgs(nativeInvocation{
+	withoutOptional := buildReviewArgs(nativeInvocation{
 		RepoDir: "/r", BaseRef: "a", HeadRef: "b", BackgroundFile: "/bg",
 		Profile: store.LLMProfile{Model: "m"}, Effort: "low", MaxTokens: 1,
 	})
-	for _, arg := range withoutTimeout {
+	for _, arg := range withoutOptional {
 		if arg == "--timeout" {
-			t.Fatalf("unexpected --timeout in %q", withoutTimeout)
+			t.Fatalf("unexpected --timeout in %q", withoutOptional)
+		}
+		if arg == "--max-tokens-budget" {
+			t.Fatalf("unexpected --max-tokens-budget when the budget is disabled: %q", withoutOptional)
 		}
 	}
+	// The effective ceiling is always sent, even when the optional budget is off.
+	if !containsArg(withoutOptional, "--max-tokens") {
+		t.Fatalf("--max-tokens missing from %q", withoutOptional)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestReviewEnvIsolation(t *testing.T) {
@@ -224,6 +242,10 @@ func TestStatusFromManifestCoverage(t *testing.T) {
 			want:     store.RunInconclusive, code: "token_budget",
 		},
 		{
+			name: "partial budget flag only", status: "partial", budget: true,
+			want: store.RunInconclusive, code: "token_budget",
+		},
+		{
 			name: "partial provider", status: "partial",
 			failed: []nativeCoverageItem{{Classification: "provider"}},
 			want:   store.RunInconclusive, code: "coverage_incomplete",
@@ -237,6 +259,10 @@ func TestStatusFromManifestCoverage(t *testing.T) {
 			name: "failed budget warning", status: "failed",
 			warnings: []nativeWarning{{Type: "token_budget_reached"}},
 			want:     store.RunInconclusive, code: "token_budget",
+		},
+		{
+			name: "failed budget flag only", status: "failed", budget: true,
+			want: store.RunInconclusive, code: "token_budget",
 		},
 		{
 			name: "failed timeout", status: "failed",
