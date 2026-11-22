@@ -110,6 +110,10 @@ func TestParseEventsAggregatesEveryStep(t *testing.T) {
 	if got.Steps != 2 {
 		t.Errorf("steps = %d, want 2", got.Steps)
 	}
+	// The largest prompt is the second step: input + cache read + cache write.
+	if got.MaxContext != 24 {
+		t.Errorf("max context = %d, want 24", got.MaxContext)
+	}
 }
 
 func TestTokenUsageAddsPasses(t *testing.T) {
@@ -125,6 +129,24 @@ func TestTokenUsageAddsPasses(t *testing.T) {
 	}
 	if run.Steps != 5 {
 		t.Errorf("run steps = %d, want 5", run.Steps)
+	}
+	if run.MaxContext != 35 {
+		t.Errorf("run max context = %d, want 35", run.MaxContext)
+	}
+}
+
+// MaxContext takes the largest prompt, not the sum: a multi-pass run must not
+// look like it exceeded the context ceiling just because it made many calls.
+func TestTokenUsageMaxContextKeepsLargestPrompt(t *testing.T) {
+	var run tokenUsage
+	run.addJSON([]byte(`{"input":100,"output":1,"total":101,"cache":{"read":200,"write":0},"steps":1,"max_context":300}`))
+	run.addJSON([]byte(`{"input":50,"output":2,"total":52,"cache":{"read":10,"write":5},"steps":1,"max_context":65}`))
+
+	if run.MaxContext != 300 {
+		t.Errorf("max context = %d, want 300", run.MaxContext)
+	}
+	if run.Steps != 2 {
+		t.Errorf("steps = %d, want 2", run.Steps)
 	}
 }
 

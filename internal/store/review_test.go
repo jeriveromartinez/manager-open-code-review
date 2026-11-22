@@ -955,9 +955,18 @@ func TestRunLifecycle(t *testing.T) {
 	}
 	coverage := []byte(`{"reviewed_files":2,"skipped":["generated.pb.go"]}`)
 	usage := []byte(`{"input_tokens":123,"output_tokens":45}`)
-	err = f.s.CompleteReviewRun(f.ctx, run.ID, store.RunSucceeded, "", "",
-		"looks good", coverage, usage,
-		[]store.Finding{finding, resolvedFinding}, []string{"finding-b"})
+	err = f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+		Status:   store.RunSucceeded,
+		Summary:  "looks good",
+		Coverage: coverage,
+		Usage:    usage,
+		Tokens: store.RunUsage{
+			Input: 123, Output: 45, CacheRead: 900, CacheWrite: 30,
+			Total: 168, MaxContext: 1053,
+		},
+		Findings: []store.Finding{finding, resolvedFinding},
+		Resolved: []string{"finding-b"},
+	})
 	if err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)
 	}
@@ -973,6 +982,16 @@ func TestRunLifecycle(t *testing.T) {
 	}
 	assertJSONEqual(t, "coverage", datatypes.JSON(stored.Coverage), `{"reviewed_files":2,"skipped":["generated.pb.go"]}`)
 	assertJSONEqual(t, "usage", datatypes.JSON(stored.Usage), `{"input_tokens":123,"output_tokens":45}`)
+	if stored.InputTokens == nil || *stored.InputTokens != 123 ||
+		stored.OutputTokens == nil || *stored.OutputTokens != 45 ||
+		stored.CacheReadTokens == nil || *stored.CacheReadTokens != 900 ||
+		stored.CacheWriteTokens == nil || *stored.CacheWriteTokens != 30 ||
+		stored.TotalTokens == nil || *stored.TotalTokens != 168 ||
+		stored.MaxContextTokens == nil || *stored.MaxContextTokens != 1053 {
+		t.Errorf("token columns = %v/%v/%v/%v/%v/%v, want 123/45/900/30/168/1053",
+			stored.InputTokens, stored.OutputTokens, stored.CacheReadTokens,
+			stored.CacheWriteTokens, stored.TotalTokens, stored.MaxContextTokens)
+	}
 
 	findings, err := f.s.FindingsForPR(f.ctx, pr.ID)
 	if err != nil || len(findings) != 2 {
@@ -1011,12 +1030,14 @@ func TestRunLifecycle(t *testing.T) {
 		DB:   f.s.DB.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}),
 		Pool: f.s.Pool,
 	}
-	err = quiet.CompleteReviewRun(f.ctx, rollbackRun.ID, store.RunSucceeded, "", "", "",
-		[]byte("{not-json"), nil,
-		[]store.Finding{{
+	err = quiet.CompleteReviewRun(f.ctx, rollbackRun.ID, store.RunCompletion{
+		Status:   store.RunSucceeded,
+		Coverage: []byte("{not-json"),
+		Findings: []store.Finding{{
 			ID: "should-rollback", PullRequestID: rollbackPR.ID, Fingerprint: "fp-rollback",
 			FirstSeenRunID: rollbackRun.ID, LastSeenRunID: rollbackRun.ID,
-		}}, nil)
+		}},
+	})
 	if err == nil {
 		t.Fatal("CompleteReviewRun with invalid coverage: got nil error")
 	}
@@ -1052,8 +1073,11 @@ func TestCompleteReviewRunRequiresRunningAndClearsToken(t *testing.T) {
 		Path: "main.go", Severity: "major", Status: store.FindingOpen,
 		FirstSeenRunID: run.ID, LastSeenRunID: run.ID,
 	}
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunSucceeded, "", "",
-		"ok", nil, nil, []store.Finding{finding}, nil); err != nil {
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+		Status:   store.RunSucceeded,
+		Summary:  "ok",
+		Findings: []store.Finding{finding},
+	}); err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)
 	}
 	stored, err := f.s.ReviewRun(f.ctx, run.ID)
@@ -1084,8 +1108,12 @@ func TestCompleteReviewRunRequiresRunningAndClearsToken(t *testing.T) {
 		Path: "main.go", Severity: "major", Status: store.FindingOpen,
 		FirstSeenRunID: supersededRun.ID, LastSeenRunID: supersededRun.ID,
 	}
-	err = f.s.CompleteReviewRun(f.ctx, supersededRun.ID, store.RunSucceeded, "", "",
-		"stale", nil, nil, []store.Finding{stale}, []string{"finding-stale"})
+	err = f.s.CompleteReviewRun(f.ctx, supersededRun.ID, store.RunCompletion{
+		Status:   store.RunSucceeded,
+		Summary:  "stale",
+		Findings: []store.Finding{stale},
+		Resolved: []string{"finding-stale"},
+	})
 	if !errors.Is(err, store.ErrRunNotActive) {
 		t.Fatalf("CompleteReviewRun(superseded) error = %v, want ErrRunNotActive", err)
 	}

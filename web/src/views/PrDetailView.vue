@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, type Finding, type PRDetail } from '../api'
+import { cacheShare, formatTokens } from '../tokens'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { isConflict, isForbidden } from '../errors'
 import { prStatusLabel, statusLabel } from '../status'
@@ -342,6 +343,29 @@ onMounted(() => {
               <p v-if="run.error_message" class="run__error">
                 <code>{{ run.error_code }}</code>: {{ run.error_message }}
               </p>
+              <dl v-if="run.total_tokens !== null" class="run__tokens" data-run-tokens>
+                <div class="run__token">
+                  <dt>Tokens</dt>
+                  <dd><code>{{ formatTokens(run.total_tokens) }}</code></dd>
+                </div>
+                <div class="run__token">
+                  <dt>Entrada / salida</dt>
+                  <dd>
+                    <code>{{ formatTokens(run.input_tokens ?? 0) }} / {{ formatTokens(run.output_tokens ?? 0) }}</code>
+                  </dd>
+                </div>
+                <div class="run__token">
+                  <dt>Caché</dt>
+                  <dd><code>{{ cacheShare(run) }}</code></dd>
+                </div>
+                <div class="run__token">
+                  <dt>Mayor prompt</dt>
+                  <dd><code>{{ formatTokens(run.max_context_tokens ?? 0) }}</code></dd>
+                </div>
+              </dl>
+              <p v-else class="run__no-tokens" data-run-no-tokens>
+                Sin datos de tokens: ejecución anterior al registro de consumo
+              </p>
             </li>
           </ol>
           <p v-else class="empty-state">Todavía no hay ejecuciones</p>
@@ -628,33 +652,43 @@ onMounted(() => {
   color: var(--text);
 }
 
-.run__times {
+.run__times,
+.run__tokens {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: var(--space-1) var(--space-5);
   margin: 0;
 }
 
-.run__time {
+.run__time,
+.run__token {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
   min-width: 0;
 }
 
-.run__time dt {
+.run__time dt,
+.run__token dt {
   flex: none;
   color: var(--text-faint);
   font-size: 13px;
 }
 
-.run__time dd {
+.run__time dd,
+.run__token dd {
   margin: 0;
   min-width: 0;
   color: var(--text-muted);
 }
 
-.run__time code {
+.run__time code,
+.run__token code {
+  font-size: 13px;
+}
+
+.run__no-tokens {
+  color: var(--text-faint);
   font-size: 13px;
 }
 

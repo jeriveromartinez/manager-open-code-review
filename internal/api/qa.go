@@ -19,6 +19,21 @@ type repoCountResponse struct {
 	Count int    `json:"count"`
 }
 
+// runTokenStatsResponse is the token consumption of the runs finished inside
+// the window. Average is the total divided by Reviews, which counts only runs
+// that recorded usage.
+type runTokenStatsResponse struct {
+	WindowDays int   `json:"window_days"`
+	Reviews    int   `json:"reviews"`
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cache_read"`
+	CacheWrite int64 `json:"cache_write"`
+	Total      int64 `json:"total"`
+	Average    int64 `json:"average"`
+	MaxContext int64 `json:"max_context"`
+}
+
 // qaSummaryResponse carries the windows the counts were computed over, so the
 // panel labels them from the server instead of repeating the constants.
 type qaSummaryResponse struct {
@@ -33,6 +48,7 @@ type qaSummaryResponse struct {
 	Categories           []categoryCountResponse `json:"categories"`
 	ConfirmedByRepo      []repoCountResponse     `json:"confirmed_by_repo"`
 	CategoryWindowDays   int                     `json:"category_window_days"`
+	Tokens               runTokenStatsResponse   `json:"tokens"`
 	ValidationSLASeconds int64                   `json:"validation_sla_seconds"`
 }
 
@@ -66,6 +82,20 @@ func (s *server) qaSummary(w http.ResponseWriter, r *http.Request) {
 	for _, c := range summary.ConfirmedByRepo {
 		repos = append(repos, repoCountResponse{Repo: c.Repo, Count: c.Count})
 	}
+	tokens := summary.Tokens
+	tokenStats := runTokenStatsResponse{
+		WindowDays: int(store.TokenWindow / (24 * time.Hour)),
+		Reviews:    tokens.Reviews,
+		Input:      tokens.Input,
+		Output:     tokens.Output,
+		CacheRead:  tokens.CacheRead,
+		CacheWrite: tokens.CacheWrite,
+		Total:      tokens.Total,
+		MaxContext: tokens.MaxContext,
+	}
+	if tokens.Reviews > 0 {
+		tokenStats.Average = tokens.Total / int64(tokens.Reviews)
+	}
 	writeJSON(w, http.StatusOK, qaSummaryResponse{
 		ReadyForHuman:        summary.ReadyForHuman,
 		Inconclusive:         summary.Inconclusive,
@@ -78,6 +108,7 @@ func (s *server) qaSummary(w http.ResponseWriter, r *http.Request) {
 		Categories:           categories,
 		ConfirmedByRepo:      repos,
 		CategoryWindowDays:   int(store.CategoryWindow / (24 * time.Hour)),
+		Tokens:               tokenStats,
 		ValidationSLASeconds: int64(s.Cfg.QAValidationSLA / time.Second),
 	})
 }

@@ -53,7 +53,25 @@ export type QASummary = {
   categories: { category: string; count: number }[]
   confirmed_by_repo: { repo: string; count: number }[]
   category_window_days: number
+  /** Consumo de tokens de las ejecuciones terminadas en la ventana. */
+  tokens: RunTokenStats
   validation_sla_seconds: number
+}
+
+/**
+ * `reviews` cuenta solo las ejecuciones con datos: las anteriores al registro
+ * de consumo (#73) no rebajan el promedio.
+ */
+export type RunTokenStats = {
+  window_days: number
+  reviews: number
+  input: number
+  output: number
+  cache_read: number
+  cache_write: number
+  total: number
+  average: number
+  max_context: number
 }
 
 /** Ejecución de revisión. CloneTokenEnc nunca se expone en la API. */
@@ -70,6 +88,14 @@ export type ReviewRun = {
   usage: Record<string, unknown>
   error_code: string
   error_message: string
+  /** null en ejecuciones anteriores al registro de consumo (#73). */
+  input_tokens: number | null
+  output_tokens: number | null
+  cache_read_tokens: number | null
+  cache_write_tokens: number | null
+  total_tokens: number | null
+  /** Mayor prompt de la ejecución; vigila el techo de contexto (#72). */
+  max_context_tokens: number | null
   started_at: string | null
   finished_at: string | null
   created_at: string

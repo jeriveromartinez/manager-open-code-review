@@ -87,6 +87,17 @@ const summary: QASummary = {
     { repo: 'acme/payments-sdk', count: 2 },
   ],
   category_window_days: 30,
+  tokens: {
+    window_days: 7,
+    reviews: 4,
+    input: 120000,
+    output: 15000,
+    cache_read: 500000,
+    cache_write: 50000,
+    total: 685000,
+    average: 171250,
+    max_context: 198000,
+  },
   validation_sla_seconds: 4 * 3600,
 }
 
@@ -175,6 +186,11 @@ describe('LeadView', () => {
     expect(wrapper.get('[data-tile="repos-defects"] .kpi-card__value').text()).toBe('9')
     expect(wrapper.get('[data-tile="repos-defects"]').text()).toContain('acme/payments-sdk')
     expect(wrapper.get('[data-repo="acme/payments-sdk"]').text()).toContain('Deshabilitado')
+    const tokens = wrapper.get('[data-tile="tokens"]')
+    expect(tokens.text()).toContain('685.0k')
+    expect(tokens.get('[data-token-reviews]').text()).toBe('4')
+    expect(tokens.get('[data-token-average]').text()).toBe('171.3k')
+    expect(tokens.get('[data-token-max-context]').text()).toBe('198.0k')
     wrapper.unmount()
   })
 

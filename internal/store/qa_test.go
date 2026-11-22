@@ -262,6 +262,56 @@ func TestQASummary(t *testing.T) {
 	}
 }
 
+func TestQASummaryAggregatesRunTokens(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+
+	payments := f.team("Payments")
+	search := f.team("Search")
+	qa := f.user("mvega", false)
+	f.member(payments, qa, "qa")
+
+	repo := f.repo(installID, installID, "acme/payments", &payments.ID, true)
+	hidden := f.repo(f.nextID(), installID, "acme/search", &search.ID, true)
+
+	now := time.Now().UTC()
+	tokenRun := func(pr store.PullRequest, finishedAt time.Time, input, output, cacheRead, cacheWrite, total, maxContext *int64) {
+		run := f.run(pr, store.RunSucceeded)
+		f.exec(`UPDATE review_runs SET finished_at = $1, input_tokens = $2, output_tokens = $3,
+			cache_read_tokens = $4, cache_write_tokens = $5, total_tokens = $6, max_context_tokens = $7
+			WHERE id = $8`, finishedAt, input, output, cacheRead, cacheWrite, total, maxContext, run.ID)
+	}
+	val := func(v int64) *int64 { return &v }
+
+	merged := f.openPR(repo.ID, 1, store.StatusMerged, false)
+	f.exec("UPDATE pull_requests SET state = 'merged' WHERE id = ?", merged.ID)
+	open := f.openPR(repo.ID, 2, store.StatusReadyForHuman, false)
+	old := f.openPR(repo.ID, 3, store.StatusReadyForHuman, false)
+	legacy := f.openPR(repo.ID, 4, store.StatusReadyForHuman, false)
+	other := f.openPR(hidden.ID, 5, store.StatusReadyForHuman, false)
+
+	// A merged PR still spent tokens in the window.
+	tokenRun(merged, now.Add(-time.Hour), val(100), val(10), val(50), val(5), val(165), val(150))
+	tokenRun(open, now.Add(-2*time.Hour), val(200), val(20), val(100), val(10), val(330), val(300))
+	// Finished before the window and never recorded usage: neither counts.
+	tokenRun(old, now.Add(-8*24*time.Hour), val(900), val(90), val(900), val(90), val(1980), val(1000))
+	tokenRun(legacy, now.Add(-time.Hour), nil, nil, nil, nil, nil, nil)
+	tokenRun(other, now.Add(-time.Hour), val(5000), val(500), val(5000), val(500), val(11000), val(9000))
+
+	got, err := f.s.QASummary(f.ctx, qa, now, store.QAFilter{})
+	if err != nil {
+		t.Fatalf("QASummary: %v", err)
+	}
+	want := store.RunTokenStats{
+		Reviews: 2, Input: 300, Output: 30, CacheRead: 150,
+		CacheWrite: 15, Total: 495, MaxContext: 300,
+	}
+	if got.Tokens != want {
+		t.Errorf("Tokens = %+v, want %+v", got.Tokens, want)
+	}
+}
+
 func TestQASummaryForOneTeam(t *testing.T) {
 	f := newFixture(t)
 	installID := f.nextID()

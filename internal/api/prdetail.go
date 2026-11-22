@@ -26,10 +26,17 @@ type reviewRunDTO struct {
 	Usage        json.RawMessage `json:"usage"`
 	ErrorCode    string          `json:"error_code"`
 	ErrorMessage string          `json:"error_message"`
-	StartedAt    *string         `json:"started_at"`
-	FinishedAt   *string         `json:"finished_at"`
-	CreatedAt    string          `json:"created_at"`
-	UpdatedAt    string          `json:"updated_at"`
+	// Token columns are null on runs that predate the accounting (#73).
+	InputTokens      *int64  `json:"input_tokens"`
+	OutputTokens     *int64  `json:"output_tokens"`
+	CacheReadTokens  *int64  `json:"cache_read_tokens"`
+	CacheWriteTokens *int64  `json:"cache_write_tokens"`
+	TotalTokens      *int64  `json:"total_tokens"`
+	MaxContextTokens *int64  `json:"max_context_tokens"`
+	StartedAt        *string `json:"started_at"`
+	FinishedAt       *string `json:"finished_at"`
+	CreatedAt        string  `json:"created_at"`
+	UpdatedAt        string  `json:"updated_at"`
 }
 
 func jsonObject(raw datatypes.JSON) json.RawMessage {
@@ -45,6 +52,9 @@ func reviewRunDTOOf(run store.ReviewRun) reviewRunDTO {
 		Trigger: run.Trigger, Status: run.Status, Attempt: run.Attempt, Summary: run.Summary,
 		Coverage: jsonObject(run.Coverage), Usage: jsonObject(run.Usage),
 		ErrorCode: run.ErrorCode, ErrorMessage: run.ErrorMessage,
+		InputTokens: run.InputTokens, OutputTokens: run.OutputTokens,
+		CacheReadTokens: run.CacheReadTokens, CacheWriteTokens: run.CacheWriteTokens,
+		TotalTokens: run.TotalTokens, MaxContextTokens: run.MaxContextTokens,
 		StartedAt: formatTimePtr(run.StartedAt), FinishedAt: formatTimePtr(run.FinishedAt),
 		CreatedAt: run.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt: run.UpdatedAt.UTC().Format(time.RFC3339),

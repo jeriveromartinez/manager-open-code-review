@@ -471,12 +471,19 @@ type tokenUsage struct {
 	} `json:"cache"`
 	Total int `json:"total"`
 	Steps int `json:"steps"`
+	// MaxContext is the largest prompt of the run: every step re-sends the
+	// whole history, so the step with the most input is the one that can hit
+	// the model context ceiling (#72).
+	MaxContext int `json:"max_context"`
 }
 
 func (u *tokenUsage) addStep(raw []byte) {
 	var step tokenUsage
 	if err := json.Unmarshal(raw, &step); err != nil {
 		return
+	}
+	if step.MaxContext == 0 {
+		step.MaxContext = step.Input + step.Cache.Read + step.Cache.Write
 	}
 	u.add(step)
 	u.Steps++
@@ -491,6 +498,9 @@ func (u *tokenUsage) add(other tokenUsage) {
 	u.Cache.Write += other.Cache.Write
 	u.Total += other.Total
 	u.Steps += other.Steps
+	if other.MaxContext > u.MaxContext {
+		u.MaxContext = other.MaxContext
+	}
 }
 
 func (u *tokenUsage) addJSON(raw []byte) {
@@ -500,6 +510,11 @@ func (u *tokenUsage) addJSON(raw []byte) {
 	var part tokenUsage
 	if err := json.Unmarshal(raw, &part); err != nil {
 		return
+	}
+	// Aggregated usage recorded before MaxContext existed carries no ceiling
+	// sample; fall back to the aggregated prompt instead of reporting 0.
+	if part.MaxContext == 0 {
+		part.MaxContext = part.Input + part.Cache.Read + part.Cache.Write
 	}
 	u.add(part)
 }

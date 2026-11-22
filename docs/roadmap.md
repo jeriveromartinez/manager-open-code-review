@@ -30,7 +30,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #67 | Aclarar que `review_agent_steps` es por pasada | XS | — | **Hecho** (#86) |
 | #69 | Drenar revisiones en vuelo al recrear el worker | M | — | **Hecho** (#91) |
 | #68 | Refrescar el token de clonado de runs en cola | S/M | — | **Hecho** (#92) |
-| #73 | Registrar y mostrar el consumo real (columnas, API, panel) | M/L | #63 | Pendiente |
+| #73 | Registrar y mostrar el consumo real (columnas, API, panel) | M/L | #63 | **Parcial** (#93): columnas, detalle de PR y tile de lead; falta consumo por perfil y chequeos de salud |
 | #77 | Aplicar `exclude_globs` y `extra_instructions` de la política | M | — | Pendiente |
 | #75 | Chequeos de salud sin coste de agente (una llamada, intervalo 6 h) | S/M | — | Pendiente |
 | #65 | Controlar tokens de razonamiento y latencia | S/M | — | Pendiente |
@@ -47,6 +47,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 - 2026-11-21: revisados los 21 issues abiertos; #70, #78 y #64 cerrados con evidencia en `main`.
 - En `main`: roadmap #85 y Fase 1 completa (#86, #87, #88, #89).
 - Fase 2 completa: #69 (#91) y #68 (#92). Siguiente: Fase 3, #73 y #77.
+- #73 parcial (#93): consumo real por ejecución, detalle de PR y tile de lead. Pendiente el consumo por perfil y el de los chequeos de salud.
 
 ## Fases
 

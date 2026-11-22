@@ -591,13 +591,39 @@ func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, headSHA
 	return nil
 }
 
+// RunUsage is the structured token consumption of one review run, summed over
+// every model call. MaxContext is the largest prompt of the run.
+type RunUsage struct {
+	Input      int64
+	Output     int64
+	CacheRead  int64
+	CacheWrite int64
+	Total      int64
+	MaxContext int64
+}
+
+// RunCompletion is the terminal state of a review run, persisted together with
+// its findings in one transaction.
+type RunCompletion struct {
+	Status       string
+	ErrorCode    string
+	ErrorMessage string
+	Summary      string
+	Coverage     []byte
+	Usage        []byte
+	Tokens       RunUsage
+	Findings     []Finding
+	Resolved     []string
+}
+
 // CompleteReviewRun stores a run's outcome in a single transaction: the run is
 // finished only when it is still running, findings are upserted, resolved
 // findings are marked, and the clone token is discarded. Any error rolls the
 // whole set back. A run superseded while executing returns ErrRunNotActive and
 // persists nothing, so stale results can never be published.
-func (s *Store) CompleteReviewRun(ctx context.Context, id uint, status, errCode, errMsg, summary string, coverage, usage []byte, findings []Finding, resolved []string) error {
+func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion) error {
 	return s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		coverage, usage := c.Coverage, c.Usage
 		if len(coverage) == 0 {
 			coverage = []byte(`{}`)
 		}
@@ -608,15 +634,21 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, status, errCode,
 		res := tx.Model(&ReviewRun{}).
 			Where("id = ? AND status = ?", id, RunRunning).
 			Updates(map[string]any{
-				"status":          status,
-				"error_code":      errCode,
-				"error_message":   errMsg,
-				"summary":         summary,
-				"coverage":        datatypes.JSON(coverage),
-				"usage":           datatypes.JSON(usage),
-				"clone_token_enc": "",
-				"finished_at":     now,
-				"updated_at":      now,
+				"status":             c.Status,
+				"error_code":         c.ErrorCode,
+				"error_message":      c.ErrorMessage,
+				"summary":            c.Summary,
+				"coverage":           datatypes.JSON(coverage),
+				"usage":              datatypes.JSON(usage),
+				"input_tokens":       c.Tokens.Input,
+				"output_tokens":      c.Tokens.Output,
+				"cache_read_tokens":  c.Tokens.CacheRead,
+				"cache_write_tokens": c.Tokens.CacheWrite,
+				"total_tokens":       c.Tokens.Total,
+				"max_context_tokens": c.Tokens.MaxContext,
+				"clone_token_enc":    "",
+				"finished_at":        now,
+				"updated_at":         now,
 			})
 		if res.Error != nil {
 			return fmt.Errorf("complete review run %d: %w", id, res.Error)
@@ -625,12 +657,12 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, status, errCode,
 			return fmt.Errorf("complete review run %d: %w", id, ErrRunNotActive)
 		}
 
-		for _, f := range findings {
+		for _, f := range c.Findings {
 			if _, err := upsertFinding(tx, f); err != nil {
 				return err
 			}
 		}
-		for _, findingID := range resolved {
+		for _, findingID := range c.Resolved {
 			if err := updateFindingStatus(tx, findingID, FindingResolved, id); err != nil {
 				return err
 			}

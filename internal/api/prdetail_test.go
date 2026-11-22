@@ -25,12 +25,19 @@ func TestPRDetailIncludesRunsAndFindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateLLMProfile: %v", err)
 	}
+	tokens := func(v int64) *int64 { return &v }
 	run, err := f.st.CreateReviewRun(f.ctx, store.ReviewRun{
 		PullRequestID: pr.ID, ProfileID: profile.ID, HeadSHA: "abc123",
 		Status: store.RunSucceeded, Summary: "todo ok",
-		Coverage:      datatypes.JSON([]byte(`{"lines":80}`)),
-		Usage:         datatypes.JSON([]byte(`{"tokens":10}`)),
-		CloneTokenEnc: "sealed-clone-token",
+		Coverage:         datatypes.JSON([]byte(`{"lines":80}`)),
+		Usage:            datatypes.JSON([]byte(`{"tokens":10}`)),
+		CloneTokenEnc:    "sealed-clone-token",
+		InputTokens:      tokens(1200),
+		OutputTokens:     tokens(300),
+		CacheReadTokens:  tokens(5000),
+		CacheWriteTokens: tokens(400),
+		TotalTokens:      tokens(6900),
+		MaxContextTokens: tokens(6600),
 	})
 	if err != nil {
 		t.Fatalf("CreateReviewRun: %v", err)
@@ -66,6 +73,11 @@ func TestPRDetailIncludesRunsAndFindings(t *testing.T) {
 	}
 	if _, ok := runObj["clone_token_enc"]; ok {
 		t.Errorf("run leaks clone_token_enc: %v", runObj)
+	}
+	if runObj["input_tokens"] != float64(1200) || runObj["output_tokens"] != float64(300) ||
+		runObj["cache_read_tokens"] != float64(5000) || runObj["cache_write_tokens"] != float64(400) ||
+		runObj["total_tokens"] != float64(6900) || runObj["max_context_tokens"] != float64(6600) {
+		t.Errorf("token columns = %v, want 1200/300/5000/400/6900/6600", runObj)
 	}
 
 	findings, ok := raw["findings"].([]any)

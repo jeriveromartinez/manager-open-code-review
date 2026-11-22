@@ -53,6 +53,12 @@ const detail: PRDetail = {
       usage: { input_tokens: 100 },
       error_code: 'LLM_TIMEOUT',
       error_message: 'timeout contacting provider',
+      input_tokens: 25000,
+      output_tokens: 5000,
+      cache_read_tokens: 60000,
+      cache_write_tokens: 10000,
+      total_tokens: 100000,
+      max_context_tokens: 41000,
       started_at: '2026-11-19T09:00:00Z',
       finished_at: '2026-11-19T09:05:00Z',
       created_at: '2026-11-19T09:00:00Z',
@@ -249,6 +255,37 @@ describe('PrDetailView', () => {
     expect(wrapper.get('[data-run]').text()).toContain('timeout contacting provider')
     expect(wrapper.get('[data-coverage-reviewed]').text()).toContain('2')
     expect(wrapper.get('[data-coverage-skipped]').text()).toContain('1')
+
+    const tokens = wrapper.get('[data-run-tokens]').text()
+    expect(tokens).toContain('100.0k')
+    expect(tokens).toContain('25.0k / 5.0k')
+    expect(tokens).toContain('70 %')
+    expect(tokens).toContain('41.0k')
+
+    wrapper.unmount()
+  })
+
+  it('labels a run without token data instead of showing zeros', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [
+        {
+          ...detail.runs[0],
+          input_tokens: null,
+          output_tokens: null,
+          cache_read_tokens: null,
+          cache_write_tokens: null,
+          total_tokens: null,
+          max_context_tokens: null,
+        },
+      ],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.find('[data-run-tokens]').exists()).toBe(false)
+    expect(wrapper.get('[data-run-no-tokens]').text()).toContain('Sin datos de tokens')
 
     wrapper.unmount()
   })
