@@ -23,11 +23,12 @@ const (
 	apiKeyEnvVar  = "QA_LLM_API_KEY"
 	// maxAgentErrorDetail bounds the provider message stored as a health error.
 	maxAgentErrorDetail = 500
-	// defaultReviewerSteps caps one `opencode run` at 40 agentic iterations.
-	// A pass carries at most MaxFilesPerPass files whose diff is attached, so
-	// 40 read/grep rounds are plenty; without a cap a stuck agent loops until
-	// the wall-clock timeout and the run ends with no useful diagnosis.
-	defaultReviewerSteps = 40
+	// defaultReviewerSteps caps one `opencode run` at 8 agentic iterations.
+	// A pass carries at most MaxFilesPerPass files whose diff is attached, and
+	// the diff is already in the first message, so a small read budget is
+	// enough. Every step re-sends the whole history; raising this multiplies
+	// the cost of the pass instead of improving it.
+	defaultReviewerSteps = 8
 )
 
 // Agent runs one isolated `opencode run` invocation. Home is the temporary HOME
@@ -43,6 +44,11 @@ type Agent struct {
 	// Steps is the agentic iteration cap written to the generated config.
 	// Zero means defaultReviewerSteps.
 	Steps int
+	// Continue resumes the most recent session in Home instead of creating a
+	// new one. It is used by the schema retry so the agent does not explore the
+	// repository twice; each pass gets its own Home so it cannot resume an
+	// earlier pass.
+	Continue bool
 }
 
 // Run executes OpenCode with a private HOME/XDG environment and a locked-down
@@ -81,7 +87,7 @@ func (a *Agent) Run(ctx context.Context, prompt string, files []string) (text st
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(runCtx, bin, buildArgs(a.Profile, dir, prompt, files)...)
+	cmd := exec.CommandContext(runCtx, bin, buildArgs(a.Profile, dir, prompt, files, a.Continue)...)
 	cmd.Dir = dir
 	cmd.Env = childEnv(a.APIKey, home)
 	isolateProcessGroup(cmd)
@@ -109,7 +115,7 @@ func (a *Agent) Run(ctx context.Context, prompt string, files []string) (text st
 	return text, usage, nil
 }
 
-func buildArgs(profile store.LLMProfile, dir, prompt string, files []string) []string {
+func buildArgs(profile store.LLMProfile, dir, prompt string, files []string, continueSession bool) []string {
 	args := []string{
 		"run",
 		"--pure",
@@ -119,6 +125,9 @@ func buildArgs(profile store.LLMProfile, dir, prompt string, files []string) []s
 	}
 	if profile.Variant != nil && *profile.Variant != "" {
 		args = append(args, "--variant", *profile.Variant)
+	}
+	if continueSession {
+		args = append(args, "--continue")
 	}
 	args = append(args, "--dir", dir, prompt)
 	if len(files) > 0 {
@@ -193,14 +202,27 @@ func writeOpenCodeConfig(home string, profile store.LLMProfile, steps int) error
 		},
 	}
 
+	// The reviewer only reads the attached diff. Every other built-in tool is
+	// denied in both blocks: a tool without an allow rule is materialized for
+	// the model and tempts it into exploration that costs another step.
 	permission := map[string]string{
 		"read":               "allow",
 		"edit":               "deny",
+		"write":              "deny",
 		"bash":               "deny",
 		"task":               "deny",
 		"webfetch":           "deny",
 		"websearch":          "deny",
 		"external_directory": "deny",
+		"todowrite":          "deny",
+		"question":           "deny",
+		"skill":              "deny",
+		"glob":               "deny",
+		"grep":               "deny",
+		"list":               "deny",
+		"lsp":                "deny",
+		"patch":              "deny",
+		"doom_loop":          "deny",
 	}
 
 	cfg := map[string]any{
@@ -208,6 +230,11 @@ func writeOpenCodeConfig(home string, profile store.LLMProfile, steps int) error
 		"provider":   map[string]any{profile.Provider: provider},
 		"permission": permission,
 		"agent": map[string]any{
+			// OpenCode forks a title-generation call on the first step. The
+			// `title` agent is a built-in primary agent; disabling it makes
+			// SessionPrompt.ensureTitle return before it calls the provider.
+			// A small_model would still spend a request.
+			"title": map[string]any{"disable": true},
 			reviewerAgent: map[string]any{
 				"description": "Solo lectura: revisa el diff sin modificar el repo",
 				"mode":        "primary",

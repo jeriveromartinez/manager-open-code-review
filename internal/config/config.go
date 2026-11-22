@@ -22,7 +22,7 @@ type Config struct {
 	GitHubURL            string        // github_url, default "https://github.com"
 	GitHubAPIURL         string        // github_api_url, default "https://api.github.com"
 	ReviewConcurrency    int           // review_concurrency, default 2
-	ReviewAgentSteps     int           // review_agent_steps, default 40
+	ReviewAgentSteps     int           // review_agent_steps, default 8
 	ReviewTimeout        time.Duration // review_timeout, default 20m
 	ReviewStaleAfter     time.Duration // review_stale_after, default 45m
 	LLMHealthInterval    time.Duration // llm_health_interval, default 30m
@@ -71,7 +71,7 @@ func Default() Config {
 		GitHubURL:         "https://github.com",
 		GitHubAPIURL:      "https://api.github.com",
 		ReviewConcurrency: 2,
-		ReviewAgentSteps:  40,
+		ReviewAgentSteps:  8,
 		ReviewTimeout:     20 * time.Minute,
 		WorkspaceDir:      "/tmp/qa",
 		WorkerHealthAddr:  ":9090",

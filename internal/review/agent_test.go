@@ -251,7 +251,10 @@ func TestAgentConfigDeniesTools(t *testing.T) {
 		if !ok {
 			t.Fatalf("agents has no qa-reviewer entry: %+v", cfg.Agent)
 		}
-		denied := []string{"edit", "bash", "task", "webfetch", "websearch", "external_directory"}
+		denied := []string{
+			"edit", "write", "bash", "task", "webfetch", "websearch", "external_directory",
+			"todowrite", "question", "skill", "glob", "grep", "list", "lsp", "patch", "doom_loop",
+		}
 		for _, action := range denied {
 			if got := agent.Permission[action]; got != "deny" {
 				t.Errorf("agent permission %q = %q, want deny", action, got)
@@ -265,6 +268,9 @@ func TestAgentConfigDeniesTools(t *testing.T) {
 		}
 		if got := cfg.Permission["read"]; got != "allow" {
 			t.Errorf("global permission read = %q, want allow", got)
+		}
+		if !cfg.Agent["title"].Disable {
+			t.Error("agent.title.disable = false, want true: the title call must not run")
 		}
 	})
 
@@ -395,6 +401,20 @@ func TestAgentCommandFlags(t *testing.T) {
 	}
 }
 
+func TestAgentContinueFlag(t *testing.T) {
+	a := testAgent(t, t.TempDir())
+	a.Continue = true
+
+	text, _, err := a.Run(context.Background(), "__FAKE_ARGS__", nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := fmt.Sprintf("run --pure --format json --agent qa-reviewer --model nvidia/nemotron --continue --dir %s __FAKE_ARGS__", a.Dir)
+	if text != want {
+		t.Fatalf("argv = %q, want %q", text, want)
+	}
+}
+
 type generatedConfig struct {
 	Provider map[string]struct {
 		Options struct {
@@ -405,6 +425,8 @@ type generatedConfig struct {
 	Permission map[string]string `json:"permission"`
 	Agent      map[string]struct {
 		Permission map[string]string `json:"permission"`
+		Steps      int               `json:"steps"`
+		Disable    bool              `json:"disable"`
 	} `json:"agent"`
 }
 
