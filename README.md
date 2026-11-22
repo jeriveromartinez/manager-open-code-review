@@ -156,6 +156,8 @@ make test       # go test ./... + Vitest
 go test ./internal/review -run '^TestE2EFlow$' -count=1   # flujo E2E contra dobles (docs/e2e.md)
 ```
 
+Los pull requests usan la plantilla de `.github/pull_request_template.md`. Conserva la línea `Closes #N`: GitHub cierra ese issue automáticamente al fusionar.
+
 El binario admite `qa serve`, `qa worker`, `qa migrate`, `qa monitor` y `qa healthcheck [url]`.
 
 ## Rutas principales
