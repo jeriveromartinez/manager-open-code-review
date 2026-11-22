@@ -18,7 +18,7 @@ import type { DotTone } from '../dots'
 import { isForbidden } from '../errors'
 import { blockedAt, decisionRows, thresholds, type Threshold } from '../leadPanel'
 import { formatWait, isOverSla, qaBucket, waitMinutes } from '../qaQueue'
-import { formatTokens } from '../tokens'
+import { cacheShare, formatTokens } from '../tokens'
 import { useSessionStore } from '../stores/session'
 
 const session = useSessionStore()
@@ -407,8 +407,20 @@ onBeforeUnmount(() => {
                   <dd data-token-average>{{ tokenStats ? formatTokens(tokenStats.average) : '—' }}</dd>
                 </div>
                 <div>
+                  <dt class="caption">Servido desde caché</dt>
+                  <dd data-token-cache>
+                    {{ tokenStats ? cacheShare({
+                      total_tokens: tokenStats.total,
+                      cache_read_tokens: tokenStats.cache_read,
+                      cache_write_tokens: tokenStats.cache_write,
+                    }) : '—' }}
+                  </dd>
+                </div>
+                <div>
                   <dt class="caption">Mayor prompt</dt>
-                  <dd data-token-max-context>{{ tokenStats ? formatTokens(tokenStats.max_context) : '—' }}</dd>
+                  <dd data-token-max-context>
+                    {{ tokenStats && tokenStats.max_context_known ? formatTokens(tokenStats.max_context) : '—' }}
+                  </dd>
                 </div>
               </dl>
               <p v-if="tokenStats && tokenStats.reviews === 0" class="tile__empty">

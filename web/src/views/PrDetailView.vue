@@ -391,9 +391,9 @@ onMounted(() => {
                   <dt>Caché</dt>
                   <dd><code>{{ cacheShare(run) }}</code></dd>
                 </div>
-                <div class="run__token">
+                <div class="run__token" data-run-max-context>
                   <dt>Mayor prompt</dt>
-                  <dd><code>{{ formatTokens(run.max_context_tokens ?? 0) }}</code></dd>
+                  <dd><code>{{ run.max_context_tokens === null ? '—' : formatTokens(run.max_context_tokens) }}</code></dd>
                 </div>
               </dl>
               <p v-else class="run__no-tokens" data-run-no-tokens>

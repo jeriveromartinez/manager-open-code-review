@@ -32,6 +32,9 @@ type runTokenStatsResponse struct {
 	Total      int64 `json:"total"`
 	Average    int64 `json:"average"`
 	MaxContext int64 `json:"max_context"`
+	// MaxContextKnown is false when no run in the window reported a
+	// max-context sample, so the panel can render "—" instead of a fake 0.
+	MaxContextKnown bool `json:"max_context_known"`
 }
 
 // qaSummaryResponse carries the windows the counts were computed over, so the
@@ -90,8 +93,9 @@ func (s *server) qaSummary(w http.ResponseWriter, r *http.Request) {
 		Output:     tokens.Output,
 		CacheRead:  tokens.CacheRead,
 		CacheWrite: tokens.CacheWrite,
-		Total:      tokens.Total,
-		MaxContext: tokens.MaxContext,
+		Total:           tokens.Total,
+		MaxContext:      tokens.MaxContext,
+		MaxContextKnown: tokens.MaxContextKnown,
 	}
 	if tokens.Reviews > 0 {
 		tokenStats.Average = tokens.Total / int64(tokens.Reviews)

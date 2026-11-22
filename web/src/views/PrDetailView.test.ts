@@ -378,6 +378,21 @@ describe('PrDetailView', () => {
     wrapper.unmount()
   })
 
+  it('labels an unknown max prompt instead of painting zero', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [{ ...detail.runs[0], max_context_tokens: null }],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.get('[data-run-max-context] dd').text()).toBe('—')
+    expect(wrapper.get('[data-run-tokens]').text()).toContain('70 %')
+
+    wrapper.unmount()
+  })
+
   it('withdraws a finding with a reason after confirming', async () => {
     const wrapper = mountDetail()
     await flushPromises()
