@@ -57,7 +57,7 @@ func (t *Trigger) OnPullRequest(ctx context.Context, prID uint) error {
 	if err != nil || cfg == nil {
 		return err
 	}
-	if cfg.PR.Draft || cfg.PR.IsFork {
+	if !cfg.PR.IsOpen() || cfg.PR.Draft || cfg.PR.IsFork {
 		return nil
 	}
 	if t.Jobs == nil {
@@ -67,17 +67,18 @@ func (t *Trigger) OnPullRequest(ctx context.Context, prID uint) error {
 }
 
 // FireDebounced runs a scheduled trigger. It no-ops when a newer push has moved
-// the head (that push has its own job) or when the PR stopped being eligible
-// while the job waited.
+// the head (that push has its own job), when the PR was closed or merged, or
+// when it stopped being eligible while the job waited. The check below is only
+// a fast path; enqueueForHead repeats it under the PR lock.
 func (t *Trigger) FireDebounced(ctx context.Context, prID uint, headSHA string) error {
 	cfg, err := t.reviewConfig(ctx, prID)
 	if err != nil || cfg == nil {
 		return err
 	}
-	if cfg.PR.HeadSHA != headSHA || cfg.PR.Draft || cfg.PR.IsFork {
+	if cfg.PR.HeadSHA != headSHA || !cfg.PR.IsOpen() || cfg.PR.Draft || cfg.PR.IsFork {
 		return nil
 	}
-	_, err = t.enqueue(ctx, prID, "webhook", false)
+	_, err = t.enqueueForHead(ctx, prID, headSHA, "webhook", false)
 	return err
 }
 
@@ -152,9 +153,17 @@ func (t *Trigger) EnqueuePending(ctx context.Context, limit int) (int, error) {
 	return created, errors.Join(errs...)
 }
 
-// enqueue implements both entry points. The boolean result reports whether a
-// run was created, which lets EnqueuePending count only real work.
+// enqueue implements the immediate entry points. The boolean result reports
+// whether a run was created, which lets EnqueuePending count only real work.
 func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ignoreSameSHA bool) (bool, error) {
+	return t.enqueueForHead(ctx, prID, "", triggerKind, ignoreSameSHA)
+}
+
+// enqueueForHead is enqueue with an optional head check evaluated under the PR
+// lock. A scheduled trigger passes the SHA captured at scheduling time, so a
+// push that lands between the fast-path check and this call cannot start a
+// review of the newer head ahead of its own debounce.
+func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, triggerKind string, ignoreSameSHA bool) (bool, error) {
 	if t.Store == nil {
 		return false, errors.New("review: trigger has no store")
 	}
@@ -170,6 +179,14 @@ func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ig
 	}
 	if err != nil {
 		return false, fmt.Errorf("load review configuration of pull request %d: %w", prID, err)
+	}
+	// A merge or close during a debounce wait must not review a dead PR. The
+	// check lives here so every entry point agrees on the same boundary.
+	if expectedHead != "" && cfg.PR.HeadSHA != expectedHead {
+		return false, nil
+	}
+	if !cfg.PR.IsOpen() {
+		return false, nil
 	}
 
 	runs, err := t.Store.ListReviewRuns(ctx, prID)

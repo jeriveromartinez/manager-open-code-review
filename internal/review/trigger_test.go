@@ -135,6 +135,7 @@ type seedOpts struct {
 	withPolicy     bool
 	profileEnabled bool
 	headSHA        string
+	state          string
 	requireGreenCI bool
 }
 
@@ -229,11 +230,15 @@ func (f *triggerFixture) seed(name string, opts seedOpts) store.PullRequest {
 	if sha == "" {
 		sha = "sha-" + name
 	}
+	state := opts.state
+	if state == "" {
+		state = "open"
+	}
 	pr := store.PullRequest{
 		RepositoryID: repoID, Number: int(f.seq), Title: "PR " + name,
 		AuthorLogin: "octocat", HeadSHA: sha, BaseRef: "main", HeadRef: "branch-" + name,
 		HTMLURL: "https://github.com/acme/" + name + "/pull/1",
-		Draft:   opts.draft, IsFork: opts.fork, State: "open", QAStatus: store.StatusPending,
+		Draft:   opts.draft, IsFork: opts.fork, State: state, QAStatus: store.StatusPending,
 		GitHubUpdatedAt: time.Now().UTC(),
 	}
 	if err := f.st.DB.WithContext(f.ctx).Create(&pr).Error; err != nil {
@@ -876,6 +881,42 @@ func TestFireDebouncedIgnoresStaleHead(t *testing.T) {
 	}
 }
 
+// The pre-check is only a fast path: the head must still match when the config
+// is reloaded under the PR lock, or a push landing in between would start the
+// wrong review.
+func TestEnqueueForHeadRejectsStaleHeadUnderLock(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	oldHead := pr.HeadSHA
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.PullRequest{}).
+		Where("id = ?", pr.ID).Update("head_sha", "sha-newer").Error; err != nil {
+		t.Fatalf("move the head: %v", err)
+	}
+
+	created, err := f.trigger.enqueueForHead(f.ctx, pr.ID, oldHead, "webhook", false)
+	if err != nil {
+		t.Fatalf("enqueueForHead(old head) error = %v", err)
+	}
+	if created {
+		t.Fatal("enqueueForHead(old head) created a run, want none")
+	}
+	if runs, err := f.st.ListReviewRuns(f.ctx, pr.ID); err != nil || len(runs) != 0 {
+		t.Fatalf("runs = %+v, err = %v; want none", runs, err)
+	}
+	if len(f.jobs.reviews) != 0 || len(f.checks.started) != 0 {
+		t.Errorf("unexpected enqueues/checks: %v / %v", f.jobs.reviews, f.checks.started)
+	}
+
+	created, err = f.trigger.enqueueForHead(f.ctx, pr.ID, "sha-newer", "webhook", false)
+	if err != nil || !created {
+		t.Fatalf("enqueueForHead(current head) = %v, %v; want a created run", created, err)
+	}
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil || len(runs) != 1 || runs[0].HeadSHA != "sha-newer" {
+		t.Fatalf("runs = %+v, err = %v; want one run for the current head", runs, err)
+	}
+}
+
 // The PR can become a draft or a fork while the job waits, and the
 // configuration can disappear (disabled repo, removed policy).
 func TestFireDebouncedSkipsIneligiblePullRequests(t *testing.T) {
@@ -886,6 +927,8 @@ func TestFireDebouncedSkipsIneligiblePullRequests(t *testing.T) {
 	}{
 		{"draft", seedOpts{draft: true, repoEnabled: true, withPolicy: true, profileEnabled: true}, ""},
 		{"fork", seedOpts{fork: true, repoEnabled: true, withPolicy: true, profileEnabled: true}, ""},
+		{"closed", seedOpts{repoEnabled: true, withPolicy: true, profileEnabled: true, state: "closed"}, ""},
+		{"merged", seedOpts{repoEnabled: true, withPolicy: true, profileEnabled: true, state: "merged"}, ""},
 		{"disabled", seedOpts{withPolicy: true, profileEnabled: true}, ""},
 		{"stale-head", eligibleOpts(), "sha-anterior"},
 	}
