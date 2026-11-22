@@ -38,3 +38,21 @@ func TestFieldsCarryHumanMetadata(t *testing.T) {
 		}
 	}
 }
+
+// The value is applied inside the pass loop, so the panel must not present it
+// as a per-review limit.
+func TestReviewAgentStepsLabelSaysPerPass(t *testing.T) {
+	for _, field := range Fields() {
+		if field.Key != KeyReviewAgentSteps {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(field.Label), "pasada") {
+			t.Errorf("label = %q, want it to say the limit applies per pass", field.Label)
+		}
+		if !strings.Contains(field.Help, "max_passes") {
+			t.Errorf("help = %q, want it to explain the relationship with max_passes", field.Help)
+		}
+		return
+	}
+	t.Fatalf("%s is missing from Fields()", KeyReviewAgentSteps)
+}
