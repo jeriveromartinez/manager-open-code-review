@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	ghapp "github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/web"
+	"gorm.io/gorm"
 )
 
 type recordingHealth struct {
@@ -610,6 +612,97 @@ func TestPolicyReviewControls(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPolicyReportsPromptCache(t *testing.T) {
+	f := newSecureFixture(t)
+	cookie := f.session(f.user("cache-admin", true))
+
+	seedPolicy := func(t *testing.T, name, provider string) (uint, uint) {
+		t.Helper()
+		team := f.team(name)
+		profile, err := f.st.CreateLLMProfile(f.ctx, store.LLMProfile{
+			Name: name, Provider: provider, Model: "test-model",
+			APIKeyEnc: "sealed", Concurrency: 1, Enabled: true, HealthStatus: store.HealthOK,
+		})
+		if err != nil {
+			t.Fatalf("CreateLLMProfile(%q): %v", name, err)
+		}
+		if _, err := f.st.SaveQAPolicy(f.ctx, store.QAPolicy{
+			TeamID: team.ID, LLMProfileID: profile.ID,
+		}); err != nil {
+			t.Fatalf("SaveQAPolicy(%q): %v", name, err)
+		}
+		return team.ID, profile.ID
+	}
+
+	readPromptCache := func(t *testing.T, rec *httptest.ResponseRecorder) any {
+		t.Helper()
+		assertStatus(t, rec, http.StatusOK)
+		var body map[string]any
+		decodeJSON(t, rec, &body)
+		return body["prompt_cache"]
+	}
+
+	for _, tc := range []struct {
+		name     string
+		provider string
+		want     bool
+	}{
+		{"openai-compatible", "groq", true},
+		{"anthropic", "anthropic", false},
+		{"custom", "private-gateway", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			teamID, profileID := seedPolicy(t, "cache-"+tc.name, tc.provider)
+			path := fmt.Sprintf("/api/teams/%d/policy", teamID)
+			if got := readPromptCache(t, f.request(http.MethodGet, path, nil, cookie)); got != tc.want {
+				t.Errorf("GET prompt_cache = %v, want %v", got, tc.want)
+			}
+			rec := f.request(http.MethodPut, path, policyBodyFor(profileID), cookie)
+			if got := readPromptCache(t, rec); got != tc.want {
+				t.Errorf("PUT prompt_cache = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("no profile", func(t *testing.T) {
+		team := f.team("cache-none")
+		rec := f.request(http.MethodGet, fmt.Sprintf("/api/teams/%d/policy", team.ID), nil, cookie)
+		if got := readPromptCache(t, rec); got != false {
+			t.Errorf("prompt_cache = %v, want false", got)
+		}
+	})
+
+	t.Run("deleted profile", func(t *testing.T) {
+		team := f.team("cache-deleted")
+		profile, err := f.st.CreateLLMProfile(f.ctx, store.LLMProfile{
+			Name: "cache-deleted", Provider: "groq", Model: "test-model",
+			APIKeyEnc: "sealed", Concurrency: 1, Enabled: true, HealthStatus: store.HealthOK,
+		})
+		if err != nil {
+			t.Fatalf("CreateLLMProfile: %v", err)
+		}
+		if _, err := f.st.SaveQAPolicy(f.ctx, store.QAPolicy{
+			TeamID: team.ID, LLMProfileID: profile.ID,
+		}); err != nil {
+			t.Fatalf("SaveQAPolicy: %v", err)
+		}
+		// The store refuses to delete a profile in use, so remove the row with
+		// FK enforcement off to reproduce a policy left behind by a deletion.
+		if err := f.st.DB.WithContext(f.ctx).Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec("SET LOCAL session_replication_role = replica").Error; err != nil {
+				return err
+			}
+			return tx.Delete(&store.LLMProfile{}, profile.ID).Error
+		}); err != nil {
+			t.Fatalf("delete profile: %v", err)
+		}
+		rec := f.request(http.MethodGet, fmt.Sprintf("/api/teams/%d/policy", team.ID), nil, cookie)
+		if got := readPromptCache(t, rec); got != false {
+			t.Errorf("prompt_cache = %v, want false", got)
+		}
+	})
 }
 
 func seedProfile(t *testing.T, f *secureFixture, name string, profile store.LLMProfile) store.LLMProfile {

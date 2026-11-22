@@ -103,6 +103,24 @@ func TestGoogleModels(t *testing.T) {
 	}
 }
 
+func TestSupportsPromptCache(t *testing.T) {
+	cases := []struct {
+		provider string
+		want     bool
+	}{
+		{"openai", true},
+		{"groq", true},
+		{"anthropic", false},
+		{"google", false},
+		{"custom-endpoint", true},
+	}
+	for _, tc := range cases {
+		if got := llmmodels.SupportsPromptCache(tc.provider); got != tc.want {
+			t.Errorf("SupportsPromptCache(%q) = %v, want %v", tc.provider, got, tc.want)
+		}
+	}
+}
+
 func TestUnknownProvider(t *testing.T) {
 	client := &llmmodels.Client{HTTP: http.DefaultClient, Timeout: time.Second}
 	if _, err := client.Models(context.Background(), "nope", "sk"); !errors.Is(err, llmmodels.ErrUnknownProvider) {

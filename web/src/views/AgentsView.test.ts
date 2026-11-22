@@ -162,6 +162,7 @@ const policy: QAPolicy = {
   effective_context_ceiling: 270000,
   review_effort: 'low',
   review_token_budget: 0,
+  prompt_cache: true,
   updated_at: '2026-11-19T10:00:00Z',
 }
 

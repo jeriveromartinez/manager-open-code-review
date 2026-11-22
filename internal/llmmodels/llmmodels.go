@@ -79,6 +79,16 @@ func ProviderBaseURL(providerID string) (string, bool) {
 	return provider.BaseURL, ok
 }
 
+// SupportsPromptCache reports whether a provider accepts an explicit prompt
+// cache key. Only the OpenAI-compatible dialect tolerates the extra body
+// field; Anthropic's /v1/messages rejects it and Google's compatibility layer
+// is not guaranteed to pass it through. Unknown providers use the
+// OpenAI-compatible protocol, so they support it.
+func SupportsPromptCache(providerID string) bool {
+	provider, ok := DefaultProviders[providerID]
+	return !ok || provider.Shape == OpenAICompatible
+}
+
 // UpstreamError reports a provider that failed or did not answer. Error() is
 // safe to log and return: it never includes the key, the URL or the body.
 // Message is the provider's own bounded sentence, when it sent one.
