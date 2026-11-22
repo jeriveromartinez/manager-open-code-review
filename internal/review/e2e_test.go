@@ -515,14 +515,13 @@ func (p e2eApps) App(context.Context) (*ghapp.App, error) { return p.app, nil }
 
 type e2eFixture struct {
 	*runTestFixture
-	runner      *Runner
-	worker      *publish.Worker
-	trigger     *Trigger
-	gh          *e2eGitHub
-	events      *e2eEventStream
-	publisher   events.Publisher
-	ocrArgv     string
-	agentConfig string
+	runner    *Runner
+	worker    *publish.Worker
+	trigger   *Trigger
+	gh        *e2eGitHub
+	events    *e2eEventStream
+	publisher events.Publisher
+	ocrArgv   string
 }
 
 func newE2EFixture(t *testing.T) *e2eFixture {
@@ -559,14 +558,11 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 		trigger: &Trigger{
 			Store: f.s, Apps: apps, Jobs: f.jobs, Checks: worker, Box: f.box,
 		},
-		gh:          gh,
-		publisher:   publisher,
-		ocrArgv:     filepath.Join(f.root, "ocr-argv.txt"),
-		agentConfig: filepath.Join(f.root, "agent-config.json"),
+		gh:        gh,
+		publisher: publisher,
+		ocrArgv:   filepath.Join(f.root, "ocr-argv.txt"),
 	}
 	fixture.events = startE2EBroker(t, f.s, publisher)
-	t.Setenv("RUN_FAKE_OCR_ARGV", fixture.ocrArgv)
-	t.Setenv("RUN_FAKE_AGENT_CONFIG_OUT", fixture.agentConfig)
 	return fixture
 }
 
@@ -696,62 +692,19 @@ func (f *e2eFixture) assertShallowBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ocr argv: %v", err)
 	}
-	args := strings.Split(strings.TrimSpace(string(data)), "\n")
-	for i, arg := range args {
-		if arg != "--from" || i+1 >= len(args) {
-			continue
-		}
-		if args[i+1] != f.baseSHA {
-			t.Fatalf("ocr --from = %q, want the resolved base SHA %q (branch name breaks on shallow clones)", args[i+1], f.baseSHA)
-		}
-		return
-	}
-	t.Fatalf("ocr was not invoked with --from: %v", args)
-}
-
-// assertAgentConfig pins the OpenCode 1.19 authentication shape and the
-// subagent permission escape: the provider block keeps the key in the
-// environment and `task` stays denied so a spawned agent cannot inherit a
-// wider policy.
-func (f *e2eFixture) assertAgentConfig(t *testing.T) {
-	t.Helper()
-	raw, err := os.ReadFile(f.agentConfig)
-	if err != nil {
-		t.Fatalf("read captured opencode config: %v", err)
-	}
-	var cfg struct {
-		Provider map[string]struct {
-			Options struct {
-				APIKey string `json:"apiKey"`
-			} `json:"options"`
-		} `json:"provider"`
-		Permission map[string]string `json:"permission"`
-		Agent      map[string]struct {
-			Permission map[string]string `json:"permission"`
-		} `json:"agent"`
-	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		t.Fatalf("decode opencode config: %v", err)
-	}
-	provider, ok := cfg.Provider["nvidia"]
-	if !ok {
-		t.Fatalf("config has no provider entry (OpenCode 1.19 drops the V2 providers block): %s", raw)
-	}
-	if provider.Options.APIKey != "{env:QA_LLM_API_KEY}" {
-		t.Errorf("provider apiKey = %q, want the environment placeholder", provider.Options.APIKey)
-	}
-	reviewer, ok := cfg.Agent["qa-reviewer"]
-	if !ok {
-		t.Fatalf("config has no qa-reviewer agent: %s", raw)
-	}
-	for _, action := range []string{"edit", "bash", "task", "webfetch", "websearch", "external_directory"} {
-		if got := reviewer.Permission[action]; got != "deny" {
-			t.Errorf("qa-reviewer permission %q = %q, want deny", action, got)
-		}
-		if got := cfg.Permission[action]; got != "deny" {
-			t.Errorf("global permission %q = %q, want deny", action, got)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		args := strings.Fields(line)
+		for i, arg := range args {
+			if arg != "--from" || i+1 >= len(args) {
+				continue
+			}
+			if args[i+1] != f.baseSHA {
+				t.Fatalf("ocr --from = %q, want the resolved base SHA %q (branch name breaks on shallow clones)", args[i+1], f.baseSHA)
+			}
+			return
 		}
 	}
+	t.Fatalf("ocr was not invoked with --from: %s", data)
 }
 
 // --- cases -----------------------------------------------------------------
@@ -804,7 +757,8 @@ func testE2ESuccess(t *testing.T) {
 	assertE2EPRStatus(t, f, store.StatusChangesRequested)
 
 	body := assertE2ESummary(t, f, "Revisión #1", f.headSHA[:7], "major 1", "2/0",
-		"Revisión completada", "https://qa.example/prs/"+strconv.FormatUint(uint64(f.pr.ID), 10))
+		"Revisión completada: 2 archivos revisados, 1 hallazgo",
+		"https://qa.example/prs/"+strconv.FormatUint(uint64(f.pr.ID), 10))
 	if strings.Contains(body, "Revisión no concluyente") {
 		t.Errorf("successful summary carries the inconclusive warning: %q", body)
 	}
@@ -830,7 +784,12 @@ func testE2ESuccess(t *testing.T) {
 	}
 
 	f.assertShallowBase(t)
-	f.assertAgentConfig(t)
+	if got := f.ocrCalls(t); got != 1 {
+		t.Errorf("ocr invocations = %d, want 1", got)
+	}
+	if got := f.agentCalls(t); got != 0 {
+		t.Errorf("opencode invocations = %d, want 0", got)
+	}
 
 	f.events.wait(t,
 		events.Event{Type: "run.updated", ID: strconv.FormatUint(uint64(runID), 10)},
@@ -843,7 +802,7 @@ func testE2ESuccess(t *testing.T) {
 func testE2ETimeout(t *testing.T) {
 	f := newE2EFixture(t)
 	f.runner.Cfg.Timeout = 300 * time.Millisecond
-	t.Setenv("RUN_FAKE_AGENT_SLEEP_ON_CALL", "1")
+	t.Setenv("RUN_FAKE_OCR_SLEEP", "30")
 
 	seed := store.Finding{
 		ID: "seed-finding", PullRequestID: f.pr.ID, Fingerprint: "seed-fp",
@@ -1010,8 +969,11 @@ func testE2ESuperseded(t *testing.T) {
 		t.Errorf("created checks = %v, want a second one for %q", created, head2)
 	}
 	assertE2ECheck(t, f, "failure")
-	if got := f.agentCalls(t); got != 1 {
-		t.Errorf("agent calls = %d, want only the new head reviewed", got)
+	if got := f.agentCalls(t); got != 0 {
+		t.Errorf("opencode calls = %d, want 0", got)
+	}
+	if got := f.ocrCalls(t); got != 1 {
+		t.Errorf("ocr calls = %d, want only the new head reviewed", got)
 	}
 
 	f.events.wait(t,
@@ -1095,7 +1057,7 @@ func testE2EFindingsLifecycle(t *testing.T) {
 	head4 := f.push(t, "fix2.go")
 	f.setHead(t, head4)
 	f.runner.Cfg.OCRBin = ocrBin
-	f.setAgent(t, `{"summary":"Sin hallazgos","coverage":{"reviewed_files":2,"skipped_files":0},"previous_findings":[],"findings":[]}`, false)
+	f.setOCR(t, runTestNativeNoFindings())
 	run4 := f.enqueue(t, false)
 	f.events.reset()
 	f.execute(t, run4)

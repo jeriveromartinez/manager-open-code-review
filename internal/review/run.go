@@ -109,11 +109,9 @@ func (e *CloneTokenStaleError) Error() string {
 type RunnerConfig struct {
 	WorkspaceDir, OCRBin, OpencodeBin, GitBaseURL string
 	FetchDepthMax                                 int
-	// Timeout is the whole-run budget, not a per-invocation watchdog: every pass
-	// receives whatever is left of it and the run stops when nothing remains.
+	// Timeout is the whole-run budget. It bounds the execution context and
+	// derives OCR's own concurrent-task timeout.
 	Timeout time.Duration
-	// Steps caps the agentic iterations of one pass. Zero uses the agent default.
-	Steps int
 }
 
 // Enqueuer is the minimal queue interface used by the review worker. Task 8
@@ -408,10 +406,17 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	remote := strings.TrimSuffix(r.Cfg.GitBaseURL, "/") + "/" + cfg.Repo.FullName + ".git"
 	remote = withCloneToken(remote, token)
 
-	if _, err := Clone(ctx, workDir, remote, baseRef, headRef, r.Cfg.FetchDepthMax); err != nil {
-		return classifyCloneError(ctx, out, err)
+	runCtx := ctx
+	if r.Cfg.Timeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, r.Cfg.Timeout)
+		defer cancel()
 	}
-	headSHA, err := git(ctx, workDir, "rev-parse", "--no-pager", "rev-parse", "HEAD")
+	mergeBase, err := Clone(runCtx, workDir, remote, baseRef, headRef, r.Cfg.FetchDepthMax)
+	if err != nil {
+		return classifyCloneError(runCtx, out, err)
+	}
+	headSHA, err := git(runCtx, workDir, "rev-parse", "--no-pager", "rev-parse", "HEAD")
 	if err != nil {
 		return out.failed(fmt.Errorf("resolver HEAD del checkout: %w", err), "git_error"), nil
 	}
@@ -432,161 +437,87 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		slog.Warn("review excludes dropped: OCR cannot carry commas",
 			"run_id", run.ID, "patterns", dropped)
 	}
-	ocr := &OCR{Bin: r.Cfg.OCRBin, RepoDir: workDir, Excludes: excludes}
-	// El primer run no tiene BaseSHA: usar el nombre de rama no funciona en un
-	// clon shallow porque no existe como ref local. FETCH_HEAD sí tiene el SHA
-	// exacto que se acaba de pedir como base.
+	key, err := r.boxOpen(cfg.Profile.APIKeyEnc)
+	if err != nil {
+		return out.inconclusive(fmt.Errorf("descifrar clave del perfil %d: %w", cfg.Profile.ID, err), "llm_error"), nil
+	}
+
+	// The first run has no BaseSHA, so Clone's merge-base is the reviewed base.
+	// It is already computed from the fetched refs and works on shallow clones.
 	ocrBase := run.BaseSHA
+	if ocrBase == "" {
+		ocrBase = mergeBase
+	}
 	if ocrBase == "" {
 		ocrBase, err = fetchHeadBase(workDir)
 		if err != nil {
 			return out.failed(fmt.Errorf("resolver base del checkout: %w", err), "git_error"), nil
 		}
 	}
-	preview, err := ocr.Preview(ctx, ocrBase, headSHA)
+
+	timeout := r.Cfg.Timeout
+	if deadline, ok := runCtx.Deadline(); ok {
+		timeout = time.Until(deadline)
+	}
+	reviewer := &NativeReviewer{
+		Bin:        r.Cfg.OCRBin,
+		RepoDir:    workDir,
+		Home:       filepath.Join(workDir, "home-ocr"),
+		Profile:    cfg.Profile,
+		APIKey:     string(key),
+		Excludes:   excludes,
+		Background: buildBackground(cfg.PR, cfg.Policy.ExtraInstructions),
+		BaseRef:    ocrBase,
+		HeadRef:    headSHA,
+		Timeout:    timeout,
+	}
+
+	slog.Info("native OCR review started", "run_id", run.ID, "profile_id", cfg.Profile.ID)
+	res, _, err := r.runNativeReview(runCtx, cfg.Profile.ID, reviewer)
 	if err != nil {
-		return classifyOCR(ctx, out, err)
-	}
-	baseSHA := preview.MergeBase
-	out.excludedFiles = len(preview.ExcludedFiles)
-
-	paths := make([]string, 0, len(preview.ReviewableFiles))
-	for _, f := range preview.ReviewableFiles {
-		paths = append(paths, f.Path)
-	}
-	groups, err := ocr.Rules(ctx, ocrBase, headSHA, paths)
-	if err != nil {
-		return classifyOCR(ctx, out, err)
+		var capacity *ProfileCapacityError
+		if errors.As(err, &capacity) {
+			return out, capacity
+		}
+		return classifyNativeError(runCtx, out, err)
 	}
 
-	sized, err := diffSizes(ctx, workDir, baseSHA, headSHA, preview.ReviewableFiles)
-	if err != nil {
-		return out.failed(fmt.Errorf("medir diffs por archivo: %w", err), "git_error"), nil
+	status, code := nativeOutcome(res)
+	reviewed, skipped, excluded := nativeCoverageCounts(res)
+	out.coverage = coverageJSON(reviewed, skipped, excluded)
+	out.excludedFiles = excluded
+	out.tokens = nativeTokenUsage(res)
+	out.summary = nativeSummaryText(res, status)
+	out.merged = mergeNativeFindings(res.Comments)
+
+	switch status {
+	case store.RunSucceeded:
+		upserts, resolved := Reconcile(open, out.merged, run.ID, true)
+		for i := range upserts {
+			upserts[i].PullRequestID = run.PullRequestID
+		}
+		out.status = store.RunSucceeded
+		out.findings = upserts
+		out.resolved = resolved
+		return out, nil
+	case store.RunInconclusive:
+		return out.inconclusive(errors.New(nativeStatusMessage(res, code)), code), nil
+	default:
+		return out.failed(errors.New(nativeStatusMessage(res, code)), code), nil
 	}
-	passes, uncovered, err := PlanPasses(PlanInput{
-		Files:        sized,
-		Groups:       groups,
-		MaxFiles:     cfg.Policy.MaxFilesPerPass,
-		MaxDiffLines: cfg.Policy.MaxDiffLinesPerPass,
-		MaxDiffBytes: maxAttachmentBytes,
-		MaxPasses:    cfg.Policy.MaxPasses,
-	})
-	if err != nil {
-		return out.failed(fmt.Errorf("planificar pasadas: %w", err), "config"), nil
-	}
-
-	reviewed := countCovered(passes)
-	out.coverage = coverageJSON(reviewed, len(uncovered), out.excludedFiles)
-	if len(uncovered) > 0 {
-		return out.inconclusive(
-			fmt.Errorf("cobertura incompleta: %d archivos sin revisar", len(uncovered)),
-			"coverage_incomplete"), nil
-	}
-
-	findingIndex := make(map[string]int)
-	budget := newRunBudget(r.Cfg.Timeout, nil)
-	for idx, pass := range passes {
-		passesLeft := len(passes) - idx - 1
-		timeout, ok := budget.timeout()
-		if !ok {
-			return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
-		}
-		slog.Info("review pass started",
-			"run_id", run.ID, "pass", idx+1, "passes", len(passes),
-			"files", len(pass.Files), "remaining", timeout)
-
-		diffPath, err := writePassDiff(ctx, workDir, baseSHA, headSHA, pass.Files)
-		if err != nil {
-			return out.failed(fmt.Errorf("generar diff de pasada: %w", err), "git_error"), nil
-		}
-
-		key, err := r.boxOpen(cfg.Profile.APIKeyEnc)
-		if err != nil {
-			return out.inconclusive(fmt.Errorf("descifrar clave del perfil %d: %w", cfg.Profile.ID, err), "llm_error"), nil
-		}
-		agent := &Agent{
-			Bin: r.Cfg.OpencodeBin,
-			Dir: workDir,
-			// Each pass gets its own HOME so a schema retry can resume this
-			// pass with --continue without picking up an earlier pass.
-			Home:    filepath.Join(workDir, fmt.Sprintf("home-pass-%d", idx+1)),
-			Profile: cfg.Profile,
-			APIKey:  string(key),
-			Timeout: timeout,
-			Steps:   r.Cfg.Steps,
-		}
-		prompt := BuildPrompt(cfg.PR, pass.Rules, open, cfg.Policy.ExtraInstructions, diffPath)
-
-		text, usage, runErr := r.runAgent(ctx, agent, prompt, []string{diffPath})
-		out.tokens.addJSON(usage)
-		if runErr != nil {
-			if budgetCut(runErr, passesLeft) {
-				return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
-			}
-			return classifyAgentError(ctx, out, runErr)
-		}
-		parsed, err := ValidateOutput(text)
-		if err != nil {
-			retry := prompt + "\n\nLa salida anterior no validó el esquema: " + err.Error() +
-				"\nCorrígela y responde solo con el JSON válido."
-			agent.Timeout, ok = budget.timeout()
-			if !ok {
-				return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
-			}
-			// Reuse the session that already read the diff: a fresh run would
-			// repeat the same exploration before it could correct the schema.
-			agent.Continue = true
-			text, usage, runErr = r.runAgent(ctx, agent, retry, nil)
-			out.tokens.addJSON(usage)
-			if runErr != nil {
-				if budgetCut(runErr, passesLeft) {
-					return out.budgetExhausted(idx+1, len(passes), passes, r.Cfg.Timeout), nil
-				}
-				return classifyAgentError(ctx, out, runErr)
-			}
-			parsed, err = ValidateOutput(text)
-			if err != nil {
-				return out.inconclusive(fmt.Errorf("salida del agente inválida: %w", err), "schema_invalid"), nil
-			}
-		}
-
-		if parsed.Summary != "" {
-			out.summary = parsed.Summary
-		}
-		for _, finding := range parsed.Findings {
-			fp := Fingerprint(finding, nil)
-			if i, seen := findingIndex[fp]; seen {
-				out.merged.Findings[i] = finding // última pasada gana, posición estable
-			} else {
-				findingIndex[fp] = len(out.merged.Findings)
-				out.merged.Findings = append(out.merged.Findings, finding)
-			}
-		}
-	}
-
-	upserts, resolved := Reconcile(open, out.merged, run.ID, true)
-	for i := range upserts {
-		upserts[i].PullRequestID = run.PullRequestID
-	}
-	out.status = store.RunSucceeded
-	out.findings = upserts
-	out.resolved = resolved
-	return out, nil
 }
 
-// runAgent holds one profile slot for exactly one agent invocation. files are
-// attached with `-f`; the schema retry passes none because the continued
-// session already has the diff.
-func (r *Runner) runAgent(ctx context.Context, agent *Agent, prompt string, files []string) (string, []byte, error) {
-	release, acquired, err := r.Store.AcquireProfileSlot(ctx, agent.Profile.ID)
+// runNativeReview holds one profile slot for exactly one OCR invocation.
+func (r *Runner) runNativeReview(ctx context.Context, profileID uint, reviewer *NativeReviewer) (nativeReview, []byte, error) {
+	release, acquired, err := r.Store.AcquireProfileSlot(ctx, profileID)
 	if err != nil {
-		return "", nil, fmt.Errorf("bloquear perfil %d: %w", agent.Profile.ID, err)
+		return nativeReview{}, nil, fmt.Errorf("bloquear perfil %d: %w", profileID, err)
 	}
 	if !acquired {
-		return "", nil, &ProfileCapacityError{ProfileID: agent.Profile.ID}
+		return nativeReview{}, nil, &ProfileCapacityError{ProfileID: profileID}
 	}
 	defer release()
-	return agent.Run(ctx, prompt, files)
+	return reviewer.Review(ctx)
 }
 
 func (r *Runner) boxOpen(sealed string) ([]byte, error) {
@@ -603,52 +534,6 @@ func withCloneToken(remote string, token []byte) string {
 	}
 	u.User = url.UserPassword("x-access-token", string(token))
 	return u.String()
-}
-
-// writePassDiff executes the git diff for one pass and writes its output to a
-// temporary file inside the ephemeral workspace, attached to the agent prompt.
-// diffSizes measures each file's diff in the clone. OCR reports line counts
-// but not bytes, and OpenCode truncates a text attachment at 50 KB, so the
-// planner needs the real size before grouping files into a pass.
-func diffSizes(ctx context.Context, dir, baseSHA, headSHA string, files []PreviewFile) ([]PreviewFile, error) {
-	sized := make([]PreviewFile, len(files))
-	copy(sized, files)
-	for i := range sized {
-		out, err := git(ctx, dir, "diff", "-C", dir, "diff", "--unified=3", baseSHA, headSHA, "--", sized[i].Path)
-		if err != nil {
-			return nil, err
-		}
-		sized[i].DiffBytes = len(out)
-	}
-	return sized, nil
-}
-
-func writePassDiff(ctx context.Context, dir, baseSHA, headSHA string, files []string) (string, error) {
-	args := []string{"-C", dir, "diff", "--unified=3", baseSHA, headSHA, "--"}
-	args = append(args, files...)
-	out, err := git(ctx, dir, "diff", args...)
-	if err != nil {
-		return "", err
-	}
-	f, err := os.CreateTemp(dir, "qa-diff-*.patch")
-	if err != nil {
-		return "", fmt.Errorf("crear archivo de diff: %w", err)
-	}
-	defer f.Close()
-	if _, err := f.WriteString(out); err != nil {
-		return "", fmt.Errorf("escribir archivo de diff: %w", err)
-	}
-	return f.Name(), nil
-}
-
-func countCovered(passes []Pass) int {
-	seen := make(map[string]bool)
-	for _, pass := range passes {
-		for _, file := range pass.Files {
-			seen[file] = true
-		}
-	}
-	return len(seen)
 }
 
 func coverageJSON(reviewed, skipped, excluded int) []byte {
@@ -755,22 +640,6 @@ func (out runOutcome) inconclusive(err error, code string) runOutcome {
 	return out
 }
 
-// budgetExhausted ends the run when the review_timeout budget ran out before
-// every pass could run. The message has to name the aborted pass and the files
-// left unreviewed: a bare DeadlineExceeded leaves the operator with nothing to
-// act on. Inconclusive (not failed) so the findings of completed passes publish.
-//
-// pass is 1-based and is also the pass that could not run.
-func (out runOutcome) budgetExhausted(pass, passes int, all []Pass, budget time.Duration) runOutcome {
-	done := pass - 1
-	out.coverage = coverageJSON(countCovered(all[:done]), countCovered(all[done:]), out.excludedFiles)
-	err := fmt.Errorf(
-		"presupuesto agotado en la pasada %d de %d: %d archivos sin revisar; "+
-			"aumenta review_timeout en Ajustes → Revisión (actual %s) para completar la revisión",
-		pass, passes, countCovered(all[done:]), budget)
-	return out.inconclusive(err, "budget_exhausted")
-}
-
 // staleCloneToken reports whether the token expires before it can finish
 // cloning. A nil expiry means the run predates the stored expiry: the clone is
 // attempted with whatever token it carries.
@@ -781,54 +650,6 @@ func staleCloneToken(expiresAt *time.Time, now time.Time) bool {
 func truncatedContext(ctx context.Context, err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, context.Canceled) || ctx.Err() != nil
-}
-
-// runBudget is the whole-run time budget from the review_timeout setting. Every
-// pass spends from it, so a slow pass leaves less for the passes after it
-// instead of each invocation getting the full figure as an opaque watchdog.
-type runBudget struct {
-	total time.Duration
-	now   func() time.Time
-	start time.Time
-}
-
-func newRunBudget(total time.Duration, now func() time.Time) *runBudget {
-	if now == nil {
-		now = time.Now
-	}
-	return &runBudget{total: total, now: now, start: now()}
-}
-
-// remaining never goes negative. Without a configured budget it is 0.
-func (b *runBudget) remaining() time.Duration {
-	if b == nil || b.total <= 0 {
-		return 0
-	}
-	left := b.total - b.now().Sub(b.start)
-	if left < 0 {
-		return 0
-	}
-	return left
-}
-
-// timeout is what a pass may consume: whatever is left of the whole-run budget.
-// ok is false when nothing is left, so no further pass may start. Without a
-// configured budget it means "no per-pass deadline".
-func (b *runBudget) timeout() (time.Duration, bool) {
-	if b == nil || b.total <= 0 {
-		return 0, true
-	}
-	left := b.remaining()
-	return left, left > 0
-}
-
-// budgetCut separates a run that ran out of budget from a single slow pass. The
-// per-pass deadline is the whole remaining budget, so a pass cut short while
-// passes remain leaves nothing for them: that is budget exhaustion, and the run
-// must stop with an actionable message. On the last pass the pre-existing
-// `timeout` code is kept.
-func budgetCut(err error, passesLeft int) bool {
-	return passesLeft > 0 && errors.Is(err, context.DeadlineExceeded)
 }
 
 // cloneCredentialSignals are the shapes git and the HTTP stack use to report a
@@ -875,24 +696,22 @@ func classifyCloneError(ctx context.Context, out runOutcome, err error) (runOutc
 	return out.failed(err, "git_error"), nil
 }
 
-func classifyOCR(ctx context.Context, out runOutcome, err error) (runOutcome, error) {
+// classifyNativeError handles failures that produced no parseable OCR result.
+// A configuration failure is terminal; anything else that is not our own
+// deadline is reported as an OCR error and keeps the run inconclusive.
+func classifyNativeError(ctx context.Context, out runOutcome, err error) (runOutcome, error) {
 	if truncatedContext(ctx, err) {
 		return out.inconclusive(err, "timeout"), nil
+	}
+	message := strings.ToLower(err.Error())
+	for _, signal := range []string{
+		"no valid llm endpoint", "configuration", "config file", "invalid config",
+	} {
+		if strings.Contains(message, signal) {
+			return out.failed(err, "config"), nil
+		}
 	}
 	return out.inconclusive(err, "ocr_error"), nil
-}
-
-// classifyAgentError keeps a run waiting for a profile slot out of the LLM
-// error path: it must be retried, not finished.
-func classifyAgentError(ctx context.Context, out runOutcome, err error) (runOutcome, error) {
-	var capacity *ProfileCapacityError
-	if errors.As(err, &capacity) {
-		return out, capacity
-	}
-	if truncatedContext(ctx, err) {
-		return out.inconclusive(err, "timeout"), nil
-	}
-	return out.inconclusive(err, "llm_error"), nil
 }
 
 func truncateRunMessage(message string) string {
