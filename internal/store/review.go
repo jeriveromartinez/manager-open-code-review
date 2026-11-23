@@ -942,7 +942,8 @@ func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
 		Columns: []clause.Column{{Name: "pull_request_id"}, {Name: "fingerprint"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"path", "start_line", "end_line", "severity", "category", "title",
-			"body", "suggestion", "confidence", "status", "last_seen_run_id", "updated_at",
+			"body", "suggestion", "confidence", "existing_code", "status",
+			"last_seen_run_id", "updated_at",
 		}),
 	}).Create(&f)
 	if res.Error != nil {

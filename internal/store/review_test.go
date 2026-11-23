@@ -2079,3 +2079,35 @@ func TestQAPolicyAutoTriageFieldsRoundTrip(t *testing.T) {
 		t.Errorf("policy ID = %d, want %d", loaded.ID, saved.ID)
 	}
 }
+
+func TestUpsertFindingStoresExistingCode(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/cited-code", nil, true)
+	pr := f.openPR(repo.ID, 14, store.StatusPending, false)
+
+	first, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_cited", PullRequestID: pr.ID, Fingerprint: "fp-cited",
+		Path: "main.go", Severity: "minor", Category: "correctness",
+		Status: store.FindingOpen, ExistingCode: "guard()",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if first.ExistingCode != "guard()" {
+		t.Errorf("ExistingCode = %q, want guard()", first.ExistingCode)
+	}
+
+	updated, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_cited", PullRequestID: pr.ID, Fingerprint: "fp-cited",
+		Path: "main.go", Severity: "minor", Category: "correctness",
+		Status: store.FindingOpen, ExistingCode: "other guard()",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding(update): %v", err)
+	}
+	if updated.ExistingCode != "other guard()" {
+		t.Errorf("ExistingCode after upsert = %q, want the updated cited code", updated.ExistingCode)
+	}
+}

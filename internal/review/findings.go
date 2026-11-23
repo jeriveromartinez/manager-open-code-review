@@ -157,12 +157,18 @@ func Reconcile(open []store.Finding, out AgentOutput, runID uint, complete bool)
 			Body:                af.Body,
 			Suggestion:          af.Suggestion,
 			Confidence:          af.Confidence,
+			ExistingCode:        af.ExistingCode,
 			Status:              store.FindingOpen,
 			FirstSeenRunID:      prev.FirstSeenRunID,
 			LastSeenRunID:       runID,
 			GithubCommentID:     prev.GithubCommentID,
 			GithubCommentNodeID: prev.GithubCommentNodeID,
 			GithubThreadID:      prev.GithubThreadID,
+			TriageVerdict:       prev.TriageVerdict,
+			TriageSource:        prev.TriageSource,
+			TriagedBy:           prev.TriagedBy,
+			TriagedAt:           prev.TriagedAt,
+			Verification:        prev.Verification,
 		}
 		if !exists {
 			nf.ID = "f_" + fp[:16]
