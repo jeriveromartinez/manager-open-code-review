@@ -940,6 +940,22 @@ func TestRunInconclusiveWhenOCRMissing(t *testing.T) {
 	}
 }
 
+// TestRunWithoutOCRSummaryStoresNullTokens pins #129: a parsed result with no
+// summary never reported consumption, so the columns stay NULL.
+func TestRunWithoutOCRSummaryStoresNullTokens(t *testing.T) {
+	f := newRunTestFixture(t)
+	f.setOCR(t, `{"status": "complete"}`)
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+	if run.InputTokens != nil || run.OutputTokens != nil || run.TotalTokens != nil {
+		t.Errorf("token columns = %v/%v/%v, want NULL without an OCR summary",
+			run.InputTokens, run.OutputTokens, run.TotalTokens)
+	}
+}
+
 func TestRunInconclusiveLeavesFindingsOpen(t *testing.T) {
 	f := newRunTestFixture(t)
 	seed := store.Finding{

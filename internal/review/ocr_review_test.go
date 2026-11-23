@@ -722,3 +722,21 @@ func TestReviewStreamsStderrOnFailure(t *testing.T) {
 		t.Errorf("streamed lines = %q, want the failure reason", got)
 	}
 }
+
+func TestParseNativeReviewDetectsSummary(t *testing.T) {
+	withSummary, err := parseNativeReview([]byte(`{"status": "complete", "summary": {"total_tokens": 10}}`))
+	if err != nil {
+		t.Fatalf("parseNativeReview(with summary): %v", err)
+	}
+	if !withSummary.hasSummary {
+		t.Error("hasSummary = false, want true when OCR wrote a summary")
+	}
+
+	withoutSummary, err := parseNativeReview([]byte(`{"status": "complete"}`))
+	if err != nil {
+		t.Fatalf("parseNativeReview(without summary): %v", err)
+	}
+	if withoutSummary.hasSummary {
+		t.Error("hasSummary = true, want false when OCR omitted the summary")
+	}
+}

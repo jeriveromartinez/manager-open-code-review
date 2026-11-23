@@ -151,8 +151,8 @@ type runOutcome struct {
 	// tokens accumulates every model call of the run; usage is its JSON form,
 	// kept for panels that read the raw event stream.
 	tokens tokenUsage
-	// tokensKnown is set only when an engine returned a parseable result, so a
-	// cut run persists NULL instead of a fake zero (#129).
+	// tokensKnown is set only when OCR reported a summary, so a cut run persists
+	// NULL instead of a fake zero (#129).
 	tokensKnown bool
 
 	// Context needed to reconcile findings from passes that already completed
@@ -642,7 +642,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		time.Since(started).Round(time.Second), status, reviewed, skipped, excluded, len(res.Comments)))
 	files := nativeCoverageFiles(res)
 	out.tokens = nativeTokenUsage(res)
-	out.tokensKnown = true
+	out.tokensKnown = res.hasSummary
 	out.summary = nativeSummaryText(res, status)
 
 	comments := append([]nativeComment(nil), res.Comments...)
