@@ -33,9 +33,9 @@ type Config struct {
 	ReviewConcurrency    int           // review_concurrency, default 2
 	ReviewAgentSteps     int           // review_agent_steps, default 8
 	ReviewContextCeiling int           // review_context_ceiling, default 270000
-	ReviewTimeout        time.Duration // review_timeout, default 20m
+	ReviewTimeout        time.Duration // review_timeout, default 45m
 	ReviewDebounce       time.Duration // review_debounce, default 2m
-	ReviewStaleAfter     time.Duration // review_stale_after, default 45m
+	ReviewStaleAfter     time.Duration // review_stale_after, default 60m
 	LLMHealthInterval    time.Duration // llm_health_interval, default 6h
 	WorkspaceDir         string        // workspace_dir, default "/tmp/qa"
 	WorkerHealthAddr     string        // worker_health_addr, default ":9090"
@@ -84,7 +84,7 @@ func Default() Config {
 		ReviewConcurrency:    2,
 		ReviewAgentSteps:     8,
 		ReviewContextCeiling: ReviewContextCeilingDefault,
-		ReviewTimeout:        20 * time.Minute,
+		ReviewTimeout:        45 * time.Minute,
 		// A burst of pushes is common while a PR is being prepared; waiting two
 		// quiet minutes reviews the final head instead of every intermediate one.
 		ReviewDebounce:   2 * time.Minute,
@@ -104,7 +104,7 @@ func Default() Config {
 		MonitorRenotifyAfter: 30 * time.Minute,
 		// A review budget is 20m plus the River retry window, so a shorter
 		// threshold would fail healthy runs on a slow LLM.
-		ReviewStaleAfter: 45 * time.Minute,
+		ReviewStaleAfter: 60 * time.Minute,
 		// A provider credential changes rarely and the probe is a single tiny
 		// request, so six hours is frequent enough without polling the provider.
 		LLMHealthInterval: 6 * time.Hour,

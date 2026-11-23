@@ -44,8 +44,8 @@ func TestSettingsReturnsDefaultsAndMetadata(t *testing.T) {
 		} `json:"fields"`
 	}
 	decodeJSON(t, rec, &body)
-	if body.Values["review_timeout"] != "20m0s" && body.Values["review_timeout"] != "20m" {
-		t.Errorf("review_timeout = %q, want the 20m default", body.Values["review_timeout"])
+	if body.Values["review_timeout"] != "45m0s" && body.Values["review_timeout"] != "45m" {
+		t.Errorf("review_timeout = %q, want the 45m default", body.Values["review_timeout"])
 	}
 	if body.Values["review_debounce"] != "2m0s" && body.Values["review_debounce"] != "2m" {
 		t.Errorf("review_debounce = %q, want the 2m default", body.Values["review_debounce"])
@@ -226,7 +226,7 @@ func TestSettingsGetOverlaysStoredRowsOverProcessConfig(t *testing.T) {
 	if body.Values["review_timeout"] != "30m0s" {
 		t.Errorf("review_timeout = %q, want the stored 30m0s", body.Values["review_timeout"])
 	}
-	if f.deps.Cfg.ReviewTimeout != 20*time.Minute {
-		t.Errorf("deps.Cfg.ReviewTimeout = %s, want the untouched 20m startup value", f.deps.Cfg.ReviewTimeout)
+	if f.deps.Cfg.ReviewTimeout != 45*time.Minute {
+		t.Errorf("deps.Cfg.ReviewTimeout = %s, want the untouched 45m startup value", f.deps.Cfg.ReviewTimeout)
 	}
 }
