@@ -451,9 +451,11 @@ onBeforeUnmount(() => {
                 </div>
               </dl>
               <p v-else class="run__no-tokens" data-run-no-tokens>
-                {{ run.error_code
-                  ? 'Sin datos de tokens: la revisión se cortó antes de que OCR informara el consumo'
-                  : 'Sin datos de tokens: ejecución anterior al registro de consumo' }}
+                {{ run.finished_at === null
+                  ? 'Sin datos de tokens: la revisión aún no ha informado su consumo'
+                  : run.error_code
+                    ? 'Sin datos de tokens: la revisión se cortó antes de que OCR informara el consumo'
+                    : 'Sin datos de tokens: ejecución anterior al registro de consumo' }}
               </p>
             </li>
           </ol>

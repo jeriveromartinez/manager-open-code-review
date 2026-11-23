@@ -463,6 +463,36 @@ describe('PrDetailView', () => {
     wrapper.unmount()
   })
 
+  it('does not call a live run cut when it was requeued', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [
+        {
+          ...detail.runs[0],
+          status: 'queued',
+          error_code: 'capacity',
+          finished_at: null,
+          input_tokens: null,
+          output_tokens: null,
+          reasoning_tokens: null,
+          cache_read_tokens: null,
+          cache_write_tokens: null,
+          total_tokens: null,
+          max_context_tokens: null,
+        },
+      ],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const text = wrapper.get('[data-run-no-tokens]').text()
+    expect(text).toContain('aún no ha informado su consumo')
+    expect(text).not.toContain('se cortó')
+
+    wrapper.unmount()
+  })
+
   it('shows the current phase and its elapsed time for an active run', async () => {
     mocks.api.prDetail.mockResolvedValue({
       ...detail,

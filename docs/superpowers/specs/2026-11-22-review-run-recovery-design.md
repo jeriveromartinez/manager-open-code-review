@@ -61,8 +61,9 @@ nuevo entre procesos.
 - El código de error sigue siendo `interrupted`; solo cambia el mensaje.
 - Margen mínimo entre los dos ajustes: 5 minutos, suficientes para clonar y
   publicar después del corte de OCR.
-- En el panel, un `total_tokens` nulo con `error_code` no vacío es un run
-  cortado; sin `error_code`, es una fila anterior al registro de consumo.
+- En el panel, un `total_tokens` nulo con `error_code` no vacío en un run ya
+  terminado es un run cortado. Un run en cola o en curso aún no ha informado su
+  consumo, y sin `error_code` la fila es anterior al registro de consumo.
 
 ## Alcance
 
