@@ -727,8 +727,11 @@ type RunCompletion struct {
 	Coverage     []byte
 	Usage        []byte
 	Tokens       RunUsage
-	Findings     []Finding
-	Resolved     []string
+	// TokensKnown reports whether an engine measured consumption. When false the
+	// token columns are stored as NULL, not as a fake zero (#129).
+	TokensKnown bool
+	Findings    []Finding
+	Resolved    []string
 	// BaseSHA is the reviewed base of the run, used to decide whether the next
 	// push can be reviewed incrementally. An empty value never overwrites the
 	// base a run already carried.
@@ -751,9 +754,16 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 		}
 		now := time.Now().UTC()
 		// An untyped nil interface makes the column NULL; a typed nil pointer
-		// would depend on how the driver treats it.
+		// would depend on how the driver treats it. Without an engine result the
+		// whole set stays NULL, so aggregates skip the run instead of counting a
+		// fake zero (#129).
+		var input, output, reasoning, cacheRead, cacheWrite, total any
+		if c.TokensKnown {
+			input, output, reasoning = c.Tokens.Input, c.Tokens.Output, c.Tokens.Reasoning
+			cacheRead, cacheWrite, total = c.Tokens.CacheRead, c.Tokens.CacheWrite, c.Tokens.Total
+		}
 		var maxContext any
-		if c.Tokens.MaxContext != nil {
+		if c.TokensKnown && c.Tokens.MaxContext != nil {
 			maxContext = *c.Tokens.MaxContext
 		}
 		updates := map[string]any{
@@ -763,12 +773,12 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 			"summary":            c.Summary,
 			"coverage":           datatypes.JSON(coverage),
 			"usage":              datatypes.JSON(usage),
-			"input_tokens":       c.Tokens.Input,
-			"output_tokens":      c.Tokens.Output,
-			"reasoning_tokens":   c.Tokens.Reasoning,
-			"cache_read_tokens":  c.Tokens.CacheRead,
-			"cache_write_tokens": c.Tokens.CacheWrite,
-			"total_tokens":       c.Tokens.Total,
+			"input_tokens":       input,
+			"output_tokens":      output,
+			"reasoning_tokens":   reasoning,
+			"cache_read_tokens":  cacheRead,
+			"cache_write_tokens": cacheWrite,
+			"total_tokens":       total,
 			"max_context_tokens": maxContext,
 			"clone_token_enc":    "",
 			// A finished run has no phase: keeping the last one would make the

@@ -413,6 +413,7 @@ describe('PrDetailView', () => {
       runs: [
         {
           ...detail.runs[0],
+          error_code: '',
           input_tokens: null,
           output_tokens: null,
           reasoning_tokens: null,
@@ -429,6 +430,65 @@ describe('PrDetailView', () => {
 
     expect(wrapper.find('[data-run-tokens]').exists()).toBe(false)
     expect(wrapper.get('[data-run-no-tokens]').text()).toContain('Sin datos de tokens')
+    expect(wrapper.get('[data-run-no-tokens]').text()).toContain('ejecución anterior al registro de consumo')
+
+    wrapper.unmount()
+  })
+
+  it('explains that a cut run never reported its token usage', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [
+        {
+          ...detail.runs[0],
+          status: 'failed',
+          error_code: 'timeout',
+          input_tokens: null,
+          output_tokens: null,
+          reasoning_tokens: null,
+          cache_read_tokens: null,
+          cache_write_tokens: null,
+          total_tokens: null,
+          max_context_tokens: null,
+        },
+      ],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.find('[data-run-tokens]').exists()).toBe(false)
+    expect(wrapper.get('[data-run-no-tokens]').text()).toContain('se cortó antes de que OCR informara el consumo')
+
+    wrapper.unmount()
+  })
+
+  it('does not call a live run cut when it was requeued', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [
+        {
+          ...detail.runs[0],
+          status: 'queued',
+          error_code: 'capacity',
+          finished_at: null,
+          input_tokens: null,
+          output_tokens: null,
+          reasoning_tokens: null,
+          cache_read_tokens: null,
+          cache_write_tokens: null,
+          total_tokens: null,
+          max_context_tokens: null,
+        },
+      ],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const text = wrapper.get('[data-run-no-tokens]').text()
+    expect(text).toContain('aún no ha informado su consumo')
+    expect(text).not.toContain('se cortó')
 
     wrapper.unmount()
   })

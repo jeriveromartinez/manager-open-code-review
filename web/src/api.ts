@@ -111,13 +111,14 @@ export type ReviewRun = {
   usage: Record<string, unknown>
   error_code: string
   error_message: string
-  /** null en ejecuciones anteriores al registro de consumo (#73). */
+  /** null en ejecuciones anteriores al registro y en runs cortados antes de que OCR informe consumo (#73, #129). */
   input_tokens: number | null
   output_tokens: number | null
   /** Parte oculta de output_tokens; baja al elegir una variante de bajo esfuerzo (#65). */
   reasoning_tokens: number | null
   cache_read_tokens: number | null
   cache_write_tokens: number | null
+  /** null si el run se cortó antes de que OCR informara su consumo (#129). */
   total_tokens: number | null
   /** Mayor prompt de la ejecución; vigila el techo de contexto (#72). */
   max_context_tokens: number | null

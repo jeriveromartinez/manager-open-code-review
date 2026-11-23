@@ -306,6 +306,12 @@ func TestQASummaryAggregatesRunTokens(t *testing.T) {
 	// lower Average.
 	tokenRun(zeroNative, now.Add(-time.Hour), val(0), val(0), val(0), val(0), val(0), nil)
 	tokenRun(other, now.Add(-time.Hour), val(5000), val(500), val(5000), val(500), val(11000), val(9000))
+	// A cut run has NULL token columns: it must not count or lower the average
+	// (#129).
+	cutPR := f.openPR(repo.ID, 8, store.StatusReadyForHuman, false)
+	cutRun := f.run(cutPR, store.RunFailed)
+	f.exec(`UPDATE review_runs SET finished_at = $1, error_code = 'timeout'
+		WHERE id = $2`, now.Add(-time.Hour), cutRun.ID)
 
 	got, err := f.s.QASummary(f.ctx, qa, now, store.QAFilter{})
 	if err != nil {
@@ -469,6 +475,11 @@ func TestProfileTokenUsageGroupsRunsAndChecks(t *testing.T) {
 	tokenRun(alpha.ID, now.Add(-2*time.Hour), val(200), val(20), val(100), val(10), val(330), val(300))
 	tokenRun(alpha.ID, now.Add(-time.Hour), nil, nil, nil, nil, nil, nil)
 	tokenRun(alpha.ID, now.Add(-8*24*time.Hour), val(900), val(90), val(0), val(0), val(990), val(900))
+	// A cut run has NULL token columns: it must not count or dilute the average
+	// (#129).
+	cut := f.run(pr, store.RunFailed)
+	f.exec(`UPDATE review_runs SET profile_id = $1, finished_at = $2, error_code = 'timeout'
+		WHERE id = $3`, alpha.ID, now.Add(-time.Hour), cut.ID)
 	// Beta: one measured run only.
 	tokenRun(beta.ID, now.Add(-3*time.Hour), val(40), val(4), val(10), val(2), val(56), val(50))
 

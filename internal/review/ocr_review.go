@@ -45,6 +45,9 @@ type nativeReview struct {
 	Message string        `json:"message"`
 	LLM     nativeLLM     `json:"llm"`
 	Summary nativeSummary `json:"summary"`
+	// hasSummary reports whether OCR actually wrote a summary object. Without
+	// it the token columns stay NULL instead of recording a fake zero (#129).
+	hasSummary bool
 	// Comments is nil when OCR found nothing.
 	Comments    []nativeComment    `json:"comments"`
 	Groups      []nativeGroup      `json:"groups"`
@@ -438,6 +441,13 @@ func parseNativeReview(raw []byte) (nativeReview, error) {
 	if strings.TrimSpace(res.Status) == "" && strings.TrimSpace(res.Manifest.TerminalState) == "" {
 		return nativeReview{}, errors.New("parse review: falta status")
 	}
+	var envelope struct {
+		Summary json.RawMessage `json:"summary"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nativeReview{}, fmt.Errorf("parse review: %w", err)
+	}
+	res.hasSummary = len(envelope.Summary) > 0 && string(envelope.Summary) != "null"
 	return res, nil
 }
 
