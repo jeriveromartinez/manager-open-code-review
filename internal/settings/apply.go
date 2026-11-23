@@ -24,12 +24,41 @@ func (e *KeyError) Error() string { return e.Key + ": " + e.Msg }
 // value leaves cfg partially written, so callers validate on a copy and only
 // publish it once Apply returns nil.
 func Apply(cfg *config.Config, values map[string]string) error {
+	if err := applyKeys(cfg, values); err != nil {
+		return err
+	}
+	return validatePairs(cfg)
+}
+
+// Adjustment names a stored value that a pair rule raised while loading it, so
+// the caller can tell an operator instead of changing behaviour silently.
+type Adjustment struct {
+	Key      string
+	From, To time.Duration
+}
+
+func (a Adjustment) String() string {
+	return fmt.Sprintf("%s %s -> %s", a.Key, a.From, a.To)
+}
+
+// ApplyStored loads persisted overrides the way a start does. Every key still
+// has to parse and be positive, but a pair the current release tightened is
+// raised instead of refused: the row was written by a release with a laxer rule,
+// and refusing it leaves the panel and SQL as the only way out (#130).
+func ApplyStored(cfg *config.Config, values map[string]string) ([]Adjustment, error) {
+	if err := applyKeys(cfg, values); err != nil {
+		return nil, err
+	}
+	return normalizePairs(cfg), nil
+}
+
+func applyKeys(cfg *config.Config, values map[string]string) error {
 	for key, raw := range values {
 		if err := applyOne(cfg, key, raw); err != nil {
 			return err
 		}
 	}
-	return validatePairs(cfg)
+	return nil
 }
 
 func applyOne(cfg *config.Config, key, raw string) error {
@@ -191,4 +220,25 @@ func validatePairs(cfg *config.Config) error {
 		return &KeyError{KeyMonitorRenotifyAfter, "must be greater than or equal to monitor_interval"}
 	}
 	return nil
+}
+
+// normalizePairs repairs the same rules for values that are already stored. It
+// raises the threshold and keeps the value the operator chose for the other
+// side, so an install stored as 45m/48m keeps its review budget and the watchdog
+// moves to 50m instead of the deployment refusing to boot.
+func normalizePairs(cfg *config.Config) []Adjustment {
+	var adjusted []Adjustment
+	if floor := cfg.ReviewTimeout + MinReviewStaleMargin; cfg.ReviewStaleAfter < floor {
+		adjusted = append(adjusted, Adjustment{Key: KeyReviewStaleAfter, From: cfg.ReviewStaleAfter, To: floor})
+		cfg.ReviewStaleAfter = floor
+	}
+	if cfg.MonitorRenotifyAfter < cfg.MonitorInterval {
+		adjusted = append(adjusted, Adjustment{
+			Key:  KeyMonitorRenotifyAfter,
+			From: cfg.MonitorRenotifyAfter,
+			To:   cfg.MonitorInterval,
+		})
+		cfg.MonitorRenotifyAfter = cfg.MonitorInterval
+	}
+	return adjusted
 }

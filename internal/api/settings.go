@@ -78,11 +78,16 @@ func (s *server) saveSettings(r *http.Request, values map[string]string) (stored
 	// (review_timeout 40m, then review_stale_after 30m) that aborts the next
 	// boot.
 	next := config.Default()
-	if err := settings.Apply(&next, stored); err != nil {
-		// Only validated values are ever written through this API, so a bad row
-		// is corruption that needs SQL, not a save the panel refuses to accept.
+	if _, err := settings.ApplyStored(&next, stored); err != nil {
+		// Only validated values are ever written through this API, so a row that
+		// does not even parse is corruption that needs SQL, not a save the panel
+		// refuses to accept.
 		return nil, nil, http.StatusInternalServerError, err.Error()
 	}
+	// The stored pair is loaded the way startup loads it (a tightened rule
+	// raises it instead of refusing), so the panel can still repair a pair an
+	// upgraded release left below the minimum. The values in this request are
+	// validated as they arrive: an explicit incoherent save must still fail.
 	if err := settings.Apply(&next, values); err != nil {
 		return nil, nil, http.StatusBadRequest, err.Error()
 	}

@@ -459,7 +459,7 @@ func (s *server) globalContextCeiling(ctx context.Context) int {
 	stored, err := s.Store.Settings(ctx)
 	if err == nil {
 		next := config.Default()
-		if err := settings.Apply(&next, stored); err == nil {
+		if _, err := settings.ApplyStored(&next, stored); err == nil {
 			ceiling = next.ReviewContextCeiling
 		}
 	}

@@ -72,9 +72,14 @@ func monitorConfig(ctx context.Context, dsn string) (config.Config, error) {
 		slog.Warn("cannot read settings; the monitor uses the defaults", "error", err)
 		return cfg, nil
 	}
-	if err := settings.Apply(&cfg, values); err != nil {
+	if adjusted, err := settings.ApplyStored(&cfg, values); err != nil {
 		slog.Warn("stored settings are invalid; the monitor uses the defaults", "error", err)
 		return config.Default(), nil
+	} else if len(adjusted) > 0 {
+		// Same repair the app logs at start, so the two processes watch the same
+		// orphan threshold.
+		slog.Warn("stored settings were raised to meet the current minimums; review them in the panel",
+			"settings", adjusted)
 	}
 	return cfg, nil
 }
