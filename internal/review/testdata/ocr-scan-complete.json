@@ -1,0 +1,116 @@
+{
+  "status": "complete",
+  "llm": {
+    "model": "fake-model"
+  },
+  "message": "Scan complete: 3 verification(s) across 2 selected item(s).",
+  "summary": {
+    "files_reviewed": 2,
+    "comments": 3,
+    "total_tokens": 3120,
+    "input_tokens": 3000,
+    "output_tokens": 120,
+    "elapsed": "0s"
+  },
+  "tool_calls": {
+    "total": 2,
+    "by_tool": {
+      "code_comment": 3
+    },
+    "failure": 0,
+    "failure_by_tool": {},
+    "failure_details": []
+  },
+  "comments": [
+    {
+      "path": "main.go",
+      "content": "QA-VERIFY f_1a2b3c4d5e6f7788 CONFIRM\nEVIDENCE: \tfmt.Println(\"hello world\")\nPrinting from main still makes the greeting hard to test, so the finding holds.",
+      "suggestion_code": "",
+      "existing_code": "\tfmt.Println(\"hello world\")",
+      "start_line": 6,
+      "end_line": 6,
+      "category": "maintainability",
+      "severity": "low"
+    },
+    {
+      "path": "auth.go",
+      "content": "QA-VERIFY f_9f8e7d6c5b4a3210 REFUTE\nEVIDENCE: \tif stored == \"\" || provided == \"\" {\nThe guard rejects empty credentials before the comparison, so the reported nil dereference cannot happen.",
+      "suggestion_code": "",
+      "existing_code": "\tif stored == \"\" || provided == \"\" {",
+      "start_line": 5,
+      "end_line": 5,
+      "category": "correctness",
+      "severity": "medium"
+    },
+    {
+      "path": "auth.go",
+      "content": "QA-VERIFY f_0011223344556677 UNCERTAIN\nThe comparison looks suspicious, but no single line proves or disproves the claim.",
+      "suggestion_code": "",
+      "existing_code": "\treturn strings.ToLower(stored) == strings.ToLower(provided)",
+      "start_line": 7,
+      "end_line": 7,
+      "category": "security",
+      "severity": "high"
+    }
+  ],
+  "groups": [
+    {
+      "label": "verification pass",
+      "files": [
+        "auth.go",
+        "main.go"
+      ]
+    }
+  ],
+  "session_id": "00000000-0000-4000-8000-000000000002",
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "run_id": "00000000-0000-4000-8000-000000000002",
+    "operation": "scan",
+    "terminal_state": "complete",
+    "repository": {},
+    "input": {
+      "mode": "full",
+      "source_artifact_sha256": "c26c2e9fc523813be4b48912585a9f1d7e245e6741ec0ad1d84e0b3ab2e82da5"
+    },
+    "execution": {
+      "ocr_version": "v1.14.1",
+      "model": "fake-model",
+      "configured_concurrency": 8,
+      "max_tool_request_times": 100,
+      "rule_config_sha256": "77361ee3e7a3ab0b4ab3b6fbe56c09c7c02e83722fcce12db220c2af88cd9d4e",
+      "runtime_config_sha256": "37eee96debd47656e374d227db172318fc29ea350ec09cc7575cf42a62cbcf79"
+    },
+    "coverage": {
+      "selected": [
+        {
+          "item_id": "09fd23a0ad05c00813f62c6a849895ef3ec844e0645f507087296f05b4f06f15",
+          "path": "main.go",
+          "fingerprint": "d851221b876ca0a0bbe6c0e8d615829bbbbb14d19a5a8b3b80a96901d6a4a611"
+        },
+        {
+          "item_id": "c14432f22e4255b04061b5bbd987ae2ba9beee713ca6071b96ac44fd4dbdcbcc",
+          "path": "auth.go",
+          "fingerprint": "c75631da47502be17248ad72e220a52b5a3461b653679223baa3eb1859f665c2"
+        }
+      ],
+      "completed": [
+        {
+          "item_id": "09fd23a0ad05c00813f62c6a849895ef3ec844e0645f507087296f05b4f06f15",
+          "path": "main.go",
+          "fingerprint": "d851221b876ca0a0bbe6c0e8d615829bbbbb14d19a5a8b3b80a96901d6a4a611"
+        },
+        {
+          "item_id": "c14432f22e4255b04061b5bbd987ae2ba9beee713ca6071b96ac44fd4dbdcbcc",
+          "path": "auth.go",
+          "fingerprint": "c75631da47502be17248ad72e220a52b5a3461b653679223baa3eb1859f665c2"
+        }
+      ],
+      "reused": [],
+      "failed": [],
+      "waived": [],
+      "excluded": []
+    },
+    "elapsed_ms": 0
+  }
+}
