@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -335,6 +336,11 @@ fi
 if [ -n "${RUN_FAKE_OCR_SLEEP:-}" ]; then
     sleep "$RUN_FAKE_OCR_SLEEP"
 fi
+# A helper in its own session survives the process-group kill and keeps the
+# pipes open, so the review keeps executing after its deadline.
+if [ -n "${RUN_FAKE_OCR_LINGER:-}" ]; then
+    setsid sleep "$RUN_FAKE_OCR_LINGER" &
+fi
 if [ -n "${RUN_FAKE_OCR_FAIL:-}" ]; then
     printf 'ocr no disponible\n' >&2
     exit 1
@@ -402,6 +408,54 @@ func (f *runTestFixture) loadRun(t *testing.T) store.ReviewRun {
 		t.Fatalf("reload run: %v", err)
 	}
 	return run
+}
+
+// waitPhase blocks until the run reports the phase and returns when it began.
+func (f *runTestFixture) waitPhase(t *testing.T, want string) time.Time {
+	t.Helper()
+
+	limit := time.Now().Add(5 * time.Second)
+	for {
+		run := f.loadRun(t)
+		if run.Phase == want && run.PhaseStartedAt != nil {
+			return *run.PhaseStartedAt
+		}
+		if time.Now().After(limit) {
+			t.Fatalf("run phase = %q, want %q", run.Phase, want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// heartbeatAt returns the stored heartbeat of a run.
+func heartbeatAt(t *testing.T, s *store.Store, ctx context.Context, runID uint) *time.Time {
+	t.Helper()
+
+	run, err := s.ReviewRun(ctx, runID)
+	if err != nil {
+		t.Fatalf("ReviewRun(%d): %v", runID, err)
+	}
+	return run.HeartbeatAt
+}
+
+// waitHeartbeatAfter fails unless the run records a beat later than after.
+func waitHeartbeatAfter(t *testing.T, s *store.Store, ctx context.Context, runID uint, after time.Time) {
+	t.Helper()
+
+	limit := time.Now().Add(5 * time.Second)
+	for {
+		got := heartbeatAt(t, s, ctx, runID)
+		if got != nil && got.After(after) {
+			return
+		}
+		if time.Now().After(limit) {
+			if got == nil {
+				t.Fatalf("run %d has no heartbeat_at, want a beat after %v", runID, after.UTC())
+			}
+			t.Fatalf("run %d heartbeat_at = %v, want a beat after %v", runID, got.UTC(), after.UTC())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func (f *runTestFixture) loadPR(t *testing.T) store.PullRequest {
@@ -2024,5 +2078,94 @@ func TestReviewedPathsTrimDotSlash(t *testing.T) {
 	}
 	if got := findingsInPaths(open, map[string]bool{}); len(got) != 0 {
 		t.Errorf("findingsInPaths with empty coverage = %+v, want none", got)
+	}
+}
+
+// TestRunStopsWhenWatchdogClosesTheRun proves the worker abandons a review the
+// watchdog already failed instead of waiting for OCR to finish its budget.
+func TestRunStopsWhenWatchdogClosesTheRun(t *testing.T) {
+	f := newRunTestFixture(t)
+	f.setOCR(t, `{
+	  "status": "complete",
+	  "summary": {"files_reviewed": 1, "comments": 0, "total_tokens": 10},
+	  "manifest": {"coverage": {"completed": [{"path": "auth.go"}],
+	    "failed": [], "waived": [], "excluded": []}}
+	}`)
+	t.Setenv("RUN_FAKE_OCR_SLEEP", "10")
+
+	runner := f.runner()
+	runner.heartbeatEvery = 20 * time.Millisecond
+
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(f.ctx, f.runID) }()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", f.runID).
+		Updates(map[string]any{
+			"status":     store.RunFailed,
+			"error_code": store.RunErrorInterrupted,
+		}).Error; err != nil {
+		t.Fatalf("close the run like the watchdog: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil after the run was closed", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run() kept executing after the watchdog closed the run")
+	}
+}
+
+// TestRunHeartbeatOutlivesReviewTimeout pins #130 end to end: OCR leaves a
+// helper outside its process group, so the review keeps executing after
+// Runner.Cfg.Timeout. The heartbeat describes the worker, so it must stay fresh
+// past the deadline and the sweep must report the run as overrun, not lost.
+func TestRunHeartbeatOutlivesReviewTimeout(t *testing.T) {
+	// setsid is Linux-only, so this end-to-end case runs there. The portable
+	// wiring coverage lives in TestHeartbeatOutlivesReviewDeadline.
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid is needed to leave a helper outside the OCR process group")
+	}
+	f := newRunTestFixture(t)
+	t.Setenv("RUN_FAKE_OCR_LINGER", "5")
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 2 * time.Second
+	runner.heartbeatEvery = 20 * time.Millisecond
+
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(f.ctx, f.runID) }()
+
+	// runCtx is built before OCR starts, so its deadline is at ocrStart+Cfg.Timeout
+	// at the latest: a beat later than this one is a beat past the deadline.
+	ocrStart := f.waitPhase(t, store.RunPhaseReviewing)
+	waitHeartbeatAfter(t, f.s, f.ctx, f.runID, ocrStart.Add(3*runner.Cfg.Timeout/2))
+
+	w := &Watchdog{Store: f.s, Events: f.events, Jobs: f.jobs, StaleAfter: 100 * time.Millisecond}
+	if err := w.Sweep(f.ctx); err != nil {
+		t.Fatalf("Sweep() error = %v", err)
+	}
+	stored := f.loadRun(t)
+	if stored.Status != store.RunFailed || stored.ErrorCode != store.RunErrorInterrupted {
+		t.Fatalf("run = %q/%q, want failed/%s",
+			stored.Status, stored.ErrorCode, store.RunErrorInterrupted)
+	}
+	if !strings.Contains(stored.ErrorMessage, "tiempo máximo") {
+		t.Errorf("error message = %q, want the overrun message", stored.ErrorMessage)
+	}
+	if strings.Contains(stored.ErrorMessage, "dejó de responder") {
+		t.Errorf("error message = %q, reported a live worker as lost", stored.ErrorMessage)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil after the sweep closed the run", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run() kept executing after the sweep closed the run")
 	}
 }

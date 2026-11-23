@@ -271,3 +271,100 @@ func TestToMapRoundTripsThroughApply(t *testing.T) {
 		t.Errorf("ToMap round trip changed review_timeout from %q to %q", want, got)
 	}
 }
+
+func TestApplyEnforcesMinimumStaleMargin(t *testing.T) {
+	cfg := config.Default()
+	err := Apply(&cfg, map[string]string{
+		KeyReviewTimeout:    "57m",
+		KeyReviewStaleAfter: "60m",
+	})
+	var keyErr *KeyError
+	if !errors.As(err, &keyErr) || keyErr.Key != KeyReviewStaleAfter {
+		t.Fatalf("timeout 57m with stale 60m = %v, want KeyError on %s", err, KeyReviewStaleAfter)
+	}
+
+	cfg = config.Default()
+	if err := Apply(&cfg, map[string]string{
+		KeyReviewTimeout:    "55m",
+		KeyReviewStaleAfter: "60m",
+	}); err != nil {
+		t.Fatalf("timeout 55m with stale 60m = %v, want the 5m margin accepted", err)
+	}
+}
+
+// A pair stored by a release with the older, laxer rule has to load: the upgrade
+// raises the threshold and keeps the review budget the operator chose, because
+// refusing it aborts the start with no way out but SQL (#130).
+func TestApplyStoredRaisesLegacyStaleMargin(t *testing.T) {
+	cfg := config.Default()
+	adjusted, err := ApplyStored(&cfg, map[string]string{
+		KeyReviewTimeout:    "45m",
+		KeyReviewStaleAfter: "48m",
+	})
+	if err != nil {
+		t.Fatalf("ApplyStored(45m/48m) = %v, want the pair loaded", err)
+	}
+	if cfg.ReviewTimeout != 45*time.Minute {
+		t.Errorf("ReviewTimeout = %s, want the stored 45m kept", cfg.ReviewTimeout)
+	}
+	if cfg.ReviewStaleAfter != 45*time.Minute+MinReviewStaleMargin {
+		t.Errorf("ReviewStaleAfter = %s, want the repaired 50m", cfg.ReviewStaleAfter)
+	}
+	if len(adjusted) != 1 || adjusted[0].Key != KeyReviewStaleAfter ||
+		adjusted[0].From != 48*time.Minute || adjusted[0].To != 50*time.Minute {
+		t.Fatalf("adjusted = %v, want exactly review_stale_after 48m -> 50m", adjusted)
+	}
+	if err := validatePairs(&cfg); err != nil {
+		t.Errorf("validatePairs after the repair = %v, want the repaired pair to pass", err)
+	}
+}
+
+// The monitor pair follows the same rule for the same reason: it was accepted
+// when it was saved and only a strict reload would strand the install.
+func TestApplyStoredRaisesAnEarlyRenotifyWindow(t *testing.T) {
+	cfg := config.Default()
+	adjusted, err := ApplyStored(&cfg, map[string]string{
+		KeyMonitorInterval:      "30m",
+		KeyMonitorRenotifyAfter: "10m",
+	})
+	if err != nil {
+		t.Fatalf("ApplyStored(interval 30m, renotify 10m) = %v, want it loaded", err)
+	}
+	if cfg.MonitorInterval != 30*time.Minute || cfg.MonitorRenotifyAfter != 30*time.Minute {
+		t.Errorf("interval/renotify = %s/%s, want 30m/30m", cfg.MonitorInterval, cfg.MonitorRenotifyAfter)
+	}
+	if len(adjusted) != 1 || adjusted[0].Key != KeyMonitorRenotifyAfter {
+		t.Fatalf("adjusted = %v, want exactly %s", adjusted, KeyMonitorRenotifyAfter)
+	}
+}
+
+// Repairing pairs must not become a licence to store anything: a row that does
+// not parse is still corruption, and it still aborts the start.
+func TestApplyStoredStillRejectsAnUnparseableRow(t *testing.T) {
+	cfg := config.Default()
+	adjusted, err := ApplyStored(&cfg, map[string]string{
+		KeyReviewTimeout:    "0s",
+		KeyReviewStaleAfter: "48m",
+	})
+	var keyErr *KeyError
+	if !errors.As(err, &keyErr) || keyErr.Key != KeyReviewTimeout {
+		t.Fatalf("ApplyStored(review_timeout=0s) = %v, want KeyError on %s", err, KeyReviewTimeout)
+	}
+	if len(adjusted) != 0 {
+		t.Errorf("adjusted = %v, want none when the load fails", adjusted)
+	}
+}
+
+func TestApplyStoredLeavesAValidConfigurationAlone(t *testing.T) {
+	cfg := config.Default()
+	adjusted, err := ApplyStored(&cfg, ToMap(config.Default()))
+	if err != nil {
+		t.Fatalf("ApplyStored(defaults) = %v, want the 45m/60m defaults accepted", err)
+	}
+	if len(adjusted) != 0 {
+		t.Errorf("adjusted = %v, want the defaults untouched", adjusted)
+	}
+	if cfg.ReviewStaleAfter != 60*time.Minute {
+		t.Errorf("ReviewStaleAfter = %s, want the default 60m", cfg.ReviewStaleAfter)
+	}
+}

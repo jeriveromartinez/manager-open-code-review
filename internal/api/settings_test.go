@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/config"
+	"github.com/jeriveromartinez/qa-control-center/internal/settings"
 )
 
 // The base fixture carries a hand-built config; the settings endpoints report
@@ -156,6 +157,74 @@ func TestSettingsPutNamesCorruptRowWithoutEchoingIt(t *testing.T) {
 	}
 	if body := rec.Body.String(); strings.Contains(body, "0s") {
 		t.Errorf("body = %q, want the stored value left out", body)
+	}
+}
+
+// The panel is the only way back for an install whose stored pair no longer
+// meets the rule: a save that brings the pair inside it must succeed instead of
+// reporting the stale baseline as corruption (#130).
+func TestSettingsPutRepairsAnInvalidStoredPair(t *testing.T) {
+	f := newSettingsFixture(t)
+	cookie := f.session(f.user("admin", true))
+
+	if err := f.st.SaveSettings(f.ctx, nil, map[string]string{
+		"review_timeout": "45m", "review_stale_after": "48m",
+	}); err != nil {
+		t.Fatalf("seed stored pair: %v", err)
+	}
+
+	rec := f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{"review_stale_after": "52m"},
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+
+	stored, err := f.st.Settings(f.ctx)
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if stored["review_stale_after"] != "52m0s" {
+		t.Errorf("stored review_stale_after = %q, want the saved 52m0s", stored["review_stale_after"])
+	}
+
+	// The pair the next start loads is the one the panel just reported.
+	next := config.Default()
+	if _, err := settings.ApplyStored(&next, stored); err != nil {
+		t.Fatalf("reload stored settings = %v, want the repaired pair to load", err)
+	}
+	if next.ReviewTimeout != 45*time.Minute || next.ReviewStaleAfter != 52*time.Minute {
+		t.Errorf("reloaded %s/%s, want 45m0s/52m0s", next.ReviewTimeout, next.ReviewStaleAfter)
+	}
+}
+
+// Repairing the baseline must not soften the save itself: an explicit
+// incoherent pair still has to come back as a bad request naming the key.
+func TestSettingsPutRejectsAnExplicitInvalidPair(t *testing.T) {
+	f := newSettingsFixture(t)
+	cookie := f.session(f.user("admin", true))
+
+	if err := f.st.SaveSettings(f.ctx, nil, map[string]string{
+		"review_timeout": "45m", "review_stale_after": "48m",
+	}); err != nil {
+		t.Fatalf("seed stored pair: %v", err)
+	}
+
+	rec := f.request(http.MethodPut, "/api/settings", map[string]any{
+		"values": map[string]string{"review_timeout": "57m", "review_stale_after": "60m"},
+	}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+
+	var apiErr map[string]string
+	decodeJSON(t, rec, &apiErr)
+	if !strings.Contains(apiErr["error"], "review_stale_after") {
+		t.Errorf("error = %q, want the offending key", apiErr["error"])
+	}
+
+	stored, err := f.st.Settings(f.ctx)
+	if err != nil {
+		t.Fatalf("Settings: %v", err)
+	}
+	if stored["review_timeout"] != "45m" || stored["review_stale_after"] != "48m" {
+		t.Errorf("stored = %v, want the rejected save to leave the rows untouched", stored)
 	}
 }
 

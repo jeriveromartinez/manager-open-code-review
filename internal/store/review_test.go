@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1530,34 +1531,66 @@ func TestInterruptStaleRuns(t *testing.T) {
 	queuedPR := f.openPR(repo.ID, 3, store.StatusPending, false)
 	queued := f.run(queuedPR, store.RunQueued)
 
-	cutoff := time.Now().UTC().Add(-time.Hour)
-	runs, err := f.s.InterruptStaleRuns(f.ctx, cutoff)
+	// A run that overran its budget but still beats: its worker is alive, so
+	// the watchdog must report a timeout instead of a vanished worker.
+	overrunPR := f.openPR(repo.ID, 4, store.StatusReviewing, false)
+	overrun, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: overrunPR.ID, HeadSHA: overrunPR.HeadSHA, Status: store.RunRunning,
+		StartedAt: &oldStarted, CloneTokenEnc: "sealed-token",
+	})
+	if err != nil {
+		t.Fatalf("create overrun running run: %v", err)
+	}
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", overrun.ID).
+		Update("heartbeat_at", time.Now().UTC()).Error; err != nil {
+		t.Fatalf("set overrun heartbeat: %v", err)
+	}
+
+	now := time.Now().UTC()
+	policy := store.StaleRunPolicy{
+		StartedBefore:     now.Add(-time.Hour),
+		HeartbeatBefore:   now.Add(-3 * time.Minute),
+		OverranMessage:    "la revisión superó el tiempo máximo de 60 min sin terminar",
+		LostWorkerMessage: "el worker dejó de responder hace más de 3 min (posible reinicio o caída)",
+	}
+	runs, err := f.s.InterruptStaleRuns(f.ctx, policy)
 	if err != nil {
 		t.Fatalf("InterruptStaleRuns: %v", err)
 	}
-	if len(runs) != 1 || runs[0].ID != stale.ID {
-		t.Fatalf("interrupted runs = %v, want only %d", prIDsOfRuns(runs), stale.ID)
+	byID := map[uint]store.ReviewRun{}
+	for _, run := range runs {
+		byID[run.ID] = run
+	}
+	if len(byID) != 2 {
+		t.Fatalf("interrupted runs = %v, want %d and %d", prIDsOfRuns(runs), stale.ID, overrun.ID)
 	}
 
-	got, err := f.s.ReviewRun(f.ctx, stale.ID)
-	if err != nil {
-		t.Fatalf("ReviewRun(stale): %v", err)
+	for _, run := range []store.ReviewRun{stale, overrun} {
+		got, err := f.s.ReviewRun(f.ctx, run.ID)
+		if err != nil {
+			t.Fatalf("ReviewRun(%d): %v", run.ID, err)
+		}
+		if got.Status != store.RunFailed || got.ErrorCode != store.RunErrorInterrupted {
+			t.Errorf("run %d = status %q code %q, want failed/%s",
+				run.ID, got.Status, got.ErrorCode, store.RunErrorInterrupted)
+		}
+		if got.FinishedAt == nil {
+			t.Errorf("run %d finished_at is nil", run.ID)
+		}
+		if got.StartedAt == nil || !got.StartedAt.Equal(oldStarted) {
+			t.Errorf("run %d started_at = %v, want the original %v", run.ID, got.StartedAt, oldStarted)
+		}
+		if got.CloneTokenEnc != "" {
+			t.Errorf("run %d clone token = %q, want it cleared", run.ID, got.CloneTokenEnc)
+		}
 	}
-	if got.Status != store.RunFailed || got.ErrorCode != store.RunErrorInterrupted {
-		t.Errorf("stale run = status %q code %q, want failed/%s",
-			got.Status, got.ErrorCode, store.RunErrorInterrupted)
+
+	if msg := byID[stale.ID].ErrorMessage; !strings.Contains(msg, "dejó de responder") {
+		t.Errorf("stale run message = %q, want the lost-worker wording", msg)
 	}
-	if got.ErrorMessage == "" {
-		t.Error("stale run has no error message")
-	}
-	if got.FinishedAt == nil {
-		t.Error("stale run finished_at is nil")
-	}
-	if got.StartedAt == nil || !got.StartedAt.Equal(oldStarted) {
-		t.Errorf("started_at = %v, want the original %v", got.StartedAt, oldStarted)
-	}
-	if got.CloneTokenEnc != "" {
-		t.Errorf("clone token = %q, want it cleared", got.CloneTokenEnc)
+	if msg := byID[overrun.ID].ErrorMessage; !strings.Contains(msg, "tiempo máximo") {
+		t.Errorf("overrun run message = %q, want the overrun wording", msg)
 	}
 
 	untouchedRecent, err := f.s.ReviewRun(f.ctx, recent.ID)
@@ -1576,7 +1609,7 @@ func TestInterruptStaleRuns(t *testing.T) {
 	}
 
 	// A second sweep has nothing left to interrupt.
-	again, err := f.s.InterruptStaleRuns(f.ctx, cutoff)
+	again, err := f.s.InterruptStaleRuns(f.ctx, policy)
 	if err != nil {
 		t.Fatalf("second InterruptStaleRuns: %v", err)
 	}
@@ -1602,7 +1635,13 @@ func TestInterruptStaleRunsConcurrent(t *testing.T) {
 		t.Fatalf("create stale running run: %v", err)
 	}
 
-	cutoff := time.Now().UTC().Add(-time.Hour)
+	now := time.Now().UTC()
+	policy := store.StaleRunPolicy{
+		StartedBefore:     now.Add(-time.Hour),
+		HeartbeatBefore:   now.Add(-3 * time.Minute),
+		OverranMessage:    "la revisión superó el tiempo máximo de 60 min sin terminar",
+		LostWorkerMessage: "el worker dejó de responder hace más de 3 min (posible reinicio o caída)",
+	}
 	type result struct {
 		runs []store.ReviewRun
 		err  error
@@ -1615,7 +1654,7 @@ func TestInterruptStaleRunsConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			runs, err := f.s.InterruptStaleRuns(context.Background(), cutoff)
+			runs, err := f.s.InterruptStaleRuns(context.Background(), policy)
 			results <- result{runs: runs, err: err}
 		}()
 	}
@@ -1643,6 +1682,58 @@ func TestInterruptStaleRunsConcurrent(t *testing.T) {
 	}
 	if got.FinishedAt == nil {
 		t.Error("finished_at is nil after concurrent sweep")
+	}
+	// The run never beat, so exactly one of the sweeps must have left the
+	// lost-worker message, not the overrun one.
+	if !strings.Contains(got.ErrorMessage, "dejó de responder") {
+		t.Errorf("error message = %q, want the lost-worker wording", got.ErrorMessage)
+	}
+}
+
+func TestReviewRunHeartbeat(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 1, store.StatusPending, false)
+	run, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: pr.ID, HeadSHA: pr.HeadSHA,
+	})
+	if err != nil {
+		t.Fatalf("CreateReviewRun: %v", err)
+	}
+
+	claimed, ok, err := f.s.ClaimReviewRun(f.ctx, run.ID)
+	if err != nil || !ok {
+		t.Fatalf("ClaimReviewRun: ok = %v, err = %v", ok, err)
+	}
+	if claimed.HeartbeatAt == nil {
+		t.Fatal("claimed run has no heartbeat_at")
+	}
+
+	old := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", run.ID).Update("heartbeat_at", old).Error; err != nil {
+		t.Fatalf("age heartbeat: %v", err)
+	}
+	if err := f.s.HeartbeatReviewRun(f.ctx, run.ID); err != nil {
+		t.Fatalf("HeartbeatReviewRun: %v", err)
+	}
+	stored, err := f.s.ReviewRun(f.ctx, run.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun: %v", err)
+	}
+	if stored.HeartbeatAt == nil || !stored.HeartbeatAt.After(old) {
+		t.Errorf("heartbeat_at = %v, want a time after %v", stored.HeartbeatAt, old)
+	}
+
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+		Status: store.RunFailed, ErrorCode: "timeout",
+	}); err != nil {
+		t.Fatalf("CompleteReviewRun: %v", err)
+	}
+	if err := f.s.HeartbeatReviewRun(f.ctx, run.ID); !errors.Is(err, store.ErrRunNotActive) {
+		t.Fatalf("HeartbeatReviewRun on a finished run = %v, want ErrRunNotActive", err)
 	}
 }
 

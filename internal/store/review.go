@@ -533,9 +533,10 @@ func (s *Store) ClaimReviewRun(ctx context.Context, id uint) (ReviewRun, bool, e
 	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
 		Where("id = ? AND status = ?", id, RunQueued).
 		Updates(map[string]any{
-			"status":     RunRunning,
-			"started_at": now,
-			"updated_at": now,
+			"status":       RunRunning,
+			"started_at":   now,
+			"heartbeat_at": now,
+			"updated_at":   now,
 		})
 	if res.Error != nil {
 		return ReviewRun{}, false, fmt.Errorf("claim review run %d: %w", id, res.Error)
@@ -548,6 +549,22 @@ func (s *Store) ClaimReviewRun(ctx context.Context, id uint) (ReviewRun, bool, e
 		return ReviewRun{}, false, err
 	}
 	return run, true, nil
+}
+
+// HeartbeatReviewRun records that the worker executing the run is alive. Only a
+// running run accepts the write: ErrRunNotActive tells the worker that the
+// watchdog or a new head already closed it, so it must stop the pipeline.
+func (s *Store) HeartbeatReviewRun(ctx context.Context, id uint) error {
+	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunRunning).
+		Update("heartbeat_at", time.Now().UTC())
+	if res.Error != nil {
+		return fmt.Errorf("heartbeat review run %d: %w", id, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("heartbeat review run %d: %w", id, ErrRunNotActive)
+	}
+	return nil
 }
 
 // RequeueReviewRun returns a claimed run to the queue without finishing it, so
@@ -817,31 +834,44 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 	})
 }
 
-// InterruptStaleRuns fails every running run whose start is older than cutoff
-// and returns the runs it moved. Queued and terminal runs are never touched.
-// A single UPDATE decides and persists the transition, so several instances can
-// sweep the same database concurrently: row locks serialize them and the
-// losers see zero rows, which keeps the count exact and each run interrupted
-// once.
-func (s *Store) InterruptStaleRuns(ctx context.Context, cutoff time.Time) ([]ReviewRun, error) {
+// StaleRunPolicy decides which running rows the watchdog closes and the message
+// each case leaves behind. HeartbeatBefore is the oldest heartbeat considered
+// alive: older silence means the worker is gone, not that the review overran.
+type StaleRunPolicy struct {
+	StartedBefore     time.Time
+	HeartbeatBefore   time.Time
+	OverranMessage    string
+	LostWorkerMessage string
+}
+
+// InterruptStaleRuns fails every running run whose start is older than the
+// policy cutoff and returns the runs it moved. A fresh heartbeat classifies the
+// run as overrun; silence classifies it as a lost worker. Queued and terminal
+// runs are never touched, and the single UPDATE keeps concurrent sweeps exact:
+// row locks serialize them and the losers see zero rows, which keeps the count
+// exact and each run interrupted once.
+func (s *Store) InterruptStaleRuns(ctx context.Context, p StaleRunPolicy) ([]ReviewRun, error) {
 	now := time.Now().UTC()
 	// A running run always has started_at; the COALESCE keeps a row claimed
 	// without one from staying stranded forever.
 	const query = `
 UPDATE review_runs
-SET status = ?, error_code = ?, error_message = ?, clone_token_enc = '',
-    phase = '', phase_started_at = NULL, finished_at = ?, updated_at = ?
+SET status = ?, error_code = ?, error_message = CASE
+        WHEN heartbeat_at IS NULL OR heartbeat_at < ? THEN ?
+        ELSE ? END,
+    clone_token_enc = '', phase = '', phase_started_at = NULL, finished_at = ?, updated_at = ?
 WHERE status = ? AND COALESCE(started_at, created_at) < ?
 RETURNING *`
 
 	var runs []ReviewRun
 	err := s.DB.WithContext(ctx).Raw(query,
 		RunFailed, RunErrorInterrupted,
-		"la revisión quedó interrumpida: el worker que la ejecutaba desapareció antes de terminar",
-		now, now, RunRunning, cutoff,
+		p.HeartbeatBefore, p.LostWorkerMessage, p.OverranMessage,
+		now, now, RunRunning, p.StartedBefore,
 	).Scan(&runs).Error
 	if err != nil {
-		return nil, fmt.Errorf("interrupt review runs started before %s: %w", cutoff.UTC().Format(time.RFC3339), err)
+		return nil, fmt.Errorf("interrupt review runs started before %s: %w",
+			p.StartedBefore.UTC().Format(time.RFC3339), err)
 	}
 	return runs, nil
 }

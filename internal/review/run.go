@@ -58,6 +58,10 @@ const (
 	// context on shutdown. They run detached from that cancellation so the
 	// run never stays "running" until the stale watchdog.
 	terminalWriteTimeout = 15 * time.Second
+
+	// heartbeatWriteTimeout bounds the heartbeat write. It runs detached from
+	// the pipeline cancellation so a stopped review can still record why.
+	heartbeatWriteTimeout = 5 * time.Second
 )
 
 // terminalContext returns a context that survives the job cancellation River
@@ -133,6 +137,10 @@ type Runner struct {
 	Events events.Publisher
 	Jobs   Enqueuer
 	Cfg    RunnerConfig
+
+	// heartbeatEvery overrides heartbeatInterval in tests. Zero uses the
+	// production interval.
+	heartbeatEvery time.Duration
 }
 
 // runOutcome is the complete terminal state written by CompleteReviewRun.
@@ -466,12 +474,19 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	remote := strings.TrimSuffix(r.Cfg.GitBaseURL, "/") + "/" + cfg.Repo.FullName + ".git"
 	remote = withCloneToken(remote, token)
 
-	runCtx := ctx
+	pipelineCtx, cancelPipeline := context.WithCancel(ctx)
+	defer cancelPipeline()
+	runCtx := pipelineCtx
 	if r.Cfg.Timeout > 0 {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, r.Cfg.Timeout)
-		defer cancel()
+		var cancelTimeout context.CancelFunc
+		runCtx, cancelTimeout = context.WithTimeout(pipelineCtx, r.Cfg.Timeout)
+		defer cancelTimeout()
 	}
+	// The heartbeat reports that the worker is alive, not that the pipeline
+	// still has budget: it outlives the review deadline so a run that overran
+	// it is classified as overrun and not as a lost worker (#130).
+	stopHeartbeat := r.heartbeat(pipelineCtx, run.ID, log, cancelPipeline)
+	defer stopHeartbeat()
 	r.setPhase(runCtx, run.ID, store.RunPhaseCloning, log)
 	log.Log(runCtx, "worker", "", "info", logPhaseClone,
 		fmt.Sprintf("clonando %s (%s → %s)", cfg.Repo.FullName, baseRef, headRef))
@@ -703,6 +718,49 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		return out.inconclusive(errors.New(chunkedInconclusiveMessage(res, code, reviewed, skipped)), code), nil
 	default:
 		return out.failed(errors.New(nativeStatusMessage(res, code)), code), nil
+	}
+}
+
+// heartbeat keeps the run marked alive while the worker executes it. When the
+// store reports the run is no longer running, the watchdog or a new head closed
+// it, so abort cancels the pipeline instead of letting it finish blind.
+func (r *Runner) heartbeat(ctx context.Context, runID uint, log *runLogSink, abort context.CancelFunc) func() {
+	interval := r.heartbeatEvery
+	if interval <= 0 {
+		interval = heartbeatInterval
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), heartbeatWriteTimeout)
+				err := r.Store.HeartbeatReviewRun(writeCtx, runID)
+				cancel()
+				switch {
+				case err == nil:
+				case errors.Is(err, store.ErrRunNotActive):
+					log.Log(context.WithoutCancel(ctx), "worker", "", "warn", logPhaseFinish,
+						"el run ya no está activo; se cancela la revisión en curso")
+					abort()
+					return
+				default:
+					slog.Warn("review run heartbeat failed", "run_id", runID, "error", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-done
 	}
 }
 
