@@ -271,3 +271,23 @@ func TestToMapRoundTripsThroughApply(t *testing.T) {
 		t.Errorf("ToMap round trip changed review_timeout from %q to %q", want, got)
 	}
 }
+
+func TestApplyEnforcesMinimumStaleMargin(t *testing.T) {
+	cfg := config.Default()
+	err := Apply(&cfg, map[string]string{
+		KeyReviewTimeout:    "57m",
+		KeyReviewStaleAfter: "60m",
+	})
+	var keyErr *KeyError
+	if !errors.As(err, &keyErr) || keyErr.Key != KeyReviewStaleAfter {
+		t.Fatalf("timeout 57m with stale 60m = %v, want KeyError on %s", err, KeyReviewStaleAfter)
+	}
+
+	cfg = config.Default()
+	if err := Apply(&cfg, map[string]string{
+		KeyReviewTimeout:    "55m",
+		KeyReviewStaleAfter: "60m",
+	}); err != nil {
+		t.Fatalf("timeout 55m with stale 60m = %v, want the 5m margin accepted", err)
+	}
+}

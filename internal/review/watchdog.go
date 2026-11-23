@@ -22,6 +22,19 @@ type Watchdog struct {
 	StaleAfter time.Duration
 }
 
+const (
+	// heartbeatInterval is how often a running review refreshes heartbeat_at.
+	heartbeatInterval = time.Minute
+	// heartbeatTimeout tolerates three missed beats, so one slow tick does not
+	// look like a dead worker.
+	heartbeatTimeout = 3 * time.Minute
+)
+
+// reviewMinutes renders a duration in whole minutes for operator-facing text.
+func reviewMinutes(d time.Duration) string {
+	return fmt.Sprintf("%d min", int(d.Round(time.Minute)/time.Minute))
+}
+
 // Sweep interrupts every run started longer ago than StaleAfter and publishes
 // the consequence of each one exactly like a terminal failure: the publish
 // worker closes the check and moves the pull request to inconclusive.
@@ -33,8 +46,17 @@ func (w *Watchdog) Sweep(ctx context.Context) error {
 		return errors.New("review: watchdog has no stale threshold")
 	}
 
-	cutoff := time.Now().UTC().Add(-w.StaleAfter)
-	runs, err := w.Store.InterruptStaleRuns(ctx, cutoff)
+	now := time.Now().UTC()
+	cutoff := now.Add(-w.StaleAfter)
+	runs, err := w.Store.InterruptStaleRuns(ctx, store.StaleRunPolicy{
+		StartedBefore:   cutoff,
+		HeartbeatBefore: now.Add(-heartbeatTimeout),
+		OverranMessage: fmt.Sprintf(
+			"la revisión superó el tiempo máximo de %s sin terminar", reviewMinutes(w.StaleAfter)),
+		LostWorkerMessage: fmt.Sprintf(
+			"el worker dejó de responder hace más de %s (posible reinicio o caída)",
+			reviewMinutes(heartbeatTimeout)),
+	})
 	if err != nil {
 		return fmt.Errorf("interrupt stale review runs: %w", err)
 	}

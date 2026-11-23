@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,14 @@ func (f *watchdogFixture) runningRun(t *testing.T, number int, startedAt time.Ti
 	return run
 }
 
+func (f *watchdogFixture) beat(t *testing.T, run store.ReviewRun, at time.Time) {
+	t.Helper()
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", run.ID).Update("heartbeat_at", at).Error; err != nil {
+		t.Fatalf("set heartbeat of run %d: %v", run.ID, err)
+	}
+}
+
 // TestWatchdogSweepPublishesInterruptedRuns proves the sweep fails orphaned
 // runs and then publishes them through the same path as a terminal failure:
 // browser events plus the publish job per run.
@@ -71,6 +80,8 @@ func TestWatchdogSweepPublishesInterruptedRuns(t *testing.T) {
 	first := f.runningRun(t, 1, time.Now().UTC().Add(-3*time.Hour))
 	second := f.runningRun(t, 2, time.Now().UTC().Add(-2*time.Hour))
 	recent := f.runningRun(t, 3, time.Now().UTC().Add(-time.Minute))
+	f.beat(t, first, time.Now().UTC().Add(-time.Minute)) // alive: it overran
+	// second keeps a NULL heartbeat: its worker is gone.
 
 	if err := f.w.Sweep(f.ctx); err != nil {
 		t.Fatalf("Sweep() error = %v", err)
@@ -87,6 +98,13 @@ func TestWatchdogSweepPublishesInterruptedRuns(t *testing.T) {
 		}
 		if stored.FinishedAt == nil {
 			t.Errorf("run %d finished_at is nil", run.ID)
+		}
+		wantMessage := map[uint]string{
+			first.ID:  "tiempo máximo",
+			second.ID: "dejó de responder",
+		}[run.ID]
+		if !strings.Contains(stored.ErrorMessage, wantMessage) {
+			t.Errorf("run %d message = %q, want %q", run.ID, stored.ErrorMessage, wantMessage)
 		}
 		for _, ev := range []events.Event{
 			{Type: "run.updated", ID: strconv.FormatUint(uint64(run.ID), 10)},

@@ -2026,3 +2026,41 @@ func TestReviewedPathsTrimDotSlash(t *testing.T) {
 		t.Errorf("findingsInPaths with empty coverage = %+v, want none", got)
 	}
 }
+
+// TestRunStopsWhenWatchdogClosesTheRun proves the worker abandons a review the
+// watchdog already failed instead of waiting for OCR to finish its budget.
+func TestRunStopsWhenWatchdogClosesTheRun(t *testing.T) {
+	f := newRunTestFixture(t)
+	f.setOCR(t, `{
+	  "status": "complete",
+	  "summary": {"files_reviewed": 1, "comments": 0, "total_tokens": 10},
+	  "manifest": {"coverage": {"completed": [{"path": "auth.go"}],
+	    "failed": [], "waived": [], "excluded": []}}
+	}`)
+	t.Setenv("RUN_FAKE_OCR_SLEEP", "10")
+
+	runner := f.runner()
+	runner.heartbeatEvery = 20 * time.Millisecond
+
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(f.ctx, f.runID) }()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", f.runID).
+		Updates(map[string]any{
+			"status":     store.RunFailed,
+			"error_code": store.RunErrorInterrupted,
+		}).Error; err != nil {
+		t.Fatalf("close the run like the watchdog: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil after the run was closed", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Run() kept executing after the watchdog closed the run")
+	}
+}

@@ -125,7 +125,7 @@ func Fields() []Field {
 		{
 			Key: KeyReviewTimeout, Group: GroupReview,
 			Label: "Tiempo máximo por revisión",
-			Help:  "Depende del modelo y del tamaño del PR. Antes de agotarlo, OCR entrega lo revisado y el PR queda inconcluso con los archivos pendientes.",
+			Help:  "Presupuesto de la revisión. OCR lo reparte entre sus tareas y entrega lo revisado antes de agotarlo; depende del modelo y del tamaño del PR.",
 			Kind:  "duration", Unit: "m", Default: "45m", Restart: "worker",
 		},
 		{
@@ -137,7 +137,7 @@ func Fields() []Field {
 		{
 			Key: KeyReviewStaleAfter, Group: GroupReview,
 			Label: "Umbral de runs huérfanos",
-			Help:  "Los runs en curso más antiguos que esto se marcan como interrumpidos. Debe superar el tiempo máximo.",
+			Help:  "Red de seguridad del watchdog: un run en curso más antiguo que esto se cierra. Si el worker sigue enviando latido, el aviso habla de tiempo máximo; si dejó de latir, de worker sin respuesta. Debe superar el tiempo máximo por al menos 5 min.",
 			Kind:  "duration", Unit: "m", Default: "60m", Restart: "worker",
 		},
 		{

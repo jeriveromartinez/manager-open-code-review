@@ -268,10 +268,13 @@ type ReviewRun struct {
 	// before #123, which the panel renders as "—".
 	Phase          string     `gorm:"column:phase"`
 	PhaseStartedAt *time.Time `gorm:"column:phase_started_at"`
-	StartedAt      *time.Time `gorm:"column:started_at"`
-	FinishedAt     *time.Time `gorm:"column:finished_at"`
-	CreatedAt      time.Time  `gorm:"column:created_at"`
-	UpdatedAt      time.Time  `gorm:"column:updated_at"`
+	// HeartbeatAt is refreshed by the executing worker every minute. Nil on
+	// runs claimed before the heartbeat existed (#130).
+	HeartbeatAt *time.Time `gorm:"column:heartbeat_at"`
+	StartedAt   *time.Time `gorm:"column:started_at"`
+	FinishedAt  *time.Time `gorm:"column:finished_at"`
+	CreatedAt   time.Time  `gorm:"column:created_at"`
+	UpdatedAt   time.Time  `gorm:"column:updated_at"`
 }
 
 // ReviewRunLog is one line of a review run's live log. Seq orders the lines of

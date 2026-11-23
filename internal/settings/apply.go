@@ -175,12 +175,17 @@ func setIntAtMost(dst *int, key, raw string, max int) error {
 	return nil
 }
 
+// MinReviewStaleMargin is the room the watchdog needs between the OCR deadline
+// and the orphan threshold to clone, parse and publish (#130).
+const MinReviewStaleMargin = 5 * time.Minute
+
 // validatePairs runs after every write because a partial save can still make
 // the resulting configuration incoherent.
 func validatePairs(cfg *config.Config) error {
-	if cfg.ReviewStaleAfter <= cfg.ReviewTimeout {
+	if margin := cfg.ReviewStaleAfter - cfg.ReviewTimeout; margin < MinReviewStaleMargin {
 		return &KeyError{KeyReviewStaleAfter, fmt.Sprintf(
-			"must exceed review_timeout (%s) or the watchdog kills healthy runs", cfg.ReviewTimeout)}
+			"must exceed review_timeout (%s) by at least %s so the watchdog leaves room to clone and publish",
+			cfg.ReviewTimeout, MinReviewStaleMargin)}
 	}
 	if cfg.MonitorRenotifyAfter < cfg.MonitorInterval {
 		return &KeyError{KeyMonitorRenotifyAfter, "must be greater than or equal to monitor_interval"}
