@@ -473,7 +473,7 @@ func TestBuildReviewArgsCommit(t *testing.T) {
 		Effort:         "high",
 		MaxTokens:      270000,
 		TokenBudget:    500000,
-		Timeout:        90 * time.Second,
+		TaskTimeout:    2 * time.Minute,
 		Commit:         "chunk-sha",
 	}
 

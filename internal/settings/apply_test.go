@@ -80,18 +80,18 @@ func TestSetDurationRejectsNonPositive(t *testing.T) {
 
 func TestApplyRejectsIncoherentPairs(t *testing.T) {
 	cfg := config.Default()
-	err := Apply(&cfg, map[string]string{KeyReviewTimeout: "60m"})
+	err := Apply(&cfg, map[string]string{KeyReviewTimeout: "75m"})
 	var keyErr *KeyError
 	if !errors.As(err, &keyErr) || keyErr.Key != KeyReviewStaleAfter {
-		t.Fatalf("timeout 60m with stale 45m = %v, want KeyError on %s", err, KeyReviewStaleAfter)
+		t.Fatalf("timeout 75m with stale 60m = %v, want KeyError on %s", err, KeyReviewStaleAfter)
 	}
 
 	// Equality is the whole point of the rule: the watchdog would kill a run at
 	// the same instant the review's own timeout expires.
 	cfg = config.Default()
-	err = Apply(&cfg, map[string]string{KeyReviewTimeout: "45m"})
+	err = Apply(&cfg, map[string]string{KeyReviewTimeout: "60m"})
 	if !errors.As(err, &keyErr) || keyErr.Key != KeyReviewStaleAfter {
-		t.Fatalf("timeout 45m with stale 45m = %v, want KeyError on %s", err, KeyReviewStaleAfter)
+		t.Fatalf("timeout 60m with stale 60m = %v, want KeyError on %s", err, KeyReviewStaleAfter)
 	}
 
 	cfg = config.Default()

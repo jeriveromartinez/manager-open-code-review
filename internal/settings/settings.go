@@ -125,8 +125,8 @@ func Fields() []Field {
 		{
 			Key: KeyReviewTimeout, Group: GroupReview,
 			Label: "Tiempo máximo por revisión",
-			Help:  "Al superarlo, el run falla y el PR queda inconcluso.",
-			Kind:  "duration", Unit: "m", Default: "20m", Restart: "worker",
+			Help:  "Depende del modelo y del tamaño del PR. Antes de agotarlo, OCR entrega lo revisado y el PR queda inconcluso con los archivos pendientes.",
+			Kind:  "duration", Unit: "m", Default: "45m", Restart: "worker",
 		},
 		{
 			Key: KeyReviewDebounce, Group: GroupReview,
@@ -138,7 +138,7 @@ func Fields() []Field {
 			Key: KeyReviewStaleAfter, Group: GroupReview,
 			Label: "Umbral de runs huérfanos",
 			Help:  "Los runs en curso más antiguos que esto se marcan como interrumpidos. Debe superar el tiempo máximo.",
-			Kind:  "duration", Unit: "m", Default: "45m", Restart: "worker",
+			Kind:  "duration", Unit: "m", Default: "60m", Restart: "worker",
 		},
 		{
 			Key: KeyLLMHealthInterval, Group: GroupReview,

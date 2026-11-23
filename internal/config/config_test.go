@@ -141,8 +141,8 @@ func TestLoadOnlyReadsTheEssentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.ReviewTimeout != 20*time.Minute {
-		t.Errorf("ReviewTimeout = %s, want the 20m default: the environment must be ignored", cfg.ReviewTimeout)
+	if cfg.ReviewTimeout != 45*time.Minute {
+		t.Errorf("ReviewTimeout = %s, want the 45m default: the environment must be ignored", cfg.ReviewTimeout)
 	}
 	if cfg.PublicURL != "" {
 		t.Errorf("PublicURL = %q, want it empty: the setup detects and stores it", cfg.PublicURL)
@@ -282,14 +282,14 @@ func TestLoadReviewDefaults(t *testing.T) {
 	if cfg.ReviewContextCeiling != 270000 {
 		t.Errorf("ReviewContextCeiling = %d, want 270000", cfg.ReviewContextCeiling)
 	}
-	if cfg.ReviewTimeout != 20*time.Minute {
-		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 20*time.Minute)
+	if cfg.ReviewTimeout != 45*time.Minute {
+		t.Errorf("ReviewTimeout = %v, want %v", cfg.ReviewTimeout, 45*time.Minute)
 	}
 	if cfg.ReviewDebounce != 2*time.Minute {
 		t.Errorf("ReviewDebounce = %v, want %v", cfg.ReviewDebounce, 2*time.Minute)
 	}
-	if cfg.ReviewStaleAfter != 45*time.Minute {
-		t.Errorf("ReviewStaleAfter = %v, want %v", cfg.ReviewStaleAfter, 45*time.Minute)
+	if cfg.ReviewStaleAfter != 60*time.Minute {
+		t.Errorf("ReviewStaleAfter = %v, want %v", cfg.ReviewStaleAfter, 60*time.Minute)
 	}
 	if cfg.LLMHealthInterval != 6*time.Hour {
 		t.Errorf("LLMHealthInterval = %v, want %v", cfg.LLMHealthInterval, 6*time.Hour)
