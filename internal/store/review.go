@@ -65,6 +65,16 @@ func ValidReviewEffort(effort string) bool {
 	}
 }
 
+// ValidAutoTriageMode reports whether mode is one the verifier understands.
+func ValidAutoTriageMode(mode string) bool {
+	switch mode {
+	case AutoTriageOff, AutoTriageDryRun, AutoTriageApply:
+		return true
+	default:
+		return false
+	}
+}
+
 // ReviewConfig is the complete configuration that applies to one pull request.
 type ReviewConfig struct {
 	PR           PullRequest

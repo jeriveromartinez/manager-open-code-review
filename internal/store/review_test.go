@@ -1960,3 +1960,122 @@ func TestArtifactIdempotency(t *testing.T) {
 		return err
 	}())
 }
+
+func TestFindingVerificationFieldsRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/verify", nil, true)
+	pr := f.openPR(repo.ID, 11, store.StatusPending, false)
+
+	evidence := datatypes.JSON(`{"verdict":"confirm","evidence":"if err != nil {"}`)
+	saved, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_verify_fields", PullRequestID: pr.ID, Fingerprint: "fp-verify-fields",
+		Path: "main.go", Severity: "minor", Category: "correctness", Status: store.FindingOpen,
+		ExistingCode: "if err != nil {", Verification: evidence, TriageSource: "verifier",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if saved.ExistingCode != "if err != nil {" || saved.TriageSource != "verifier" ||
+		!sameJSON(t, saved.Verification, string(evidence)) {
+		t.Errorf("verification fields = %q/%q/%s, want the persisted values",
+			saved.ExistingCode, saved.TriageSource, saved.Verification)
+	}
+
+	var reloaded store.Finding
+	if err := f.s.DB.WithContext(f.ctx).First(&reloaded, "id = ?", saved.ID).Error; err != nil {
+		t.Fatalf("reload finding: %v", err)
+	}
+	if reloaded.ExistingCode != saved.ExistingCode || reloaded.TriageSource != saved.TriageSource ||
+		!sameJSON(t, reloaded.Verification, string(saved.Verification)) {
+		t.Errorf("reloaded verification fields = %+v, want %+v", reloaded, saved)
+	}
+}
+
+func TestReviewRunVerifyFieldsRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/verify-run", nil, true)
+	pr := f.openPR(repo.ID, 12, store.StatusPending, false)
+	run := f.run(pr, store.RunRunning)
+
+	usage := datatypes.JSON(`{"total_tokens":42}`)
+	f.exec(`UPDATE review_runs SET verify_session_id = 'verify-session', verify_usage = ? WHERE id = ?`,
+		usage, run.ID)
+
+	got, err := f.s.ReviewRun(f.ctx, run.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun: %v", err)
+	}
+	if got.VerifySessionID != "verify-session" || !sameJSON(t, got.VerifyUsage, string(usage)) {
+		t.Errorf("verify fields = %q/%s, want verify-session/%s",
+			got.VerifySessionID, got.VerifyUsage, usage)
+	}
+}
+
+// sameJSON compares two JSON documents by value: jsonb normalizes whitespace
+// and key order, so raw string comparison is wrong.
+func sameJSON(t *testing.T, got datatypes.JSON, want string) bool {
+	t.Helper()
+	var a, b any
+	if err := json.Unmarshal(got, &a); err != nil {
+		t.Fatalf("unmarshal got JSON %s: %v", got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &b); err != nil {
+		t.Fatalf("unmarshal want JSON %s: %v", want, err)
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+func TestTriageSourceBackfillMarksExistingTriagesAsHuman(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/backfill", nil, true)
+	pr := f.openPR(repo.ID, 13, store.StatusPending, false)
+	finding := f.finding(pr, "f_backfill", "minor", "correctness", store.FindingWithdrawn)
+
+	f.exec(`UPDATE findings SET triaged_by = 'qa-user', triage_verdict = 'false_positive' WHERE id = ?`,
+		finding.ID)
+	f.exec(`UPDATE findings SET triage_source = 'human' WHERE triaged_by <> '' AND triage_source = ''`)
+
+	var got store.Finding
+	if err := f.s.DB.WithContext(f.ctx).First(&got, "id = ?", finding.ID).Error; err != nil {
+		t.Fatalf("reload finding: %v", err)
+	}
+	if got.TriageSource != "human" {
+		t.Errorf("triage_source = %q, want human for a pre-existing triage", got.TriageSource)
+	}
+}
+
+func TestQAPolicyAutoTriageFieldsRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	team := f.team("auto-triage")
+	profile := f.llmProfile("auto-triage-profile", true)
+
+	saved, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID,
+		AutoTriageMode: store.AutoTriageApply, AutoWithdraw: true,
+		VerifyMaxFindings: 25, VerifyMaxFiles: 7, VerifyTokenShare: 30,
+		VerifyTimeShare: 10, VerifyTokenMax: 150000,
+	})
+	if err != nil {
+		t.Fatalf("SaveQAPolicy: %v", err)
+	}
+
+	loaded, err := f.s.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if loaded.AutoTriageMode != store.AutoTriageApply || !loaded.AutoWithdraw ||
+		loaded.VerifyMaxFindings != 25 || loaded.VerifyMaxFiles != 7 ||
+		loaded.VerifyTokenShare != 30 || loaded.VerifyTimeShare != 10 ||
+		loaded.VerifyTokenMax != 150000 {
+		t.Errorf("auto-triage policy = %+v, want the saved values", loaded)
+	}
+	if loaded.ID != saved.ID {
+		t.Errorf("policy ID = %d, want %d", loaded.ID, saved.ID)
+	}
+}
