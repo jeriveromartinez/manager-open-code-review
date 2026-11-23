@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,7 +151,9 @@ type nativeInvocation struct {
 	Effort         string
 	MaxTokens      int
 	TokenBudget    int64
-	Timeout        time.Duration
+	// TaskTimeout is OCR's own per-subtask budget, already divided by the
+	// effort rounds (see ocrBudget). Zero leaves OCR's default.
+	TaskTimeout time.Duration
 }
 
 func buildReviewArgs(in nativeInvocation) []string {
@@ -180,7 +181,11 @@ func buildReviewArgs(in nativeInvocation) []string {
 	if in.TokenBudget > 0 {
 		args = append(args, "--max-tokens-budget", fmt.Sprint(in.TokenBudget))
 	}
-	if minutes, ok := nativeTimeoutMinutes(in.Timeout); ok {
+	if in.TaskTimeout > 0 {
+		minutes := int(in.TaskTimeout / time.Minute)
+		if minutes < 1 {
+			minutes = 1
+		}
 		args = append(args, "--timeout", fmt.Sprint(minutes))
 	}
 	if in.Excludes != "" {
@@ -189,17 +194,60 @@ func buildReviewArgs(in nativeInvocation) []string {
 	return args
 }
 
-// nativeTimeoutMinutes converts the whole-run budget into OCR's concurrent-task
-// budget. It rounds up so OCR does not cancel before the run context does.
-func nativeTimeoutMinutes(budget time.Duration) (int, bool) {
-	if budget <= 0 {
-		return 0, false
+const (
+	// ocrReserveMin and ocrReserveShare keep time after OCR for parsing,
+	// publishing and the chunked review of oversized files.
+	ocrReserveMin   = 2 * time.Minute
+	ocrReserveShare = 10
+	// ocrRequestMin and ocrRequestMax bound one model request. OCR's own
+	// default is 300 s; a hung request must fail and be retried well inside
+	// the subtask budget instead of consuming it.
+	ocrRequestMin = time.Minute
+	ocrRequestMax = 300 * time.Second
+)
+
+// ocrBudget turns the time the run has left into OCR's own limits. OCR's
+// --timeout is a per-subtask budget that OCR multiplies by the effort rounds,
+// and OCR only stops itself (and writes its JSON with the partial results) when
+// that budget runs out. It must therefore end before the run context: a run
+// cut by the context kills OCR before it writes anything, and every finding
+// and token of the review is lost (#128). task is the value for --timeout;
+// request bounds one model call. Both are zero when no time is known.
+func ocrBudget(remaining time.Duration, effort string) (task, request time.Duration) {
+	if remaining <= 0 {
+		return 0, 0
 	}
-	minutes := int(math.Ceil(budget.Minutes()))
-	if minutes < 1 {
-		minutes = 1
+	reserve := remaining / ocrReserveShare
+	if reserve < ocrReserveMin {
+		reserve = ocrReserveMin
 	}
-	return minutes, true
+	usable := remaining - reserve
+	rounds := time.Duration(effortRounds(effort))
+	task = (usable / rounds).Truncate(time.Minute)
+	if task < time.Minute {
+		task = time.Minute
+	}
+	request = (task * rounds) / 3
+	if request < ocrRequestMin {
+		request = ocrRequestMin
+	}
+	if request > ocrRequestMax {
+		request = ocrRequestMax
+	}
+	return task, request
+}
+
+// effortRounds mirrors OCR's effort presets: low, medium and high run one, two
+// and three review rounds. Anything else is treated as the low default.
+func effortRounds(effort string) int {
+	switch effort {
+	case store.ReviewEffortMedium:
+		return 2
+	case store.ReviewEffortHigh:
+		return 3
+	default:
+		return 1
+	}
 }
 
 // NativeReviewer runs one `ocr review` for the whole pull request.
@@ -223,8 +271,9 @@ type NativeReviewer struct {
 	Effort      string
 	MaxTokens   int
 	TokenBudget int64
-	// Timeout is the whole-run budget. It bounds the context and derives
-	// --timeout; the per-request OCR_LLM_TIMEOUT keeps its own default.
+	// Timeout is the most this invocation may run. The context deadline wins
+	// when it is earlier, which is the case for chunks reviewed after the
+	// main run; ocrBudget derives OCR's own limits from whichever is shorter.
 	Timeout time.Duration
 	// OnLog receives every stderr line as OCR prints it, so the review log can
 	// stream progress live. Nil keeps the buffered path used elsewhere.
@@ -252,7 +301,14 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 	if err != nil {
 		return nativeReview{}, nil, err
 	}
-	if err := writeNativeConfig(home, n.Profile, keyPath); err != nil {
+	remaining := n.Timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if left := time.Until(deadline); remaining <= 0 || left < remaining {
+			remaining = left
+		}
+	}
+	taskTimeout, requestTimeout := ocrBudget(remaining, n.Effort)
+	if err := writeNativeConfig(home, n.Profile, keyPath, requestTimeout); err != nil {
 		return nativeReview{}, nil, err
 	}
 	backgroundPath, err := writeNativeBackground(home, n.Background)
@@ -275,7 +331,7 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 		Effort:         n.Effort,
 		MaxTokens:      n.MaxTokens,
 		TokenBudget:    n.TokenBudget,
-		Timeout:        n.Timeout,
+		TaskTimeout:    taskTimeout,
 	})
 
 	cmd := exec.CommandContext(ctx, bin, args...)
@@ -445,7 +501,7 @@ func nativeSupportsPromptCache(profile store.LLMProfile) bool {
 // writeNativeConfig writes the isolated OCR configuration. The custom provider
 // is the only shape that exposes extra_body, which is how the prompt cache key
 // reaches providers that support an explicit key.
-func writeNativeConfig(home string, profile store.LLMProfile, keyPath string) error {
+func writeNativeConfig(home string, profile store.LLMProfile, keyPath string, requestTimeout time.Duration) error {
 	baseURL, protocol, err := nativeEndpoint(profile)
 	if err != nil {
 		return fmt.Errorf("review: %w", err)
@@ -458,6 +514,9 @@ func writeNativeConfig(home string, profile store.LLMProfile, keyPath string) er
 	}
 	if nativeSupportsPromptCache(profile) {
 		custom["extra_body"] = map[string]string{"prompt_cache_key": ocrSessionKeyPlaceholder}
+	}
+	if seconds := int(requestTimeout / time.Second); seconds > 0 {
+		custom["timeout_sec"] = seconds
 	}
 	cfg := map[string]any{
 		"provider": nativeProviderName,

@@ -27,7 +27,7 @@ func TestBuildReviewArgs(t *testing.T) {
 		Effort:         "high",
 		MaxTokens:      reviewContextCeiling,
 		TokenBudget:    500000,
-		Timeout:        90 * time.Second,
+		TaskTimeout:    2 * time.Minute,
 	})
 	want := []string{
 		"review",
@@ -411,11 +411,12 @@ func TestNativeTitleFingerprintStable(t *testing.T) {
 }
 
 type nativeCustomProvider struct {
-	URL       string            `json:"url"`
-	Protocol  string            `json:"protocol"`
-	Model     string            `json:"model"`
-	APIKeyCmd string            `json:"api_key_cmd"`
-	ExtraBody map[string]string `json:"extra_body"`
+	URL        string            `json:"url"`
+	Protocol   string            `json:"protocol"`
+	Model      string            `json:"model"`
+	APIKeyCmd  string            `json:"api_key_cmd"`
+	ExtraBody  map[string]string `json:"extra_body"`
+	TimeoutSec int               `json:"timeout_sec"`
 }
 
 type nativeConfigFile struct {
@@ -447,7 +448,7 @@ func TestNativeConfigKeepsKeyOffDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writeNativeKeyHelper: %v", err)
 	}
-	if err := writeNativeConfig(home, profile, keyPath); err != nil {
+	if err := writeNativeConfig(home, profile, keyPath, 0); err != nil {
 		t.Fatalf("writeNativeConfig: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(home, ".opencodereview", "config.json"))
@@ -515,7 +516,7 @@ func TestNativeConfigPromptCachePerProtocol(t *testing.T) {
 				t.Fatalf("writeNativeKeyHelper: %v", err)
 			}
 			profile := store.LLMProfile{Provider: tt.provider, Model: "m", BaseURL: tt.baseURL}
-			if err := writeNativeConfig(home, profile, keyPath); err != nil {
+			if err := writeNativeConfig(home, profile, keyPath, 0); err != nil {
 				t.Fatalf("writeNativeConfig: %v", err)
 			}
 			cfg := readNativeConfig(t, home)
@@ -526,6 +527,122 @@ func TestNativeConfigPromptCachePerProtocol(t *testing.T) {
 			if got != tt.wantCache {
 				t.Errorf("prompt_cache_key present = %v, want %v (extra_body %v)",
 					got, tt.wantCache, cfg.ExtraBody)
+			}
+		})
+	}
+}
+
+// TestOCRBudget pins how the run's remaining time becomes OCR's own limits.
+// OCR multiplies --timeout by the effort rounds and only stops itself (and
+// writes its JSON with partial results) inside that budget, so the budget must
+// end before the run context or the whole review is lost (#128).
+func TestOCRBudget(t *testing.T) {
+	tests := []struct {
+		name        string
+		remaining   time.Duration
+		effort      string
+		wantTask    time.Duration
+		wantRequest time.Duration
+	}{
+		{name: "default run, low effort", remaining: 20 * time.Minute, effort: "low", wantTask: 18 * time.Minute, wantRequest: 300 * time.Second},
+		{name: "medium halves the per-round budget", remaining: 20 * time.Minute, effort: "medium", wantTask: 9 * time.Minute, wantRequest: 300 * time.Second},
+		{name: "high splits it in three", remaining: 20 * time.Minute, effort: "high", wantTask: 6 * time.Minute, wantRequest: 300 * time.Second},
+		{name: "long run keeps a ten percent reserve", remaining: 45 * time.Minute, effort: "low", wantTask: 40 * time.Minute, wantRequest: 300 * time.Second},
+		{name: "short run shortens each request", remaining: 4 * time.Minute, effort: "low", wantTask: 2 * time.Minute, wantRequest: 60 * time.Second},
+		{name: "request limit follows the subtask budget", remaining: 10 * time.Minute, effort: "low", wantTask: 8 * time.Minute, wantRequest: 160 * time.Second},
+		{name: "never below one minute per round", remaining: 3 * time.Minute, effort: "medium", wantTask: time.Minute, wantRequest: 60 * time.Second},
+		{name: "unknown effort counts as one round", remaining: 20 * time.Minute, effort: "", wantTask: 18 * time.Minute, wantRequest: 300 * time.Second},
+		{name: "no time means no limits", remaining: 0, effort: "low", wantTask: 0, wantRequest: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task, request := ocrBudget(tt.remaining, tt.effort)
+			if task != tt.wantTask || request != tt.wantRequest {
+				t.Fatalf("ocrBudget(%s, %q) = (%s, %s), want (%s, %s)",
+					tt.remaining, tt.effort, task, request, tt.wantTask, tt.wantRequest)
+			}
+		})
+	}
+}
+
+func TestNativeConfigRequestTimeout(t *testing.T) {
+	base := "https://provider.example/v1"
+	profile := store.LLMProfile{Provider: "custom", Model: "m", BaseURL: &base}
+	for _, tt := range []struct {
+		timeout time.Duration
+		want    int
+	}{{90 * time.Second, 90}, {0, 0}} {
+		home := t.TempDir()
+		keyPath, err := writeNativeKeyHelper(home)
+		if err != nil {
+			t.Fatalf("writeNativeKeyHelper: %v", err)
+		}
+		if err := writeNativeConfig(home, profile, keyPath, tt.timeout); err != nil {
+			t.Fatalf("writeNativeConfig: %v", err)
+		}
+		if got := readNativeConfig(t, home).TimeoutSec; got != tt.want {
+			t.Errorf("timeout_sec for %s = %d, want %d", tt.timeout, got, tt.want)
+		}
+	}
+}
+
+// TestReviewBudgetsFromRemainingTime runs the reviewer against a fake OCR that
+// records its arguments, so the budget it receives is the one derived from the
+// context deadline at call time, not the run budget fixed before cloning.
+func TestReviewBudgetsFromRemainingTime(t *testing.T) {
+	tests := []struct {
+		name        string
+		deadline    time.Duration
+		effort      string
+		wantTimeout string
+		wantRequest int
+	}{
+		{name: "context deadline wins over the run budget", deadline: 10*time.Minute + 30*time.Second, effort: "medium", wantTimeout: "4", wantRequest: 160},
+		{name: "run budget without a deadline", deadline: 0, effort: "low", wantTimeout: "18", wantRequest: 300},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reviewer := streamTestReviewer(t, nil,
+				`{"status":"complete","summary":{"files_reviewed":1},"manifest":{"terminal_state":"complete"}}`, "0")
+			argsFile := filepath.Join(t.TempDir(), "args")
+			script, err := os.ReadFile(reviewer.Bin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorded := strings.Replace(string(script), "#!/bin/sh\n",
+				fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", argsFile), 1)
+			if err := os.WriteFile(reviewer.Bin, []byte(recorded), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			reviewer.Effort = tt.effort
+			reviewer.Timeout = 20 * time.Minute
+
+			ctx := context.Background()
+			if tt.deadline > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.deadline)
+				defer cancel()
+			}
+			if _, _, err := reviewer.Review(ctx); err != nil {
+				t.Fatalf("Review() error = %v", err)
+			}
+
+			raw, err := os.ReadFile(argsFile)
+			if err != nil {
+				t.Fatalf("read recorded args: %v", err)
+			}
+			args := strings.Split(strings.TrimSpace(string(raw)), "\n")
+			got := ""
+			for i, arg := range args {
+				if arg == "--timeout" && i+1 < len(args) {
+					got = args[i+1]
+				}
+			}
+			if got != tt.wantTimeout {
+				t.Errorf("--timeout = %q, want %q (args %q)", got, tt.wantTimeout, args)
+			}
+			if req := readNativeConfig(t, reviewer.Home).TimeoutSec; req != tt.wantRequest {
+				t.Errorf("timeout_sec = %d, want %d", req, tt.wantRequest)
 			}
 		})
 	}
