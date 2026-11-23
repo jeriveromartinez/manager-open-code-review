@@ -151,6 +151,9 @@ type runOutcome struct {
 	// tokens accumulates every model call of the run; usage is its JSON form,
 	// kept for panels that read the raw event stream.
 	tokens tokenUsage
+	// tokensKnown is set only when an engine returned a parseable result, so a
+	// cut run persists NULL instead of a fake zero (#129).
+	tokensKnown bool
 
 	// Context needed to reconcile findings from passes that already completed
 	// when the run ends inconclusively.
@@ -161,10 +164,10 @@ type runOutcome struct {
 }
 
 // tokenTotals flattens the aggregated usage into the columns the panel reads.
-// A run that never called the model writes zeros, which is accurate; runs that
-// predate the columns stay NULL because they are never written again. MaxContext
-// stays nil when the engine reported no sample (native OCR), so the column is
-// NULL and the averages skip it instead of counting a fake zero.
+// The caller persists it only when tokensKnown is true; without an engine result
+// the columns stay NULL and the averages skip the run instead of counting a fake
+// zero. MaxContext stays nil when the engine reported no sample (native OCR), so
+// the column is NULL and the averages skip it.
 func (o *runOutcome) tokenTotals() store.RunUsage {
 	usage := store.RunUsage{
 		Input:      int64(o.tokens.Input),
@@ -331,6 +334,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		Coverage:     outcome.coverage,
 		Usage:        outcome.usage,
 		Tokens:       outcome.tokenTotals(),
+		TokensKnown:  outcome.tokensKnown,
 		Findings:     outcome.findings,
 		Resolved:     outcome.resolved,
 		BaseSHA:      outcome.baseSHA,
@@ -638,6 +642,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		time.Since(started).Round(time.Second), status, reviewed, skipped, excluded, len(res.Comments)))
 	files := nativeCoverageFiles(res)
 	out.tokens = nativeTokenUsage(res)
+	out.tokensKnown = true
 	out.summary = nativeSummaryText(res, status)
 
 	comments := append([]nativeComment(nil), res.Comments...)

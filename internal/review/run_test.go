@@ -924,7 +924,13 @@ func TestRunInconclusiveWhenOCRMissing(t *testing.T) {
 	if err := f.runner().Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	assertRunTerminal(t, f, store.RunInconclusive, "ocr_error")
+	run := assertRunTerminal(t, f, store.RunInconclusive, "ocr_error")
+	if run.InputTokens != nil || run.OutputTokens != nil || run.ReasoningTokens != nil ||
+		run.CacheReadTokens != nil || run.CacheWriteTokens != nil || run.TotalTokens != nil {
+		t.Errorf("token columns = %v/%v/%v/%v/%v/%v, want NULL after an OCR failure",
+			run.InputTokens, run.OutputTokens, run.ReasoningTokens,
+			run.CacheReadTokens, run.CacheWriteTokens, run.TotalTokens)
+	}
 	if pr := f.loadPR(t); pr.QAStatus != store.StatusInconclusive {
 		t.Errorf("qa_status = %q, want %q", pr.QAStatus, store.StatusInconclusive)
 	}
@@ -1001,6 +1007,12 @@ func TestRunBudgetPartialPublishesFindings(t *testing.T) {
 	run := assertRunTerminal(t, f, store.RunInconclusive, "token_budget")
 	if !strings.Contains(run.ErrorMessage, "tope de gasto") {
 		t.Errorf("error_message = %q, want it to explain the budget", run.ErrorMessage)
+	}
+	if run.InputTokens == nil || *run.InputTokens != 700 ||
+		run.OutputTokens == nil || *run.OutputTokens != 200 ||
+		run.TotalTokens == nil || *run.TotalTokens != 900 {
+		t.Errorf("token columns = %v/%v/%v, want the OCR summary 700/200/900",
+			run.InputTokens, run.OutputTokens, run.TotalTokens)
 	}
 	if got := f.ocrCalls(t); got != 1 {
 		t.Errorf("ocr calls = %d, want 1", got)

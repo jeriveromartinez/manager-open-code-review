@@ -1108,10 +1108,11 @@ func TestRunLifecycle(t *testing.T) {
 	usage := []byte(`{"input_tokens":123,"output_tokens":45}`)
 	maxContext := int64(1053)
 	err = f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
-		Status:   store.RunSucceeded,
-		Summary:  "looks good",
-		Coverage: coverage,
-		Usage:    usage,
+		Status:      store.RunSucceeded,
+		Summary:     "looks good",
+		Coverage:    coverage,
+		Usage:       usage,
+		TokensKnown: true,
 		Tokens: store.RunUsage{
 			Input: 123, Output: 45, Reasoning: 30, CacheRead: 900, CacheWrite: 30,
 			Total: 168, MaxContext: &maxContext,
@@ -1202,6 +1203,78 @@ func TestRunLifecycle(t *testing.T) {
 		t.Errorf("run after rollback = %+v, want still running", afterRollback)
 	}
 	requireCount(t, db.Table("findings").Where("pull_request_id = ?", rollbackPR.ID), "findings", 0)
+}
+
+type reviewRunTokenColumns struct {
+	InputTokens      *int64 `gorm:"column:input_tokens"`
+	OutputTokens     *int64 `gorm:"column:output_tokens"`
+	ReasoningTokens  *int64 `gorm:"column:reasoning_tokens"`
+	CacheReadTokens  *int64 `gorm:"column:cache_read_tokens"`
+	CacheWriteTokens *int64 `gorm:"column:cache_write_tokens"`
+	TotalTokens      *int64 `gorm:"column:total_tokens"`
+	MaxContextTokens *int64 `gorm:"column:max_context_tokens"`
+}
+
+// TestCompleteReviewRunStoresNullTokensWithoutUsage pins the #129 rule: a run
+// with no engine result stores NULL, while a measured zero is a real 0.
+func TestCompleteReviewRunStoresNullTokensWithoutUsage(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 1, store.StatusPending, false)
+
+	tokenColumns := func(id uint) reviewRunTokenColumns {
+		t.Helper()
+		var cols reviewRunTokenColumns
+		if err := f.s.DB.Raw(`SELECT input_tokens, output_tokens, reasoning_tokens,
+			cache_read_tokens, cache_write_tokens, total_tokens, max_context_tokens
+			FROM review_runs WHERE id = ?`, id).Scan(&cols).Error; err != nil {
+			t.Fatalf("read token columns: %v", err)
+		}
+		return cols
+	}
+	runningRun := func() store.ReviewRun {
+		t.Helper()
+		run, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+			PullRequestID: pr.ID, HeadSHA: pr.HeadSHA,
+		})
+		if err != nil {
+			t.Fatalf("CreateReviewRun: %v", err)
+		}
+		if _, ok, err := f.s.ClaimReviewRun(f.ctx, run.ID); err != nil || !ok {
+			t.Fatalf("ClaimReviewRun: ok = %v, err = %v", ok, err)
+		}
+		return run
+	}
+
+	unknown := runningRun()
+	if err := f.s.CompleteReviewRun(f.ctx, unknown.ID, store.RunCompletion{
+		Status: store.RunFailed, ErrorCode: "timeout",
+	}); err != nil {
+		t.Fatalf("CompleteReviewRun(unknown): %v", err)
+	}
+	cols := tokenColumns(unknown.ID)
+	if cols.InputTokens != nil || cols.OutputTokens != nil || cols.ReasoningTokens != nil ||
+		cols.CacheReadTokens != nil || cols.CacheWriteTokens != nil ||
+		cols.TotalTokens != nil || cols.MaxContextTokens != nil {
+		t.Errorf("token columns = %+v, want NULL when no engine reported usage", cols)
+	}
+
+	measured := runningRun()
+	if err := f.s.CompleteReviewRun(f.ctx, measured.ID, store.RunCompletion{
+		Status: store.RunSucceeded, TokensKnown: true,
+	}); err != nil {
+		t.Fatalf("CompleteReviewRun(measured zero): %v", err)
+	}
+	cols = tokenColumns(measured.ID)
+	if cols.InputTokens == nil || *cols.InputTokens != 0 ||
+		cols.TotalTokens == nil || *cols.TotalTokens != 0 {
+		t.Errorf("token columns = %+v, want measured zeros stored as 0", cols)
+	}
+	if cols.MaxContextTokens != nil {
+		t.Errorf("max_context_tokens = %v, want NULL when no sample was reported", *cols.MaxContextTokens)
+	}
 }
 
 func TestCompleteReviewRunRequiresRunningAndClearsToken(t *testing.T) {
