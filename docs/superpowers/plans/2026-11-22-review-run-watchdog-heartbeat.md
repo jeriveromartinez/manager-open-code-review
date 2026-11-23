@@ -521,9 +521,14 @@ In `execute`, replace the current context block (`runCtx := ctx` … `defer canc
 		runCtx, cancelTimeout = context.WithTimeout(pipelineCtx, r.Cfg.Timeout)
 		defer cancelTimeout()
 	}
-	stopHeartbeat := r.heartbeat(runCtx, run.ID, log, cancelPipeline)
+	stopHeartbeat := r.heartbeat(pipelineCtx, run.ID, log, cancelPipeline)
 	defer stopHeartbeat()
 ```
+
+The heartbeat must use `pipelineCtx`, not `runCtx`: it reports that the worker
+is alive, not that the pipeline still has budget. Bound to `runCtx` it stops at
+`review_timeout`, and with `review_stale_after` at least 5 min later the sweep
+always sees silence and can never report an overrun (#130).
 
 - [ ] **Step 4: Run the test and the review suite**
 
@@ -598,6 +603,14 @@ Replace the `ReviewStaleAfter` check with:
 			cfg.ReviewTimeout, MinReviewStaleMargin)}
 	}
 ```
+
+Persisted settings that the previous rule accepted (for example
+`review_timeout=45m`, `review_stale_after=48m`) must not abort startup after an
+upgrade. Add `settings.ApplyStored`: it validates every row strictly and then
+raises only the cross-key minimums (`review_stale_after` to
+`review_timeout + MinReviewStaleMargin`, and the same for the monitor
+renotify pair), returning the adjustments so every load path can log them.
+Strict `Apply` keeps rejecting incoming values from the panel.
 
 - [ ] **Step 4: Update the settings help**
 

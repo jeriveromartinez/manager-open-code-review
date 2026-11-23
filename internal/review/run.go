@@ -482,7 +482,10 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		runCtx, cancelTimeout = context.WithTimeout(pipelineCtx, r.Cfg.Timeout)
 		defer cancelTimeout()
 	}
-	stopHeartbeat := r.heartbeat(runCtx, run.ID, log, cancelPipeline)
+	// The heartbeat reports that the worker is alive, not that the pipeline
+	// still has budget: it outlives the review deadline so a run that overran
+	// it is classified as overrun and not as a lost worker (#130).
+	stopHeartbeat := r.heartbeat(pipelineCtx, run.ID, log, cancelPipeline)
 	defer stopHeartbeat()
 	r.setPhase(runCtx, run.ID, store.RunPhaseCloning, log)
 	log.Log(runCtx, "worker", "", "info", logPhaseClone,
