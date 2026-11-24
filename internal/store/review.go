@@ -998,6 +998,21 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 }
 
 func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
+	if f.IdentityVersion == 0 {
+		f.IdentityVersion = IdentityVersionCurrent
+	}
+
+	// A row written before #144 keeps its ID and references, but its fingerprint
+	// belongs to the old scheme. Migrating it in place is the only way the next
+	// run can match it by the new identity without re-keying comments or threads.
+	legacy, ok, err := legacyFindingByID(db, f)
+	if err != nil {
+		return Finding{}, err
+	}
+	if ok {
+		return migrateLegacyFinding(db, legacy, f)
+	}
+
 	// A verifier dismissal survives while the cited code and range stay the
 	// same; reopening it on every run would undo the second pass. A human
 	// verdict is never discarded here.
@@ -1017,7 +1032,7 @@ func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
 		DoUpdates: clause.AssignmentColumns([]string{
 			"path", "start_line", "end_line", "severity", "category", "title",
 			"body", "suggestion", "confidence", "existing_code", "status",
-			"last_seen_run_id", "updated_at",
+			"identity_version", "last_seen_run_id", "updated_at",
 		}),
 		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{
 			SQL: "findings.triage_verdict = '' OR findings.existing_code <> EXCLUDED.existing_code" +
@@ -1029,9 +1044,82 @@ func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
 	}
 
 	var saved Finding
-	err := quietDB(db).Where("pull_request_id = ? AND fingerprint = ?", f.PullRequestID, f.Fingerprint).
+	err = quietDB(db).Where("pull_request_id = ? AND fingerprint = ?", f.PullRequestID, f.Fingerprint).
 		Take(&saved).Error
 	if err != nil {
+		return Finding{}, fmt.Errorf("reload finding %q: %w", f.ID, err)
+	}
+	return saved, nil
+}
+
+// legacyFindingByID returns the version-1 row that owns f.ID in the same pull
+// request, when there is one. Only a current-scheme upsert can migrate it:
+// keeping the legacy fingerprint would make every future run treat the row as
+// a new finding.
+func legacyFindingByID(db *gorm.DB, f Finding) (Finding, bool, error) {
+	if f.ID == "" || f.IdentityVersion < IdentityVersionCurrent {
+		return Finding{}, false, nil
+	}
+	var legacy Finding
+	err := quietDB(db).
+		Where("id = ? AND pull_request_id = ? AND identity_version < ?",
+			f.ID, f.PullRequestID, IdentityVersionCurrent).
+		Take(&legacy).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Finding{}, false, nil
+	}
+	if err != nil {
+		return Finding{}, false, fmt.Errorf("find legacy finding %q: %w", f.ID, err)
+	}
+	return legacy, true, nil
+}
+
+func migrateLegacyFinding(db *gorm.DB, legacy, f Finding) (Finding, error) {
+	now := time.Now().UTC()
+	// The verifier rule is the same as the normal upsert, keyed by ID because the
+	// legacy row still carries its old fingerprint.
+	if err := db.Model(&Finding{}).
+		Where("id = ? AND triage_source = ?", legacy.ID, TriageSourceVerifier).
+		Where("existing_code <> ? OR start_line <> ? OR end_line <> ?",
+			f.ExistingCode, f.StartLine, f.EndLine).
+		Updates(map[string]any{
+			"triage_verdict": "", "triaged_by": "", "triaged_at": nil, "triage_source": "",
+		}).Error; err != nil {
+		return Finding{}, fmt.Errorf("clear stale verifier triage for %q: %w", f.ID, err)
+	}
+
+	// The identity migrates unless another row of the same PR already owns the
+	// target fingerprint. Taking it would violate the unique index and abort the
+	// whole run, so in that case the row stays on the legacy scheme; its ID and
+	// references are still kept and its contents are refreshed below.
+	if err := db.Model(&Finding{}).Where("id = ?", legacy.ID).
+		Where("NOT EXISTS (SELECT 1 FROM findings other "+
+			"WHERE other.pull_request_id = ? AND other.fingerprint = ? AND other.id <> ?)",
+			f.PullRequestID, f.Fingerprint, legacy.ID).
+		Updates(map[string]any{
+			"fingerprint":      f.Fingerprint,
+			"identity_version": IdentityVersionCurrent,
+			"updated_at":       now,
+		}).Error; err != nil {
+		return Finding{}, fmt.Errorf("migrate finding %q identity: %w", f.ID, err)
+	}
+
+	res := db.Model(&Finding{}).Where("id = ?", legacy.ID).
+		Where("triage_verdict = '' OR existing_code <> ? OR start_line <> ? OR end_line <> ?",
+			f.ExistingCode, f.StartLine, f.EndLine).
+		Updates(map[string]any{
+			"path": f.Path, "start_line": f.StartLine, "end_line": f.EndLine,
+			"severity": f.Severity, "category": f.Category, "title": f.Title,
+			"body": f.Body, "suggestion": f.Suggestion, "confidence": f.Confidence,
+			"existing_code": f.ExistingCode, "status": f.Status,
+			"last_seen_run_id": f.LastSeenRunID, "updated_at": now,
+		})
+	if res.Error != nil {
+		return Finding{}, fmt.Errorf("migrate finding %q contents: %w", f.ID, res.Error)
+	}
+
+	var saved Finding
+	if err := quietDB(db).Where("id = ?", legacy.ID).Take(&saved).Error; err != nil {
 		return Finding{}, fmt.Errorf("reload finding %q: %w", f.ID, err)
 	}
 	return saved, nil

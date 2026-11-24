@@ -2112,6 +2112,159 @@ func TestUpsertFindingStoresExistingCode(t *testing.T) {
 	}
 }
 
+func TestUpsertFindingMigratesLegacyRowInPlace(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/legacy-identity", nil, true)
+	pr := f.openPR(repo.ID, 29, store.StatusPending, false)
+
+	seed, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_legacy", PullRequestID: pr.ID, Fingerprint: "legacy-fp",
+		IdentityVersion: store.IdentityVersionLegacy,
+		Path:            "main.go", StartLine: 10, EndLine: 12, Severity: "minor",
+		Category: "style", Title: "Nombre largo", Status: store.FindingOpen,
+		ExistingCode: "guard()", FirstSeenRunID: 3, LastSeenRunID: 3,
+		TriageVerdict: store.VerdictConfirmed, TriageSource: store.TriageSourceHuman,
+		TriagedBy: "ana", Verification: datatypes.JSON(`{"verdict":"confirm","evidence":"guard()"}`),
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding(seed): %v", err)
+	}
+	if seed.IdentityVersion != store.IdentityVersionLegacy {
+		t.Fatalf("seed identity version = %d, want %d", seed.IdentityVersion, store.IdentityVersionLegacy)
+	}
+	if err := f.s.SetFindingPublished(f.ctx, seed.ID, 4242, "node-1", "thread-1"); err != nil {
+		t.Fatalf("SetFindingPublished: %v", err)
+	}
+	if err := f.s.DB.WithContext(f.ctx).Create(&store.AuditLog{
+		Action: "finding.confirmed", TargetType: "finding", TargetID: seed.ID,
+	}).Error; err != nil {
+		t.Fatalf("seed audit row: %v", err)
+	}
+
+	migrate := func(lastSeen uint) store.Finding {
+		t.Helper()
+		got, err := f.s.UpsertFinding(f.ctx, store.Finding{
+			ID: "f_legacy", PullRequestID: pr.ID, Fingerprint: "new-fp",
+			IdentityVersion: store.IdentityVersionCurrent,
+			Path:            "main.go", StartLine: 20, EndLine: 22, Severity: "minor",
+			Category: "style", Title: "Nombre largo", Status: store.FindingOpen,
+			ExistingCode: "guard()", FirstSeenRunID: 99, LastSeenRunID: lastSeen,
+		})
+		if err != nil {
+			t.Fatalf("UpsertFinding(migrate): %v", err)
+		}
+		return got
+	}
+
+	migrated := migrate(5)
+	if migrated.ID != "f_legacy" {
+		t.Fatalf("migrated ID = %q, want the legacy ID", migrated.ID)
+	}
+	if migrated.Fingerprint != "new-fp" || migrated.IdentityVersion != store.IdentityVersionCurrent {
+		t.Fatalf("identity not migrated: %+v", migrated)
+	}
+	if migrated.FirstSeenRunID != 3 || migrated.StartLine != 20 || migrated.LastSeenRunID != 5 {
+		t.Fatalf("migrated row = %+v, want first_seen preserved and the range refreshed", migrated)
+	}
+	if migrated.GithubCommentID != 4242 || migrated.GithubCommentNodeID != "node-1" ||
+		migrated.GithubThreadID != "thread-1" {
+		t.Fatalf("legacy references lost: %+v", migrated)
+	}
+	var verification map[string]string
+	if err := json.Unmarshal(migrated.Verification, &verification); err != nil {
+		t.Fatalf("verification is not JSON: %v", err)
+	}
+	if migrated.TriageVerdict != store.VerdictConfirmed || migrated.TriageSource != store.TriageSourceHuman ||
+		migrated.TriagedBy != "ana" || verification["verdict"] != "confirm" ||
+		verification["evidence"] != "guard()" {
+		t.Fatalf("triage or verification lost on migration: %+v", migrated)
+	}
+	if rows := f.auditRows(seed.ID); rows != 1 {
+		t.Fatalf("audit rows referencing the finding = %d, want 1", rows)
+	}
+	requireCount(t, f.s.DB.WithContext(f.ctx).Model(&store.Finding{}).Where("pull_request_id = ?", pr.ID), "findings", 1)
+
+	again := migrate(6)
+	if again.ID != migrated.ID || again.Fingerprint != migrated.Fingerprint ||
+		again.IdentityVersion != store.IdentityVersionCurrent {
+		t.Fatalf("rerun not idempotent: %+v", again)
+	}
+	requireCount(t, f.s.DB.WithContext(f.ctx).Model(&store.Finding{}).Where("pull_request_id = ?", pr.ID), "findings", 1)
+}
+
+func TestUpsertFindingKeepsLegacyIDWhenFingerprintAlreadyExists(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/legacy-fingerprint-conflict", nil, true)
+	pr := f.openPR(repo.ID, 32, store.StatusPending, false)
+
+	// Another row of the same PR already owns the fingerprint the legacy row
+	// would migrate to.
+	if _, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_current_owner", PullRequestID: pr.ID, Fingerprint: "target-fp",
+		IdentityVersion: store.IdentityVersionCurrent,
+		Path:            "main.go", StartLine: 30, EndLine: 30, Status: store.FindingOpen,
+	}); err != nil {
+		t.Fatalf("UpsertFinding(target owner): %v", err)
+	}
+
+	legacy, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_legacy_conflict", PullRequestID: pr.ID, Fingerprint: "legacy-fp",
+		IdentityVersion: store.IdentityVersionLegacy,
+		Path:            "main.go", StartLine: 10, EndLine: 10, Title: "Legacy", Status: store.FindingOpen,
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding(legacy): %v", err)
+	}
+
+	// The migration must not fail the run on the unique index: the legacy row
+	// keeps its ID and stays on the old scheme.
+	migrated, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: legacy.ID, PullRequestID: pr.ID, Fingerprint: "target-fp",
+		IdentityVersion: store.IdentityVersionCurrent,
+		Path:            "main.go", StartLine: 10, EndLine: 10, Title: "Legacy", Status: store.FindingOpen,
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding(conflict) failed: %v", err)
+	}
+	if migrated.ID != legacy.ID {
+		t.Fatalf("ID = %q, want the legacy ID %q", migrated.ID, legacy.ID)
+	}
+	if migrated.Fingerprint != "legacy-fp" || migrated.IdentityVersion != store.IdentityVersionLegacy {
+		t.Fatalf("conflict should leave the row on the legacy scheme: %+v", migrated)
+	}
+	requireCount(t, f.s.DB.WithContext(f.ctx).Model(&store.Finding{}).Where("pull_request_id = ?", pr.ID), "findings", 2)
+}
+
+func TestUpsertFindingSameSignatureAcrossPullRequests(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/cross-pr-identity", nil, true)
+	first := f.openPR(repo.ID, 30, store.StatusPending, false)
+	second := f.openPR(repo.ID, 31, store.StatusPending, false)
+
+	for _, tc := range []struct {
+		prID uint
+		id   string
+	}{{first.ID, "f_id_first"}, {second.ID, "f_id_second"}} {
+		if _, err := f.s.UpsertFinding(f.ctx, store.Finding{
+			ID: tc.id, PullRequestID: tc.prID, Fingerprint: "same-signature",
+			IdentityVersion: store.IdentityVersionCurrent,
+			Path:            "main.go", StartLine: 3, EndLine: 3, Severity: "minor",
+			Category: "style", Title: "Mismo", Status: store.FindingOpen,
+		}); err != nil {
+			t.Fatalf("UpsertFinding(pr %d): %v", tc.prID, err)
+		}
+	}
+
+	requireCount(t, f.s.DB.WithContext(f.ctx).Model(&store.Finding{}).Where("pull_request_id = ?", first.ID), "findings", 1)
+	requireCount(t, f.s.DB.WithContext(f.ctx).Model(&store.Finding{}).Where("pull_request_id = ?", second.ID), "findings", 1)
+}
+
 func TestTriageFindingVerifierCannotOverrideHuman(t *testing.T) {
 	f := newFixture(t)
 	installID := f.nextID()

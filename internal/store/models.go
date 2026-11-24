@@ -37,6 +37,12 @@ const (
 	FindingResolved  = "resolved"
 	FindingWithdrawn = "withdrawn"
 
+	// IdentityVersionLegacy marks findings written before the identity change
+	// (#144); IdentityVersionCurrent is the fingerprint scheme every new row
+	// carries. Legacy rows migrate in place the first time a review matches them.
+	IdentityVersionLegacy  int16 = 1
+	IdentityVersionCurrent int16 = 2
+
 	VerdictConfirmed     = "confirmed"
 	VerdictFalsePositive = "false_positive"
 
@@ -321,15 +327,18 @@ type Finding struct {
 	ID            string `gorm:"column:id;primaryKey;autoIncrement:false"`
 	PullRequestID uint   `gorm:"column:pull_request_id"`
 	Fingerprint   string `gorm:"column:fingerprint"`
-	Path          string `gorm:"column:path"`
-	StartLine     int    `gorm:"column:start_line"`
-	EndLine       int    `gorm:"column:end_line"`
-	Severity      string `gorm:"column:severity"`
-	Category      string `gorm:"column:category"`
-	Title         string `gorm:"column:title"`
-	Body          string `gorm:"column:body"`
-	Suggestion    string `gorm:"column:suggestion"`
-	Confidence    string `gorm:"column:confidence"`
+	// IdentityVersion is the fingerprint scheme of the row. It stays 1 on rows
+	// written before #144 until a review matches them and migrates them in place.
+	IdentityVersion int16  `gorm:"column:identity_version;default:2"`
+	Path            string `gorm:"column:path"`
+	StartLine       int    `gorm:"column:start_line"`
+	EndLine         int    `gorm:"column:end_line"`
+	Severity        string `gorm:"column:severity"`
+	Category        string `gorm:"column:category"`
+	Title           string `gorm:"column:title"`
+	Body            string `gorm:"column:body"`
+	Suggestion      string `gorm:"column:suggestion"`
+	Confidence      string `gorm:"column:confidence"`
 	// ExistingCode is the code OCR cited when reporting the finding. It decides
 	// whether a stored verdict still refers to the same code.
 	ExistingCode string         `gorm:"column:existing_code"`

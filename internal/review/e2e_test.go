@@ -1115,8 +1115,8 @@ func testE2EAutoTriagePublishesCuratedSummary(t *testing.T) {
 	f.setOCR(t, runTestNativeTwoFindings())
 	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
 
-	minorID := findingIDFor("auth.go", "security", "Comparación insegura")
-	nitID := findingIDFor("auth.go", "style", "Nombre confuso")
+	minorID := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
+	nitID := findingIDFor(f.pr.ID, "auth.go", "style", "Nombre confuso", 5, 5)
 	f.setScan(t, runTestScanAnswer(t, map[string]string{
 		minorID: "REFUTE",
 		nitID:   "CONFIRM",

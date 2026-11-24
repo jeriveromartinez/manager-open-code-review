@@ -173,10 +173,11 @@ type runOutcome struct {
 
 	// Context needed to reconcile findings from passes that already completed
 	// when the run ends inconclusively.
-	merged AgentOutput
-	open   []store.Finding
-	runID  uint
-	prID   uint
+	merged  AgentOutput
+	open    []store.Finding
+	runID   uint
+	prID    uint
+	anchors AnchorProvider
 }
 
 // tokenTotals flattens the aggregated usage into the columns the panel reads.
@@ -549,6 +550,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 	workDir := filepath.Join(r.Cfg.WorkspaceDir, fmt.Sprintf("run-%d", run.ID))
 	defer os.RemoveAll(workDir)
+	out.anchors = checkoutAnchors(workDir)
 
 	baseRef := run.BaseSHA
 	if baseRef == "" {
@@ -745,7 +747,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	out.summary = nativeSummaryText(res, status)
 
 	comments := append([]nativeComment(nil), res.Comments...)
-	out.merged = mergeNativeFindings(comments)
+	out.merged = mergeNativeFindings(run.PullRequestID, comments, out.anchors)
 	scopePaths := reviewedPaths(res.Manifest.Coverage)
 
 	// OCR excludes oversized files from the main run. Review each of them by
@@ -760,13 +762,13 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		out.tokens.add(chunked.tokens)
 		if len(chunked.comments) > 0 {
 			comments = append(comments, chunked.comments...)
-			out.merged = mergeNativeFindings(comments)
+			out.merged = mergeNativeFindings(run.PullRequestID, comments, out.anchors)
 		}
 		if len(chunked.statuses) > 0 {
 			files = overlayCoverage(files, chunked.statuses)
 			status, code = chunkedRunStatus(status, code, chunked)
 			for path := range chunked.reviewedPaths() {
-				scopePaths[path] = true
+				scopePaths[normalizeCoveragePath(path)] = true
 			}
 		}
 	}
@@ -790,7 +792,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 	switch status {
 	case store.RunSucceeded:
-		upserts, resolved := Reconcile(out.open, out.merged, run.ID, true)
+		upserts, resolved := Reconcile(out.open, out.merged, run.ID, true, run.PullRequestID, out.anchors)
 		for i := range upserts {
 			upserts[i].PullRequestID = run.PullRequestID
 		}
@@ -981,7 +983,7 @@ func (out runOutcome) inconclusive(err error, code string) runOutcome {
 	out.code = code
 	out.message = err.Error()
 	if len(out.merged.Findings) > 0 {
-		upserts, _ := Reconcile(out.open, out.merged, out.runID, false)
+		upserts, _ := Reconcile(out.open, out.merged, out.runID, false, out.prID, out.anchors)
 		for i := range upserts {
 			upserts[i].PullRequestID = out.prID
 		}

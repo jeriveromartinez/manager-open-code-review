@@ -392,12 +392,12 @@ func TestNativeTitleFingerprintStable(t *testing.T) {
 		Path: "src/a.go", Content: "Nil pointer dereference\n\nmore detail",
 		StartLine: 7, EndLine: 7, Category: "bug", Severity: "high",
 	}
-	first := mergeNativeFindings([]nativeComment{comment}).Findings
-	second := mergeNativeFindings([]nativeComment{comment}).Findings
+	first := mergeNativeFindings(0, []nativeComment{comment}, nil).Findings
+	second := mergeNativeFindings(0, []nativeComment{comment}, nil).Findings
 	if len(first) != 1 || len(second) != 1 {
 		t.Fatalf("findings = %d/%d, want 1/1", len(first), len(second))
 	}
-	fp1, fp2 := Fingerprint(first[0], nil), Fingerprint(second[0], nil)
+	fp1, fp2 := Fingerprint(0, first[0], nil, 0), Fingerprint(0, second[0], nil, 0)
 	if fp1 != fp2 {
 		t.Fatalf("fingerprint is not deterministic: %q != %q", fp1, fp2)
 	}
@@ -405,8 +405,43 @@ func TestNativeTitleFingerprintStable(t *testing.T) {
 	// whitespace must not fork the fingerprint.
 	spaced := comment
 	spaced.Content = "  Nil pointer dereference  \n\ndifferent details"
-	if got := Fingerprint(mergeNativeFindings([]nativeComment{spaced}).Findings[0], nil); got != fp1 {
+	if got := Fingerprint(0, mergeNativeFindings(0, []nativeComment{spaced}, nil).Findings[0], nil, 0); got != fp1 {
 		t.Errorf("spaced title fingerprint = %q, want %q", got, fp1)
+	}
+}
+
+func TestMergeNativeFindingsUsesAnchorIdentity(t *testing.T) {
+	nearby := func(start int, code string) nativeComment {
+		return nativeComment{
+			Path: "src/a.go", Content: "Mismo problema\n\ncuerpo", ExistingCode: code,
+			StartLine: start, EndLine: start, Category: "bug", Severity: "high",
+		}
+	}
+
+	if got := mergeNativeFindings(1, []nativeComment{nearby(10, "guard()"), nearby(12, "guard()")}, nil).Findings; len(got) != 1 {
+		t.Fatalf("nearby duplicates = %d, want 1", len(got))
+	}
+	if got := mergeNativeFindings(1, []nativeComment{nearby(10, "guard()"), nearby(40, "guard()")}, nil).Findings; len(got) != 2 {
+		t.Fatalf("distant occurrences = %d, want 2", len(got))
+	}
+	if got := mergeNativeFindings(1, []nativeComment{nearby(10, "guard()"), nearby(11, "other()")}, nil).Findings; len(got) != 2 {
+		t.Fatalf("same title over a different anchor merged into %d finding(s), want 2", len(got))
+	}
+
+	// Two chunks that split a boundary without citing code have different
+	// derived anchors, but proximity is the only signal available and must merge.
+	lines := make([]string, 40)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i+1)
+	}
+	uncited := func(start int) nativeComment {
+		return nativeComment{
+			Path: "src/a.go", Content: "Frontera compartida\n\ncuerpo",
+			StartLine: start, EndLine: start, Category: "bug", Severity: "high",
+		}
+	}
+	if got := mergeNativeFindings(1, []nativeComment{uncited(20), uncited(21)}, linesProvider(lines)).Findings; len(got) != 1 {
+		t.Fatalf("uncited boundary duplicates = %d, want 1", len(got))
 	}
 }
 

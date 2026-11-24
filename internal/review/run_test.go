@@ -418,10 +418,13 @@ func runTestScanNoVerdicts() string {
 }`
 }
 
-// findingIDFor mirrors Reconcile's deterministic ID for a review finding.
-func findingIDFor(path, category, title string) string {
-	fp := Fingerprint(AgentFinding{Path: path, Category: category, Title: title}, nil)
-	return "f_" + fp[:16]
+// findingIDFor mirrors Reconcile's deterministic ID for a review finding on
+// the run fixture's auth.go checkout (one line: "package main").
+func findingIDFor(prID uint, path, category, title string, start, end int) string {
+	fp := Fingerprint(prID, AgentFinding{
+		Path: path, Category: category, Title: title, StartLine: start, EndLine: end,
+	}, []string{"package main"}, 0)
+	return FindingID(prID, fp)
 }
 
 // runTestScanAnswer builds a scan answer carrying one verdict per id.
@@ -1016,10 +1019,10 @@ func TestRunPipelineSucceeds(t *testing.T) {
 		t.Fatalf("findings = %d, want 1: %+v", len(findings), findings)
 	}
 	got := findings[0]
-	wantFP := Fingerprint(AgentFinding{
+	wantFP := Fingerprint(f.pr.ID, AgentFinding{
 		Path: "auth.go", Category: "security", Title: "Comparación insegura",
 		StartLine: 3, EndLine: 3,
-	}, nil)
+	}, []string{"package main"}, 0)
 	if got.Fingerprint != wantFP {
 		t.Errorf("fingerprint = %q, want %q", got.Fingerprint, wantFP)
 	}
@@ -1102,8 +1105,8 @@ func TestRunVerifiesAndProducesDecisions(t *testing.T) {
 	skipWithoutShellFake(t)
 	f := newRunTestFixture(t)
 	f.setOCR(t, runTestNativeTwoFindings())
-	minorID := findingIDFor("auth.go", "security", "Comparación insegura")
-	nitID := findingIDFor("auth.go", "style", "Nombre confuso")
+	minorID := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
+	nitID := findingIDFor(f.pr.ID, "auth.go", "style", "Nombre confuso", 5, 5)
 	f.setScan(t, runTestScanAnswer(t, map[string]string{
 		minorID: "CONFIRM",
 		nitID:   "REFUTE",
@@ -1186,7 +1189,7 @@ func TestRunVerifierFailureLeavesFindingsUntriaged(t *testing.T) {
 func TestRunVerifierTokensAreAddedToRunUsage(t *testing.T) {
 	skipWithoutShellFake(t)
 	f := newRunTestFixture(t)
-	id := findingIDFor("auth.go", "security", "Comparación insegura")
+	id := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
 	f.setScan(t, runTestScanAnswer(t, map[string]string{id: "CONFIRM"}))
 	f.setAutoTriage(t, store.AutoTriageDryRun, true, nil)
 
@@ -1244,8 +1247,8 @@ func TestRunVerifierRespectsMaxFindings(t *testing.T) {
 	skipWithoutShellFake(t)
 	f := newRunTestFixture(t)
 	f.setOCR(t, runTestNativeTwoFindings())
-	minorID := findingIDFor("auth.go", "security", "Comparación insegura")
-	nitID := findingIDFor("auth.go", "style", "Nombre confuso")
+	minorID := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
+	nitID := findingIDFor(f.pr.ID, "auth.go", "style", "Nombre confuso", 5, 5)
 	f.setAutoTriage(t, store.AutoTriageDryRun, true, map[string]any{
 		"verify_max_findings": 1,
 	})
@@ -1272,9 +1275,9 @@ func TestRunReusesStoredVerdictsForSameHead(t *testing.T) {
 	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
 	t.Setenv("RUN_FAKE_SCAN_FAIL", "1")
 
-	fp := Fingerprint(AgentFinding{
+	fp := Fingerprint(f.pr.ID, AgentFinding{
 		Path: "auth.go", Category: "security", Title: "Comparación insegura",
-	}, nil)
+	}, []string{"package main"}, 0)
 	verification, err := json.Marshal(Verification{
 		Verdict: VerdictConfirm, Evidence: "package main", HeadSHA: f.headSHA,
 		Model: "nemotron", SessionID: "previous-session", VerifiedAt: time.Now().UTC(),
@@ -1348,8 +1351,8 @@ func (f *runTestFixture) auditCount(t *testing.T, findingID, action string) int6
 func (f *runTestFixture) runTwoFindingVerifyRun(t *testing.T, mode string) (minorID, nitID string) {
 	t.Helper()
 	f.setOCR(t, runTestNativeTwoFindings())
-	minorID = findingIDFor("auth.go", "security", "Comparación insegura")
-	nitID = findingIDFor("auth.go", "style", "Nombre confuso")
+	minorID = findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
+	nitID = findingIDFor(f.pr.ID, "auth.go", "style", "Nombre confuso", 5, 5)
 	f.setScan(t, runTestScanAnswer(t, map[string]string{
 		minorID: "CONFIRM",
 		nitID:   "REFUTE",
@@ -1402,9 +1405,9 @@ func TestRunAppliesConfirmAndWithdrawDecisions(t *testing.T) {
 func TestRunSkipsDecisionWhenHumanTriagedMeanwhile(t *testing.T) {
 	skipWithoutShellFake(t)
 	f := newRunTestFixture(t)
-	fp := Fingerprint(AgentFinding{
+	fp := Fingerprint(f.pr.ID, AgentFinding{
 		Path: "auth.go", Category: "security", Title: "Comparación insegura",
-	}, nil)
+	}, []string{"package main"}, 0)
 	seed, err := f.s.UpsertFinding(f.ctx, store.Finding{
 		ID: "f_human_pending", PullRequestID: f.pr.ID, Fingerprint: fp,
 		Path: "auth.go", StartLine: 3, EndLine: 3, Severity: "major",
@@ -1446,7 +1449,7 @@ func TestRunSkipsDecisionWhenHumanTriagedMeanwhile(t *testing.T) {
 func TestRunDoesNotApplyDecisionsWhenHeadMoved(t *testing.T) {
 	skipWithoutShellFake(t)
 	f := newRunTestFixture(t)
-	id := findingIDFor("auth.go", "security", "Comparación insegura")
+	id := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
 	f.setScan(t, runTestScanAnswer(t, map[string]string{id: "REFUTE"}))
 	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
 	if err := f.s.DB.WithContext(f.ctx).Exec(
@@ -1488,7 +1491,7 @@ func TestRunLogsAutoTriageCounts(t *testing.T) {
 func TestRunDryRunStoresVerificationWithoutChangingStatus(t *testing.T) {
 	skipWithoutShellFake(t)
 	f := newRunTestFixture(t)
-	id := findingIDFor("auth.go", "security", "Comparación insegura")
+	id := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
 	f.setScan(t, runTestScanAnswer(t, map[string]string{id: "REFUTE"}))
 	f.setAutoTriage(t, store.AutoTriageDryRun, true, nil)
 
@@ -1528,7 +1531,7 @@ func TestAutoTriageKeepsStoredVerificationWhenUnanswered(t *testing.T) {
 			FirstSeenRunID: f.runID, LastSeenRunID: f.runID},
 		{ID: "f_answered", PullRequestID: f.pr.ID, Fingerprint: "fp-answered",
 			Path: "auth.go", Severity: "minor", Category: "style", Title: "respondido",
-			Status: store.FindingOpen,
+			Status:         store.FindingOpen,
 			FirstSeenRunID: f.runID, LastSeenRunID: f.runID},
 	} {
 		if _, err := f.s.UpsertFinding(f.ctx, finding); err != nil {
@@ -1730,10 +1733,10 @@ func TestRunBudgetPartialPublishesFindings(t *testing.T) {
 			partial = finding
 		}
 	}
-	wantFP := Fingerprint(AgentFinding{
+	wantFP := Fingerprint(f.pr.ID, AgentFinding{
 		Path: "auth.go", Category: "security", Title: "Comparación insegura",
 		StartLine: 3, EndLine: 3,
-	}, nil)
+	}, []string{"package main"}, 0)
 	if partial.Fingerprint != wantFP {
 		t.Errorf("partial finding fingerprint = %q, want %q", partial.Fingerprint, wantFP)
 	}
