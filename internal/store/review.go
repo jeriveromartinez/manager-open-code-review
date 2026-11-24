@@ -42,7 +42,17 @@ const (
 	policyDefaultMaxDiffLines = 3000
 	policyDefaultMaxPasses    = 4
 	policyDefaultReviewEffort = ReviewEffortLow
+
+	DefaultVerifyMaxFindings = 50
+	DefaultVerifyMaxFiles    = 20
+	DefaultVerifyTokenShare  = 20
+	DefaultVerifyTimeShare   = 15
+	DefaultVerifyTokenMax    = 100000
 )
+
+// VerifyTokenMaxMin is the smallest per-run cap the second OCR pass accepts:
+// below it the scan cannot answer anything useful.
+const VerifyTokenMaxMin = 10000
 
 // Review effort values and policy bounds shared by validation and the API. The
 // context ceiling is the per-conversation input limit, not the run's total
@@ -406,6 +416,41 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid review token budget %d",
 			p.TeamID, p.ReviewTokenBudget)
 	}
+	if p.AutoTriageMode == "" {
+		p.AutoTriageMode = AutoTriageOff
+	}
+	if !ValidAutoTriageMode(p.AutoTriageMode) {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid auto-triage mode %q",
+			p.TeamID, p.AutoTriageMode)
+	}
+	if p.VerifyMaxFindings == 0 {
+		p.VerifyMaxFindings = DefaultVerifyMaxFindings
+	}
+	if p.VerifyMaxFiles == 0 {
+		p.VerifyMaxFiles = DefaultVerifyMaxFiles
+	}
+	if p.VerifyTokenShare == 0 {
+		p.VerifyTokenShare = DefaultVerifyTokenShare
+	}
+	if p.VerifyTimeShare == 0 {
+		p.VerifyTimeShare = DefaultVerifyTimeShare
+	}
+	if p.VerifyTokenMax == 0 {
+		p.VerifyTokenMax = DefaultVerifyTokenMax
+	}
+	if p.VerifyMaxFindings < 0 || p.VerifyMaxFiles < 0 {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid verify limits %d/%d",
+			p.TeamID, p.VerifyMaxFindings, p.VerifyMaxFiles)
+	}
+	if p.VerifyTokenShare < 0 || p.VerifyTokenShare > 100 ||
+		p.VerifyTimeShare < 0 || p.VerifyTimeShare > 100 {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid verify shares %d/%d",
+			p.TeamID, p.VerifyTokenShare, p.VerifyTimeShare)
+	}
+	if p.VerifyTokenMax < VerifyTokenMaxMin || p.VerifyTokenMax > ReviewTokenBudgetMax {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid verify token max %d",
+			p.TeamID, p.VerifyTokenMax)
+	}
 	globs := bytes.TrimSpace(p.ExcludeGlobs)
 	if len(globs) == 0 || bytes.Equal(globs, []byte("null")) {
 		p.ExcludeGlobs = datatypes.JSON([]byte(`[]`))
@@ -423,7 +468,9 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 			"llm_profile_id", "blocking_threshold", "extra_instructions", "exclude_globs",
 			"max_files_per_pass", "max_diff_lines_per_pass", "max_passes",
 			"require_green_ci", "review_context_ceiling", "review_effort",
-			"review_token_budget", "updated_at",
+			"review_token_budget", "auto_triage_mode", "auto_withdraw",
+			"verify_max_findings", "verify_max_files", "verify_token_share",
+			"verify_time_share", "verify_token_max", "updated_at",
 		}),
 	}).Create(&p).Error
 	if err != nil {

@@ -446,6 +446,13 @@ type qaPolicyResponse struct {
 	EffectiveContextCeiling int      `json:"effective_context_ceiling"`
 	ReviewEffort            string   `json:"review_effort"`
 	ReviewTokenBudget       int64    `json:"review_token_budget"`
+	AutoTriageMode          string   `json:"auto_triage_mode"`
+	AutoWithdraw            bool     `json:"auto_withdraw"`
+	VerifyMaxFindings       int      `json:"verify_max_findings"`
+	VerifyMaxFiles          int      `json:"verify_max_files"`
+	VerifyTokenShare        int      `json:"verify_token_share"`
+	VerifyTimeShare         int      `json:"verify_time_share"`
+	VerifyTokenMax          int64    `json:"verify_token_max"`
 	PromptCache             bool     `json:"prompt_cache"`
 	UpdatedAt               string   `json:"updated_at"`
 }
@@ -502,6 +509,10 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 	if p.ReviewContextCeiling != nil {
 		effective = *p.ReviewContextCeiling
 	}
+	mode := p.AutoTriageMode
+	if mode == "" {
+		mode = store.AutoTriageOff
+	}
 	return qaPolicyResponse{
 		ID: p.ID, TeamID: p.TeamID, LLMProfileID: p.LLMProfileID,
 		BlockingThreshold: p.BlockingThreshold, ExtraInstructions: p.ExtraInstructions,
@@ -511,9 +522,30 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 		ReviewContextCeiling: p.ReviewContextCeiling,
 		GlobalContextCeiling: globalCeiling, EffectiveContextCeiling: effective,
 		ReviewEffort: effort, ReviewTokenBudget: p.ReviewTokenBudget,
-		PromptCache: promptCache,
-		UpdatedAt:   p.UpdatedAt.UTC().Format(time.RFC3339),
+		AutoTriageMode:    mode,
+		AutoWithdraw:      p.AutoWithdraw,
+		VerifyMaxFindings: verifyDefault(p.VerifyMaxFindings, store.DefaultVerifyMaxFindings),
+		VerifyMaxFiles:    verifyDefault(p.VerifyMaxFiles, store.DefaultVerifyMaxFiles),
+		VerifyTokenShare:  verifyDefault(p.VerifyTokenShare, store.DefaultVerifyTokenShare),
+		VerifyTimeShare:   verifyDefault(p.VerifyTimeShare, store.DefaultVerifyTimeShare),
+		VerifyTokenMax:    verifyDefault64(p.VerifyTokenMax, store.DefaultVerifyTokenMax),
+		PromptCache:       promptCache,
+		UpdatedAt:         p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
+}
+
+func verifyDefault(value, fallback int) int {
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+
+func verifyDefault64(value, fallback int64) int64 {
+	if value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 // getPolicy returns the saved policy, or the instance defaults for a team that
@@ -534,7 +566,13 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 			TeamID: teamID, BlockingThreshold: "major", ExcludeGlobs: []string{},
 			MaxFiles: 40, MaxDiffLines: 3000, MaxPasses: 4,
 			GlobalContextCeiling: global, EffectiveContextCeiling: global,
-			ReviewEffort: store.ReviewEffortLow,
+			ReviewEffort:      store.ReviewEffortLow,
+			AutoTriageMode:    store.AutoTriageOff,
+			VerifyMaxFindings: store.DefaultVerifyMaxFindings,
+			VerifyMaxFiles:    store.DefaultVerifyMaxFiles,
+			VerifyTokenShare:  store.DefaultVerifyTokenShare,
+			VerifyTimeShare:   store.DefaultVerifyTimeShare,
+			VerifyTokenMax:    store.DefaultVerifyTokenMax,
 		})
 		return
 	}
@@ -659,6 +697,57 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(value, &policy.ReviewTokenBudget); err != nil ||
 			policy.ReviewTokenBudget < 0 || policy.ReviewTokenBudget > store.ReviewTokenBudgetMax {
 			writeAPIError(w, http.StatusBadRequest, "invalid review_token_budget")
+			return
+		}
+	}
+	if value, present := raw["auto_triage_mode"]; present {
+		if err := json.Unmarshal(value, &policy.AutoTriageMode); err != nil ||
+			(policy.AutoTriageMode != "" && !store.ValidAutoTriageMode(policy.AutoTriageMode)) {
+			writeAPIError(w, http.StatusBadRequest, "invalid auto_triage_mode")
+			return
+		}
+	}
+	if value, present := raw["auto_withdraw"]; present {
+		if err := json.Unmarshal(value, &policy.AutoWithdraw); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid auto_withdraw")
+			return
+		}
+	}
+	for _, field := range []struct {
+		key string
+		dst *int
+	}{
+		{"verify_max_findings", &policy.VerifyMaxFindings},
+		{"verify_max_files", &policy.VerifyMaxFiles},
+	} {
+		if value, present := raw[field.key]; present {
+			if err := json.Unmarshal(value, field.dst); err != nil || *field.dst < 0 {
+				writeAPIError(w, http.StatusBadRequest, "invalid "+field.key)
+				return
+			}
+		}
+	}
+	for _, field := range []struct {
+		key string
+		dst *int
+	}{
+		{"verify_token_share", &policy.VerifyTokenShare},
+		{"verify_time_share", &policy.VerifyTimeShare},
+	} {
+		if value, present := raw[field.key]; present {
+			if err := json.Unmarshal(value, field.dst); err != nil ||
+				*field.dst < 0 || *field.dst > 100 {
+				writeAPIError(w, http.StatusBadRequest, "invalid "+field.key)
+				return
+			}
+		}
+	}
+	if value, present := raw["verify_token_max"]; present {
+		if err := json.Unmarshal(value, &policy.VerifyTokenMax); err != nil ||
+			(policy.VerifyTokenMax != 0 &&
+				(policy.VerifyTokenMax < store.VerifyTokenMaxMin ||
+					policy.VerifyTokenMax > store.ReviewTokenBudgetMax)) {
+			writeAPIError(w, http.StatusBadRequest, "invalid verify_token_max")
 			return
 		}
 	}

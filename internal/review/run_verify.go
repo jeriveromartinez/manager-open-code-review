@@ -14,17 +14,9 @@ import (
 )
 
 const (
-	// Defaults applied when a policy row predates the auto-triage columns or
-	// leaves them at zero.
-	defaultVerifyMaxFindings = 50
-	defaultVerifyMaxFiles    = 20
-	defaultVerifyTokenShare  = 20
-	defaultVerifyTimeShare   = 15
-	defaultVerifyTokenMax    = 100000
-
 	// verifyMinBudget is the smallest verification worth starting. Below it the
 	// pass is skipped and the findings stay untriaged (fail-open to the human).
-	verifyMinBudget    = 10000
+	verifyMinBudget    = store.VerifyTokenMaxMin
 	verifyMinTimeout   = time.Minute
 	maxVerifyFileBytes = 4 << 20
 )
@@ -45,19 +37,19 @@ func verifyPolicy(p store.QAPolicy) VerifyPolicy {
 		policy.Mode = store.AutoTriageOff
 	}
 	if policy.MaxFindings <= 0 {
-		policy.MaxFindings = defaultVerifyMaxFindings
+		policy.MaxFindings = store.DefaultVerifyMaxFindings
 	}
 	if policy.MaxFiles <= 0 {
-		policy.MaxFiles = defaultVerifyMaxFiles
+		policy.MaxFiles = store.DefaultVerifyMaxFiles
 	}
 	if policy.TokenShare <= 0 {
-		policy.TokenShare = defaultVerifyTokenShare
+		policy.TokenShare = store.DefaultVerifyTokenShare
 	}
 	if policy.TimeShare <= 0 {
-		policy.TimeShare = defaultVerifyTimeShare
+		policy.TimeShare = store.DefaultVerifyTimeShare
 	}
 	if policy.TokenMax <= 0 {
-		policy.TokenMax = defaultVerifyTokenMax
+		policy.TokenMax = store.DefaultVerifyTokenMax
 	}
 	return policy
 }

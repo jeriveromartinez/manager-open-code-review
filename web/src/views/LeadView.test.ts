@@ -118,6 +118,13 @@ const policy: QAPolicy = {
   effective_context_ceiling: 120000,
   review_effort: 'high',
   review_token_budget: 750000,
+  auto_triage_mode: 'off',
+  auto_withdraw: false,
+  verify_max_findings: 50,
+  verify_max_files: 20,
+  verify_token_share: 20,
+  verify_time_share: 15,
+  verify_token_max: 100000,
   prompt_cache: true,
   updated_at: hoursAgo(48),
 }

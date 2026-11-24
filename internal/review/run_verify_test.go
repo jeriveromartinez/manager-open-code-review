@@ -14,11 +14,11 @@ import (
 func TestVerifyPolicyFillsLegacyDefaults(t *testing.T) {
 	policy := verifyPolicy(store.QAPolicy{})
 	if policy.Mode != store.AutoTriageOff ||
-		policy.MaxFindings != defaultVerifyMaxFindings ||
-		policy.MaxFiles != defaultVerifyMaxFiles ||
-		policy.TokenShare != defaultVerifyTokenShare ||
-		policy.TimeShare != defaultVerifyTimeShare ||
-		policy.TokenMax != defaultVerifyTokenMax {
+		policy.MaxFindings != store.DefaultVerifyMaxFindings ||
+		policy.MaxFiles != store.DefaultVerifyMaxFiles ||
+		policy.TokenShare != store.DefaultVerifyTokenShare ||
+		policy.TimeShare != store.DefaultVerifyTimeShare ||
+		policy.TokenMax != store.DefaultVerifyTokenMax {
 		t.Fatalf("policy = %+v, want the documented defaults", policy)
 	}
 }

@@ -375,6 +375,8 @@ export type LLMModelsResponse = { models: LLMModelOption[] }
 
 export type ReviewEffort = 'low' | 'medium' | 'high'
 
+export type AutoTriageMode = 'off' | 'dry_run' | 'apply'
+
 export type QAPolicy = {
   id: number
   team_id: number
@@ -395,6 +397,14 @@ export type QAPolicy = {
   review_effort: ReviewEffort
   /** 0 disables the optional total-spend cap. */
   review_token_budget: number
+  /** Second OCR pass: off, dry_run (records only) or apply. */
+  auto_triage_mode: AutoTriageMode
+  auto_withdraw: boolean
+  verify_max_findings: number
+  verify_max_files: number
+  verify_token_share: number
+  verify_time_share: number
+  verify_token_max: number
   /** Read-only: whether the profile accepts an explicit prompt cache key. */
   prompt_cache: boolean
   updated_at: string
@@ -413,6 +423,13 @@ export type QAPolicyInput = Pick<
   | 'review_context_ceiling'
   | 'review_effort'
   | 'review_token_budget'
+  | 'auto_triage_mode'
+  | 'auto_withdraw'
+  | 'verify_max_findings'
+  | 'verify_max_files'
+  | 'verify_token_share'
+  | 'verify_time_share'
+  | 'verify_token_max'
 >
 
 export type ReviewEvent = {
