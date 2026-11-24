@@ -236,11 +236,60 @@ func TestEnqueueReviewTriggerSchedulesJob(t *testing.T) {
 	}
 }
 
+// A repair may enqueue a run the queue already holds. River must collapse the
+// duplicate into the live job instead of running the same review twice, while a
+// finalized job must not prevent a later repair from scheduling it again.
+func TestEnqueueReviewCollapsesLiveDuplicate(t *testing.T) {
+	s := testutil.NewStore(t)
+	client, err := jobs.NewControlClient(s.Pool, &syncer.Syncer{Store: s})
+	if err != nil {
+		t.Fatalf("NewControlClient() error = %v", err)
+	}
+	enqueuer := jobs.NewEnqueuer(client)
+	ctx := context.Background()
+
+	count := func(where string) int {
+		t.Helper()
+		var n int
+		if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE kind = 'review_run' `+where).Scan(&n); err != nil {
+			t.Fatalf("count review jobs: %v", err)
+		}
+		return n
+	}
+
+	for range 2 {
+		if err := enqueuer.EnqueueReview(ctx, 7); err != nil {
+			t.Fatalf("EnqueueReview() error = %v", err)
+		}
+	}
+	if live := count(`AND state IN ('available','running','scheduled','retryable','pending')`); live != 1 {
+		t.Errorf("live review jobs = %d, want 1 for the same run", live)
+	}
+
+	// A finalized job releases the unique key: the run can be scheduled again
+	// by the reconciliation sweep.
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE river_job SET state = 'completed', finalized_at = now() WHERE kind = 'review_run'`); err != nil {
+		t.Fatalf("finalize review job: %v", err)
+	}
+	if err := enqueuer.EnqueueReview(ctx, 7); err != nil {
+		t.Fatalf("EnqueueReview() after finalization error = %v", err)
+	}
+	if live := count(`AND state IN ('available','running','scheduled','retryable','pending')`); live != 1 {
+		t.Errorf("live review jobs after finalization = %d, want the repaired one", live)
+	}
+	if total := count(`AND state = 'completed'`); total != 1 {
+		t.Errorf("completed review jobs = %d, want the original one", total)
+	}
+}
+
 type recordingTrigger struct {
 	fired chan string
 }
 
 func (r *recordingTrigger) EnqueuePending(context.Context, int) (int, error) { return 0, nil }
+
+func (r *recordingTrigger) ReconcileQueuedRuns(context.Context, int) (int, error) { return 0, nil }
 
 func (r *recordingTrigger) FireDebounced(_ context.Context, prID uint, headSHA string) error {
 	r.fired <- fmt.Sprintf("%d:%s", prID, headSHA)

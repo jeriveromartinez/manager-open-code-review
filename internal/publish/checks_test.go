@@ -285,3 +285,29 @@ func TestCancelCheckMarksCancelled(t *testing.T) {
 		t.Errorf("body = %q, want the completed/cancelled payload", gotBody)
 	}
 }
+
+// A run queued before StartCheck could create its check has no artifact to
+// cancel. That must not fail the trigger that supersedes the orphan run.
+func TestCancelCheckWithoutArtifactIsNoop(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, _, _ := seedRun(t, st)
+
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	w := &publish.Worker{
+		Store: st,
+		Apps:  fakeAppProvider{app: &ghapp.App{Creds: ghapp.AppCredentials{AppID: 12345, PEM: testPEM(t)}, APIURL: srv.URL}},
+	}
+	if err := w.CancelCheck(ctx, run.ID); err != nil {
+		t.Fatalf("CancelCheck() error = %v, want nil for a missing check", err)
+	}
+	if calls != 0 {
+		t.Errorf("GitHub requests = %d, want none", calls)
+	}
+}

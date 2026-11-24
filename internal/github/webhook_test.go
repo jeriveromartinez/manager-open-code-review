@@ -78,17 +78,25 @@ func (p *recordingPublisher) snapshot() []events.Event {
 }
 
 type recordingReviews struct {
-	mu      sync.Mutex
-	ids     []uint
-	checks  []uint
-	retries []uint
-	err     error
+	mu         sync.Mutex
+	ids        []uint
+	ineligible []uint
+	checks     []uint
+	retries    []uint
+	err        error
 }
 
 func (r *recordingReviews) OnPullRequest(_ context.Context, prID uint) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.ids = append(r.ids, prID)
+	return r.err
+}
+
+func (r *recordingReviews) OnPullRequestIneligible(_ context.Context, prID uint) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ineligible = append(r.ineligible, prID)
 	return r.err
 }
 
@@ -110,6 +118,12 @@ func (r *recordingReviews) snapshot() []uint {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]uint(nil), r.ids...)
+}
+
+func (r *recordingReviews) ineligibleSnapshot() []uint {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint(nil), r.ineligible...)
 }
 
 func (r *recordingReviews) retrySnapshot() []uint {
@@ -436,10 +450,12 @@ func TestWebhookReviewTriggeredForNonForkPR(t *testing.T) {
 		t.Fatalf("published events = %v, want the pr.updated event", got)
 	}
 
-	// A redelivery is a no-op sync, so it must not start a second review.
+	// A redelivery reasserts the review intent; the trigger deduplicates it
+	// against the run the first delivery queued. It must not be skipped just
+	// because the PR sync itself was a no-op.
 	assertStatus(t, f.deliver("pull_request", "pr-opened.json"), http.StatusAccepted)
-	if got := f.reviews.snapshot(); len(got) != 1 {
-		t.Fatalf("OnPullRequest calls after redelivery = %v, want one", got)
+	if got := f.reviews.snapshot(); len(got) != 2 || got[1] != pr.ID {
+		t.Fatalf("OnPullRequest calls after redelivery = %v, want [%d %d]", got, pr.ID, pr.ID)
 	}
 }
 
@@ -533,6 +549,47 @@ func TestWebhookReviewStartFailure500(t *testing.T) {
 	assertStatus(t, f.deliver("pull_request", "pr-opened.json"), http.StatusInternalServerError)
 	if got := f.reviews.snapshot(); len(got) != 1 {
 		t.Fatalf("OnPullRequest calls = %v, want one attempt", got)
+	}
+}
+
+func TestWebhookRedeliveryRetriesFailedTrigger(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+	f.reviews.err = errors.New("queue unavailable")
+
+	assertStatus(t, f.deliver("pull_request", "pr-opened.json"), http.StatusInternalServerError)
+	if got := f.reviews.snapshot(); len(got) != 1 {
+		t.Fatalf("OnPullRequest calls after the failure = %v, want one attempt", got)
+	}
+
+	// The sync is now a no-op, but the review intent was never completed: the
+	// identical delivery must retry it instead of being skipped.
+	f.reviews.err = nil
+	assertStatus(t, f.deliver("pull_request", "pr-opened.json"), http.StatusAccepted)
+	if got := f.reviews.snapshot(); len(got) != 2 {
+		t.Fatalf("OnPullRequest calls after the redelivery = %v, want two", got)
+	}
+}
+
+// A closed, merged or draft pull request may still have a queued run from an
+// earlier delivery. The state conversion must reconcile it even when the PR
+// sync is a no-op.
+func TestWebhookIneligibleStateReconciles(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+	assertStatus(t, f.deliver("pull_request", "pr-opened.json"), http.StatusAccepted)
+	pr := f.pullRequest()
+
+	closed := []byte(`{"action":"closed","repository":{"id":501},"pull_request":{"number":142,"title":"Add QA endpoint","user":{"login":"alice"},"head":{"sha":"aaa111","ref":"feature/qa","repo":{"id":501,"full_name":"acme/backend-api","fork":false}},"base":{"ref":"main"},"state":"closed","draft":false,"merged":true,"updated_at":"2026-01-02T12:00:00Z"}}`)
+	assertStatus(t, f.deliverBody("pull_request", closed, signWebhook(closed)), http.StatusAccepted)
+	if got := f.reviews.ineligibleSnapshot(); len(got) != 1 || got[0] != pr.ID {
+		t.Fatalf("OnPullRequestIneligible calls after close = %v, want [%d]", got, pr.ID)
+	}
+
+	draft := []byte(`{"action":"converted_to_draft","repository":{"id":501},"pull_request":{"number":142,"title":"Add QA endpoint","user":{"login":"alice"},"head":{"sha":"aaa111","ref":"feature/qa","repo":{"id":501,"full_name":"acme/backend-api","fork":false}},"base":{"ref":"main"},"state":"open","draft":true,"updated_at":"2026-01-03T12:00:00Z"}}`)
+	assertStatus(t, f.deliverBody("pull_request", draft, signWebhook(draft)), http.StatusAccepted)
+	if got := f.reviews.ineligibleSnapshot(); len(got) != 2 {
+		t.Fatalf("OnPullRequestIneligible calls after the draft conversion = %v, want two", got)
 	}
 }
 

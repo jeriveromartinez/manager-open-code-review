@@ -546,7 +546,10 @@ func (s *Store) ReviewConfigForPR(ctx context.Context, prID uint) (ReviewConfig,
 // run in an active or terminal state. A run covers the pull request only when
 // its head, base branch and resolved merge base match the current ones; legacy
 // runs without a key still cover it once. Superseded runs never suppress a PR.
-// Everything is filtered in SQL, including the limit and the ordering.
+// Teams that gate reviews on CI only expose a PR once its head is green, so a
+// crowded batch of PRs still waiting for checks cannot push older eligible
+// candidates past the limit. Everything is filtered in SQL, including the limit
+// and the ordering.
 func (s *Store) PendingReviewPRs(ctx context.Context, limit int) ([]PullRequest, error) {
 	const query = `
 SELECT pr.* FROM pull_requests pr
@@ -555,6 +558,8 @@ JOIN qa_policies q ON q.team_id = r.team_id
 JOIN llm_profiles p ON p.id = q.llm_profile_id AND p.enabled = true
 WHERE pr.state = 'open' AND pr.draft = false AND pr.is_fork = false
   AND r.enabled = true AND r.team_id IS NOT NULL
+  AND (q.require_green_ci = false
+    OR (pr.validations_total > 0 AND pr.validations_passed = pr.validations_total))
   AND NOT EXISTS (
     SELECT 1 FROM review_runs rr
     WHERE rr.pull_request_id = pr.id
@@ -575,6 +580,98 @@ LIMIT ?`
 		return nil, fmt.Errorf("list pending review pull requests: %w", err)
 	}
 	return prs, nil
+}
+
+// QueuedRunWork flags the two pieces of work a queued review run depends on: a
+// live River job that will execute it and the GitHub check run it reports to.
+type QueuedRunWork struct {
+	RunID         uint `gorm:"column:run_id"`
+	PullRequestID uint `gorm:"column:pull_request_id"`
+	HasJob        bool `gorm:"column:has_job"`
+	HasCheck      bool `gorm:"column:has_check"`
+}
+
+// riverLiveReviewJob matches the River jobs that keep a queued run moving.
+// Finalized jobs (completed, discarded, cancelled) are the ones a repair may
+// replace, so they are deliberately excluded.
+const riverLiveReviewJob = `
+	SELECT 1 FROM river_job j
+	WHERE j.kind = 'review_run'
+	  AND j.state IN ('available','running','scheduled','pending','retryable')
+	  AND j.args->>'run_id' = rr.id::text`
+
+// StrandedQueuedRuns lists queued runs that lost their live River job, their
+// GitHub check, or both. PendingReviewPRs excludes a PR with any queued run, so
+// these rows would otherwise never be looked at again.
+func (s *Store) StrandedQueuedRuns(ctx context.Context, limit int) ([]QueuedRunWork, error) {
+	query := `
+WITH work AS (
+	SELECT rr.id AS run_id, rr.pull_request_id,
+		EXISTS (` + riverLiveReviewJob + `) AS has_job,
+		EXISTS (
+			SELECT 1 FROM github_artifacts a
+			WHERE a.pull_request_id = rr.pull_request_id
+			  AND a.kind = 'check_run'
+			  AND a.head_sha = rr.head_sha
+		) AS has_check
+	FROM review_runs rr
+	WHERE rr.status = ?
+)
+SELECT run_id, pull_request_id, has_job, has_check
+FROM work
+WHERE NOT has_job OR NOT has_check
+ORDER BY run_id
+LIMIT ?`
+
+	var runs []QueuedRunWork
+	if err := s.DB.WithContext(ctx).Raw(query, RunQueued, limit).Scan(&runs).Error; err != nil {
+		return nil, fmt.Errorf("list stranded queued review runs: %w", err)
+	}
+	return runs, nil
+}
+
+// QueuedRunWork re-reads the job and check state of one queued run. Callers use
+// it under the pull request lock, right before repairing, so a concurrent
+// delivery that already healed the run does not cause duplicated work.
+func (s *Store) QueuedRunWork(ctx context.Context, runID uint) (hasJob, hasCheck bool, err error) {
+	query := `
+SELECT
+	EXISTS (` + riverLiveReviewJob + `) AS has_job,
+	EXISTS (
+		SELECT 1 FROM github_artifacts a
+		WHERE a.pull_request_id = rr.pull_request_id
+		  AND a.kind = 'check_run'
+		  AND a.head_sha = rr.head_sha
+	) AS has_check
+FROM review_runs rr
+WHERE rr.id = ?`
+
+	var row struct {
+		HasJob   bool `gorm:"column:has_job"`
+		HasCheck bool `gorm:"column:has_check"`
+	}
+	if err := s.DB.WithContext(ctx).Raw(query, runID).Scan(&row).Error; err != nil {
+		return false, false, fmt.Errorf("read work of review run %d: %w", runID, err)
+	}
+	return row.HasJob, row.HasCheck, nil
+}
+
+// ActiveRunsForReconcile lists queued or running runs, oldest first. Eligibility
+// is not decided here: the trigger re-reads the pull request under its lock, so
+// a policy, profile, installation or state that disappeared after the query is
+// still caught instead of leaving the run to fail later at configuration load.
+func (s *Store) ActiveRunsForReconcile(ctx context.Context, limit int) ([]ReviewRun, error) {
+	const query = `
+SELECT rr.* FROM review_runs rr
+WHERE rr.status IN (?, ?)
+ORDER BY rr.id
+LIMIT ?`
+
+	var runs []ReviewRun
+	if err := s.DB.WithContext(ctx).Raw(query, RunQueued, RunRunning, limit).Scan(&runs).Error; err != nil {
+		return nil, fmt.Errorf("list active runs for review reconciliation: %w", err)
+	}
+	return runs, nil
 }
 
 // CreateReviewRun inserts a run in the queued state unless the caller supplied

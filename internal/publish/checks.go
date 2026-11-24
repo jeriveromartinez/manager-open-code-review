@@ -154,6 +154,13 @@ func (w *Worker) CancelCheck(ctx context.Context, runID uint) error {
 		return err
 	}
 	artifact, err := w.Store.ArtifactFor(ctx, pr.ID, store.ArtifactCheck, run.HeadSHA)
+	if errors.Is(err, store.ErrNotFound) {
+		// The original delivery failed before StartCheck could create the check,
+		// so there is nothing to cancel. Returning nil lets the trigger replace
+		// the orphan run with the new head instead of blocking on the missing
+		// artifact forever.
+		return nil
+	}
 	if err != nil {
 		return err
 	}

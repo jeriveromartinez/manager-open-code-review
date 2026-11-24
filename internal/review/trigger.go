@@ -75,6 +75,23 @@ func (t *Trigger) OnPullRequest(ctx context.Context, prID uint) error {
 	return t.Jobs.EnqueueReviewTrigger(ctx, prID, cfg.PR.HeadSHA, t.Debounce)
 }
 
+// OnPullRequestIneligible reconciles a pull request that stopped being
+// reviewable because it was closed, merged or converted to a draft. Active runs
+// and their checks are discarded so no worker starts reviewing a pull request
+// that is no longer eligible. Repeating the delivery is a no-op.
+func (t *Trigger) OnPullRequestIneligible(ctx context.Context, prID uint) error {
+	if t.Store == nil {
+		return errors.New("review: trigger has no store")
+	}
+	unlock, err := t.Store.LockPR(ctx, prID)
+	if err != nil {
+		return fmt.Errorf("lock pull request %d: %w", prID, err)
+	}
+	defer unlock()
+	_, err = t.reconcileIneligibleLocked(ctx, prID)
+	return err
+}
+
 // FireDebounced runs a scheduled trigger. It no-ops when a newer push has moved
 // the head (that push has its own job), when the PR was closed or merged, or
 // when it stopped being eligible while the job waited. The check below is only
@@ -161,6 +178,63 @@ func (t *Trigger) EnqueuePending(ctx context.Context, limit int) (int, error) {
 		}
 	}
 	return created, errors.Join(errs...)
+}
+
+// ReconcileQueuedRuns repairs the review queue. It supersedes active runs of
+// pull requests that stopped being reviewable and gives queued runs back the
+// job or check they lost. Every action is serialized per pull request by the
+// same advisory lock the webhook uses, and only the missing piece is re-created,
+// so a healthy queued run is left alone and a live job is never duplicated. A
+// failure on one pull request does not stop the rest of the batch.
+func (t *Trigger) ReconcileQueuedRuns(ctx context.Context, limit int) (int, error) {
+	if t.Store == nil {
+		return 0, errors.New("review: trigger has no store")
+	}
+
+	active, err := t.Store.ActiveRunsForReconcile(ctx, limit)
+	if err != nil {
+		return 0, err
+	}
+	done := 0
+	var errs []error
+	for _, prID := range distinctPRIDs(active) {
+		unlock, err := t.Store.LockPR(ctx, prID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("lock pull request %d: %w", prID, err))
+			continue
+		}
+		discarded, err := t.reconcileIneligibleLocked(ctx, prID)
+		unlock()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("discard runs of pull request %d: %w", prID, err))
+			continue
+		}
+		if discarded {
+			done++
+		}
+	}
+
+	stranded, err := t.Store.StrandedQueuedRuns(ctx, limit)
+	if err != nil {
+		return done, errors.Join(append(errs, err)...)
+	}
+	for _, work := range stranded {
+		unlock, err := t.Store.LockPR(ctx, work.PullRequestID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("lock pull request %d: %w", work.PullRequestID, err))
+			continue
+		}
+		repaired, err := t.repairQueuedRunLocked(ctx, work)
+		unlock()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("repair review run %d: %w", work.RunID, err))
+			continue
+		}
+		if repaired {
+			done++
+		}
+	}
+	return done, errors.Join(errs...)
 }
 
 // enqueue implements the immediate entry points. The boolean result reports
@@ -502,6 +576,139 @@ func (t *Trigger) repair(ctx context.Context, run store.ReviewRun) error {
 		return fmt.Errorf("enqueue review run %d: %w", run.ID, err)
 	}
 	return nil
+}
+
+// reconcileIneligibleLocked discards the active runs of a pull request that is
+// no longer reviewable and reports whether it did. The caller must hold the
+// pull request lock.
+func (t *Trigger) reconcileIneligibleLocked(ctx context.Context, prID uint) (bool, error) {
+	cfg, err := t.reviewConfigLocked(ctx, prID)
+	if err != nil {
+		return false, err
+	}
+	if cfg != nil {
+		return false, nil
+	}
+	return true, t.discardActiveLocked(ctx, prID)
+}
+
+// discardActiveLocked cancels the checks of the pull request's queued and
+// running runs and supersedes them. Cancelling a check that was never created
+// is a no-op, and the local supersede still happens when GitHub rejects the
+// cancellation, so the worker cannot start a dead review.
+func (t *Trigger) discardActiveLocked(ctx context.Context, prID uint) error {
+	runs, err := t.Store.ListReviewRuns(ctx, prID)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, run := range runs {
+		if run.Status != store.RunQueued && run.Status != store.RunRunning {
+			continue
+		}
+		if t.Checks == nil {
+			errs = append(errs, fmt.Errorf("cancel check of review run %d: trigger has no check starter", run.ID))
+			continue
+		}
+		if err := t.Checks.CancelCheck(ctx, run.ID); err != nil {
+			errs = append(errs, fmt.Errorf("cancel check of review run %d: %w", run.ID, err))
+		}
+	}
+	if err := t.Store.SupersedeActiveRuns(ctx, prID); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+// reviewConfigLocked resolves the configuration of a reviewable pull request.
+// A nil result means it must not be reviewed: closed or merged, draft, fork, a
+// missing row, or configuration that no longer resolves (disabled repository,
+// removed policy or profile, missing installation). The caller must hold the
+// pull request lock.
+func (t *Trigger) reviewConfigLocked(ctx context.Context, prID uint) (*store.ReviewConfig, error) {
+	pr, err := t.Store.PullRequest(ctx, prID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !pr.IsOpen() || pr.Draft || pr.IsFork {
+		return nil, nil
+	}
+	cfg, err := t.Store.ReviewConfigForPR(ctx, prID)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrNoReviewConfig) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+// repairQueuedRunLocked heals one queued run under the pull request lock,
+// recreating only the missing job or check. A run that stopped being queued,
+// reviewable or part of the current comparison is superseded instead.
+func (t *Trigger) repairQueuedRunLocked(ctx context.Context, work store.QueuedRunWork) (bool, error) {
+	run, err := t.Store.ReviewRun(ctx, work.RunID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if run.Status != store.RunQueued {
+		return false, nil
+	}
+
+	cfg, err := t.reviewConfigLocked(ctx, run.PullRequestID)
+	if err != nil {
+		return false, err
+	}
+	if cfg == nil || !cfg.PR.CoveredBy(run) {
+		// The pull request stopped being reviewable, or the queued run belongs
+		// to an older head/base. Supersede it; EnqueuePending or the next
+		// delivery schedules the current comparison.
+		return true, t.discardActiveLocked(ctx, run.PullRequestID)
+	}
+
+	hasJob, hasCheck, err := t.Store.QueuedRunWork(ctx, run.ID)
+	if err != nil {
+		return false, err
+	}
+	repaired := false
+	if !hasCheck {
+		if t.Checks == nil {
+			return false, errors.New("review: trigger has no check starter")
+		}
+		if err := t.Checks.StartCheck(ctx, run.ID); err != nil {
+			return false, fmt.Errorf("start check of review run %d: %w", run.ID, err)
+		}
+		repaired = true
+	}
+	if !hasJob {
+		if t.Jobs == nil {
+			return false, errors.New("review: trigger has no enqueuer")
+		}
+		if err := t.Jobs.EnqueueReview(ctx, run.ID); err != nil {
+			return false, fmt.Errorf("enqueue review run %d: %w", run.ID, err)
+		}
+		repaired = true
+	}
+	return repaired, nil
+}
+
+func distinctPRIDs(runs []store.ReviewRun) []uint {
+	seen := make(map[uint]struct{}, len(runs))
+	ids := make([]uint, 0, len(runs))
+	for _, run := range runs {
+		if _, ok := seen[run.PullRequestID]; ok {
+			continue
+		}
+		seen[run.PullRequestID] = struct{}{}
+		ids = append(ids, run.PullRequestID)
+	}
+	return ids
 }
 
 // cloneTokenRefreshWindow is how far ahead the control process renews the clone

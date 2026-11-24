@@ -1,7 +1,9 @@
 package review
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -158,5 +160,35 @@ func TestEnqueuePendingHonoursCIGate(t *testing.T) {
 	}
 	if runs := f.runsOf(pr); len(runs) != 1 {
 		t.Errorf("runs = %+v, want one", runs)
+	}
+}
+
+// A full batch of recent PRs still waiting for CI must not consume the limit:
+// an older eligible candidate must still be scheduled.
+func TestEnqueuePendingDoesNotLetCIWaitersConsumeBatch(t *testing.T) {
+	f := newTriggerFixture(t)
+	eligible := f.seed("eligible", eligibleOpts())
+
+	// Age the eligible PR so the CI waiters would win the newest-first order.
+	old := time.Now().UTC().Add(-time.Hour)
+	if err := f.st.DB.WithContext(f.ctx).Exec(
+		`UPDATE pull_requests SET updated_at = ? WHERE id = ?`, old, eligible.ID,
+	).Error; err != nil {
+		t.Fatalf("age eligible pull request: %v", err)
+	}
+	for i := range 3 {
+		pr := f.seed(fmt.Sprintf("ci-pending-%d", i), gatedOpts())
+		f.setCI(pr, store.PRValidations{Passed: 1, Failed: 0, Total: 3})
+	}
+
+	created, err := f.trigger.EnqueuePending(f.ctx, 1)
+	if err != nil {
+		t.Fatalf("EnqueuePending() error = %v", err)
+	}
+	if created != 1 {
+		t.Fatalf("created = %d, want the eligible PR scheduled despite the full CI-waiting batch", created)
+	}
+	if runs := f.runsOf(eligible); len(runs) != 1 {
+		t.Errorf("eligible runs = %+v, want one", runs)
 	}
 }

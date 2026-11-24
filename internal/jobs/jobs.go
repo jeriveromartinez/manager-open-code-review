@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
+	"github.com/riverqueue/river/rivertype"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/publish"
@@ -65,7 +66,26 @@ type ReviewRunArgs struct {
 func (ReviewRunArgs) Kind() string { return "review_run" }
 
 func (ReviewRunArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{Queue: reviewQueue, MaxAttempts: 3}
+	return river.InsertOpts{
+		Queue:       reviewQueue,
+		MaxAttempts: 3,
+		// A run has at most one live job. Redeliveries and the reconciliation
+		// sweep re-enqueue the same run to heal it, and without this uniqueness
+		// each repair inserted another live job. Finalized jobs are excluded so
+		// a run whose previous job completed or was discarded can be scheduled
+		// again (retryable stays, as River requires it to be omittable only when
+		// explicitly listed).
+		UniqueOpts: river.UniqueOpts{
+			ByArgs: true,
+			ByState: []rivertype.JobState{
+				rivertype.JobStateAvailable,
+				rivertype.JobStatePending,
+				rivertype.JobStateRunning,
+				rivertype.JobStateScheduled,
+				rivertype.JobStateRetryable,
+			},
+		},
+	}
 }
 
 // ReviewTriggerArgs runs a debounced trigger once the captured head has been
@@ -118,6 +138,7 @@ func (w *syncInstallationWorker) Work(ctx context.Context, job *river.Job[SyncIn
 // the debounced-trigger worker.
 type ReviewTrigger interface {
 	EnqueuePending(ctx context.Context, limit int) (int, error)
+	ReconcileQueuedRuns(ctx context.Context, limit int) (int, error)
 	FireDebounced(ctx context.Context, prID uint, headSHA string) error
 }
 
@@ -169,6 +190,14 @@ func (w *reconcileWorker) Work(ctx context.Context, _ *river.Job[ReconcileArgs])
 	}
 	if w.trigger == nil {
 		return nil
+	}
+	// Heal the queue before scheduling new work: a queued run that lost its job
+	// or check is invisible to PendingReviewPRs, and a run of a closed PR must
+	// not stay active. One failure must not stop the batch.
+	if repaired, err := w.trigger.ReconcileQueuedRuns(ctx, pendingBatchSize); err != nil {
+		slog.Error("reconcile queued review runs", "error", err)
+	} else if repaired > 0 {
+		slog.Info("reconciled queued review runs", "count", repaired)
 	}
 	created, err := w.trigger.EnqueuePending(ctx, pendingBatchSize)
 	if err != nil {
