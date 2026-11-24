@@ -1,6 +1,6 @@
 # Roadmap de correcciones del motor de revisión
 
-Actualizado: 2026-11-23. Este documento es la fuente de verdad del avance: cada PR que cierra un issue actualiza su fila y la fase correspondiente.
+Actualizado: 2026-11-24. Este documento es la fuente de verdad del avance: cada PR que cierra un issue actualiza su fila y la fase correspondiente.
 
 ## Objetivo
 
@@ -40,7 +40,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 | #72 | Techo de 270k, caché y esfuerzo por equipo | M/L | #71 | **Hecho** (#106, #108, #109, #118, #120): el motor aplica techo, esfuerzo, tope y troceo por equipo en cada run; la medición con datos reales queda en #76 |
 | #80 | Diffs enormes por partes sin abandonar el PR | L | #71, #72 | **Hecho** (#118, #120): commits sintéticos por hunks completos, deduplicación de hallazgos de frontera y cobertura por archivo |
 | #74 | Revisión incremental por push y antirrebote | L | #71 | **Hecho** (#113, #114): antirrebote de 2 min y revisión `<head revisado>..<head>` solo cuando la base no cambió y el head desciende del anterior; vuelta al diff completo en el resto de casos |
-| #76 | Seguimiento del objetivo global | — | todas | **Seguimiento** |
+| #76 | Seguimiento del objetivo global | — | todas | **Cerrado** (2026-11-22): decisión registrada en el issue de no esperar la semana de muestra real; la medición con proveedor real se traslada al corpus de #140 |
 
 ## Progreso
 
@@ -59,6 +59,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 - #74 hecho (#113, #114): cada push revisa `<head revisado>..<head>` cuando la base y la ascendencia del head anterior lo permiten; el run persiste `base_sha`, los hallazgos fuera del rango revisado siguen abiertos y cualquier force-push, cambio de base o run previo incompleto vuelve al diff completo. El antirrebote de 2 min llegó en #113.
 - #60 y #62 hechos (#115): con OCR nativo las revisiones ya no ejecutan OpenCode; `review_agent_steps` solo acota el chequeo de salud, que ahora recibe el valor configurado en vez de caer al valor por defecto.
 - 2026-11-23: verificación automática de hallazgos en `feat/ocr-auto-triage`: una segunda pasada `ocr scan` responde `CONFIRM`/`REFUTE`/`UNCERTAIN` con evidencia literal, la política del equipo decide si se aplica (nunca sobre `major`/`blocker` ni con la regla de descarte apagada) y el comentario del PR se publica curado. Queda rodarla en escalera (`off` → `dry_run` → `apply` → `auto_withdraw`) y medir con PRs reales dentro de #76.
+- 2026-11-24: revisados los 30 issues abiertos (#135–#164) sobre `182168f`. #164 mantiene el seguimiento del nuevo programa y este documento recoge su orden en el backlog de abajo. Primer cambio: #155; después #141 y #144 en paralelo.
 
 ## Fases
 
@@ -99,10 +100,54 @@ Objetivo: dejar de pagar un bucle genérico de OpenCode y usar los controles de 
 - [x] #80 Trocear diffs enormes por hunks completos y commits sintéticos, deduplicar hallazgos de trozos contiguos y publicar cobertura por archivo (`reviewed_by_parts`, `not_reviewed` con motivo); nunca abandonar el PR entero. (#118, #120)
 - [x] #74 Antirrebote de 2 min (#113) y revisión incremental `<sha revisado>..<head>` con vuelta a completa ante force-push, cambio de base o run parcial (#114).
 
-### Fase 5 — Cierre
+### Fase 5 — Cierre (histórica)
 
-- [ ] #76 Cerrar el seguimiento cuando una semana de PRs reales cumpla el criterio de cierre.
+- [x] #76 Cerrado el 2026-11-22 con la decisión registrada en el issue: no se espera la semana de muestra real; la medición con proveedor real pasa al corpus de #140.
 - [ ] Rodar la verificación automática en escalera y revisar los descartes que un humano restaure antes de ampliarla.
+
+## Backlog 2026-11-24 — revisión autónoma y dictamen arquitectónico
+
+Objetivo: que la revisión concluya cuando tiene cobertura y evidencia suficientes, entregue todos los defectos confirmados en GitHub y derive a una persona solo cuando quede una incertidumbre material. #164 mantiene el seguimiento y sus casillas mandan; este documento fija el orden.
+
+| Issue | Tema | Depende de | Fase |
+|---|---|---|---|
+| #155 | Regresiones locales del E2E: fixture de anclaje, timeout y `VerifyUsage` | — | 0 |
+| #141 | Invalidar la revisión cuando cambia la comparación base–head | — | 1 |
+| #144 | Identidad por PR y continuidad de cada hallazgo | — | 1 |
+| #135 | Cobertura real antes de declarar completa una revisión | — | 1 |
+| #136 | Evidencia verificable antes de publicar o bloquear | — | 1 |
+| #138 | Entrega durable e idempotente, sin resultados de SHAs obsoletos | #141 | 1 |
+| #142 | PRs sin job y bloqueo de cabeza de cola | #137, #138 | 1 |
+| #145 | Preservar las decisiones humanas al sincronizar hilos | #136, #137, #138, #144 | 1 |
+| #143 | Veredicto único con el CI requerido vigente | #135, #137, #138, #141 | 1 |
+| #137 | Solicitar revisión humana cuando el motor no concluye | #135, #136 | 2 |
+| #146 | Registrar el resultado humano de una revisión inconclusa | #135, #137, #141, #143, #145 | 2 |
+| #152 | Reevaluar objeciones desde los hilos del PR | #136, #137, #138, #145 | 2 |
+| #153 | Política efectiva por repositorio con herencia y auditoría | #137, #140, #141, #143, #150 | 2 |
+| #154 | Colas estancadas y alertas no entregadas | #138, #140, #142 | 2 |
+| #162 | Hallazgos de diseño multiarchivo o de PR, con una sola entrega | #136, #138, #144, #145, #157 | 2 |
+| #139 | Descripción del PR y contexto del repositorio | — | 3 |
+| #147 | Cobertura de texto y hunks grandes que OCR omite | #135, #136, #137, #140 | 3 |
+| #148 | PRs de forks con política de confianza y presupuesto | #137, #140, #142 | 3 |
+| #149 | Reanudar solo las partes pendientes | #135, #137, #138, #141 | 3 |
+| #150 | Perfil de respaldo autorizado y consumo atribuido | #137, #140, #149 | 3 |
+| #151 | Reserva efectiva del presupuesto de verificación | #136, #137, #149, #150 | 3 |
+| #156 | Plazo global con cierre gradual de OCR | #137, #149 | 3 |
+| #140 | Corpus local y evaluación ciega por lenguaje y tipo | #78, #135, #136, #137 | 0 (corpus) / 4 (medición) |
+| #157 | Dictamen arquitectónico por comparación, en observación | #135, #136, #137, #140, #141, #143, #146, #151, #153 | 4 |
+| #158 | Límites y decisiones de arquitectura contra línea base | #136, #139, #153, #157 | 4 |
+| #159 | Compatibilidad de contratos versionados base–head | #135, #136, #140, #147, #157 | 4 |
+| #160 | Impacto en consumidores de otros repositorios | #137, #139, #148, #153, #157, #159 | 4 |
+| #161 | Migraciones, despliegue y operación con evidencia del cambio | #136, #137, #140, #143, #157, #159 | 4 |
+| #163 | Revalidar la evidencia arquitectónica tras push parcial | #135, #136, #141, #144, #149, #157, #158, #162 | 4 |
+
+### Notas de la revisión
+
+- **#137 contra #148**: #137 deriva los forks a una revisión humana y #148 los analiza dentro del motor con límites. Hay que decidir cuál manda y bajo qué política antes de implementar la fase 3.
+- **Trabajo previo parcial**: #142 ya repara runs en cola huérfanos en `trigger.go:196`, pero el barrido sigue excluyendo los runs en cola; #143 reevalúa el CI por entrega de check, pero la publicación aún puede declarar éxito sin CI; #145 audita los cambios de hilo sin autorizar; #135 mapea `complete` a `succeeded` aunque queden archivos excluidos.
+- **#151** sigue abierto: #134 acota la verificación a lo que queda del presupuesto, pero la cuota no se reserva antes de la pasada principal y el verificador no tiene plazo propio.
+- **#155** no es un fallo de producto: son regresiones de los tests de #134 que no se ejecutaban en Windows.
+- **#136** está parcialmente cubierto por #134 (la evidencia se compara con el archivo citado), pero falta validar SHA, ruta, rango y cita contra el commit, y la evidencia del impacto.
 
 ## Orden de ejecución
 
@@ -112,6 +157,9 @@ Objetivo: dejar de pagar un bucle genérico de OpenCode y usar los controles de 
 4. #75, #65 y #66 (salud y latencia), hechos.
 5. Motor nativo: #79, #71, #72, #74 y #80 hechos; solo queda la medición real en #76.
 6. Cierre de #76.
+7. Backlog 2026-11-24, fase 0: #155 deja la suite local reproducible en Linux.
+8. Fase 1: #141 y #144 en paralelo; acordados sus contratos, #135 y #136; después #138, #142, #145 y #143. El corpus de #140 arranca en paralelo.
+9. Fases 2–4 en el orden del backlog; el dictamen arquitectónico solo se promueve tras #140 y #162 verificados.
 
 ## Reglas de avance
 
