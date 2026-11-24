@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -85,6 +86,14 @@ type fakeGitHub struct {
 	pulls            func(http.ResponseWriter, *http.Request)
 	appInstallations func(http.ResponseWriter, *http.Request)
 	getInstallation  func(http.ResponseWriter, *http.Request)
+	reviewReqs       []syncerReviewRequest
+}
+
+type syncerReviewRequest struct {
+	Repo          string
+	Number        int
+	Reviewers     []string
+	TeamReviewers []string
 }
 
 func newFakeGitHub(t *testing.T, repos, pulls, appInstallations func(http.ResponseWriter, *http.Request)) *fakeGitHub {
@@ -140,6 +149,29 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		f.reposCalls++
 		f.mu.Unlock()
 		f.repos(w, r)
+	case strings.HasPrefix(r.URL.Path, "/repos/") && strings.HasSuffix(r.URL.Path, "/requested_reviewers"):
+		raw, _ := io.ReadAll(r.Body)
+		var in struct {
+			Reviewers     []string `json:"reviewers"`
+			TeamReviewers []string `json:"team_reviewers"`
+		}
+		_ = json.Unmarshal(raw, &in)
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		number := 0
+		repo := ""
+		if len(parts) == 6 {
+			number, _ = strconv.Atoi(parts[4])
+			repo = parts[1] + "/" + parts[2]
+		}
+		f.mu.Lock()
+		f.reviewReqs = append(f.reviewReqs, syncerReviewRequest{
+			Repo: repo, Number: number,
+			Reviewers: in.Reviewers, TeamReviewers: in.TeamReviewers,
+		})
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"number":1}`))
 	case strings.HasPrefix(r.URL.Path, "/repos/") && strings.HasSuffix(r.URL.Path, "/pulls"):
 		f.mu.Lock()
 		f.pullsCalls++
@@ -172,6 +204,12 @@ func (f *fakeGitHub) seenInstallations() []int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]int64(nil), f.installations...)
+}
+
+func (f *fakeGitHub) reviewRequests() []syncerReviewRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]syncerReviewRequest(nil), f.reviewReqs...)
 }
 
 func writeRepos(t *testing.T, w http.ResponseWriter, r *http.Request, repos []*gh.Repository, nextPage string) {
@@ -1153,5 +1191,87 @@ func TestSyncInstallationUnknownIDIsNoOp(t *testing.T) {
 	}
 	if got := f.pullCalls(); got != 0 {
 		t.Errorf("/pulls calls = %d, want 0", got)
+	}
+}
+
+// Polling mode has no webhook delivery, so the syncer must hand a fork to a
+// person just like the webhook trigger does.
+func TestSyncInstallationRequestsReviewForFork(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 1, testInstallationID, "acme/repo-1", true)
+
+	profile, err := s.CreateLLMProfile(ctx, store.LLMProfile{
+		Name: "primary", Provider: "openai", Model: "gpt-4o-mini",
+		APIKeyEnc: "sealed", Enabled: true, HealthStatus: store.HealthOK,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+	team := store.Team{Name: "review-team", Slug: "review-team"}
+	if err := s.DB.WithContext(ctx).Create(&team).Error; err != nil {
+		t.Fatalf("create team: %v", err)
+	}
+	if _, err := s.SaveQAPolicy(ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID, ReviewerLogin: "qa-reviewer",
+	}); err != nil {
+		t.Fatalf("SaveQAPolicy: %v", err)
+	}
+	if err := s.AssignRepositoryTeam(ctx, 1, &team.ID); err != nil {
+		t.Fatalf("AssignRepositoryTeam: %v", err)
+	}
+
+	now := time.Now().UTC()
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(1, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]*gh.PullRequest{{
+				Number: gh.Int(1),
+				Title:  gh.String("fork PR"),
+				User:   &gh.User{Login: gh.String("bob")},
+				Head: &gh.PullRequestBranch{
+					Ref:  gh.String("feature"),
+					SHA:  gh.String("sha-fork"),
+					Repo: &gh.Repository{Fork: gh.Bool(true), FullName: gh.String("ext/repo")},
+				},
+				Base:      &gh.PullRequestBranch{Ref: gh.String("main")},
+				HTMLURL:   gh.String("https://github.com/acme/repo-1/pull/1"),
+				State:     gh.String("open"),
+				UpdatedAt: &gh.Timestamp{Time: now},
+			}})
+		}, nil)
+
+	sy := newSyncer(s, f.srv.URL, noopPublisher{})
+	sy.ReviewRequests = &ghapp.ReviewRequestService{Store: s, Apps: sy.Apps}
+	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v", err)
+	}
+	// A second poll sees the same head; the dedupe table must absorb it.
+	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("second SyncInstallation() error = %v", err)
+	}
+
+	calls := f.reviewRequests()
+	if len(calls) != 1 {
+		t.Fatalf("review requests = %+v, want one deduplicated request", calls)
+	}
+	if calls[0].Repo != "acme/repo-1" || calls[0].Number != 1 ||
+		len(calls[0].Reviewers) != 1 || calls[0].Reviewers[0] != "qa-reviewer" {
+		t.Errorf("review request = %+v, want acme/repo-1#1 to qa-reviewer", calls[0])
+	}
+	var pr store.PullRequest
+	if err := s.DB.WithContext(ctx).Where("repository_id = ? AND number = ?", 1, 1).Take(&pr).Error; err != nil {
+		t.Fatalf("load fork PR: %v", err)
+	}
+	saved, err := s.ReviewRequestFor(ctx, pr.ID, "sha-fork")
+	if err != nil {
+		t.Fatalf("ReviewRequestFor: %v", err)
+	}
+	if saved.Status != store.ReviewRequestDelivered || saved.Cause != store.ReviewRequestCauseFork {
+		t.Errorf("request = %+v, want a delivered fork request", saved)
 	}
 }

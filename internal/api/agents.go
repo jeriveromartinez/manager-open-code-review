@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -454,6 +455,8 @@ type qaPolicyResponse struct {
 	VerifyTokenShare        int                   `json:"verify_token_share"`
 	VerifyTimeShare         int                   `json:"verify_time_share"`
 	VerifyTokenMax          int64                 `json:"verify_token_max"`
+	ReviewerLogin           string                `json:"reviewer_login"`
+	ReviewerTeam            string                `json:"reviewer_team"`
 	PromptCache             bool                  `json:"prompt_cache"`
 	UpdatedAt               string                `json:"updated_at"`
 }
@@ -531,6 +534,8 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 		VerifyTokenShare:  verifyDefault(p.VerifyTokenShare, store.DefaultVerifyTokenShare),
 		VerifyTimeShare:   verifyDefault(p.VerifyTimeShare, store.DefaultVerifyTimeShare),
 		VerifyTokenMax:    verifyDefault64(p.VerifyTokenMax, store.DefaultVerifyTokenMax),
+		ReviewerLogin:     p.ReviewerLogin,
+		ReviewerTeam:      p.ReviewerTeam,
 		PromptCache:       promptCache,
 		UpdatedAt:         p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
@@ -695,6 +700,45 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reviewer fields are new and the panel does not send them yet, so an
+	// omitted value keeps the stored one instead of clearing the escalation
+	// target on every unrelated policy save.
+	reviewerLoginSet, reviewerTeamSet := false, false
+	if value, present := raw["reviewer_login"]; present {
+		if err := json.Unmarshal(value, &policy.ReviewerLogin); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid reviewer_login")
+			return
+		}
+		reviewerLoginSet = true
+	}
+	if value, present := raw["reviewer_team"]; present {
+		if err := json.Unmarshal(value, &policy.ReviewerTeam); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid reviewer_team")
+			return
+		}
+		reviewerTeamSet = true
+	}
+	if !reviewerLoginSet || !reviewerTeamSet {
+		if stored, err := s.Store.QAPolicyForTeam(r.Context(), teamID); err == nil {
+			if !reviewerLoginSet {
+				policy.ReviewerLogin = stored.ReviewerLogin
+			}
+			if !reviewerTeamSet {
+				policy.ReviewerTeam = stored.ReviewerTeam
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			writeAPIError(w, http.StatusInternalServerError, "load qa policy")
+			return
+		}
+	}
+	if !store.ValidReviewRecipient(strings.TrimSpace(policy.ReviewerLogin)) {
+		writeAPIError(w, http.StatusBadRequest, "invalid reviewer_login")
+		return
+	}
+	if !store.ValidReviewRecipient(strings.TrimSpace(policy.ReviewerTeam)) {
+		writeAPIError(w, http.StatusBadRequest, "invalid reviewer_team")
+		return
+	}
 	// A null or omitted ceiling clears the team override: PUT replaces the whole
 	// policy, so inheriting the global value is expressed by leaving it out.
 	if value, present := raw["review_context_ceiling"]; present {

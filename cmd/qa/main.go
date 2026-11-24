@@ -112,7 +112,10 @@ func runServe() error {
 	}()
 
 	checks := &github.Checks{Store: st, Apps: apps}
-	s := &syncer.Syncer{Store: st, Apps: apps, Events: publisher, Checks: checks}
+	reviewRequests := &github.ReviewRequestService{
+		Store: st, Apps: apps, RetryDelay: github.ReviewRequestRetryDelay,
+	}
+	s := &syncer.Syncer{Store: st, Apps: apps, Events: publisher, Checks: checks, ReviewRequests: reviewRequests}
 	// The same worker starts/cancels checks for the trigger and publishes
 	// finished runs from the publish queue. It never executes a review.
 	publisherWorker := &publish.Worker{

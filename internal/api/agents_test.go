@@ -508,6 +508,70 @@ func TestPolicyRequireGreenCIRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPolicyReviewerTargets(t *testing.T) {
+	f := newSecureFixture(t)
+	profile, err := f.st.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "primary", Provider: "openai", Model: "gpt-4o-mini", APIKeyEnc: "sealed", Enabled: true,
+		HealthStatus: store.HealthOK,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+	team := f.team("review-team")
+	cookie := f.session(f.user("admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	rec := f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": profile.ID,
+		"reviewer_login": "qa-reviewer",
+		"reviewer_team":  "qa-team",
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var saved map[string]any
+	decodeJSON(t, rec, &saved)
+	if saved["reviewer_login"] != "qa-reviewer" || saved["reviewer_team"] != "qa-team" {
+		t.Errorf("PUT reviewers = %v/%v, want qa-reviewer/qa-team",
+			saved["reviewer_login"], saved["reviewer_team"])
+	}
+
+	// The panel does not send the new fields yet, so an unrelated save keeps
+	// the stored target.
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": profile.ID, "blocking_threshold": "blocker",
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	policy, err := f.st.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if policy.ReviewerLogin != "qa-reviewer" || policy.ReviewerTeam != "qa-team" {
+		t.Errorf("omitted reviewers = %q/%q, want the stored target", policy.ReviewerLogin, policy.ReviewerTeam)
+	}
+
+	// Invalid tokens are a client error, not an internal one.
+	for field, value := range map[string]string{
+		"reviewer_login": "bad/login",
+		"reviewer_team":  "bad team",
+	} {
+		rec = f.request(http.MethodPut, path, map[string]any{
+			"llm_profile_id": profile.ID, field: value,
+		}, cookie)
+		assertStatus(t, rec, http.StatusBadRequest)
+	}
+
+	// An explicit empty value clears the target.
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": profile.ID, "reviewer_login": "", "reviewer_team": "",
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	if policy, err = f.st.QAPolicyForTeam(f.ctx, team.ID); err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if policy.ReviewerLogin != "" || policy.ReviewerTeam != "" {
+		t.Errorf("explicit empty reviewers = %q/%q, want cleared", policy.ReviewerLogin, policy.ReviewerTeam)
+	}
+}
+
 func TestPolicyReviewControls(t *testing.T) {
 	f := newSecureFixture(t)
 	profile := seedProfile(t, f, "primary", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})

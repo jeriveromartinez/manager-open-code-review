@@ -29,6 +29,10 @@ type Syncer struct {
 	Apps   github.AppProvider
 	Events events.Publisher
 	Checks ChecksRefresher
+	// ReviewRequests handles forks, which the engine never reviews. Polling
+	// mode has no webhook delivery, so the syncer is the only path that can
+	// hand those pull requests to a person.
+	ReviewRequests *github.ReviewRequestService
 }
 
 // ChecksRefresher re-reads the CI state of a pull request head and stores it.
@@ -370,6 +374,7 @@ func (s *Syncer) syncPullRequests(ctx context.Context, client *gh.Client, instal
 				slog.Error("refresh pull request checks failed",
 					"pull_request_id", pr.ID, "head_sha", pr.HeadSHA, "error", err)
 			}
+			s.requestForkReview(ctx, pr)
 		}
 		if err := s.Store.CloseMissingPullRequests(ctx, repo.ID, openNumbers); err != nil {
 			return fmt.Errorf("close missing pull requests of %s: %w", repo.FullName, err)
@@ -398,6 +403,29 @@ func (s *Syncer) refreshChecks(ctx context.Context, client *gh.Client, pr store.
 		})
 	}
 	return nil
+}
+
+// requestForkReview hands an open, non-draft fork to a person. The request is
+// deduplicated by pull request and head, so walking the open pull requests on
+// every poll is cheap and never asks GitHub twice. A failure is logged and does
+// not abort the rest of the installation.
+func (s *Syncer) requestForkReview(ctx context.Context, pr store.PullRequest) {
+	if s.ReviewRequests == nil || !pr.IsFork || !pr.IsOpen() || pr.Draft || pr.HeadSHA == "" {
+		return
+	}
+	cfg, err := s.Store.ReviewRequestConfigForPR(ctx, pr.ID)
+	if errors.Is(err, store.ErrNoReviewConfig) {
+		return
+	}
+	if err != nil {
+		slog.Error("load fork review request config failed",
+			"pull_request_id", pr.ID, "error", err)
+		return
+	}
+	if _, err := s.ReviewRequests.Request(ctx, cfg, store.ReviewRequestCauseFork); err != nil {
+		slog.Error("request human review of fork failed",
+			"pull_request_id", pr.ID, "head_sha", pr.HeadSHA, "error", err)
+	}
 }
 
 func (s *Syncer) publish(ctx context.Context, ev events.Event) error {

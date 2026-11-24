@@ -37,10 +37,25 @@ type prResponse struct {
 		Passed int `json:"passed"`
 		Total  int `json:"total"`
 	} `json:"validations"`
-	OpenFindings severityCountsResponse `json:"open_findings"`
-	TeamID       *uint                  `json:"team_id"`
-	StatusSince  string                 `json:"status_since"`
-	UpdatedAt    string                 `json:"updated_at"`
+	OpenFindings  severityCountsResponse `json:"open_findings"`
+	TeamID        *uint                  `json:"team_id"`
+	StatusSince   string                 `json:"status_since"`
+	UpdatedAt     string                 `json:"updated_at"`
+	ReviewRequest *reviewRequestResponse `json:"review_request"`
+}
+
+// reviewRequestResponse is the human escalation state the panel shows beside
+// the QA verdict: whether a person was asked, who, at which head and whether
+// GitHub accepted the request.
+type reviewRequestResponse struct {
+	Status        string  `json:"status"`
+	HeadSHA       string  `json:"head_sha"`
+	Cause         string  `json:"cause"`
+	ReviewerLogin string  `json:"reviewer_login"`
+	ReviewerTeam  string  `json:"reviewer_team"`
+	Attempts      int     `json:"attempts"`
+	LastError     string  `json:"last_error"`
+	DeliveredAt   *string `json:"delivered_at"`
 }
 
 type severityCountsResponse struct {
@@ -73,6 +88,18 @@ func prDTO(v store.PRView) prResponse {
 	}
 	out.Validations.Passed = v.Validations.Passed
 	out.Validations.Total = v.Validations.Total
+	if v.ReviewRequest != nil {
+		out.ReviewRequest = &reviewRequestResponse{
+			Status:        v.ReviewRequest.Status,
+			HeadSHA:       v.ReviewRequest.HeadSHA,
+			Cause:         v.ReviewRequest.Cause,
+			ReviewerLogin: v.ReviewRequest.ReviewerLogin,
+			ReviewerTeam:  v.ReviewRequest.ReviewerTeam,
+			Attempts:      v.ReviewRequest.Attempts,
+			LastError:     v.ReviewRequest.LastError,
+			DeliveredAt:   formatTimePtr(v.ReviewRequest.DeliveredAt),
+		}
+	}
 	return out
 }
 

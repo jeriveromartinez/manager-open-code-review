@@ -31,6 +31,22 @@ export type PRView = {
   /** When the PR entered its current `qa_status` (RFC 3339). */
   status_since: string
   updated_at: string
+  /** Latest human escalation request, when the engine could not conclude. */
+  review_request?: ReviewRequest | null
+}
+
+export type ReviewRequestStatus = 'pending' | 'sending' | 'delivered' | 'rejected' | 'escalated'
+
+/** Human review request of one PR revision, as GitHub reported it. */
+export type ReviewRequest = {
+  status: ReviewRequestStatus
+  head_sha: string
+  cause: string
+  reviewer_login: string
+  reviewer_team: string
+  attempts: number
+  last_error: string
+  delivered_at: string | null
 }
 
 export type SeverityCounts = {

@@ -460,6 +460,14 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 	if len(globs) == 0 || bytes.Equal(globs, []byte("null")) {
 		p.ExcludeGlobs = datatypes.JSON([]byte(`[]`))
 	}
+	p.ReviewerLogin = strings.TrimSpace(p.ReviewerLogin)
+	p.ReviewerTeam = strings.TrimSpace(p.ReviewerTeam)
+	if !ValidReviewRecipient(p.ReviewerLogin) {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid reviewer login %q", p.TeamID, p.ReviewerLogin)
+	}
+	if !ValidReviewRecipient(p.ReviewerTeam) {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid reviewer team %q", p.TeamID, p.ReviewerTeam)
+	}
 	var configured []RequiredCheck
 	if raw := bytes.TrimSpace(p.RequiredChecks); len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
 		if err := json.Unmarshal(raw, &configured); err != nil {
@@ -486,7 +494,7 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 			"require_green_ci", "required_checks", "review_context_ceiling", "review_effort",
 			"review_token_budget", "auto_triage_mode", "auto_withdraw",
 			"verify_max_findings", "verify_max_files", "verify_token_share",
-			"verify_time_share", "verify_token_max", "updated_at",
+			"verify_time_share", "verify_token_max", "reviewer_login", "reviewer_team", "updated_at",
 		}),
 	}).Create(&p).Error
 	if err != nil {

@@ -96,8 +96,45 @@ func (t *Trigger) OnPullRequestIneligible(ctx context.Context, prID uint) error 
 	if err != nil {
 		return fmt.Errorf("lock pull request %d: %w", prID, err)
 	}
-	defer unlock()
-	_, err = t.reconcileIneligibleLocked(ctx, prID)
+	_, reconcileErr := t.reconcileIneligibleLocked(ctx, prID)
+	unlock()
+	if reconcileErr != nil {
+		return reconcileErr
+	}
+	// A fork is stored and kept out of the engine, so a person has to own it.
+	// The request runs after the lock: it calls GitHub and must not block other
+	// deliveries of the same pull request.
+	return t.requestForkReview(ctx, prID)
+}
+
+// requestForkReview asks for a human review of an open fork pull request the
+// engine never reviews. The request is deduplicated by pull request and head,
+// and a closed, draft or ordinary pull request is left alone.
+func (t *Trigger) requestForkReview(ctx context.Context, prID uint) error {
+	if t.Apps == nil {
+		return nil
+	}
+	pr, err := t.Store.PullRequest(ctx, prID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !pr.IsOpen() || !pr.IsFork || pr.Draft {
+		return nil
+	}
+	cfg, err := t.Store.ReviewRequestConfigForPR(ctx, prID)
+	if errors.Is(err, store.ErrNoReviewConfig) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	service := &github.ReviewRequestService{
+		Store: t.Store, Apps: t.Apps, RetryDelay: github.ReviewRequestRetryDelay,
+	}
+	_, err = service.Request(ctx, cfg, store.ReviewRequestCauseFork)
 	return err
 }
 

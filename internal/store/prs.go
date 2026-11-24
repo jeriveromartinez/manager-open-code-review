@@ -298,6 +298,22 @@ type PRView struct {
 	StatusSince  time.Time
 	TeamID       *uint
 	UpdatedAt    time.Time
+	// ReviewRequest is the latest human review request of the pull request, or
+	// nil when none was ever recorded. It tells the panel whether the engine
+	// handed the revision to a person and whether GitHub accepted it.
+	ReviewRequest *ReviewRequestSummary
+}
+
+// ReviewRequestSummary is the panel-facing state of a human review request.
+type ReviewRequestSummary struct {
+	Status        string
+	HeadSHA       string
+	Cause         string
+	ReviewerLogin string
+	ReviewerTeam  string
+	Attempts      int
+	LastError     string
+	DeliveredAt   *time.Time
 }
 
 // SeverityCounts counts findings by severity. Severities outside the known
@@ -313,29 +329,37 @@ type SeverityCounts struct {
 // separate from PRView avoids GORM trying to map the computed fields. The
 // pointer fields are the ones a LEFT JOIN can leave NULL.
 type prViewRow struct {
-	ID                uint
-	Repo              string
-	Number            int
-	Title             string
-	AuthorLogin       string
-	HTMLURL           string
-	QAStatus          string
-	TeamID            *uint
-	Draft             bool
-	IsFork            bool
-	PolicyID          *uint
-	ProfileID         *uint
-	ProfileEnabled    *bool
-	ActiveRun         string
-	ValidationsPassed int
-	ValidationsFailed int
-	ValidationsTotal  int
-	OpenBlockers      int
-	OpenMajors        int
-	OpenMinors        int
-	OpenNits          int
-	QAStatusChangedAt time.Time
-	UpdatedAt         time.Time
+	ID                         uint
+	Repo                       string
+	Number                     int
+	Title                      string
+	AuthorLogin                string
+	HTMLURL                    string
+	QAStatus                   string
+	TeamID                     *uint
+	Draft                      bool
+	IsFork                     bool
+	PolicyID                   *uint
+	ProfileID                  *uint
+	ProfileEnabled             *bool
+	ActiveRun                  string
+	ValidationsPassed          int
+	ValidationsFailed          int
+	ValidationsTotal           int
+	OpenBlockers               int
+	OpenMajors                 int
+	OpenMinors                 int
+	OpenNits                   int
+	QAStatusChangedAt          time.Time
+	UpdatedAt                  time.Time
+	ReviewRequestStatus        string
+	ReviewRequestHeadSHA       string
+	ReviewRequestCause         string
+	ReviewRequestReviewerLogin string
+	ReviewRequestReviewerTeam  string
+	ReviewRequestAttempts      int
+	ReviewRequestLastError     string
+	ReviewRequestDeliveredAt   *time.Time
 }
 
 // Review states reported to the panel.
@@ -438,6 +462,11 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 	err := s.visiblePRs(ctx, u, f).
 		Joins("LEFT JOIN qa_policies pol ON pol.team_id = r.team_id").
 		Joins("LEFT JOIN llm_profiles prof ON prof.id = pol.llm_profile_id").
+		Joins(`LEFT JOIN LATERAL (
+			SELECT rq.status, rq.head_sha, rq.cause, rq.reviewer_login, rq.reviewer_team,
+			       rq.attempts, rq.last_error, rq.delivered_at
+			FROM review_requests rq WHERE rq.pull_request_id = pr.id
+			ORDER BY rq.id DESC LIMIT 1) rr ON true`).
 		Select(strings.Join([]string{
 			"pr.id AS id",
 			"r.full_name AS repo",
@@ -462,6 +491,14 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 			openFindingsColumn("nit", "open_nits"),
 			"pr.qa_status_changed_at AS qa_status_changed_at",
 			"pr.updated_at AS updated_at",
+			"COALESCE(rr.status, '') AS review_request_status",
+			"COALESCE(rr.head_sha, '') AS review_request_head_sha",
+			"COALESCE(rr.cause, '') AS review_request_cause",
+			"COALESCE(rr.reviewer_login, '') AS review_request_reviewer_login",
+			"COALESCE(rr.reviewer_team, '') AS review_request_reviewer_team",
+			"COALESCE(rr.attempts, 0) AS review_request_attempts",
+			"COALESCE(rr.last_error, '') AS review_request_last_error",
+			"rr.delivered_at AS review_request_delivered_at",
 		}, ", ")).
 		Order("pr.updated_at DESC").
 		Scan(&rows).Error
@@ -504,6 +541,18 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 			StatusSince: row.QAStatusChangedAt,
 			TeamID:      row.TeamID,
 			UpdatedAt:   row.UpdatedAt,
+		}
+		if row.ReviewRequestStatus != "" {
+			views[i].ReviewRequest = &ReviewRequestSummary{
+				Status:        row.ReviewRequestStatus,
+				HeadSHA:       row.ReviewRequestHeadSHA,
+				Cause:         row.ReviewRequestCause,
+				ReviewerLogin: row.ReviewRequestReviewerLogin,
+				ReviewerTeam:  row.ReviewRequestReviewerTeam,
+				Attempts:      row.ReviewRequestAttempts,
+				LastError:     row.ReviewRequestLastError,
+				DeliveredAt:   row.ReviewRequestDeliveredAt,
+			}
 		}
 	}
 	return views, nil

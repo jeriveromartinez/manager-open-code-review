@@ -50,6 +50,11 @@ type fakeReview struct {
 	Comments []reviewComment `json:"comments"`
 }
 
+type reviewRequestCall struct {
+	Reviewers     []string `json:"reviewers"`
+	TeamReviewers []string `json:"team_reviewers"`
+}
+
 type checkPatch struct {
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
@@ -92,6 +97,10 @@ type fakeGitHub struct {
 	failResolveOnce           bool
 	failCheckOnce             bool
 	failReviewCommentsOnce    bool
+	reviewRequests            []reviewRequestCall
+	reviewRequestAttempts     int
+	reviewRequestStatus       int
+	reviewRequestFailures     int
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -262,6 +271,20 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 			}{}
 		}
 		writeJSON(out, http.StatusOK)
+	case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/pulls/7/requested_reviewers":
+		g.reviewRequestAttempts++
+		// A negative failure count fails forever; a positive one counts down.
+		if g.reviewRequestStatus != 0 && g.reviewRequestFailures != 0 {
+			if g.reviewRequestFailures > 0 {
+				g.reviewRequestFailures--
+			}
+			http.Error(w, "review request rejected", g.reviewRequestStatus)
+			return
+		}
+		var in reviewRequestCall
+		_ = json.Unmarshal(body, &in)
+		g.reviewRequests = append(g.reviewRequests, in)
+		writeJSON(map[string]any{"number": 7}, http.StatusCreated)
 
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/pulls/7/reviews":
 		var review fakeReview
@@ -2438,5 +2461,204 @@ func TestPublishConcurrentIsIdempotent(t *testing.T) {
 	saved := loadRun(t, st, run.ID)
 	if saved.PublishPending {
 		t.Error("publish_pending is still true after concurrent deliveries")
+	}
+}
+
+// setReviewTarget points the single team policy of a test database at a GitHub
+// user and/or team.
+func setReviewTarget(t *testing.T, st *store.Store, login, team string) {
+	t.Helper()
+	if err := st.DB.WithContext(context.Background()).Model(&store.QAPolicy{}).
+		Where("id > 0").Updates(map[string]any{
+		"reviewer_login": login, "reviewer_team": team,
+	}).Error; err != nil {
+		t.Fatalf("set review target: %v", err)
+	}
+}
+
+func reviewRequestCalls(gh *fakeGitHub) []reviewRequestCall {
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	return append([]reviewRequestCall(nil), gh.reviewRequests...)
+}
+
+func TestPublishRequestsHumanReviewWhenInconclusive(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunInconclusive, "major")
+	setReviewTarget(t, st, "qa-reviewer", "qa-team")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	calls := reviewRequestCalls(gh)
+	if len(calls) != 1 {
+		t.Fatalf("review requests = %d, want 1", len(calls))
+	}
+	if len(calls[0].Reviewers) != 1 || calls[0].Reviewers[0] != "qa-reviewer" ||
+		len(calls[0].TeamReviewers) != 1 || calls[0].TeamReviewers[0] != "qa-team" {
+		t.Errorf("review request = %+v, want qa-reviewer/qa-team", calls[0])
+	}
+
+	saved, err := st.ReviewRequestFor(ctx, pr.ID, run.HeadSHA)
+	if err != nil {
+		t.Fatalf("ReviewRequestFor() error = %v", err)
+	}
+	if saved.Status != store.ReviewRequestDelivered || saved.Attempts != 1 || saved.DeliveredAt == nil {
+		t.Errorf("request = %+v, want delivered on the first attempt", saved)
+	}
+	if saved.Cause != store.ReviewRequestCauseInconclusive || saved.HeadSHA != run.HeadSHA ||
+		saved.ReviewerLogin != "qa-reviewer" || saved.ReviewerTeam != "qa-team" {
+		t.Errorf("request = %+v, want the inconclusive cause and the configured recipients", saved)
+	}
+}
+
+func TestPublishRequestsHumanReviewForFailedRun(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, _ := seedPublishContext(t, st, store.RunFailed, "major")
+	setReviewTarget(t, st, "qa-reviewer", "")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if calls := reviewRequestCalls(gh); len(calls) != 1 {
+		t.Fatalf("review requests = %d, want 1 for a failed run", len(calls))
+	}
+}
+
+// A conclusive review is owned by the engine, not by a person: no request.
+func TestPublishDoesNotRequestReviewForConclusiveRun(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	setReviewTarget(t, st, "qa-reviewer", "qa-team")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if calls := reviewRequestCalls(gh); len(calls) != 0 {
+		t.Fatalf("review requests = %+v, want none", calls)
+	}
+	if _, err := st.ReviewRequestFor(ctx, pr.ID, run.HeadSHA); err == nil {
+		t.Fatal("ReviewRequestFor() found a request for a conclusive run")
+	}
+}
+
+func TestPublishReviewRequestDeduplicatesPerPRAndSHA(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunInconclusive, "major")
+	setReviewTarget(t, st, "qa-reviewer", "")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	for i := 0; i < 2; i++ {
+		if err := w.Publish(ctx, run.ID); err != nil {
+			t.Fatalf("Publish() #%d error = %v", i+1, err)
+		}
+	}
+	if calls := reviewRequestCalls(gh); len(calls) != 1 {
+		t.Fatalf("review requests = %d, want 1 after a retried publish", len(calls))
+	}
+	saved, err := st.ReviewRequestFor(ctx, pr.ID, run.HeadSHA)
+	if err != nil {
+		t.Fatalf("ReviewRequestFor() error = %v", err)
+	}
+	if saved.Attempts != 1 {
+		t.Errorf("attempts = %d, want 1", saved.Attempts)
+	}
+}
+
+func TestPublishReviewRequestRetriesThenEscalates(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunInconclusive, "major")
+	setReviewTarget(t, st, "qa-reviewer", "")
+	gh := newFakeGitHub(t)
+	gh.reviewRequestStatus = http.StatusInternalServerError
+	gh.reviewRequestFailures = -1
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	attempts := gh.reviewRequestAttempts
+	gh.mu.Unlock()
+	if attempts != 3 {
+		t.Errorf("review-request attempts = %d, want the bounded 3", attempts)
+	}
+	saved, err := st.ReviewRequestFor(ctx, pr.ID, run.HeadSHA)
+	if err != nil {
+		t.Fatalf("ReviewRequestFor() error = %v", err)
+	}
+	if saved.Status != store.ReviewRequestEscalated || saved.Attempts != 3 || saved.DeliveredAt != nil {
+		t.Errorf("request = %+v, want escalated after three attempts", saved)
+	}
+	if !strings.Contains(saved.LastError, "500") {
+		t.Errorf("last error = %q, want the GitHub status", saved.LastError)
+	}
+}
+
+func TestPublishReviewRequestRejectionIsRecorded(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunInconclusive, "major")
+	setReviewTarget(t, st, "qa-reviewer", "")
+	gh := newFakeGitHub(t)
+	gh.reviewRequestStatus = http.StatusUnprocessableEntity
+	gh.reviewRequestFailures = -1
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	attempts := gh.reviewRequestAttempts
+	gh.mu.Unlock()
+	if attempts != 1 {
+		t.Errorf("review-request attempts = %d, want 1 (a rejection is not retried)", attempts)
+	}
+	saved, err := st.ReviewRequestFor(ctx, pr.ID, run.HeadSHA)
+	if err != nil {
+		t.Fatalf("ReviewRequestFor() error = %v", err)
+	}
+	if saved.Status != store.ReviewRequestRejected || saved.DeliveredAt != nil {
+		t.Errorf("request = %+v, want rejected", saved)
+	}
+	if !strings.Contains(saved.LastError, "422") {
+		t.Errorf("last error = %q, want the GitHub status", saved.LastError)
+	}
+}
+
+func TestPublishReviewRequestWithoutTargetIsRecorded(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunInconclusive, "major")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if calls := reviewRequestCalls(gh); len(calls) != 0 {
+		t.Fatalf("review requests = %+v, want none without a target", calls)
+	}
+	saved, err := st.ReviewRequestFor(ctx, pr.ID, run.HeadSHA)
+	if err != nil {
+		t.Fatalf("ReviewRequestFor() error = %v", err)
+	}
+	if saved.Status != store.ReviewRequestRejected || !strings.Contains(saved.LastError, "no reviewer") {
+		t.Errorf("request = %+v, want a rejected row that names the missing target", saved)
 	}
 }

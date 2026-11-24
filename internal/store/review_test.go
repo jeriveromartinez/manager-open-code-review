@@ -25,11 +25,17 @@ func TestMigrateCreatesPhase2Tables(t *testing.T) {
 	st := testutil.NewStore(t)
 	for _, table := range []string{
 		"llm_profiles", "qa_policies", "review_runs", "findings",
-		"finding_events", "github_artifacts",
+		"finding_events", "github_artifacts", "review_requests",
 	} {
 		if !st.DB.Migrator().HasTable(table) {
 			t.Fatalf("missing table %s", table)
 		}
+	}
+	if !st.DB.Migrator().HasColumn(&store.QAPolicy{}, "reviewer_login") {
+		t.Fatal("qa_policies.reviewer_login missing")
+	}
+	if !st.DB.Migrator().HasColumn(&store.QAPolicy{}, "reviewer_team") {
+		t.Fatal("qa_policies.reviewer_team missing")
 	}
 	if !st.DB.Migrator().HasColumn(&store.PullRequest{}, "is_fork") {
 		t.Fatal("pull_requests.is_fork missing")
