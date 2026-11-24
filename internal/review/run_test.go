@@ -858,7 +858,9 @@ func TestRunStopsWhenBudgetIsExhausted(t *testing.T) {
 	t.Setenv("RUN_FAKE_OCR_SLEEP", "30")
 
 	runner := f.runner()
-	runner.Cfg.Timeout = 300 * time.Millisecond
+	// The clone/fetch can outlast a tight deadline on a slow host, which would
+	// starve the OCR call; the fake OCR sleeps 30s, so 5s still expires inside it.
+	runner.Cfg.Timeout = 5 * time.Second
 
 	if err := runner.Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("Run() error = %v", err)
