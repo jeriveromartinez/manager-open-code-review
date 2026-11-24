@@ -104,6 +104,9 @@ func (w *Worker) SetFindingThread(ctx context.Context, prID uint, finding store.
 	if err := p.app.GraphQL(ctx, p.inst.ID, mutation, map[string]any{"threadId": threadID}, &response); err != nil {
 		return false, fmt.Errorf("set review thread %s resolved=%v: %w", threadID, resolved, err)
 	}
+	if err := w.Store.SetFindingThreadResolved(ctx, finding.ID, resolved); err != nil {
+		return false, err
+	}
 	if err := w.Store.SetFindingThread(ctx, finding.ID, threadID); err != nil {
 		return false, err
 	}

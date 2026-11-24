@@ -90,8 +90,11 @@ type findingDTO struct {
 	// answer with its cited evidence, empty on findings it never looked at.
 	TriageSource string          `json:"triage_source"`
 	Verification json.RawMessage `json:"verification"`
-	CreatedAt    string          `json:"created_at"`
-	UpdatedAt    string          `json:"updated_at"`
+	// GithubThreadResolved is GitHub's thread state, reported apart from the QA
+	// verdict and the finding status.
+	GithubThreadResolved bool   `json:"github_thread_resolved"`
+	CreatedAt            string `json:"created_at"`
+	UpdatedAt            string `json:"updated_at"`
 }
 
 func findingDTOOf(f store.Finding) findingDTO {
@@ -103,8 +106,9 @@ func findingDTOOf(f store.Finding) findingDTO {
 		FirstSeenRunID: f.FirstSeenRunID, LastSeenRunID: f.LastSeenRunID,
 		TriageVerdict: f.TriageVerdict, TriagedBy: f.TriagedBy, TriagedAt: formatTimePtr(f.TriagedAt),
 		TriageSource: f.TriageSource, Verification: jsonObject(f.Verification),
-		CreatedAt: f.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt: f.UpdatedAt.UTC().Format(time.RFC3339),
+		GithubThreadResolved: f.GithubThreadResolved,
+		CreatedAt:            f.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:            f.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 

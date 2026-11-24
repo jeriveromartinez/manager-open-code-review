@@ -5,11 +5,13 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	gh "github.com/google/go-github/v93/github"
 	"gorm.io/gorm"
@@ -139,12 +141,26 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case *gh.StatusEvent:
 		h.handleCheckEvent(r.Context(), w, p.GetRepo(), p.GetSHA())
 	case *gh.PullRequestReviewThreadEvent:
-		h.handleReviewThread(r.Context(), w, p)
+		h.handleReviewThread(r.Context(), w, p, r.Header.Get("X-GitHub-Delivery"), reviewThreadEventTime(body))
 	case *gh.IssueCommentEvent:
 		h.handleIssueComment(r.Context(), w, p)
 	default:
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// reviewThreadEventTime reads the top-level updated_at GitHub sends with a
+// pull_request_review_thread delivery. It orders resolve/unresolve events, so a
+// delayed delivery cannot overwrite a newer one. A payload without the field
+// yields the zero time and falls back to state and delivery-id checks.
+func reviewThreadEventTime(body []byte) time.Time {
+	var payload struct {
+		UpdatedAt *time.Time `json:"updated_at"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || payload.UpdatedAt == nil {
+		return time.Time{}
+	}
+	return payload.UpdatedAt.UTC()
 }
 
 func (h *WebhookHandler) handleInstallation(ctx context.Context, w http.ResponseWriter, e *gh.InstallationEvent) {

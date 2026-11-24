@@ -32,6 +32,10 @@ var (
 	// ErrFindingHumanTriaged is returned when the verifier tries to change a
 	// finding a person already decided. A human never loses to the second pass.
 	ErrFindingHumanTriaged = errors.New("finding already triaged by a human")
+	// ErrFindingThreadAmbiguous is returned when a review thread delivery
+	// matches more than one finding. Picking one would change a finding the
+	// event did not target.
+	ErrFindingThreadAmbiguous = errors.New("review thread matches several findings")
 )
 
 // Defaults applied by SaveQAPolicy when an administrator leaves a field at its
@@ -932,13 +936,22 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 			return fmt.Errorf("complete review run %d: %w", id, ErrRunNotActive)
 		}
 
+		// A person who triaged the finding after this run began decided later
+		// than the result being stored now, so the run must not overwrite them.
+		var runStarted time.Time
+		if err := tx.Raw(
+			"SELECT COALESCE(started_at, created_at) FROM review_runs WHERE id = ?", id).
+			Scan(&runStarted).Error; err != nil {
+			return fmt.Errorf("read start of review run %d: %w", id, err)
+		}
+
 		for _, f := range c.Findings {
-			if _, err := upsertFinding(tx, f); err != nil {
+			if _, err := upsertFinding(tx, f, runStarted); err != nil {
 				return err
 			}
 		}
 		for _, findingID := range c.Resolved {
-			if err := updateFindingStatus(tx, findingID, FindingResolved, id); err != nil {
+			if err := updateFindingStatus(tx, findingID, FindingResolved, id, runStarted); err != nil {
 				return err
 			}
 		}
@@ -1036,10 +1049,13 @@ func (s *Store) SetPRStatus(ctx context.Context, prID uint, status string) error
 // (pull request, fingerprint) pair. The original ID, first seen run and GitHub
 // publication coordinates are preserved.
 func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
-	return upsertFinding(s.DB.WithContext(ctx), f)
+	return upsertFinding(s.DB.WithContext(ctx), f, time.Time{})
 }
 
-func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
+// upsertFinding refreshes a finding re-detected by a run. When runStarted is
+// set, a finding whose status an authorized thread event decided after the run
+// began is left untouched: the run must not overwrite that decision.
+func upsertFinding(db *gorm.DB, f Finding, runStarted time.Time) (Finding, error) {
 	if f.IdentityVersion == 0 {
 		f.IdentityVersion = IdentityVersionCurrent
 	}
@@ -1052,7 +1068,7 @@ func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
 		return Finding{}, err
 	}
 	if ok {
-		return migrateLegacyFinding(db, legacy, f)
+		return migrateLegacyFinding(db, legacy, f, runStarted)
 	}
 
 	// A verifier dismissal survives while the cited code and range stay the
@@ -1069,6 +1085,17 @@ func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
 		return Finding{}, fmt.Errorf("clear stale verifier triage for %q: %w", f.ID, err)
 	}
 
+	// A run that started before an authorized thread decision must not refresh
+	// the row it decided on, not even its status.
+	conflictWhere := clause.Expr{
+		SQL: "(findings.triage_verdict = '' OR findings.existing_code <> EXCLUDED.existing_code" +
+			" OR findings.start_line <> EXCLUDED.start_line OR findings.end_line <> EXCLUDED.end_line)",
+	}
+	if !runStarted.IsZero() {
+		conflictWhere.SQL += " AND (findings.github_thread_decision_at IS NULL" +
+			" OR findings.github_thread_decision_at <= ?)"
+		conflictWhere.Vars = []any{runStarted}
+	}
 	res := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "pull_request_id"}, {Name: "fingerprint"}},
 		DoUpdates: clause.AssignmentColumns([]string{
@@ -1076,10 +1103,7 @@ func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
 			"body", "suggestion", "confidence", "existing_code", "status",
 			"identity_version", "last_seen_run_id", "updated_at",
 		}),
-		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{
-			SQL: "findings.triage_verdict = '' OR findings.existing_code <> EXCLUDED.existing_code" +
-				" OR findings.start_line <> EXCLUDED.start_line OR findings.end_line <> EXCLUDED.end_line",
-		}}},
+		Where: clause.Where{Exprs: []clause.Expression{conflictWhere}},
 	}).Create(&f)
 	if res.Error != nil {
 		return Finding{}, fmt.Errorf("upsert finding %q: %w", f.ID, res.Error)
@@ -1116,7 +1140,7 @@ func legacyFindingByID(db *gorm.DB, f Finding) (Finding, bool, error) {
 	return legacy, true, nil
 }
 
-func migrateLegacyFinding(db *gorm.DB, legacy, f Finding) (Finding, error) {
+func migrateLegacyFinding(db *gorm.DB, legacy, f Finding, runStarted time.Time) (Finding, error) {
 	now := time.Now().UTC()
 	// The verifier rule is the same as the normal upsert, keyed by ID because the
 	// legacy row still carries its old fingerprint.
@@ -1146,16 +1170,19 @@ func migrateLegacyFinding(db *gorm.DB, legacy, f Finding) (Finding, error) {
 		return Finding{}, fmt.Errorf("migrate finding %q identity: %w", f.ID, err)
 	}
 
-	res := db.Model(&Finding{}).Where("id = ?", legacy.ID).
-		Where("triage_verdict = '' OR existing_code <> ? OR start_line <> ? OR end_line <> ?",
-			f.ExistingCode, f.StartLine, f.EndLine).
-		Updates(map[string]any{
-			"path": f.Path, "start_line": f.StartLine, "end_line": f.EndLine,
-			"severity": f.Severity, "category": f.Category, "title": f.Title,
-			"body": f.Body, "suggestion": f.Suggestion, "confidence": f.Confidence,
-			"existing_code": f.ExistingCode, "status": f.Status,
-			"last_seen_run_id": f.LastSeenRunID, "updated_at": now,
-		})
+	q := db.Model(&Finding{}).Where("id = ?", legacy.ID).
+		Where("(triage_verdict = '' OR existing_code <> ? OR start_line <> ? OR end_line <> ?)",
+			f.ExistingCode, f.StartLine, f.EndLine)
+	if !runStarted.IsZero() {
+		q = q.Where("(github_thread_decision_at IS NULL OR github_thread_decision_at <= ?)", runStarted)
+	}
+	res := q.Updates(map[string]any{
+		"path": f.Path, "start_line": f.StartLine, "end_line": f.EndLine,
+		"severity": f.Severity, "category": f.Category, "title": f.Title,
+		"body": f.Body, "suggestion": f.Suggestion, "confidence": f.Confidence,
+		"existing_code": f.ExistingCode, "status": f.Status,
+		"last_seen_run_id": f.LastSeenRunID, "updated_at": now,
+	})
 	if res.Error != nil {
 		return Finding{}, fmt.Errorf("migrate finding %q contents: %w", f.ID, res.Error)
 	}
@@ -1224,15 +1251,19 @@ func (s *Store) FindingForThread(ctx context.Context, prID uint, threadID string
 		return Finding{}, fmt.Errorf("finding for review thread: %w", ErrNotFound)
 	}
 
-	var f Finding
-	err := q.Order("id").Take(&f).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return Finding{}, fmt.Errorf("finding for review thread: %w", ErrNotFound)
-	}
+	var findings []Finding
+	err := q.Order("id").Limit(2).Find(&findings).Error
 	if err != nil {
 		return Finding{}, fmt.Errorf("find finding for review thread: %w", err)
 	}
-	return f, nil
+	switch len(findings) {
+	case 0:
+		return Finding{}, fmt.Errorf("finding for review thread: %w", ErrNotFound)
+	case 1:
+		return findings[0], nil
+	default:
+		return Finding{}, fmt.Errorf("finding for review thread: %w", ErrFindingThreadAmbiguous)
+	}
 }
 
 // SetFindingStatusIfChanged transitions a finding and reports whether the row
@@ -1270,11 +1301,21 @@ func (s *Store) OpenFindingsForPR(ctx context.Context, prID uint) ([]Finding, er
 // UpdateFindingStatus records a finding's lifecycle transition and the run that
 // last observed it.
 func (s *Store) UpdateFindingStatus(ctx context.Context, id, status string, runID uint) error {
-	return updateFindingStatus(s.DB.WithContext(ctx), id, status, runID)
+	return updateFindingStatus(s.DB.WithContext(ctx), id, status, runID, time.Time{})
 }
 
-func updateFindingStatus(db *gorm.DB, id, status string, runID uint) error {
-	res := db.Model(&Finding{}).Where("id = ?", id).Updates(map[string]any{
+// updateFindingStatus applies a lifecycle transition on behalf of a run. When
+// runStarted is not zero, a human triage or an authorized thread decision
+// recorded after the run began wins: that is the concurrent decision the
+// finishing run must not overwrite.
+func updateFindingStatus(db *gorm.DB, id, status string, runID uint, runStarted time.Time) error {
+	q := db.Model(&Finding{}).Where("id = ?", id)
+	if !runStarted.IsZero() {
+		q = q.Where("NOT (triage_source = ? AND triaged_at IS NOT NULL AND triaged_at > ?)",
+			TriageSourceHuman, runStarted)
+		q = q.Where("(github_thread_decision_at IS NULL OR github_thread_decision_at <= ?)", runStarted)
+	}
+	res := q.Updates(map[string]any{
 		"status":           status,
 		"last_seen_run_id": runID,
 		"updated_at":       time.Now().UTC(),
@@ -1282,7 +1323,15 @@ func updateFindingStatus(db *gorm.DB, id, status string, runID uint) error {
 	if res.Error != nil {
 		return fmt.Errorf("update finding %q status: %w", id, res.Error)
 	}
-	if res.RowsAffected == 0 {
+	if res.RowsAffected > 0 {
+		return nil
+	}
+
+	var count int64
+	if err := db.Model(&Finding{}).Where("id = ?", id).Count(&count).Error; err != nil {
+		return fmt.Errorf("find finding %q: %w", id, err)
+	}
+	if count == 0 {
 		return fmt.Errorf("update finding %q status: %w", id, ErrNotFound)
 	}
 	return nil
@@ -1320,6 +1369,23 @@ func (s *Store) SetFindingThread(ctx context.Context, id, threadID string) error
 	return nil
 }
 
+// SetFindingThreadResolved records the thread state the App's own GraphQL
+// mutation produced, so the echo of that mutation can be ignored without
+// losing the state. It never touches the triage verdict.
+func (s *Store) SetFindingThreadResolved(ctx context.Context, id string, resolved bool) error {
+	res := s.DB.WithContext(ctx).Model(&Finding{}).Where("id = ?", id).Updates(map[string]any{
+		"github_thread_resolved": resolved,
+		"updated_at":             time.Now().UTC(),
+	})
+	if res.Error != nil {
+		return fmt.Errorf("set finding %q thread state: %w", id, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("set finding %q thread state: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
 // FindingAudit is the audit entry of a finding transition that happened outside
 // a review run: a review-thread dispute or a /qa command.
 type FindingAudit struct {
@@ -1329,66 +1395,21 @@ type FindingAudit struct {
 	CommentID int64
 	Reason    string
 	ThreadID  string
+	// DeliveryID is GitHub's X-GitHub-Delivery id. Recording it makes a
+	// redelivered thread event a no-op instead of flipping the state back.
+	DeliveryID string
 	// Source is who took the decision: TriageSourceHuman when empty, or
 	// TriageSourceVerifier when the second OCR pass triages.
 	Source string
 }
 
-// SetFindingStatusAudited transitions a finding and appends its audit row in a
-// single transaction. It reports whether the status actually changed, which is
-// what makes a replayed delivery neither re-audit nor flip state back.
-func (s *Store) SetFindingStatusAudited(ctx context.Context, id, status string, entry FindingAudit) (bool, error) {
-	changed := false
-	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		now := time.Now().UTC()
-		updates := map[string]any{"status": status, "updated_at": now}
-		if entry.ThreadID != "" {
-			updates["github_thread_id"] = entry.ThreadID
-		}
-
-		res := tx.Model(&Finding{}).Where("id = ? AND status <> ?", id, status).Updates(updates)
-		if res.Error != nil {
-			return fmt.Errorf("update finding %q status: %w", id, res.Error)
-		}
-		if res.RowsAffected == 0 {
-			// An unchanged status still lets us record a thread ignored by an
-			// earlier delivery, but it must not audit the transition twice.
-			var existing Finding
-			err := quietDB(tx).Where("id = ?", id).Take(&existing).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return fmt.Errorf("update finding %q status: %w", id, ErrNotFound)
-			}
-			if err != nil {
-				return fmt.Errorf("find finding %q: %w", id, err)
-			}
-			if entry.ThreadID != "" && existing.GithubThreadID == "" {
-				if err := tx.Model(&Finding{}).Where("id = ?", id).
-					Update("github_thread_id", entry.ThreadID).Error; err != nil {
-					return fmt.Errorf("set finding %q thread: %w", id, err)
-				}
-			}
-			return nil
-		}
-
-		if err := writeFindingAudit(tx, id, entry); err != nil {
-			return err
-		}
-		changed = true
-		return nil
-	})
-	if err != nil {
-		return false, err
-	}
-	return changed, nil
-}
-
 // TriageFinding records a panel decision on a finding: status is FindingOpen
-// for "confirmed" and FindingWithdrawn for "false positive". Unlike
-// SetFindingStatusAudited, confirming an already open finding is a real change
-// because it records who vouched for it. It reports whether the status moved,
-// which is what tells the caller to touch the GitHub thread. Repeating the
-// same decision by the same person is a no-op and is not audited twice. A
-// resolved finding is no longer QA's decision and returns ErrFindingResolved.
+// for "confirmed" and FindingWithdrawn for "false positive". Confirming an
+// already open finding is a real change because it records who vouched for it.
+// It reports whether the status moved, which is what tells the caller to touch
+// the GitHub thread. Repeating the same decision by the same person is a no-op
+// and is not audited twice. A resolved finding is no longer QA's decision and
+// returns ErrFindingResolved.
 func (s *Store) TriageFinding(ctx context.Context, id, status string, entry FindingAudit) (statusChanged bool, err error) {
 	verdict := VerdictConfirmed
 	if status == FindingWithdrawn {
@@ -1445,6 +1466,109 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 	return statusChanged, nil
 }
 
+// ThreadSync describes one pull_request_review_thread delivery for a finding.
+type ThreadSync struct {
+	Resolved bool
+	// Status is the finding state the thread event means. It is applied only
+	// when ApplyStatus is true.
+	Status string
+	// ApplyStatus is false when the sender lacks triage permission or is the
+	// App echoing its own mutation: only the thread state is recorded. It is
+	// also ignored when a person already triaged the finding, so a late thread
+	// event never overrides them.
+	ApplyStatus bool
+	// EventAt is the payload's updated_at. A delivery at or before the last
+	// applied payload timestamp is ignored, so a delayed event cannot flip the
+	// state back.
+	EventAt time.Time
+	Audit   FindingAudit
+}
+
+// SyncFindingThread records GitHub's thread state for a finding and, when the
+// sender is authorized and no person has triaged it, applies the matching
+// status transition and audit row in one transaction. Older deliveries and
+// deliveries already applied are no-ops, which keeps redeliveries, echoes and
+// out-of-order events from flipping the state back.
+func (s *Store) SyncFindingThread(ctx context.Context, id string, in ThreadSync) (changed, statusChanged bool, err error) {
+	// PostgreSQL keeps microseconds; normalizing here makes a repeated delivery
+	// compare equal to the timestamp already stored.
+	eventAt := in.EventAt.Truncate(time.Microsecond)
+	err = s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current Finding
+		err := quietDB(tx).Where("id = ?", id).
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Take(&current).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("sync finding %q thread: %w", id, ErrNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("find finding %q: %w", id, err)
+		}
+
+		// The payload timestamp orders events even when a late delivery was
+		// never seen before, which delivery-id deduplication cannot detect.
+		// GitHub's updated_at has second precision, so an equal timestamp is
+		// ambiguous and must not flip the state either.
+		if !eventAt.IsZero() && current.GithubThreadEventAt != nil &&
+			!eventAt.After(*current.GithubThreadEventAt) {
+			return nil
+		}
+		if in.Audit.DeliveryID != "" {
+			var applied int64
+			if err := tx.Model(&AuditLog{}).
+				Where("target_type = ? AND target_id = ? AND data->>'delivery_id' = ?",
+					"finding", id, in.Audit.DeliveryID).
+				Count(&applied).Error; err != nil {
+				return fmt.Errorf("look up thread delivery %q: %w", in.Audit.DeliveryID, err)
+			}
+			if applied > 0 {
+				return nil
+			}
+		}
+
+		now := time.Now().UTC()
+		updates := map[string]any{}
+		if !eventAt.IsZero() &&
+			(current.GithubThreadEventAt == nil || eventAt.After(*current.GithubThreadEventAt)) {
+			updates["github_thread_event_at"] = eventAt
+		}
+		if in.Audit.ThreadID != "" && current.GithubThreadID == "" {
+			updates["github_thread_id"] = in.Audit.ThreadID
+		}
+		if current.GithubThreadResolved != in.Resolved {
+			updates["github_thread_resolved"] = in.Resolved
+		}
+		applyStatus := in.ApplyStatus && in.Status != "" && current.TriageSource != TriageSourceHuman
+		if applyStatus && current.Status != in.Status {
+			updates["status"] = in.Status
+			decisionAt := eventAt
+			if decisionAt.IsZero() {
+				decisionAt = now
+			}
+			updates["github_thread_decision_at"] = decisionAt
+			statusChanged = true
+		}
+		if len(updates) == 0 {
+			return nil
+		}
+		updates["updated_at"] = now
+		if err := tx.Model(&Finding{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return fmt.Errorf("sync finding %q thread: %w", id, err)
+		}
+		changed = true
+		if statusChanged {
+			if err := writeFindingAudit(tx, id, in.Audit); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, false, err
+	}
+	return changed, statusChanged, nil
+}
+
 func writeFindingAudit(tx *gorm.DB, findingID string, entry FindingAudit) error {
 	data := map[string]any{"actor": entry.Actor}
 	if entry.Source != "" {
@@ -1458,6 +1582,9 @@ func writeFindingAudit(tx *gorm.DB, findingID string, entry FindingAudit) error 
 	}
 	if entry.ThreadID != "" {
 		data["thread_id"] = entry.ThreadID
+	}
+	if entry.DeliveryID != "" {
+		data["delivery_id"] = entry.DeliveryID
 	}
 	raw, err := json.Marshal(data)
 	if err != nil {

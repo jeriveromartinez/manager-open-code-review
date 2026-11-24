@@ -6,7 +6,7 @@
   },
   "comment": {
     "id": 9003,
-    "body": "/qa confirm",
+    "body": "/qa confirm --all",
     "user": {"id": 8001, "login": "qa-lead", "type": "User"}
   },
   "repository": {"id": 501, "name": "backend-api", "full_name": "acme/backend-api"},

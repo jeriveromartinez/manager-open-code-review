@@ -65,9 +65,9 @@ func (h *WebhookHandler) handleIssueComment(ctx context.Context, w http.Response
 		return h.Comments.CommentOnPullRequest(ctx, eventRepo.GetFullName(), row.Number, body)
 	}
 
-	if !h.canRunCommands(ctx, actor, row) {
+	if !h.canTriage(ctx, actor, row) {
 		if err := replyWith(fmt.Sprintf(
-			"Solo un admin o un lead del equipo puede ejecutar `%s`. No se aplicó ningún cambio.", qaCommandPrefix)); err != nil {
+			"Solo un admin, un lead o QA del equipo puede ejecutar `%s`. No se aplicó ningún cambio.", qaCommandPrefix)); err != nil {
 			h.serverError(w)
 			return
 		}
@@ -130,12 +130,41 @@ func (h *WebhookHandler) commandRetry(ctx context.Context, w http.ResponseWriter
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// commandSetFindings applies dismiss/confirm to the finding the command targets,
-// or to every open (dismiss) / withdrawn (confirm) finding when none is named.
+// commandSelection is the explicit target of a dismiss/confirm command: one
+// finding id, or --all, plus an optional reason.
+const bulkSelection = "--all"
+
+var (
+	// errCommandFindingUnknown rejects a named finding that does not exist or
+	// belongs to another pull request instead of silently acting on the rest.
+	errCommandFindingUnknown = errors.New("finding id not in this pull request")
+	// errCommandNeedsSelection makes a bulk action explicit: a bare reason no
+	// longer dismisses or confirms every finding.
+	errCommandNeedsSelection = errors.New("command requires a finding id or --all")
+)
+
+// commandSetFindings applies dismiss/confirm to the finding the command names,
+// or to every matching finding when the command selects --all.
 func (h *WebhookHandler) commandSetFindings(ctx context.Context, w http.ResponseWriter, pr store.PullRequest,
 	cmd qaCommand, commentID int64, actor qaActor, status string, reply func(string) error) {
-	targets, err := h.commandTargets(ctx, pr.ID, cmd.args, status)
-	if err != nil {
+	targets, reason, err := h.commandTargets(ctx, pr.ID, cmd.args, status)
+	switch {
+	case errors.Is(err, errCommandFindingUnknown):
+		if err := reply("El hallazgo indicado no existe en este pull request. No se aplicó ningún cambio."); err != nil {
+			h.serverError(w)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
+	case errors.Is(err, errCommandNeedsSelection):
+		if err := reply(fmt.Sprintf(
+			"Indica el ID del hallazgo o `%s` para todos. No se aplicó ningún cambio.", bulkSelection)); err != nil {
+			h.serverError(w)
+			return
+		}
+		w.WriteHeader(http.StatusAccepted)
+		return
+	case err != nil:
 		h.serverError(w)
 		return
 	}
@@ -161,7 +190,7 @@ func (h *WebhookHandler) commandSetFindings(ctx context.Context, w http.Response
 			Actor:     actor.Login,
 			ActorID:   actorID(actor),
 			CommentID: commentID,
-			Reason:    cmd.args,
+			Reason:    reason,
 			Source:    store.TriageSourceHuman,
 		})
 		if err != nil {
@@ -203,33 +232,40 @@ func (h *WebhookHandler) commandSetFindings(ctx context.Context, w http.Response
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// commandTargets resolves the findings a dismiss/confirm acts on. When the first
-// word is a finding of this pull request it is the only target; otherwise the
-// whole argument is the reason and the command applies to every open (dismiss)
-// or withdrawn (confirm) finding, which is how a dismissed one comes back.
-func (h *WebhookHandler) commandTargets(ctx context.Context, prID uint, args, status string) ([]store.Finding, error) {
-	if fields := strings.Fields(args); len(fields) > 0 {
-		finding, err := h.Store.Finding(ctx, fields[0])
+// commandTargets resolves the findings a dismiss/confirm acts on. The command
+// must name one finding of this pull request or select every finding with
+// --all; anything else is rejected instead of widening the action. The reason
+// is whatever follows the selection and is recorded in the audit row.
+func (h *WebhookHandler) commandTargets(ctx context.Context, prID uint, args, status string) ([]store.Finding, string, error) {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return nil, "", errCommandNeedsSelection
+	}
+	selection := fields[0]
+	reason := strings.Join(fields[1:], " ")
+
+	if selection != bulkSelection {
+		finding, err := h.Store.Finding(ctx, selection)
 		switch {
-		case err == nil:
-			// A resolved finding is no longer anyone's call: the panel refuses
-			// it too, so the command reports nothing to do instead of failing.
-			if finding.PullRequestID != prID || finding.Status == status ||
-				finding.Status == store.FindingResolved {
-				return nil, nil
-			}
-			return []store.Finding{finding}, nil
 		case errors.Is(err, store.ErrNotFound):
-			// The first word is not a finding id, so the whole argument is the
-			// reason of a command that targets every matching finding.
-		default:
-			return nil, err
+			return nil, "", errCommandFindingUnknown
+		case err != nil:
+			return nil, "", err
 		}
+		if finding.PullRequestID != prID {
+			return nil, "", errCommandFindingUnknown
+		}
+		// A resolved finding is no longer anyone's call: the panel refuses it
+		// too, so the command reports nothing to do instead of failing.
+		if finding.Status == status || finding.Status == store.FindingResolved {
+			return nil, reason, nil
+		}
+		return []store.Finding{finding}, reason, nil
 	}
 
 	findings, err := h.Store.FindingsForPR(ctx, prID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	wanted := store.FindingOpen
 	if status == store.FindingOpen {
@@ -241,7 +277,7 @@ func (h *WebhookHandler) commandTargets(ctx context.Context, prID uint, args, st
 			targets = append(targets, finding)
 		}
 	}
-	return targets, nil
+	return targets, reason, nil
 }
 
 type threadOutcome struct {
@@ -275,25 +311,19 @@ func (h *WebhookHandler) applyThreads(ctx context.Context, pr store.PullRequest,
 	return out
 }
 
-// canRunCommands authorizes a /qa command. Administrators and the lead of the
-// repository's team may act; the role comes from the installation data, keyed by
-// the payload sender, never from the comment body.
-func (h *WebhookHandler) canRunCommands(ctx context.Context, actor qaActor, pr store.PullRequest) bool {
+// canTriage authorizes a /qa command or a GitHub thread decision. Administrators
+// and the lead or QA of the repository's team may act, matching the panel. The
+// role comes from the installation data, keyed by the payload sender, never
+// from the comment body.
+func (h *WebhookHandler) canTriage(ctx context.Context, actor qaActor, pr store.PullRequest) bool {
 	if actor.Login == "" || actor.User == nil {
 		return false
 	}
 	if actor.User.IsAdmin {
 		return true
 	}
-	var repo store.Repository
-	if err := h.Store.DB.WithContext(ctx).Where("id = ?", pr.RepositoryID).Take(&repo).Error; err != nil {
-		return false
-	}
-	if repo.TeamID == nil {
-		return false
-	}
-	role, err := h.Store.TeamRole(ctx, actor.User.ID, *repo.TeamID)
-	return err == nil && role == "lead"
+	role, err := h.Store.RepoRole(ctx, actor.User.ID, pr.RepositoryID)
+	return err == nil && (role == "lead" || role == "qa")
 }
 
 // resolveActor maps the payload sender to the local user. An unknown account

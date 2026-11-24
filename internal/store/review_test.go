@@ -1206,6 +1206,156 @@ func TestRunLifecycle(t *testing.T) {
 	requireCount(t, db.Table("findings").Where("pull_request_id = ?", rollbackPR.ID), "findings", 0)
 }
 
+// A review finishing while a person already triaged a finding must not
+// overwrite their decision, neither through the upsert nor through Resolved.
+func TestCompleteReviewRunKeepsHumanTriage(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 21, store.StatusPending, false)
+	run := f.run(pr, store.RunRunning)
+
+	finding, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "human-owned", PullRequestID: pr.ID, Fingerprint: "fp-human",
+		Path: "a.go", Severity: "major", Status: store.FindingOpen,
+		FirstSeenRunID: run.ID, LastSeenRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if _, err := f.s.TriageFinding(f.ctx, finding.ID, store.FindingWithdrawn, store.FindingAudit{
+		Action: "finding.withdrawn", Actor: "qa-lead", Source: store.TriageSourceHuman,
+	}); err != nil {
+		t.Fatalf("TriageFinding: %v", err)
+	}
+
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+		Status: store.RunSucceeded, Findings: []store.Finding{finding},
+		Resolved: []string{finding.ID},
+	}); err != nil {
+		t.Fatalf("CompleteReviewRun: %v", err)
+	}
+
+	got, err := f.s.Finding(f.ctx, finding.ID)
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.Status != store.FindingWithdrawn {
+		t.Errorf("status = %q, want the human %q", got.Status, store.FindingWithdrawn)
+	}
+	if got.TriageVerdict != store.VerdictFalsePositive ||
+		got.TriageSource != store.TriageSourceHuman || got.TriagedBy != "qa-lead" {
+		t.Errorf("triage = %q/%q by %q, want the human decision intact",
+			got.TriageVerdict, got.TriageSource, got.TriagedBy)
+	}
+}
+
+// A triage older than the run is not a concurrent decision: the run may still
+// resolve the finding it proved fixed.
+func TestCompleteReviewRunResolvesFindingTriagedBeforeRun(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 22, store.StatusPending, false)
+	run := f.run(pr, store.RunRunning)
+
+	finding, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "old-triage", PullRequestID: pr.ID, Fingerprint: "fp-old",
+		Path: "a.go", Severity: "major", Status: store.FindingOpen,
+		FirstSeenRunID: run.ID, LastSeenRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if _, err := f.s.TriageFinding(f.ctx, finding.ID, store.FindingOpen, store.FindingAudit{
+		Action: "finding.confirmed", Actor: "qa-lead", Source: store.TriageSourceHuman,
+	}); err != nil {
+		t.Fatalf("TriageFinding: %v", err)
+	}
+	triaged := time.Now().Add(-time.Hour)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.Finding{}).
+		Where("id = ?", finding.ID).Update("triaged_at", triaged).Error; err != nil {
+		t.Fatalf("age triage: %v", err)
+	}
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", run.ID).Update("started_at", triaged.Add(30*time.Minute)).Error; err != nil {
+		t.Fatalf("age run start: %v", err)
+	}
+
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+		Status: store.RunSucceeded, Resolved: []string{finding.ID},
+	}); err != nil {
+		t.Fatalf("CompleteReviewRun: %v", err)
+	}
+
+	got, err := f.s.Finding(f.ctx, finding.ID)
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.Status != store.FindingResolved {
+		t.Errorf("status = %q, want %q after the newer run", got.Status, store.FindingResolved)
+	}
+}
+
+// An authorized thread decision that changes the status is a human decision
+// too: a review finishing later must not resolve/reopen over it.
+func TestCompleteReviewRunKeepsThreadDecision(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 23, store.StatusPending, false)
+	run := f.run(pr, store.RunRunning)
+
+	finding, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "thread-decided", PullRequestID: pr.ID, Fingerprint: "fp-thread",
+		Path: "a.go", Severity: "major", Status: store.FindingResolved,
+		FirstSeenRunID: run.ID, LastSeenRunID: run.ID,
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", run.ID).Update("started_at", time.Now().Add(-time.Hour)).Error; err != nil {
+		t.Fatalf("age run start: %v", err)
+	}
+
+	eventAt := time.Now().Add(-time.Minute)
+	changed, statusChanged, err := f.s.SyncFindingThread(f.ctx, finding.ID, store.ThreadSync{
+		Resolved: false, Status: store.FindingOpen, ApplyStatus: true, EventAt: eventAt,
+		Audit: store.FindingAudit{Action: "finding.reopened", Actor: "qa-lead", Reason: "sigue vigente"},
+	})
+	if err != nil || !changed || !statusChanged {
+		t.Fatalf("SyncFindingThread = %v/%v/%v, want the authorized reopen applied", changed, statusChanged, err)
+	}
+
+	redetected := finding
+	redetected.Status = store.FindingResolved
+	redetected.Title = "re-detectado"
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+		Status: store.RunSucceeded, Findings: []store.Finding{redetected}, Resolved: []string{finding.ID},
+	}); err != nil {
+		t.Fatalf("CompleteReviewRun: %v", err)
+	}
+
+	got, err := f.s.Finding(f.ctx, finding.ID)
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.Status != store.FindingOpen {
+		t.Errorf("status = %q, want the authorized thread decision %q", got.Status, store.FindingOpen)
+	}
+	if got.Title != "" {
+		t.Errorf("title = %q, want the run upsert skipped over the thread decision", got.Title)
+	}
+	if got.GithubThreadDecisionAt == nil ||
+		!got.GithubThreadDecisionAt.Truncate(time.Microsecond).Equal(eventAt.Truncate(time.Microsecond)) {
+		t.Errorf("thread decision at = %v, want %v", got.GithubThreadDecisionAt, eventAt)
+	}
+}
+
 type reviewRunTokenColumns struct {
 	InputTokens      *int64 `gorm:"column:input_tokens"`
 	OutputTokens     *int64 `gorm:"column:output_tokens"`

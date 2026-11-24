@@ -84,6 +84,12 @@ func (p *publishContext) publishResolutions(ctx context.Context, findings []stor
 			map[string]string{"body": body}, nil); err != nil {
 			return fmt.Errorf("reply to finding %s: %w", f.ID, err)
 		}
+		// Record the state before the thread coordinates: if this write fails,
+		// the publish job retries the whole step because GithubThreadID is still
+		// empty. The App's echo would also reconcile it, but it may be lost.
+		if err := p.w.Store.SetFindingThreadResolved(ctx, f.ID, true); err != nil {
+			return err
+		}
 		if err := p.w.Store.SetFindingPublished(ctx, f.ID,
 			f.GithubCommentID, f.GithubCommentNodeID, threadID); err != nil {
 			return err
