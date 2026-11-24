@@ -1,6 +1,7 @@
 package store
 
 import (
+	"strings"
 	"time"
 
 	"gorm.io/datatypes"
@@ -143,14 +144,20 @@ type Repository struct {
 
 // PullRequest is a GitHub pull request with its QA workflow state.
 type PullRequest struct {
-	ID                uint      `gorm:"column:id;primaryKey"`
-	RepositoryID      int64     `gorm:"column:repository_id"`
-	Number            int       `gorm:"column:number"`
-	Title             string    `gorm:"column:title"`
-	AuthorLogin       string    `gorm:"column:author_login"`
-	AuthorAssociation string    `gorm:"column:author_association"`
-	HeadSHA           string    `gorm:"column:head_sha"`
-	BaseRef           string    `gorm:"column:base_ref"`
+	ID                uint   `gorm:"column:id;primaryKey"`
+	RepositoryID      int64  `gorm:"column:repository_id"`
+	Number            int    `gorm:"column:number"`
+	Title             string `gorm:"column:title"`
+	AuthorLogin       string `gorm:"column:author_login"`
+	AuthorAssociation string `gorm:"column:author_association"`
+	HeadSHA           string `gorm:"column:head_sha"`
+	BaseRef           string `gorm:"column:base_ref"`
+	// BaseSHA is the base branch tip last announced by GitHub. MergeBaseSHA is
+	// the comparison identity (#141): the real base of the three-dot diff,
+	// resolved through the Compare API and cleared whenever the head or the
+	// base moves.
+	BaseSHA           string    `gorm:"column:base_sha"`
+	MergeBaseSHA      string    `gorm:"column:merge_base_sha"`
 	HeadRef           string    `gorm:"column:head_ref"`
 	HTMLURL           string    `gorm:"column:html_url"`
 	Draft             bool      `gorm:"column:draft"`
@@ -172,6 +179,67 @@ type PullRequest struct {
 // IsOpen reports whether GitHub still has the pull request open. A merged or
 // closed PR must not start a review, even if a scheduled trigger is pending.
 func (p PullRequest) IsOpen() bool { return p.State == stateOpen }
+
+// Comparison is the identity of one base–head comparison (#141). BaseRef is part
+// of it because the prompt context names the base branch; MergeBaseSHA is the
+// real base of the three-dot diff, not the base branch tip.
+type Comparison struct {
+	HeadSHA      string
+	BaseRef      string
+	MergeBaseSHA string
+}
+
+// Comparison returns the comparison the pull request is currently at.
+func (p PullRequest) Comparison() Comparison {
+	return Comparison{HeadSHA: p.HeadSHA, BaseRef: p.BaseRef, MergeBaseSHA: p.MergeBaseSHA}
+}
+
+// Comparison returns the comparison a review run was created for. The run's
+// BaseSHA is the merge base it resolved, so it doubles as the comparison key.
+func (r ReviewRun) Comparison() Comparison {
+	return Comparison{HeadSHA: r.HeadSHA, BaseRef: r.BaseRef, MergeBaseSHA: r.BaseSHA}
+}
+
+// Covers reports whether c (the key of a run) covers o (the current key). A
+// run with another head or base branch never covers it, and a run that resolved
+// a merge base stops covering it as soon as that merge base is no longer the
+// current one. A run without a base branch and without a merge base predates
+// #141 and is a one-time wildcard; a run with a known merge base is compared
+// even when its legacy base branch is empty.
+func (c Comparison) Covers(o Comparison) bool {
+	if !strings.EqualFold(c.HeadSHA, o.HeadSHA) {
+		return false
+	}
+	if c.BaseRef == "" && c.MergeBaseSHA == "" {
+		// Pre-#141 row: no part of the comparison is known.
+		return true
+	}
+	if c.BaseRef != "" && c.BaseRef != o.BaseRef {
+		return false
+	}
+	if c.MergeBaseSHA == "" {
+		// An unknown merge base only covers an unresolved current comparison;
+		// claiming any resolved one would keep a stale result forever.
+		return o.MergeBaseSHA == ""
+	}
+	return o.MergeBaseSHA != "" && strings.EqualFold(c.MergeBaseSHA, o.MergeBaseSHA)
+}
+
+// CoveredBy reports whether the run belongs to the pull request's current
+// comparison. It backs both deduplication and the publication guard.
+func (p PullRequest) CoveredBy(r ReviewRun) bool {
+	return r.Comparison().Covers(p.Comparison())
+}
+
+// ComparisonMoved reports whether a synced payload changed the comparison
+// identity: the head, the base branch, the base tip, or the resolved merge
+// base (which SyncPullRequest clears when either side moves).
+func ComparisonMoved(prev, next PullRequest) bool {
+	return !strings.EqualFold(prev.HeadSHA, next.HeadSHA) ||
+		prev.BaseRef != next.BaseRef ||
+		!strings.EqualFold(prev.BaseSHA, next.BaseSHA) ||
+		!strings.EqualFold(prev.MergeBaseSHA, next.MergeBaseSHA)
+}
 
 // AuditLog records an administrative action.
 type AuditLog struct {
@@ -260,11 +328,17 @@ type QAPolicy struct {
 // ReviewRun is one execution of the review pipeline for a pull request. At
 // most one run per PR can be queued or running at a time.
 type ReviewRun struct {
-	ID            uint           `gorm:"column:id;primaryKey"`
-	PullRequestID uint           `gorm:"column:pull_request_id"`
-	ProfileID     uint           `gorm:"column:profile_id"`
-	HeadSHA       string         `gorm:"column:head_sha"`
-	BaseSHA       string         `gorm:"column:base_sha"`
+	ID            uint   `gorm:"column:id;primaryKey"`
+	PullRequestID uint   `gorm:"column:pull_request_id"`
+	ProfileID     uint   `gorm:"column:profile_id"`
+	HeadSHA       string `gorm:"column:head_sha"`
+	BaseSHA       string `gorm:"column:base_sha"`
+	// BaseRef and BaseTipSHA snapshot the comparison the run belongs to (#141).
+	// BaseSHA above is the merge base of that comparison; runs created before
+	// the comparison identity existed carry empty values and act as wildcards
+	// once.
+	BaseRef       string         `gorm:"column:base_ref"`
+	BaseTipSHA    string         `gorm:"column:base_tip_sha"`
 	Trigger       string         `gorm:"column:trigger"`
 	Status        string         `gorm:"column:status"`
 	Attempt       int            `gorm:"column:attempt"`

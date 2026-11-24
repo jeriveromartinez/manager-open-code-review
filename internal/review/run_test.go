@@ -1462,18 +1462,202 @@ func TestRunDoesNotApplyDecisionsWhenHeadMoved(t *testing.T) {
 	if err := runner.Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	assertRunTerminal(t, f, store.RunSucceeded, "")
+	// The head is part of the comparison key: a run whose head no longer matches
+	// must not persist findings or triage under the new head.
+	assertRunTerminal(t, f, store.RunSuperseded, "head_moved")
 
-	got := f.findingByCategoryAndTitle(t, "security", "Comparación insegura")
-	if got.Status != store.FindingOpen || got.TriageVerdict != "" {
-		t.Errorf("finding = %s/%q, want the verdict not applied to a moved head",
-			got.Status, got.TriageVerdict)
+	findings, err := f.s.FindingsForPR(f.ctx, f.pr.ID)
+	if err != nil {
+		t.Fatalf("FindingsForPR: %v", err)
 	}
-	if len(got.Verification) != 0 {
-		t.Errorf("verification = %s, want nothing recorded for a moved head", got.Verification)
+	if len(findings) != 0 {
+		t.Errorf("findings = %+v, want none for a moved head", findings)
 	}
-	if log := f.runLogText(t); !strings.Contains(log, "no se aplica el triage") {
-		t.Errorf("run log does not explain the skipped triage:\n%s", log)
+	log := f.runLogText(t)
+	if !strings.Contains(log, "head_moved") || !strings.Contains(log, "el head del PR cambió") {
+		t.Errorf("run log does not explain the superseded head:\n%s", log)
+	}
+}
+
+// The applyAutoTriage guard is still what protects a head that moves while the
+// verification pass is already running.
+func TestAutoTriageSkipsDecisionsWhenHeadMoved(t *testing.T) {
+	f := newRunTestFixture(t)
+	finding := store.Finding{
+		ID: "f_moved", PullRequestID: f.pr.ID, Fingerprint: "fp-moved",
+		Path: "auth.go", StartLine: 3, EndLine: 3, Severity: "minor",
+		Category: "security", Title: "head movido", Body: "cuerpo",
+		Status: store.FindingOpen, FirstSeenRunID: f.runID, LastSeenRunID: f.runID,
+	}
+	if _, err := f.s.UpsertFinding(f.ctx, finding); err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	cfg, err := f.s.ReviewConfigForPR(f.ctx, f.pr.ID)
+	if err != nil {
+		t.Fatalf("ReviewConfigForPR: %v", err)
+	}
+	if err := f.s.DB.WithContext(f.ctx).Exec(
+		"UPDATE pull_requests SET head_sha = 'moved-head' WHERE id = ?", f.pr.ID).Error; err != nil {
+		t.Fatalf("move PR head: %v", err)
+	}
+	out := runOutcome{decisions: []Decision{{
+		FindingID: "f_moved", Status: store.FindingWithdrawn, Apply: true,
+		Verification: Verification{Verdict: VerdictRefute, HeadSHA: f.headSHA, VerifiedAt: time.Now().UTC()},
+	}}}
+	log := newRunLogSink(f.s, f.events, f.runID, 0)
+
+	f.runner().applyAutoTriage(f.ctx, f.loadRun(t), cfg, out, log)
+
+	saved, err := f.s.Finding(f.ctx, "f_moved")
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if saved.Status != store.FindingOpen || saved.TriageVerdict != "" || len(saved.Verification) != 0 {
+		t.Errorf("finding = %s/%q/%s, want the decision untouched for a moved head",
+			saved.Status, saved.TriageVerdict, saved.Verification)
+	}
+	if n := f.auditCount(t, saved.ID, "finding.auto_triaged"); n != 0 {
+		t.Errorf("auto-triage audit rows = %d, want 0", n)
+	}
+	if text := f.runLogText(t); !strings.Contains(text, "no se aplica el triage") {
+		t.Errorf("run log does not explain the skipped triage:\n%s", text)
+	}
+}
+
+// A base move while the model is reviewing invalidates the run: neither its
+// findings nor its triage may be persisted under the old comparison.
+func TestRunSupersedesWhenBaseMovesDuringReview(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).Where("id = ?", f.runID).
+		Update("base_ref", "main").Error; err != nil {
+		t.Fatalf("snapshot the run base: %v", err)
+	}
+	t.Setenv("RUN_FAKE_OCR_SLEEP", "1")
+
+	done := make(chan error, 1)
+	go func() { done <- f.runner().Run(f.ctx, f.runID) }()
+	f.waitPhase(t, store.RunPhaseReviewing)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", f.pr.ID).
+		Updates(map[string]any{"base_ref": "release", "merge_base_sha": ""}).Error; err != nil {
+		t.Fatalf("move the base during review: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	assertRunTerminal(t, f, store.RunSuperseded, "comparison_moved")
+	findings, err := f.s.FindingsForPR(f.ctx, f.pr.ID)
+	if err != nil {
+		t.Fatalf("FindingsForPR: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("findings = %+v, want none for a stale base", findings)
+	}
+	if log := f.runLogText(t); !strings.Contains(log, comparisonMovedMessage) {
+		t.Errorf("run log does not explain the moved comparison:\n%s", log)
+	}
+}
+
+// A base push clears the merge base in the sync path; the tip is what still
+// proves the comparison moved while the model was reviewing.
+func TestRunSupersedesWhenBaseTipMovesDuringReview(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).Where("id = ?", f.runID).
+		Updates(map[string]any{"base_ref": "main", "base_tip_sha": "tip-1"}).Error; err != nil {
+		t.Fatalf("snapshot the run comparison: %v", err)
+	}
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", f.pr.ID).
+		Updates(map[string]any{"base_ref": "main", "base_sha": "tip-1"}).Error; err != nil {
+		t.Fatalf("set the PR base tip: %v", err)
+	}
+	t.Setenv("RUN_FAKE_OCR_SLEEP", "1")
+
+	done := make(chan error, 1)
+	go func() { done <- f.runner().Run(f.ctx, f.runID) }()
+	f.waitPhase(t, store.RunPhaseReviewing)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", f.pr.ID).
+		Updates(map[string]any{"base_sha": "tip-2", "merge_base_sha": ""}).Error; err != nil {
+		t.Fatalf("push the base during review: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	assertRunTerminal(t, f, store.RunSuperseded, "comparison_moved")
+	findings, err := f.s.FindingsForPR(f.ctx, f.pr.ID)
+	if err != nil {
+		t.Fatalf("FindingsForPR: %v", err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("findings = %+v, want none for a stale base", findings)
+	}
+	if log := f.runLogText(t); !strings.Contains(log, comparisonMovedMessage) {
+		t.Errorf("run log does not explain the moved comparison:\n%s", log)
+	}
+}
+
+// The pre-persist comparison check must keep the real terminal state when the
+// current merge base is merely unresolved, catch a head move even when the run
+// never resolved a base, and catch a base push through its tip.
+func TestComparisonMovedAfterReview(t *testing.T) {
+	setup := func(t *testing.T) (*runTestFixture, store.ReviewRun) {
+		t.Helper()
+		f := newRunTestFixture(t)
+		run := f.loadRun(t)
+		if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+			Updates(map[string]any{"base_ref": "main", "base_tip_sha": "tip-1"}).Error; err != nil {
+			t.Fatalf("snapshot the run comparison: %v", err)
+		}
+		if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", f.pr.ID).
+			Updates(map[string]any{"base_ref": "main", "base_sha": "tip-1", "merge_base_sha": run.BaseSHA}).Error; err != nil {
+			t.Fatalf("set the PR comparison: %v", err)
+		}
+		run.BaseRef, run.BaseTipSHA = "main", "tip-1"
+		return f, run
+	}
+
+	tests := []struct {
+		name   string
+		run    map[string]any
+		change map[string]any
+		want   bool
+	}{
+		{name: "unchanged comparison", want: false},
+		{name: "empty current merge base is unknown", change: map[string]any{"merge_base_sha": ""}, want: false},
+		{name: "base branch moved", change: map[string]any{"base_ref": "release"}, want: true},
+		{name: "merge base changed", change: map[string]any{"merge_base_sha": "mb-other"}, want: true},
+		{name: "base tip moved", change: map[string]any{"base_sha": "tip-2"}, want: true},
+		{name: "head moved", change: map[string]any{"head_sha": "moved-head"}, want: true},
+		{
+			name:   "head moved before the base was resolved",
+			run:    map[string]any{"base_sha": "", "base_tip_sha": ""},
+			change: map[string]any{"head_sha": "moved-head", "merge_base_sha": ""},
+			want:   true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, run := setup(t)
+			if len(tc.run) > 0 {
+				if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+					Updates(tc.run).Error; err != nil {
+					t.Fatalf("change the run: %v", err)
+				}
+				run.BaseSHA, _ = tc.run["base_sha"].(string)
+				run.BaseTipSHA, _ = tc.run["base_tip_sha"].(string)
+			}
+			if len(tc.change) > 0 {
+				if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", f.pr.ID).
+					Updates(tc.change).Error; err != nil {
+					t.Fatalf("change the PR: %v", err)
+				}
+			}
+			if moved, err := f.runner().comparisonMovedAfterReview(f.ctx, run, run.BaseSHA); err != nil || moved != tc.want {
+				t.Fatalf("comparisonMovedAfterReview() = %v, %v; want %v", moved, err, tc.want)
+			}
+		})
 	}
 }
 

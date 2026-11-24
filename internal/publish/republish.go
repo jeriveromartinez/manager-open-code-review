@@ -130,6 +130,11 @@ func (w *Worker) currentRun(ctx context.Context, pr store.PullRequest) (store.Re
 		}
 		switch runs[i].Status {
 		case store.RunSucceeded, store.RunInconclusive, store.RunFailed:
+			// A verdict of another comparison must not drive the shared check
+			// or the QA status (#141).
+			if !pr.CoveredBy(runs[i]) {
+				return store.ReviewRun{}, false, nil
+			}
 			return runs[i], true, nil
 		}
 		return store.ReviewRun{}, false, nil

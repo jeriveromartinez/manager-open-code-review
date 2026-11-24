@@ -121,6 +121,7 @@ func runServe() error {
 	}
 	trigger := &review.Trigger{
 		Store: st, Apps: apps, Box: workerBox, Events: publisher, Checks: publisherWorker,
+		Compare: &github.Compare{Apps: apps},
 	}
 	trigger.Debounce = cfg.ReviewDebounce
 	client, err := jobs.NewControlClient(st.Pool, s, jobs.ControlDeps{

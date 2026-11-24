@@ -764,6 +764,128 @@ func TestPublishSupersededCancelsCheckOnly(t *testing.T) {
 	}
 }
 
+// A superseded run of a previous head owns a different check; cancelling it
+// must still work even though it no longer covers the pull request.
+func TestPublishSupersededOldHeadCancelsItsCheck(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSuperseded, "major")
+	if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+		Update("head_sha", "old-head").Error; err != nil {
+		t.Fatalf("move the run head: %v", err)
+	}
+	if err := st.DB.WithContext(ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).
+		Update("head_sha", "new-head").Error; err != nil {
+		t.Fatalf("move the PR head: %v", err)
+	}
+	if _, err := st.UpsertArtifact(ctx, store.GitHubArtifact{
+		PullRequestID: pr.ID, Kind: store.ArtifactCheck, HeadSHA: "old-head",
+		ExternalID: "555", URL: "https://github.com/acme/repo/runs/555",
+	}); err != nil {
+		t.Fatalf("seed old check artifact: %v", err)
+	}
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	posts, reviews, patches := len(gh.comments), len(gh.reviews), len(gh.checkPatches)
+	gh.mu.Unlock()
+	if posts != 0 || reviews != 0 {
+		t.Errorf("summary posts = %d, reviews = %d, want none", posts, reviews)
+	}
+	if patches != 1 {
+		t.Errorf("check patches = %d, want the old head's check cancelled", patches)
+	}
+	var saved store.PullRequest
+	if err := st.DB.WithContext(ctx).Take(&saved, pr.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if saved.QAStatus != store.StatusReviewing {
+		t.Errorf("qa_status = %q, want unchanged", saved.QAStatus)
+	}
+}
+
+// A terminal run of an old comparison must not touch the shared check, the
+// summary or the PR status, even when it finishes after the retarget.
+func TestPublishSkipsRunOfAnotherComparison(t *testing.T) {
+	cases := []struct {
+		name            string
+		runBaseRef      string
+		runBaseSHA      string
+		prBaseRef       string
+		prMergeBaseSHA  string
+		wantPublication bool
+	}{
+		{
+			name:       "retarget keeps the head but changes the base branch",
+			runBaseRef: "main", runBaseSHA: "mb-old", prBaseRef: "release", prMergeBaseSHA: "mb-old",
+		},
+		{
+			name:       "force-push changes the merge base of the same branch",
+			runBaseRef: "main", runBaseSHA: "mb-old", prBaseRef: "main", prMergeBaseSHA: "mb-new",
+		},
+		{
+			name:       "base moved and the comparison is unresolved",
+			runBaseRef: "main", runBaseSHA: "mb-old", prBaseRef: "main", prMergeBaseSHA: "",
+		},
+		{
+			name:       "same comparison still publishes",
+			runBaseRef: "main", runBaseSHA: "mb", prBaseRef: "main", prMergeBaseSHA: "mb", wantPublication: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := testutil.NewStore(t)
+			ctx := context.Background()
+			run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+			if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+				Updates(map[string]any{"base_ref": tc.runBaseRef, "base_sha": tc.runBaseSHA}).Error; err != nil {
+				t.Fatalf("set run comparison: %v", err)
+			}
+			if err := st.DB.WithContext(ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).
+				Updates(map[string]any{"base_ref": tc.prBaseRef, "merge_base_sha": tc.prMergeBaseSHA}).Error; err != nil {
+				t.Fatalf("set PR comparison: %v", err)
+			}
+			seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+			gh := newFakeGitHub(t)
+			w, pub := newPublishWorker(t, st, gh)
+
+			if err := w.Publish(ctx, run.ID); err != nil {
+				t.Fatalf("Publish() error = %v", err)
+			}
+
+			gh.mu.Lock()
+			posts, reviews, patches := len(gh.comments), len(gh.reviews), len(gh.checkPatches)
+			gh.mu.Unlock()
+			var saved store.PullRequest
+			if err := st.DB.WithContext(ctx).Take(&saved, pr.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantPublication {
+				if posts == 0 || reviews == 0 || patches == 0 {
+					t.Fatalf("publication = posts %d, reviews %d, patches %d; want a full publication",
+						posts, reviews, patches)
+				}
+				return
+			}
+			if posts != 0 || reviews != 0 || patches != 0 {
+				t.Errorf("publication = posts %d, reviews %d, patches %d; want none for a stale comparison",
+					posts, reviews, patches)
+			}
+			if saved.QAStatus != store.StatusReviewing {
+				t.Errorf("qa_status = %q, want unchanged", saved.QAStatus)
+			}
+			if len(pub.all()) != 0 {
+				t.Errorf("events = %+v, want none", pub.all())
+			}
+		})
+	}
+}
+
 func TestPublishAnnotationsArePaged(t *testing.T) {
 	st := testutil.NewStore(t)
 	ctx := context.Background()

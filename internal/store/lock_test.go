@@ -234,7 +234,7 @@ func TestSupersedeOtherActiveRunsKeepsRequestedSHA(t *testing.T) {
 		t.Fatalf("seed failed run: %v", err)
 	}
 
-	if err := f.s.SupersedeOtherActiveRuns(f.ctx, pr.ID, old.HeadSHA); err != nil {
+	if err := f.s.SupersedeOtherActiveRuns(f.ctx, pr.ID, old.Comparison()); err != nil {
 		t.Fatalf("SupersedeOtherActiveRuns(same sha): %v", err)
 	}
 	got, err := f.s.ReviewRun(f.ctx, old.ID)
@@ -245,7 +245,7 @@ func TestSupersedeOtherActiveRunsKeepsRequestedSHA(t *testing.T) {
 		t.Errorf("same-SHA run status = %q, want %q", got.Status, store.RunQueued)
 	}
 
-	if err := f.s.SupersedeOtherActiveRuns(f.ctx, pr.ID, failed.HeadSHA); err != nil {
+	if err := f.s.SupersedeOtherActiveRuns(f.ctx, pr.ID, failed.Comparison()); err != nil {
 		t.Fatalf("SupersedeOtherActiveRuns(other sha): %v", err)
 	}
 	got, err = f.s.ReviewRun(f.ctx, old.ID)

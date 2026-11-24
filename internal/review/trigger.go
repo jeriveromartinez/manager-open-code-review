@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -30,24 +31,32 @@ type TriggerEnqueuer interface {
 	EnqueueReviewTrigger(ctx context.Context, prID uint, headSHA string, delay time.Duration) error
 }
 
+// MergeBaseResolver resolves the merge base of a comparison through GitHub's
+// Compare API. A failure is not fatal: the trigger enqueues a conservative new
+// run instead of reusing a result it could not verify.
+type MergeBaseResolver interface {
+	MergeBase(ctx context.Context, installationID int64, repoFullName, base, head string) (string, error)
+}
+
 // Trigger turns webhook deliveries and the periodic reconciliation into queued
 // review runs. It notifies browsers only when it creates a run; the runner
 // reports the claim and the terminal state.
 type Trigger struct {
-	Store  *store.Store
-	Apps   github.AppProvider
-	Jobs   TriggerEnqueuer
-	Checks CheckStarter
-	Box    *crypto.Box // QA_WORKER_KEY
-	Events events.Publisher
+	Store   *store.Store
+	Apps    github.AppProvider
+	Jobs    TriggerEnqueuer
+	Checks  CheckStarter
+	Compare MergeBaseResolver
+	Box     *crypto.Box // QA_WORKER_KEY
+	Events  events.Publisher
 	// Debounce delays the webhook review until the head has been quiet for this
 	// long. Zero keeps the immediate path.
 	Debounce time.Duration
 }
 
-// OnPullRequest schedules a review for the current head of a pull request. With
-// no debounce it queues the run immediately. A run for the same SHA (active or
-// terminal) makes redeliveries harmless.
+// OnPullRequest schedules a review for the current comparison of a pull
+// request. With no debounce it queues the run immediately. A run for the same
+// comparison (active or terminal) makes redeliveries harmless.
 func (t *Trigger) OnPullRequest(ctx context.Context, prID uint) error {
 	if t.Debounce <= 0 {
 		_, err := t.enqueue(ctx, prID, "webhook", false)
@@ -78,7 +87,8 @@ func (t *Trigger) FireDebounced(ctx context.Context, prID uint, headSHA string) 
 	if cfg.PR.HeadSHA != headSHA || !cfg.PR.IsOpen() || cfg.PR.Draft || cfg.PR.IsFork {
 		return nil
 	}
-	_, err = t.enqueueForHead(ctx, prID, headSHA, "webhook", false)
+	hint := t.comparisonHint(ctx, prID)
+	_, err = t.enqueueForHead(ctx, prID, headSHA, "webhook", false, hint)
 	return err
 }
 
@@ -119,8 +129,8 @@ func (t *Trigger) OnChecksUpdated(ctx context.Context, prID uint) error {
 	return err
 }
 
-// Retry queues a fresh run even when the current SHA already has a terminal
-// run. Active runs of other SHAs are still superseded.
+// Retry queues a fresh run even when the current comparison already has a
+// terminal run. Active runs of other comparisons are still superseded.
 func (t *Trigger) Retry(ctx context.Context, prID uint) error {
 	_, err := t.enqueue(ctx, prID, "retry", true)
 	return err
@@ -156,14 +166,93 @@ func (t *Trigger) EnqueuePending(ctx context.Context, limit int) (int, error) {
 // enqueue implements the immediate entry points. The boolean result reports
 // whether a run was created, which lets EnqueuePending count only real work.
 func (t *Trigger) enqueue(ctx context.Context, prID uint, triggerKind string, ignoreSameSHA bool) (bool, error) {
-	return t.enqueueForHead(ctx, prID, "", triggerKind, ignoreSameSHA)
+	var hint comparisonHint
+	if !ignoreSameSHA {
+		// Retry always creates a fresh run, so resolving Compare for it would
+		// only add latency.
+		hint = t.comparisonHint(ctx, prID)
+	}
+	return t.enqueueForHead(ctx, prID, "", triggerKind, ignoreSameSHA, hint)
+}
+
+// comparisonHint carries a Compare result resolved outside the PR lock. The
+// network call is deliberately not made while the advisory lock is held; under
+// the lock the hint is only trusted when the snapshot it was made for is still
+// the current comparison.
+type comparisonHint struct {
+	headSHA   string
+	baseRef   string
+	baseSHA   string
+	needed    bool
+	mergeBase string
+	failed    bool
+}
+
+// matches reports whether the hint still describes cfg's comparison.
+func (h comparisonHint) matches(cfg store.ReviewConfig) bool {
+	return h.needed && h.headSHA == cfg.PR.HeadSHA && h.baseRef == cfg.PR.BaseRef &&
+		h.baseSHA == cfg.PR.BaseSHA && cfg.PR.MergeBaseSHA == ""
+}
+
+// comparisonHint decides whether a coverage check needs the Compare API: the
+// head did not change, the base moved (the merge base was cleared) and a run
+// of the same head and branch already resolved a merge base. Resolving it here,
+// outside the lock, keeps a slow GitHub call from blocking every other delivery
+// of the pull request. The hint also snapshots the base tip, so a force-push
+// between the Compare call and the lock invalidates the result.
+func (t *Trigger) comparisonHint(ctx context.Context, prID uint) comparisonHint {
+	cfg, err := t.reviewConfig(ctx, prID)
+	if err != nil || cfg == nil {
+		return comparisonHint{}
+	}
+	runs, err := t.Store.ListReviewRuns(ctx, prID)
+	if err != nil {
+		return comparisonHint{}
+	}
+
+	hint := comparisonHint{headSHA: cfg.PR.HeadSHA, baseRef: cfg.PR.BaseRef, baseSHA: cfg.PR.BaseSHA}
+	candidate := false
+	for i := range runs {
+		run := &runs[i]
+		if !blocksSameSHA(run.Status) || !strings.EqualFold(run.HeadSHA, cfg.PR.HeadSHA) {
+			continue
+		}
+		if run.BaseRef != "" && run.BaseRef != cfg.PR.BaseRef {
+			continue
+		}
+		if cfg.PR.CoveredBy(*run) {
+			return comparisonHint{}
+		}
+		if cfg.PR.MergeBaseSHA == "" && run.BaseSHA != "" {
+			candidate = true
+		}
+	}
+	if !candidate {
+		return comparisonHint{}
+	}
+
+	hint.needed = true
+	mergeBase, err := t.resolveMergeBase(ctx, cfg)
+	if err != nil {
+		hint.failed = true
+		return hint
+	}
+	hint.mergeBase = mergeBase
+	return hint
+}
+
+func (t *Trigger) resolveMergeBase(ctx context.Context, cfg *store.ReviewConfig) (string, error) {
+	if t.Compare == nil {
+		return "", errors.New("review: trigger has no comparator")
+	}
+	return t.Compare.MergeBase(ctx, cfg.Installation.ID, cfg.Repo.FullName, cfg.PR.BaseRef, cfg.PR.HeadSHA)
 }
 
 // enqueueForHead is enqueue with an optional head check evaluated under the PR
 // lock. A scheduled trigger passes the SHA captured at scheduling time, so a
 // push that lands between the fast-path check and this call cannot start a
 // review of the newer head ahead of its own debounce.
-func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, triggerKind string, ignoreSameSHA bool) (bool, error) {
+func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, triggerKind string, ignoreSameSHA bool, hint comparisonHint) (bool, error) {
 	if t.Store == nil {
 		return false, errors.New("review: trigger has no store")
 	}
@@ -193,23 +282,24 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 	if err != nil {
 		return false, fmt.Errorf("list review runs of pull request %d: %w", prID, err)
 	}
+	mergeBase := cfg.PR.MergeBaseSHA
 	if !ignoreSameSHA {
-		blocked := false
 		var stranded *store.ReviewRun
+		covered := false
 		for i := range runs {
 			run := &runs[i]
-			if run.HeadSHA != cfg.PR.HeadSHA || !blocksSameSHA(run.Status) {
+			if !blocksSameSHA(run.Status) || !cfg.PR.CoveredBy(*run) {
 				continue
 			}
-			blocked = true
+			covered = true
 			if run.Status == store.RunQueued && (stranded == nil || run.ID > stranded.ID) {
 				stranded = run
 			}
 		}
-		if blocked {
+		if covered {
 			// A queued run whose StartCheck or EnqueueReview failed on an
 			// earlier delivery is stranded: heal it instead of skipping the
-			// SHA forever. Terminal runs are simply left alone.
+			// comparison forever. Terminal runs are simply left alone.
 			if stranded != nil {
 				if err := t.repair(ctx, *stranded); err != nil {
 					return false, err
@@ -217,6 +307,52 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 			}
 			return false, nil
 		}
+		// The head is unchanged and the base moved, so only Compare can tell a
+		// rewritten base (new run) from a base that advanced without changing
+		// the merge base (reuse). A failed resolution is conservative.
+		switch {
+		case hint.matches(cfg) && !hint.failed:
+			mergeBase = hint.mergeBase
+			if adopted := runForMergeBase(runs, cfg.PR, mergeBase); adopted != nil {
+				stored, err := t.Store.SetPRMergeBase(ctx, prID, cfg.PR.HeadSHA, cfg.PR.BaseRef, cfg.PR.BaseSHA, mergeBase)
+				if err != nil {
+					return false, err
+				}
+				if !stored {
+					// The pull request moved while the comparison was being
+					// adopted. The delivery that moved it owns the new run; this
+					// one must not supersede it with a stale target.
+					return false, nil
+				}
+				switch adopted.Status {
+				case store.RunQueued:
+					if t.Checks == nil || t.Jobs == nil {
+						return false, errors.New("review: trigger cannot repair the adopted run")
+					}
+					if err := t.repair(ctx, *adopted); err != nil {
+						return false, err
+					}
+				case store.RunSucceeded, store.RunInconclusive, store.RunFailed:
+					// The comparison was unresolved when the run finished, so its
+					// publication was skipped. Now that Compare proved it is
+					// current, publish it; the publish job is idempotent.
+					if t.Jobs == nil {
+						return false, errors.New("review: trigger has no enqueuer")
+					}
+					if err := t.Jobs.EnqueuePublish(ctx, adopted.ID); err != nil {
+						return false, fmt.Errorf("enqueue publish for review run %d: %w", adopted.ID, err)
+					}
+				}
+				return false, nil
+			}
+		case hint.matches(cfg) && hint.failed:
+			// Compare failed: never reuse a result we could not verify.
+			mergeBase = ""
+		}
+	}
+
+	target := store.Comparison{
+		HeadSHA: cfg.PR.HeadSHA, BaseRef: cfg.PR.BaseRef, MergeBaseSHA: mergeBase,
 	}
 
 	// The CI gate sits next to the draft/fork exclusions: it is re-evaluated on
@@ -245,18 +381,21 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 		return false, errors.New("review: trigger has no enqueuer")
 	}
 
-	// Cancel in-flight checks of OTHER heads before superseding their runs.
-	// The current SHA is never superseded by a trigger, so its check stays.
+	// Cancel in-flight checks of runs of another comparison before superseding
+	// them. The comparison being queued is never superseded by its own trigger,
+	// so its check stays.
 	for _, run := range runs {
-		if run.HeadSHA == cfg.PR.HeadSHA ||
-			(run.Status != store.RunQueued && run.Status != store.RunRunning) {
+		if run.Status != store.RunQueued && run.Status != store.RunRunning {
+			continue
+		}
+		if run.Comparison().Covers(target) {
 			continue
 		}
 		if err := t.Checks.CancelCheck(ctx, run.ID); err != nil {
 			return false, fmt.Errorf("cancel check of review run %d: %w", run.ID, err)
 		}
 	}
-	if err := t.Store.SupersedeOtherActiveRuns(ctx, prID, cfg.PR.HeadSHA); err != nil {
+	if err := t.Store.SupersedeOtherActiveRuns(ctx, prID, target); err != nil {
 		return false, fmt.Errorf("supersede review runs of pull request %d: %w", prID, err)
 	}
 
@@ -277,6 +416,9 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 		PullRequestID:       prID,
 		ProfileID:           cfg.Profile.ID,
 		HeadSHA:             cfg.PR.HeadSHA,
+		BaseRef:             cfg.PR.BaseRef,
+		BaseTipSHA:          cfg.PR.BaseSHA,
+		BaseSHA:             mergeBase,
 		Trigger:             triggerKind,
 		Status:              store.RunQueued,
 		CloneTokenEnc:       sealed,
@@ -291,12 +433,26 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 			if readErr != nil {
 				return false, fmt.Errorf("re-read review run for pull request %d at %q: %w", prID, cfg.PR.HeadSHA, readErr)
 			}
+			// The winner may belong to another comparison of the same head; it
+			// already supersedes this delivery, so healing it would start the
+			// wrong review.
+			if !cfg.PR.CoveredBy(existing) {
+				return false, nil
+			}
 			if repairErr := t.repair(ctx, existing); repairErr != nil {
 				return false, repairErr
 			}
 			return false, nil
 		}
 		return false, fmt.Errorf("create review run for pull request %d: %w", prID, err)
+	}
+	// Publish the comparison the run belongs to. The write is conditional, so a
+	// retarget landing here wins and the new run is superseded by the next
+	// delivery instead of publishing under the wrong key.
+	if mergeBase != "" && !strings.EqualFold(mergeBase, cfg.PR.MergeBaseSHA) {
+		if _, err := t.Store.SetPRMergeBase(ctx, prID, cfg.PR.HeadSHA, cfg.PR.BaseRef, cfg.PR.BaseSHA, mergeBase); err != nil {
+			return false, err
+		}
 	}
 	// Notify before repair: the queued run is stored even if starting it fails,
 	// and the redelivery that heals it stays silent.
@@ -310,6 +466,29 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 		return false, err
 	}
 	return true, nil
+}
+
+// runForMergeBase returns the latest run of the pull request's head and base
+// branch that resolved the given merge base. When it exists, Compare proved the
+// comparison is unchanged and that run must be reused instead of duplicated.
+func runForMergeBase(runs []store.ReviewRun, pr store.PullRequest, mergeBase string) *store.ReviewRun {
+	if mergeBase == "" {
+		return nil
+	}
+	var found *store.ReviewRun
+	for i := range runs {
+		run := &runs[i]
+		if !blocksSameSHA(run.Status) || !strings.EqualFold(run.HeadSHA, pr.HeadSHA) {
+			continue
+		}
+		if run.BaseRef != "" && run.BaseRef != pr.BaseRef {
+			continue
+		}
+		if strings.EqualFold(run.BaseSHA, mergeBase) && (found == nil || run.ID > found.ID) {
+			found = run
+		}
+	}
+	return found
 }
 
 // repair restarts the check and (re)enqueues an existing run. Both operations
@@ -383,7 +562,7 @@ func isActiveRunUniqueViolation(err error) bool {
 }
 
 // blocksSameSHA is the redelivery/scheduler guard: superseded runs are the only
-// ones that allow a fresh run at an otherwise identical head.
+// ones that allow a fresh run at an otherwise identical comparison.
 func blocksSameSHA(status string) bool {
 	switch status {
 	case store.RunQueued, store.RunRunning, store.RunSucceeded, store.RunInconclusive, store.RunFailed:

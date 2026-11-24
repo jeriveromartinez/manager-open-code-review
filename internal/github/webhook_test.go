@@ -162,7 +162,8 @@ type threadSync struct {
 	resolved  bool
 }
 
-func (r *recordingReconciler) Republish(_ context.Context, prID uint) error {	r.mu.Lock()
+func (r *recordingReconciler) Republish(_ context.Context, prID uint) error {
+	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.republish = append(r.republish, prID)
 	return r.err
@@ -186,7 +187,6 @@ func (r *recordingReconciler) threadSnapshot() []threadSync {
 	defer r.mu.Unlock()
 	return append([]threadSync(nil), r.threads...)
 }
-
 
 type webhookFixture struct {
 	t        *testing.T
@@ -476,19 +476,32 @@ func TestWebhookReviewTriggerGate(t *testing.T) {
 		t.Fatalf("OnPullRequest calls for a draft = %v, want none", got)
 	}
 
-	// Actions outside opened|synchronize|reopened|ready_for_review also sync
-	// without triggering a review.
-	body := []byte(`{"action":"edited","repository":{"id":501},"pull_request":{"number":142,"title":"Edited title","draft":false,"head":{"sha":"bbb222","repo":{"fork":false}},"updated_at":"2026-01-01T12:00:00Z"}}`)
-	assertStatus(t, f.deliverBody("pull_request", body, signWebhook(body)), http.StatusAccepted)
-	if got := f.reviews.snapshot(); len(got) != 0 {
-		t.Fatalf("OnPullRequest calls for edited = %v, want none", got)
-	}
-
 	// ready_for_review is a triggering action.
 	assertStatus(t, f.deliver("pull_request", "pr-ready-for-review.json"), http.StatusAccepted)
 	pr := f.pullRequest()
 	if got := f.reviews.snapshot(); len(got) != 1 || got[0] != pr.ID {
 		t.Fatalf("OnPullRequest calls after ready_for_review = %v, want [%d]", got, pr.ID)
+	}
+
+	// An edit that only changes metadata keeps the comparison and must not
+	// schedule a review.
+	metadata := []byte(`{"action":"edited","repository":{"id":501},"pull_request":{"number":142,"title":"Edited title","draft":false,"head":{"sha":"aaa111","repo":{"fork":false}},"base":{"ref":"main"},"updated_at":"2026-01-02T12:00:00Z"}}`)
+	assertStatus(t, f.deliverBody("pull_request", metadata, signWebhook(metadata)), http.StatusAccepted)
+	if got := f.reviews.snapshot(); len(got) != 1 {
+		t.Fatalf("OnPullRequest calls for a metadata edit = %v, want one", got)
+	}
+
+	// A retarget changes the comparison even though the head is the same.
+	retarget := []byte(`{"action":"edited","repository":{"id":501},"pull_request":{"number":142,"title":"Edited title","draft":false,"head":{"sha":"aaa111","repo":{"fork":false}},"base":{"ref":"release"},"updated_at":"2026-01-02T13:00:00Z"}}`)
+	assertStatus(t, f.deliverBody("pull_request", retarget, signWebhook(retarget)), http.StatusAccepted)
+	if got := f.reviews.snapshot(); len(got) != 2 {
+		t.Fatalf("OnPullRequest calls after a retarget = %v, want two", got)
+	}
+
+	// A push keeps triggering as before.
+	assertStatus(t, f.deliver("pull_request", "pr-synchronize-later.json"), http.StatusAccepted)
+	if got := f.reviews.snapshot(); len(got) != 3 {
+		t.Fatalf("OnPullRequest calls after synchronize = %v, want three", got)
 	}
 }
 
@@ -901,4 +914,3 @@ func (f *webhookFixture) repoTeam() uint {
 	}
 	return *repo.TeamID
 }
-

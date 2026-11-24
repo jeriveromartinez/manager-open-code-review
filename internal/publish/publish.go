@@ -49,6 +49,15 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 	if err != nil {
 		return err
 	}
+	// A run of another comparison must not publish: the QA check is shared by
+	// every comparison of the same head, so cancelling or completing it would
+	// overwrite the state of the run that actually belongs to the current one.
+	// A superseded run of a previous head owns a different check, so cancelling
+	// it is still safe.
+	if !p.pr.CoveredBy(p.run) &&
+		!(p.run.Status == store.RunSuperseded && !strings.EqualFold(p.run.HeadSHA, p.pr.HeadSHA)) {
+		return nil
+	}
 	defer func() {
 		if err == nil && p.redacted && w.Events != nil {
 			if evErr := w.Events.Publish(ctx, events.Event{

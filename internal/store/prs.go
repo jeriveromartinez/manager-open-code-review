@@ -98,6 +98,19 @@ func (s *Store) EnabledRepositories(ctx context.Context, installationID int64) (
 	return rows, nil
 }
 
+// PullRequest loads one pull request row.
+func (s *Store) PullRequest(ctx context.Context, id uint) (PullRequest, error) {
+	var pr PullRequest
+	err := quietDB(s.DB.WithContext(ctx)).Take(&pr, id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return PullRequest{}, fmt.Errorf("pull request %d: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return PullRequest{}, fmt.Errorf("find pull request %d: %w", id, err)
+	}
+	return pr, nil
+}
+
 // SyncPullRequest applies a GitHub pull request event.
 //
 // Events are keyed by (repository_id, number) and locked with SELECT ... FOR
@@ -183,6 +196,7 @@ func syncExisting(tx *gorm.DB, prev *PullRequest, in PullRequest, out *PullReque
 		"author_association":  in.AuthorAssociation,
 		"head_sha":            in.HeadSHA,
 		"base_ref":            in.BaseRef,
+		"base_sha":            in.BaseSHA,
 		"head_ref":            in.HeadRef,
 		"html_url":            in.HTMLURL,
 		"draft":               in.Draft,
@@ -199,6 +213,12 @@ func syncExisting(tx *gorm.DB, prev *PullRequest, in PullRequest, out *PullReque
 		updates["validations_passed"] = 0
 		updates["validations_failed"] = 0
 		updates["validations_total"] = 0
+	}
+	if prev.HeadSHA != in.HeadSHA || prev.BaseRef != in.BaseRef || prev.BaseSHA != in.BaseSHA {
+		// The merge base belongs to the comparison it was resolved for. Once
+		// either side moves it is unknown until the trigger resolves Compare
+		// again, and retaining it would let a stale result cover the delivery.
+		updates["merge_base_sha"] = ""
 	}
 	if err := tx.Model(&PullRequest{}).Where("id = ?", prev.ID).Updates(updates).Error; err != nil {
 		return fmt.Errorf("update pull request %d: %w", prev.ID, err)
@@ -221,6 +241,7 @@ func pullRequestPayloadEqual(prev, in PullRequest, status string) bool {
 		prev.AuthorAssociation == in.AuthorAssociation &&
 		prev.HeadSHA == in.HeadSHA &&
 		prev.BaseRef == in.BaseRef &&
+		prev.BaseSHA == in.BaseSHA &&
 		prev.HeadRef == in.HeadRef &&
 		prev.HTMLURL == in.HTMLURL &&
 		prev.Draft == in.Draft &&

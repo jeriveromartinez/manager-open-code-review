@@ -71,6 +71,7 @@ func PRFromGitHub(repoID int64, p *gh.PullRequest) store.PullRequest {
 		AuthorAssociation: p.GetAuthorAssociation(),
 		HeadSHA:           p.GetHead().GetSHA(),
 		BaseRef:           p.GetBase().GetRef(),
+		BaseSHA:           p.GetBase().GetSHA(),
 		HeadRef:           p.GetHead().GetRef(),
 		HTMLURL:           p.GetHTMLURL(),
 		Draft:             p.GetDraft(),

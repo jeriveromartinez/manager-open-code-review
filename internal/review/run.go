@@ -47,8 +47,14 @@ const (
 	// below this means the renewal is behind.
 	cloneTokenClaimMargin = 10 * time.Minute
 
+	// cloneTokenWaitMessage is stored when a run is requeued waiting for its
+	// clone token to be renewed.
 	cloneTokenWaitMessage   = "el token de clonado caducó en la cola; esperando a que el control lo renueve"
 	cloneTokenFailedMessage = "el token de clonado caducó y no se pudo renovar: revisa que la App siga instalada con acceso al repositorio y vuelve a encolar la revisión"
+
+	// comparisonMovedMessage labels a run superseded because its base moved
+	// while the model was reviewing.
+	comparisonMovedMessage = "la comparación base–head cambió durante la revisión"
 
 	// interruptedByShutdown is stored on a run a stopping worker put back in
 	// the queue, so the next attempt is visible in the panel before it starts.
@@ -334,6 +340,22 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		outcome = outcome.failed(retryErr, capacityErrorCode)
 	}
 
+	// The base can move while the model is reviewing. Re-check the comparison
+	// right before persisting so findings, resolutions and triage of a stale
+	// base are never written, and the QA status keeps describing the run that
+	// owns the current comparison.
+	if outcome.status != store.RunSuperseded {
+		moved, cmpErr := r.comparisonMovedAfterReview(persistCtx, run, outcome.baseSHA)
+		switch {
+		case cmpErr != nil:
+			slog.Warn("comparison re-check failed; completing the run",
+				"run_id", run.ID, "error", cmpErr)
+		case moved:
+			log.Log(persistCtx, "worker", "", "warn", logPhaseFinish, comparisonMovedMessage)
+			outcome = (&runOutcome{}).superseded(errors.New(comparisonMovedMessage), "comparison_moved")
+		}
+	}
+
 	if len(outcome.coverage) == 0 {
 		outcome.coverage = []byte(`{}`)
 	}
@@ -598,6 +620,43 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		return out.superseded(fmt.Errorf("la ref del PR avanzó de %s a %s antes del checkout", run.HeadSHA, headSHA), "head_moved"), nil
 	}
 
+	// Re-check the comparison the run was created for: a retarget while it
+	// waited in the queue must not review (or publish) code under the old key.
+	current, cfgErr := r.Store.ReviewConfigForPR(runCtx, run.PullRequestID)
+	if cfgErr != nil {
+		log.Log(runCtx, "worker", "", "warn", logPhasePrepare,
+			fmt.Sprintf("no se pudo recargar el PR; la publicación comprobará la clave: %v", cfgErr))
+	} else {
+		switch {
+		case !strings.EqualFold(current.PR.HeadSHA, run.HeadSHA):
+			return out.superseded(fmt.Errorf("el head del PR cambió de %s a %s",
+				run.HeadSHA, current.PR.HeadSHA), "head_moved"), nil
+		case run.BaseRef != "" && current.PR.BaseRef != run.BaseRef:
+			return out.superseded(fmt.Errorf("la rama base cambió de %s a %s",
+				run.BaseRef, current.PR.BaseRef), "comparison_moved"), nil
+		case run.BaseSHA != "" && current.PR.MergeBaseSHA != "" &&
+			!strings.EqualFold(run.BaseSHA, current.PR.MergeBaseSHA):
+			return out.superseded(fmt.Errorf("el merge-base cambió de %s a %s",
+				run.BaseSHA, current.PR.MergeBaseSHA), "comparison_moved"), nil
+		case mergeBase != "" && current.PR.MergeBaseSHA != "" &&
+			!strings.EqualFold(mergeBase, current.PR.MergeBaseSHA):
+			// The checkout resolved a different merge base than the one the PR
+			// now carries: the base moved while the run was queued.
+			return out.superseded(fmt.Errorf("el merge-base del checkout %s no es el actual %s",
+				mergeBase, current.PR.MergeBaseSHA), "comparison_moved"), nil
+		}
+		baseRef := run.BaseRef
+		if baseRef == "" {
+			baseRef = current.PR.BaseRef
+		}
+		if baseRef != "" && mergeBase != "" && !strings.EqualFold(current.PR.MergeBaseSHA, mergeBase) {
+			if _, err := r.Store.SetPRMergeBase(runCtx, run.PullRequestID, run.HeadSHA, baseRef, current.PR.BaseSHA, mergeBase); err != nil {
+				log.Log(runCtx, "worker", "", "warn", logPhasePrepare,
+					fmt.Sprintf("no se pudo guardar el merge-base del PR: %v", err))
+			}
+		}
+	}
+
 	r.setPhase(runCtx, run.ID, store.RunPhasePreparing, log)
 	excludes, dropped, err := policyExcludes(cfg.Policy.ExcludeGlobs)
 	if err != nil {
@@ -647,14 +706,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	prev, prevErr := r.Store.PreviousSucceededRun(runCtx, run.PullRequestID, run.ID)
 	switch {
 	case prevErr == nil:
-		if prev.BaseSHA != "" &&
-			strings.EqualFold(prev.BaseSHA, ocrBase) &&
-			prev.HeadSHA != "" &&
-			!strings.EqualFold(prev.HeadSHA, headSHA) {
+		if from, ok := incrementalSource(run, prev, ocrBase, headSHA); ok {
 			// A shallow clone may lack the prior head: that is a failure of the
 			// ancestry check and falls back to the full review.
 			if _, err := git(runCtx, workDir, "merge-base --is-ancestor", "merge-base", "--is-ancestor", prev.HeadSHA, headSHA); err == nil {
-				fromSHA = prev.HeadSHA
+				fromSHA = from
 				incremental = true
 			}
 		}
@@ -926,6 +982,55 @@ func policyExcludes(raw []byte) (string, []string, error) {
 		}
 	}
 	return strings.Join(kept, ","), dropped, nil
+}
+
+// incrementalSource returns the previous head a push can be reviewed from. It
+// requires the previous run to describe the same comparison: the same merge
+// base and the same base branch. A rewritten base that happens to produce the
+// same merge base is still a new context and reviews the full diff.
+// comparisonMovedAfterReview re-reads the pull request immediately before the
+// run is persisted. A head move is already caught before the review starts;
+// this second check covers the base, which can move while the model works, and
+// keeps a stale comparison from persisting findings, triage or QA status.
+func (r *Runner) comparisonMovedAfterReview(ctx context.Context, run store.ReviewRun, reviewedBase string) (bool, error) {
+	pr, err := r.Store.PullRequest(ctx, run.PullRequestID)
+	if err != nil {
+		return false, err
+	}
+	if !strings.EqualFold(pr.HeadSHA, run.HeadSHA) {
+		// The run must not complete under a head it never reviewed, even when
+		// the failure happened before the clone resolved a base.
+		return true, nil
+	}
+	if run.BaseRef != "" && pr.BaseRef != run.BaseRef {
+		return true, nil
+	}
+	// A base push is also visible in the base tip even when the sync already
+	// cleared the merge base, so the two checks complement each other.
+	if run.BaseTipSHA != "" && pr.BaseSHA != "" && !strings.EqualFold(run.BaseTipSHA, pr.BaseSHA) {
+		return true, nil
+	}
+	base := run.BaseSHA
+	if base == "" {
+		base = reviewedBase
+	}
+	// An empty merge base means the comparison is still unresolved, not that it
+	// moved: only two known merge bases can disagree.
+	if base != "" && pr.MergeBaseSHA != "" && !strings.EqualFold(pr.MergeBaseSHA, base) {
+		return true, nil
+	}
+	return false, nil
+}
+
+func incrementalSource(run, prev store.ReviewRun, reviewedBase, headSHA string) (string, bool) {
+	if prev.BaseSHA == "" || !strings.EqualFold(prev.BaseSHA, reviewedBase) ||
+		prev.HeadSHA == "" || strings.EqualFold(prev.HeadSHA, headSHA) {
+		return "", false
+	}
+	if run.BaseRef != "" && prev.BaseRef != "" && prev.BaseRef != run.BaseRef {
+		return "", false
+	}
+	return prev.HeadSHA, true
 }
 
 func hasBlockingFinding(findings []store.Finding, threshold string) bool {
