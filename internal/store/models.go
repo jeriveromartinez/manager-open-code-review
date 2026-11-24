@@ -372,6 +372,35 @@ type ReviewRequest struct {
 	UpdatedAt     time.Time  `gorm:"column:updated_at"`
 }
 
+// RepositoryPolicy holds the explicit review overrides of one repository
+// (#153). A nil field inherits the team policy; JSON columns follow the same
+// rule, so nil inherits and an empty list is an explicit empty value.
+type RepositoryPolicy struct {
+	RepositoryID    int64 `gorm:"column:repository_id;primaryKey;autoIncrement:false"`
+	ObservationMode bool  `gorm:"column:observation_mode"`
+	// Every nullable field below is an override only when set.
+	BlockingThreshold    *string        `gorm:"column:blocking_threshold"`
+	ExtraInstructions    *string        `gorm:"column:extra_instructions"`
+	ExcludeGlobs         datatypes.JSON `gorm:"column:exclude_globs"`
+	MaxFilesPerPass      *int           `gorm:"column:max_files_per_pass"`
+	MaxDiffLinesPerPass  *int           `gorm:"column:max_diff_lines_per_pass"`
+	MaxPasses            *int           `gorm:"column:max_passes"`
+	RequireGreenCI       *bool          `gorm:"column:require_green_ci"`
+	RequiredChecks       datatypes.JSON `gorm:"column:required_checks"`
+	ReviewContextCeiling *int           `gorm:"column:review_context_ceiling"`
+	ReviewEffort         *string        `gorm:"column:review_effort"`
+	ReviewTokenBudget    *int64         `gorm:"column:review_token_budget"`
+	AutoTriageMode       *string        `gorm:"column:auto_triage_mode"`
+	AutoWithdraw         *bool          `gorm:"column:auto_withdraw"`
+	VerifyMaxFindings    *int           `gorm:"column:verify_max_findings"`
+	VerifyMaxFiles       *int           `gorm:"column:verify_max_files"`
+	VerifyTokenShare     *int           `gorm:"column:verify_token_share"`
+	VerifyTimeShare      *int           `gorm:"column:verify_time_share"`
+	VerifyTokenMax       *int64         `gorm:"column:verify_token_max"`
+	CreatedAt            time.Time      `gorm:"column:created_at"`
+	UpdatedAt            time.Time      `gorm:"column:updated_at"`
+}
+
 // ReviewRun is one execution of the review pipeline for a pull request. At
 // most one run per PR can be queued or running at a time.
 type ReviewRun struct {
@@ -434,10 +463,16 @@ type ReviewRun struct {
 	// HeartbeatAt is refreshed by the executing worker every minute. Nil on
 	// runs claimed before the heartbeat existed (#130).
 	HeartbeatAt *time.Time `gorm:"column:heartbeat_at"`
-	StartedAt   *time.Time `gorm:"column:started_at"`
-	FinishedAt  *time.Time `gorm:"column:finished_at"`
-	CreatedAt   time.Time  `gorm:"column:created_at"`
-	UpdatedAt   time.Time  `gorm:"column:updated_at"`
+	// PolicyRevision is the effective policy revision the run executed under
+	// (#153). Empty on runs created before the recording existed.
+	PolicyRevision string `gorm:"column:policy_revision"`
+	// PolicyObservation is true when the run only recorded repository overrides
+	// and enforced the inherited team policy instead.
+	PolicyObservation bool       `gorm:"column:policy_observation"`
+	StartedAt         *time.Time `gorm:"column:started_at"`
+	FinishedAt        *time.Time `gorm:"column:finished_at"`
+	CreatedAt         time.Time  `gorm:"column:created_at"`
+	UpdatedAt         time.Time  `gorm:"column:updated_at"`
 }
 
 // Review attempt states. An attempt is one model destination the run tried: it

@@ -127,6 +127,7 @@ const policy: QAPolicy = {
   verify_time_share: 15,
   verify_token_max: 100000,
   prompt_cache: true,
+  revision: 'lead-revision',
   updated_at: hoursAgo(48),
 }
 
@@ -140,6 +141,8 @@ function repo(overrides: Partial<Repository>): Repository {
     enabled: true,
     team_id: 3,
     has_policy: true,
+    has_policy_override: false,
+    policy_observation: false,
     account_login: 'acme',
     ...overrides,
   }

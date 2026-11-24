@@ -1,7 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ReposView from './ReposView.vue'
-import type { Me, Repository, Team } from '../api'
+import type { Me, QAPolicy, Repository, RepositoryPolicy, Team } from '../api'
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
     installations: vi.fn(),
     syncInstallation: vi.fn(),
     setupStatus: vi.fn(),
+    getRepoPolicy: vi.fn(),
+    saveRepoPolicy: vi.fn(),
+    clearRepoPolicy: vi.fn(),
   },
   session: {
     me: null as Me | null,
@@ -41,6 +44,8 @@ const repos = [
     enabled: false,
     team_id: null,
     has_policy: false,
+    has_policy_override: false,
+    policy_observation: false,
     account_login: 'acme',
   },
   {
@@ -52,6 +57,8 @@ const repos = [
     enabled: true,
     team_id: 1,
     has_policy: true,
+    has_policy_override: true,
+    policy_observation: false,
     account_login: 'personal',
   },
 ] as Repository[]
@@ -60,6 +67,74 @@ const teams: Team[] = [
   { id: 1, name: 'T1', slug: 't1', members: [] },
   { id: 2, name: 'T2', slug: 't2', members: [] },
 ]
+
+function basePolicy(overrides: Partial<QAPolicy> = {}): QAPolicy {
+  return {
+    id: 3,
+    team_id: 1,
+    llm_profile_id: 7,
+    blocking_threshold: 'major',
+    extra_instructions: '',
+    exclude_globs: [],
+    max_files: 40,
+    max_diff_lines: 3000,
+    max_passes: 4,
+    require_green_ci: false,
+    required_checks: [],
+    review_context_ceiling: null,
+    global_context_ceiling: 270000,
+    effective_context_ceiling: 270000,
+    review_effort: 'low',
+    review_token_budget: 0,
+    auto_triage_mode: 'off',
+    auto_withdraw: false,
+    verify_max_findings: 50,
+    verify_max_files: 20,
+    verify_token_share: 20,
+    verify_time_share: 15,
+    verify_token_max: 100000,
+    prompt_cache: false,
+    revision: 'team-rev',
+    updated_at: '2026-11-19T10:00:00Z',
+    ...overrides,
+  }
+}
+
+function repoPolicyResponse(overrides: Partial<RepositoryPolicy> = {}): RepositoryPolicy {
+  const effective = basePolicy()
+  return {
+    repository_id: 20,
+    team_id: 1,
+    inherited: true,
+    revision: 'team-rev',
+    provenance: {},
+    overrides: {
+      observation_mode: false,
+      blocking_threshold: null,
+      extra_instructions: null,
+      exclude_globs: null,
+      max_files: null,
+      max_diff_lines: null,
+      max_passes: null,
+      require_green_ci: null,
+      required_checks: null,
+      review_context_ceiling: null,
+      review_effort: null,
+      review_token_budget: null,
+      auto_triage_mode: null,
+      auto_withdraw: null,
+      verify_max_findings: null,
+      verify_max_files: null,
+      verify_token_share: null,
+      verify_time_share: null,
+      verify_token_max: null,
+    },
+    effective,
+    enforced: effective,
+    updated_at: null,
+    ...overrides,
+  }
+}
 
 const admin: Me = {
   id: 1,
@@ -94,6 +169,9 @@ describe('ReposView', () => {
     mocks.api.installations.mockResolvedValue([])
     mocks.api.syncInstallation.mockResolvedValue({ status: 'queued' })
     mocks.api.setupStatus.mockResolvedValue({ configured: true, install_url: '' })
+    mocks.api.getRepoPolicy.mockResolvedValue(repoPolicyResponse())
+    mocks.api.saveRepoPolicy.mockResolvedValue(repoPolicyResponse())
+    mocks.api.clearRepoPolicy.mockResolvedValue(repoPolicyResponse())
     mocks.session.load.mockResolvedValue(null)
     live.registrations.length = 0
   })
@@ -401,6 +479,202 @@ describe('ReposView', () => {
     expect(wrapper.text()).toContain('No se pudo encolar la sincronización.')
     expect(button.attributes('disabled')).toBeUndefined()
     expect(button.text()).toContain('Sincronizar')
+    wrapper.unmount()
+  })
+
+  it('muestra la política heredada y abre el editor con la revisión efectiva', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(wrapper.get('[data-repo-policy-state="20"]').text()).toBe('Heredada')
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.getRepoPolicy).toHaveBeenCalledWith(20)
+    expect(wrapper.get('[data-repo-policy-revision]').text()).toBe('team-rev')
+    expect(
+      (wrapper.get('[data-policy-override="blocking_threshold"]').element as HTMLInputElement).checked,
+    ).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('guarda solo los campos sobrescritos y refleja la política propia', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+    mocks.api.saveRepoPolicy.mockResolvedValue(
+      repoPolicyResponse({
+        inherited: false,
+        revision: 'repo-rev',
+        overrides: {
+          ...repoPolicyResponse().overrides,
+          blocking_threshold: 'blocker',
+          max_files: 10,
+        },
+      }),
+    )
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-policy-override="blocking_threshold"]').setValue(true)
+    await wrapper.get('[data-policy-field="blocking_threshold"]').setValue('blocker')
+    await wrapper.get('[data-policy-override="max_files"]').setValue(true)
+    await wrapper.get('[data-policy-field="max_files"]').setValue('10')
+    await wrapper.get('[data-repo-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.saveRepoPolicy).toHaveBeenCalledWith(20, {
+      blocking_threshold: 'blocker',
+      max_files: 10,
+    })
+    expect(wrapper.get('[data-repo-policy-state="20"]').text()).toBe('Propia')
+    wrapper.unmount()
+  })
+
+  it('activa el modo observación al guardar y lo muestra en la fila', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+    mocks.api.saveRepoPolicy.mockResolvedValue(
+      repoPolicyResponse({
+        inherited: false,
+        overrides: {
+          ...repoPolicyResponse().overrides,
+          observation_mode: true,
+          blocking_threshold: 'blocker',
+        },
+      }),
+    )
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-repo-policy-observation-mode]').setValue(true)
+    await wrapper.get('[data-policy-override="blocking_threshold"]').setValue(true)
+    await wrapper.get('[data-policy-field="blocking_threshold"]').setValue('blocker')
+    await wrapper.get('[data-repo-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.saveRepoPolicy).toHaveBeenCalledWith(20, {
+      observation_mode: true,
+      blocking_threshold: 'blocker',
+    })
+    expect(wrapper.get('[data-repo-policy-observation="20"]').text()).toBe('Observación')
+    wrapper.unmount()
+  })
+
+  it('volver a herencia borra el override y actualiza la fila', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: true }])
+    mocks.api.clearRepoPolicy.mockResolvedValue(repoPolicyResponse())
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-repo-policy-clear]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.clearRepoPolicy).toHaveBeenCalledWith(20)
+    expect(wrapper.get('[data-repo-policy-state="20"]').text()).toBe('Heredada')
+    expect(wrapper.text()).toContain('Política heredada del equipo')
+    wrapper.unmount()
+  })
+
+  it('un developer no puede editar la política del repositorio', async () => {
+    mocks.session.me = developer
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(wrapper.find('[data-repo-policy="20"]').exists()).toBe(false)
+    expect(wrapper.get('[data-repo-policy-state="20"]').text()).toBe('Propia')
+    wrapper.unmount()
+  })
+
+  it('conserva extra_instructions al editar otro campo del override', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: true }])
+    mocks.api.getRepoPolicy.mockResolvedValue(
+      repoPolicyResponse({
+        inherited: false,
+        overrides: {
+          ...repoPolicyResponse().overrides,
+          extra_instructions: 'reglas guardadas',
+          blocking_threshold: 'major',
+        },
+      }),
+    )
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    expect(
+      (wrapper.get('[data-policy-override="extra_instructions"]').element as HTMLInputElement)
+        .checked,
+    ).toBe(true)
+    await wrapper.get('[data-policy-field="blocking_threshold"]').setValue('blocker')
+    await wrapper.get('[data-repo-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.saveRepoPolicy).toHaveBeenCalledWith(20, {
+      extra_instructions: 'reglas guardadas',
+      blocking_threshold: 'blocker',
+    })
+    wrapper.unmount()
+  })
+
+  it('guarda exclude_globs y required_checks y tolera checks nulos heredados', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+    const inherited = repoPolicyResponse()
+    inherited.effective.required_checks = null as never
+    inherited.effective.exclude_globs = null as never
+    mocks.api.getRepoPolicy.mockResolvedValue(inherited)
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    // A null effective list is an inherited empty policy, not a load error.
+    expect(wrapper.find('[data-close-policy]').exists()).toBe(true)
+    expect(wrapper.text()).not.toContain('No se pudo cargar la política del repositorio')
+
+    await wrapper.get('[data-policy-override="exclude_globs"]').setValue(true)
+    await wrapper.get('[data-policy-field="exclude_globs"]').setValue('vendor/**\n**/*.pb.go')
+    await wrapper.get('[data-policy-override="required_checks"]').setValue(true)
+    await wrapper.get('[data-policy-field="required_checks"]').setValue('build | app:7\nci/test | status')
+    await wrapper.get('[data-repo-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.saveRepoPolicy).toHaveBeenCalledWith(20, {
+      exclude_globs: ['vendor/**', '**/*.pb.go'],
+      required_checks: [
+        { name: 'build', origin: 'app:7' },
+        { name: 'ci/test', origin: 'status' },
+      ],
+    })
+    wrapper.unmount()
+  })
+
+  it('no ofrece editar overrides si el equipo todavía no tiene política', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy: false }])
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(wrapper.find('[data-repo-policy="20"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })

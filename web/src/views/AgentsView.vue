@@ -749,7 +749,11 @@ onMounted(() => {
         >
           <header class="policy__head">
             <h2 id="policy-title" class="policy__title">Política por equipo</h2>
-            <p class="policy__hint">Se guarda por equipo y se aplica a todas sus revisiones.</p>
+            <p class="policy__hint">
+              Se guarda por equipo y se hereda en sus revisiones; los overrides por repositorio se
+              editan en Repositorios. Revisión:
+              <span class="mono" data-policy-revision>{{ policy?.revision || '—' }}</span>.
+            </p>
           </header>
 
           <div aria-live="polite">

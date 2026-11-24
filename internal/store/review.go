@@ -101,11 +101,18 @@ func ValidAutoTriageMode(mode string) bool {
 
 // ReviewConfig is the complete configuration that applies to one pull request.
 type ReviewConfig struct {
-	PR           PullRequest
-	Repo         Repository
-	Policy       QAPolicy
-	Profile      LLMProfile
-	Installation Installation
+	PR   PullRequest
+	Repo Repository
+	// Policy is the policy the run enforces. While the repository observes its
+	// overrides, this is the inherited team policy.
+	Policy QAPolicy
+	// EffectivePolicy is the resolved policy with the repository overrides
+	// applied, whether or not they are being enforced (#153).
+	EffectivePolicy   QAPolicy
+	PolicyRevision    string
+	PolicyObservation bool
+	Profile           LLMProfile
+	Installation      Installation
 }
 
 // quietDB silences the "record not found" log line for lookups where a miss is
@@ -665,6 +672,12 @@ func (s *Store) ReviewConfigForPR(ctx context.Context, prID uint) (ReviewConfig,
 		}
 		return ReviewConfig{}, err
 	}
+	resolved, err := s.ResolvePolicyForRepo(ctx, repo.ID, policy)
+	if err != nil {
+		return ReviewConfig{}, fmt.Errorf("resolve review policy of pull request %d: %w", prID, err)
+	}
+	// The profile belongs to the team policy and is not overridable per
+	// repository, so both the effective and the enforced policy carry it.
 	profile, err := s.LLMProfile(ctx, policy.LLMProfileID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -684,7 +697,9 @@ func (s *Store) ReviewConfigForPR(ctx context.Context, prID uint) (ReviewConfig,
 		return ReviewConfig{}, fmt.Errorf("find installation %d: %w", repo.InstallationID, err)
 	}
 	return ReviewConfig{
-		PR: pr, Repo: repo, Policy: policy, Profile: profile, Installation: installation,
+		PR: pr, Repo: repo, Policy: resolved.Enforced, EffectivePolicy: resolved.Effective,
+		PolicyRevision: resolved.Revision, PolicyObservation: resolved.Observation,
+		Profile: profile, Installation: installation,
 	}, nil
 }
 
@@ -702,10 +717,17 @@ func (s *Store) PendingReviewPRs(ctx context.Context, limit int) ([]PullRequest,
 		return nil, nil
 	}
 	const query = `
-SELECT pr.*, q.require_green_ci, q.required_checks FROM pull_requests pr
+SELECT pr.*,
+       q.require_green_ci AS team_require_green_ci,
+       q.required_checks AS team_required_checks,
+       rp.observation_mode AS policy_observation,
+       rp.require_green_ci AS repo_require_green_ci,
+       rp.required_checks AS repo_required_checks
+FROM pull_requests pr
 JOIN repositories r ON r.id = pr.repository_id
 JOIN qa_policies q ON q.team_id = r.team_id
 JOIN llm_profiles p ON p.id = q.llm_profile_id AND p.enabled = true
+LEFT JOIN repository_policies rp ON rp.repository_id = r.id
 WHERE pr.state = 'open' AND pr.draft = false AND pr.is_fork = false
   AND r.enabled = true AND r.team_id IS NOT NULL
   AND NOT EXISTS (
@@ -733,14 +755,14 @@ ORDER BY pr.updated_at DESC`
 	prs := make([]PullRequest, 0, limit)
 	for i := range candidates {
 		candidate := &candidates[i]
-		if candidate.RequireGreenCI {
+		if requireGreen, requiredChecks := candidate.effectiveCIGate(); requireGreen {
 			legacy := PRValidations{
 				Passed: candidate.ValidationsPassed,
 				Failed: candidate.ValidationsFailed,
 				Total:  candidate.ValidationsTotal,
 			}
 			verdict := EvaluateConfiguredCI(
-				decodeObservation(candidate.ValidationsDetail), legacy, candidate.RequiredChecks)
+				decodeObservation(candidate.ValidationsDetail), legacy, requiredChecks)
 			if !verdict.Green() {
 				continue
 			}
@@ -755,10 +777,34 @@ ORDER BY pr.updated_at DESC`
 
 // pendingReviewCandidate is one ordered candidate plus the policy facts the CI
 // gate needs. PullRequest is embedded so the query can keep selecting pr.*.
+// The team and repository columns are kept apart because an absent repository
+// override must inherit the team value, and observation mode enforces the team
+// value even when an override exists.
 type pendingReviewCandidate struct {
 	PullRequest
-	RequireGreenCI bool           `gorm:"column:require_green_ci"`
-	RequiredChecks datatypes.JSON `gorm:"column:required_checks"`
+	TeamRequireGreenCI bool           `gorm:"column:team_require_green_ci"`
+	TeamRequiredChecks datatypes.JSON `gorm:"column:team_required_checks"`
+	PolicyObservation  *bool          `gorm:"column:policy_observation"`
+	RepoRequireGreenCI *bool          `gorm:"column:repo_require_green_ci"`
+	RepoRequiredChecks datatypes.JSON `gorm:"column:repo_required_checks"`
+}
+
+// effectiveCIGate resolves the CI gate the run would enforce. Observation mode
+// deliberately returns the team values: the overrides are measured, not
+// enforced.
+func (c pendingReviewCandidate) effectiveCIGate() (bool, datatypes.JSON) {
+	requireGreen := c.TeamRequireGreenCI
+	requiredChecks := c.TeamRequiredChecks
+	if c.PolicyObservation == nil || *c.PolicyObservation {
+		return requireGreen, requiredChecks
+	}
+	if c.RepoRequireGreenCI != nil {
+		requireGreen = *c.RepoRequireGreenCI
+	}
+	if len(bytes.TrimSpace(c.RepoRequiredChecks)) > 0 {
+		requiredChecks = c.RepoRequiredChecks
+	}
+	return requireGreen, requiredChecks
 }
 
 // QueuedRunWork flags the two pieces of work a queued review run depends on: a
@@ -999,6 +1045,27 @@ func (s *Store) FinishReviewAttempt(ctx context.Context, id uint, status, code, 
 	}
 	if res.RowsAffected == 0 {
 		return fmt.Errorf("finish review attempt %d: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// SetReviewRunPolicy records the effective policy revision and observation
+// flag a run is executing under. The policy can change between enqueue and
+// execution, so the worker rewrites this snapshot when it starts; ErrRunNotActive
+// means another delivery already retired the run.
+func (s *Store) SetReviewRunPolicy(ctx context.Context, id uint, revision string, observation bool) error {
+	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunRunning).
+		Updates(map[string]any{
+			"policy_revision":    revision,
+			"policy_observation": observation,
+			"updated_at":         time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return fmt.Errorf("record review policy of run %d: %w", id, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("record review policy of run %d: %w", id, ErrRunNotActive)
 	}
 	return nil
 }

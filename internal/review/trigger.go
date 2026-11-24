@@ -561,6 +561,8 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 		Status:              store.RunQueued,
 		CloneTokenEnc:       sealed,
 		CloneTokenExpiresAt: &expiresAt,
+		PolicyRevision:      cfg.PolicyRevision,
+		PolicyObservation:   cfg.PolicyObservation,
 	})
 	if err != nil {
 		// The partial unique index allows only one active run per PR. If a

@@ -51,6 +51,8 @@ const detail: PRDetail = {
       attempt: 2,
       phase: '',
       phase_started_at: null,
+      policy_revision: '',
+      policy_observation: false,
       summary: 'falló la revisión',
       coverage: { reviewed_files: 2, skipped_files: 1, excluded_files: 4, not_required_files: 3 },
       usage: { input_tokens: 100 },

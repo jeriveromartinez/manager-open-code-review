@@ -305,7 +305,20 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 			log.Log(ctx, "worker", "", "error", logPhasePrepare,
 				fmt.Sprintf("configuración de revisión: %v", err))
 			outcome = (&runOutcome{}).failed(fmt.Errorf("configuración de revisión: %w", err), "config")
+		} else if policyErr := r.Store.SetReviewRunPolicy(ctx, run.ID, cfg.PolicyRevision, cfg.PolicyObservation); policyErr != nil {
+			// The policy is re-resolved here because it can change while the run
+			// waits. Recording it before executing keeps the revision on the run
+			// describing what it actually enforced (#153).
+			if errors.Is(policyErr, store.ErrRunNotActive) {
+				return nil
+			}
+			log.Log(ctx, "worker", "", "error", logPhasePrepare,
+				fmt.Sprintf("registrar política de revisión: %v", policyErr))
+			outcome = (&runOutcome{}).failed(
+				fmt.Errorf("registrar política de revisión: %w", policyErr), "config")
 		} else {
+			run.PolicyRevision = cfg.PolicyRevision
+			run.PolicyObservation = cfg.PolicyObservation
 			outcome, retryErr = r.execute(ctx, run, cfg, log)
 		}
 	}

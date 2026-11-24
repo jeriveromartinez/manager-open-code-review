@@ -162,20 +162,26 @@ type repoResponse struct {
 	Enabled        bool   `json:"enabled"`
 	TeamID         *uint  `json:"team_id"`
 	HasPolicy      bool   `json:"has_policy"`
-	AccountLogin   string `json:"account_login"`
+	// HasPolicyOverride reports a per-repository policy, and PolicyObservation
+	// says whether it is being measured or enforced (#153).
+	HasPolicyOverride bool   `json:"has_policy_override"`
+	PolicyObservation bool   `json:"policy_observation"`
+	AccountLogin      string `json:"account_login"`
 }
 
 func repoDTO(r store.RepositoryWithPolicy, accountLogin string) repoResponse {
 	return repoResponse{
-		ID:             r.ID,
-		InstallationID: r.InstallationID,
-		FullName:       r.FullName,
-		Private:        r.Private,
-		DefaultBranch:  r.DefaultBranch,
-		Enabled:        r.Enabled,
-		TeamID:         r.TeamID,
-		HasPolicy:      r.TeamHasPolicy,
-		AccountLogin:   accountLogin,
+		ID:                r.ID,
+		InstallationID:    r.InstallationID,
+		FullName:          r.FullName,
+		Private:           r.Private,
+		DefaultBranch:     r.DefaultBranch,
+		Enabled:           r.Enabled,
+		TeamID:            r.TeamID,
+		HasPolicy:         r.TeamHasPolicy,
+		HasPolicyOverride: r.HasPolicyOverride,
+		PolicyObservation: r.PolicyObservation,
+		AccountLogin:      accountLogin,
 	}
 }
 

@@ -127,6 +127,12 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/teams/{id}/policy", s.getPolicy)
 			r.Put("/teams/{id}/policy", s.putPolicy)
 
+			// Repository overrides follow the same rule: admins and the lead
+			// of the repository's team (#153).
+			r.Get("/repos/{id}/policy", s.getRepoPolicy)
+			r.Put("/repos/{id}/policy", s.putRepoPolicy)
+			r.Delete("/repos/{id}/policy", s.deleteRepoPolicy)
+
 			// Retry and finding actions are limited to admins and the lead of
 			// the repo's team.
 			r.Post("/prs/{id}/retry", s.retryPR)

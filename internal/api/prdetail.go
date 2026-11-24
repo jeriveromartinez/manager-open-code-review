@@ -38,10 +38,14 @@ type reviewRunDTO struct {
 	// "—" instead of inventing a step.
 	Phase          string  `json:"phase"`
 	PhaseStartedAt *string `json:"phase_started_at"`
-	StartedAt      *string `json:"started_at"`
-	FinishedAt     *string `json:"finished_at"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
+	// PolicyRevision is the effective policy the run executed under; empty on
+	// runs that predate the recording (#153).
+	PolicyRevision    string  `json:"policy_revision"`
+	PolicyObservation bool    `json:"policy_observation"`
+	StartedAt         *string `json:"started_at"`
+	FinishedAt        *string `json:"finished_at"`
+	CreatedAt         string  `json:"created_at"`
+	UpdatedAt         string  `json:"updated_at"`
 }
 
 func jsonObject(raw datatypes.JSON) json.RawMessage {
@@ -62,6 +66,7 @@ func reviewRunDTOOf(run store.ReviewRun) reviewRunDTO {
 		CacheReadTokens: run.CacheReadTokens, CacheWriteTokens: run.CacheWriteTokens,
 		TotalTokens: run.TotalTokens, MaxContextTokens: run.MaxContextTokens,
 		Phase: run.Phase, PhaseStartedAt: formatTimePtr(run.PhaseStartedAt),
+		PolicyRevision: run.PolicyRevision, PolicyObservation: run.PolicyObservation,
 		StartedAt: formatTimePtr(run.StartedAt), FinishedAt: formatTimePtr(run.FinishedAt),
 		CreatedAt: run.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt: run.UpdatedAt.UTC().Format(time.RFC3339),
