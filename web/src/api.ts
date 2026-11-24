@@ -168,6 +168,16 @@ export type ReviewRunLogPage = {
   has_more: boolean
 }
 
+/** Respuesta de la segunda pasada de OCR; `{}` cuando no verificó el hallazgo. */
+export type FindingVerification = {
+  verdict?: 'confirm' | 'refute' | 'uncertain'
+  evidence?: string
+  head_sha?: string
+  model?: string
+  session_id?: string
+  verified_at?: string
+}
+
 export type Finding = {
   id: string
   fingerprint: string
@@ -187,6 +197,9 @@ export type Finding = {
   triage_verdict: '' | 'confirmed' | 'false_positive'
   triaged_by: string
   triaged_at: string | null
+  /** Quién produjo el veredicto: una persona desde el panel o el verificador OCR. */
+  triage_source: '' | 'human' | 'verifier'
+  verification: FindingVerification
   created_at: string
   updated_at: string
 }

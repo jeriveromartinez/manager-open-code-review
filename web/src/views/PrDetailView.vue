@@ -111,6 +111,11 @@ const runStatusLabels: Record<string, string> = {
 // positive and a /qa dismiss can withdraw a confirmed finding.
 function triageNote(finding: Finding): string {
   if (finding.status === 'resolved') return 'Resuelto en el código'
+  if (finding.triage_source === 'verifier') {
+    return finding.triage_verdict === 'confirmed'
+      ? 'Confirmado por la verificación automática'
+      : 'Descartado por la verificación automática'
+  }
   switch (finding.triage_verdict) {
     case 'confirmed':
       return `Confirmado por ${finding.triaged_by}`
@@ -119,6 +124,23 @@ function triageNote(finding: Finding): string {
     default:
       return 'Sin triar'
   }
+}
+
+const verificationLabels: Record<string, string> = {
+  confirm: 'Confirmado',
+  refute: 'Descartado',
+  uncertain: 'Sin confirmar',
+}
+
+// Solo la segunda pasada de OCR deja una verificación; un veredicto humano no.
+function verificationLabel(finding: Finding): string {
+  if (finding.triage_source !== 'verifier') return ''
+  return verificationLabels[finding.verification.verdict ?? ''] ?? 'Sin confirmar'
+}
+
+function verificationEvidence(finding: Finding): string {
+  if (finding.triage_source !== 'verifier') return ''
+  return (finding.verification.evidence ?? '').trim()
 }
 
 function coverageCount(key: string): number {
@@ -523,6 +545,14 @@ onBeforeUnmount(() => {
                   <span class="finding__label">Sugerencia</span>
                   <span>{{ finding.suggestion }}</span>
                 </p>
+                <p v-if="verificationLabel(finding)" class="finding__verification" data-verification>
+                  <span class="finding__label">Verificación automática</span>
+                  <span data-verification-verdict>{{ verificationLabel(finding) }}</span>
+                  <template v-if="verificationEvidence(finding)">
+                    <span class="finding__label">Evidencia</span>
+                    <code data-verification-evidence>{{ verificationEvidence(finding) }}</code>
+                  </template>
+                </p>
                 <div class="finding__actions">
                   <span
                     class="finding__triage"
@@ -577,6 +607,14 @@ onBeforeUnmount(() => {
                   <code>{{ finding.path }}:{{ finding.start_line }}–{{ finding.end_line }}</code>
                 </p>
               </div>
+              <p v-if="verificationLabel(finding)" class="finding__verification" data-verification>
+                <span class="finding__label">Verificación automática</span>
+                <span data-verification-verdict>{{ verificationLabel(finding) }}</span>
+                <template v-if="verificationEvidence(finding)">
+                  <span class="finding__label">Evidencia</span>
+                  <code data-verification-evidence>{{ verificationEvidence(finding) }}</code>
+                </template>
+              </p>
               <div class="finding__actions">
                 <span class="finding__triage" data-triage-note>{{ triageNote(finding) }}</span>
                 <button
@@ -988,6 +1026,17 @@ onBeforeUnmount(() => {
   max-width: 72ch;
   color: var(--text-muted);
   font-size: 16px;
+}
+
+.finding__verification {
+  max-width: 72ch;
+  color: var(--text-muted);
+  font-size: 15px;
+}
+
+.finding__verification code {
+  display: block;
+  overflow-wrap: anywhere;
 }
 
 .finding__label {

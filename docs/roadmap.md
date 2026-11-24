@@ -1,6 +1,6 @@
 # Roadmap de correcciones del motor de revisión
 
-Actualizado: 2026-11-22. Este documento es la fuente de verdad del avance: cada PR que cierra un issue actualiza su fila y la fase correspondiente.
+Actualizado: 2026-11-23. Este documento es la fuente de verdad del avance: cada PR que cierra un issue actualiza su fila y la fase correspondiente.
 
 ## Objetivo
 
@@ -58,6 +58,7 @@ Criterio de cierre de #76: una semana de PRs reales sin ningún run por encima d
 - #72 parcial (#106, #108, #109): ajuste global `review_context_ceiling` (270k), techo por equipo, esfuerzo y tope de gasto configurables y aplicados por el motor nativo: techo efectivo como `--max-tokens` por grupo, esfuerzo de la política como `--effort`, tope opcional como `--max-tokens-budget` y corte por presupuesto como `inconclusive`/`token_budget`. Los runs nativos guardan `max_context_tokens` NULL porque OCR 1.14 no reporta esa muestra. El troceo de diffs enormes llegó en #80 (#118, #120); queda la medición con proveedor real, que se sigue en #76. El techo es por grupo, no un tope total.
 - #74 hecho (#113, #114): cada push revisa `<head revisado>..<head>` cuando la base y la ascendencia del head anterior lo permiten; el run persiste `base_sha`, los hallazgos fuera del rango revisado siguen abiertos y cualquier force-push, cambio de base o run previo incompleto vuelve al diff completo. El antirrebote de 2 min llegó en #113.
 - #60 y #62 hechos (#115): con OCR nativo las revisiones ya no ejecutan OpenCode; `review_agent_steps` solo acota el chequeo de salud, que ahora recibe el valor configurado en vez de caer al valor por defecto.
+- 2026-11-23: verificación automática de hallazgos en `feat/ocr-auto-triage`: una segunda pasada `ocr scan` responde `CONFIRM`/`REFUTE`/`UNCERTAIN` con evidencia literal, la política del equipo decide si se aplica (nunca sobre `major`/`blocker` ni con la regla de descarte apagada) y el comentario del PR se publica curado. Queda rodarla en escalera (`off` → `dry_run` → `apply` → `auto_withdraw`) y medir con PRs reales dentro de #76.
 
 ## Fases
 
@@ -101,6 +102,7 @@ Objetivo: dejar de pagar un bucle genérico de OpenCode y usar los controles de 
 ### Fase 5 — Cierre
 
 - [ ] #76 Cerrar el seguimiento cuando una semana de PRs reales cumpla el criterio de cierre.
+- [ ] Rodar la verificación automática en escalera y revisar los descartes que un humano restaure antes de ampliarla.
 
 ## Orden de ejecución
 

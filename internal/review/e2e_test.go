@@ -45,6 +45,7 @@ func TestE2EFlow(t *testing.T) {
 	t.Run("invalid config fails and the retry publishes", testE2EFailedThenRetry)
 	t.Run("push before checkout supersedes and the new head is reviewed", testE2ESuperseded)
 	t.Run("only a successful run resolves an open finding", testE2EFindingsLifecycle)
+	t.Run("auto-triage withdraws the refuted finding and publishes a curated summary", testE2EAutoTriagePublishesCuratedSummary)
 }
 
 // --- fake GitHub API -------------------------------------------------------
@@ -1097,6 +1098,90 @@ func testE2EFindingsLifecycle(t *testing.T) {
 		events.Event{Type: "run.updated", ID: strconv.FormatUint(uint64(run4), 10)},
 		events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)},
 	)
+}
+
+func testE2EAutoTriagePublishesCuratedSummary(t *testing.T) {
+	f := newE2EFixture(t)
+	// The second pass reserves a percentage of the run budget; 15 % of the
+	// default 30 s is below the one-minute minimum, so the run needs a longer
+	// deadline to verify at all.
+	f.runner.Cfg.Timeout = 10 * time.Minute
+	f.setOCR(t, runTestNativeTwoFindings())
+	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
+
+	minorID := findingIDFor("auth.go", "security", "Comparación insegura")
+	nitID := findingIDFor("auth.go", "style", "Nombre confuso")
+	f.setScan(t, runTestScanAnswer(t, map[string]string{
+		minorID: "REFUTE",
+		nitID:   "CONFIRM",
+	}))
+
+	runID := f.enqueue(t, false)
+	f.events.reset()
+	f.execute(t, runID)
+
+	run := f.loadRun(t, runID)
+	assertE2ERun(t, run, store.RunSucceeded, "")
+	if run.VerifySessionID != "verify-session" {
+		t.Errorf("verify_session_id = %q, want the verification session", run.VerifySessionID)
+	}
+
+	byID := map[string]store.Finding{}
+	for _, finding := range f.findings(t) {
+		byID[finding.ID] = finding
+	}
+	refuted, ok := byID[minorID]
+	if !ok {
+		t.Fatalf("findings = %+v, want %s", byID, minorID)
+	}
+	if refuted.Status != store.FindingWithdrawn ||
+		refuted.TriageSource != store.TriageSourceVerifier ||
+		refuted.TriageVerdict != store.VerdictFalsePositive {
+		t.Errorf("refuted finding = %+v, want withdrawn by the verifier", refuted)
+	}
+	var evidence Verification
+	if err := json.Unmarshal(refuted.Verification, &evidence); err != nil {
+		t.Fatalf("decode verification of %s: %v (%s)", minorID, err, refuted.Verification)
+	}
+	if evidence.Verdict != VerdictRefute || evidence.Evidence != "package main" ||
+		evidence.HeadSHA != f.headSHA || evidence.SessionID != "verify-session" {
+		t.Errorf("verification = %+v, want the refutation with the cited evidence", evidence)
+	}
+	if refuted.GithubCommentID != 0 {
+		t.Errorf("withdrawn finding got an inline comment: %+v", refuted)
+	}
+
+	confirmed, ok := byID[nitID]
+	if !ok {
+		t.Fatalf("findings = %+v, want %s", byID, nitID)
+	}
+	if confirmed.Status != store.FindingOpen ||
+		confirmed.TriageSource != store.TriageSourceVerifier ||
+		confirmed.TriageVerdict != store.VerdictConfirmed {
+		t.Errorf("confirmed finding = %+v, want open and confirmed by the verifier", confirmed)
+	}
+	if confirmed.GithubCommentID == 0 {
+		t.Errorf("confirmed finding was not published inline: %+v", confirmed)
+	}
+
+	body := assertE2ESummary(t, f,
+		"**Verificación automática:** 1 validados · 0 para tu criterio · 1 descartados",
+		"Validado por la verificación:**",
+		"Nombre confuso",
+		"1 descartados automáticamente",
+	)
+	if strings.Contains(body, "Comparación insegura") {
+		t.Errorf("summary still lists the withdrawn finding: %q", body)
+	}
+
+	reviews := f.gh.reviewList()
+	if len(reviews) != 1 || len(reviews[0].Comments) != 1 {
+		t.Fatalf("inline reviews = %+v, want one with only the confirmed finding", reviews)
+	}
+	comment := reviews[0].Comments[0]
+	if !strings.Contains(comment.Body, "Nombre confuso") {
+		t.Errorf("inline comment body = %q, want the confirmed finding", comment.Body)
+	}
 }
 
 func (f *e2eFixture) reloadFinding(t *testing.T, id string) store.Finding {
