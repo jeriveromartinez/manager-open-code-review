@@ -80,6 +80,25 @@ func TestReadRepoFileRejectsEscapingPaths(t *testing.T) {
 			t.Errorf("path %q was accepted, want rejected", path)
 		}
 	}
+
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.go")
+	if err := os.WriteFile(secret, []byte("token\n"), 0o644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	if err := os.Symlink(secret, filepath.Join(workDir, "escape.go")); err != nil {
+		t.Skipf("symlinks unavailable on this host: %v", err)
+	}
+	if _, err := readRepoFile(workDir, "escape.go"); err == nil {
+		t.Error("a symlink out of the checkout was followed, want rejected")
+	}
+	// A symlink that stays inside the checkout is ordinary repository content.
+	if err := os.Symlink(filepath.Join(workDir, "a.go"), filepath.Join(workDir, "inside.go")); err != nil {
+		t.Fatalf("symlink inside the checkout: %v", err)
+	}
+	if content, err := readRepoFile(workDir, "inside.go"); err != nil || string(content) != "package main\n" {
+		t.Errorf("inside symlink = %q (err=%v), want the target content", content, err)
+	}
 }
 
 func TestVerifyBudgetSharesAndFallsBackToTheFixedCap(t *testing.T) {
@@ -87,7 +106,7 @@ func TestVerifyBudgetSharesAndFallsBackToTheFixedCap(t *testing.T) {
 	defer cancel()
 	policy := VerifyPolicy{TokenShare: 20, TimeShare: 15, TokenMax: 50000}
 
-	timeout, budget := verifyBudget(ctx, store.QAPolicy{ReviewTokenBudget: 200000}, policy)
+	timeout, budget := verifyBudget(ctx, store.QAPolicy{ReviewTokenBudget: 200000}, policy, 0)
 	if budget != 40000 {
 		t.Errorf("budget = %d, want 20%% of 200000", budget)
 	}
@@ -95,7 +114,15 @@ func TestVerifyBudgetSharesAndFallsBackToTheFixedCap(t *testing.T) {
 		t.Errorf("timeout = %s, want 15%% of the remaining time", timeout)
 	}
 
-	if _, budget = verifyBudget(ctx, store.QAPolicy{}, policy); budget != 50000 {
+	// The share is a reservation: it never exceeds what the main pass left.
+	if _, budget = verifyBudget(ctx, store.QAPolicy{ReviewTokenBudget: 200000}, policy, 170000); budget != 30000 {
+		t.Errorf("budget = %d, want the 30000 left of the run budget", budget)
+	}
+	if _, budget = verifyBudget(ctx, store.QAPolicy{ReviewTokenBudget: 200000}, policy, 210000); budget != 0 {
+		t.Errorf("budget = %d, want 0 when the main pass already spent the cap", budget)
+	}
+
+	if _, budget = verifyBudget(ctx, store.QAPolicy{}, policy, 900000); budget != 50000 {
 		t.Errorf("budget = %d, want the fixed VerifyTokenMax when the run budget is disabled", budget)
 	}
 }

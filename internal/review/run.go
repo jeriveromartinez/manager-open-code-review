@@ -448,13 +448,17 @@ func (r *Runner) applyAutoTriage(ctx context.Context, run store.ReviewRun, cfg s
 	actor := "ocr-verify:" + cfg.Profile.Model
 	confirmed, withdrawn, skipped := 0, 0, 0
 	for _, decision := range out.decisions {
-		raw, err := json.Marshal(decision.Verification)
-		if err != nil {
-			log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
-				fmt.Sprintf("no se pudo serializar la verificación de %s: %v", decision.FindingID, err))
-		} else if err := r.Store.RecordFindingVerification(ctx, decision.FindingID, raw); err != nil {
-			log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
-				fmt.Sprintf("no se pudo guardar la verificación de %s: %v", decision.FindingID, err))
+		// A finding the verifier never answered has no verification: recording
+		// the zero value would erase the evidence a previous run stored.
+		if !decision.Verification.VerifiedAt.IsZero() {
+			raw, err := json.Marshal(decision.Verification)
+			if err != nil {
+				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+					fmt.Sprintf("no se pudo serializar la verificación de %s: %v", decision.FindingID, err))
+			} else if err := r.Store.RecordFindingVerification(ctx, decision.FindingID, raw); err != nil {
+				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+					fmt.Sprintf("no se pudo guardar la verificación de %s: %v", decision.FindingID, err))
+			}
 		}
 		if !decision.Apply {
 			continue

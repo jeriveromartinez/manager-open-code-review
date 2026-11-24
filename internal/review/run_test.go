@@ -1505,6 +1505,65 @@ func TestRunDryRunStoresVerificationWithoutChangingStatus(t *testing.T) {
 	}
 }
 
+// TestAutoTriageKeepsStoredVerificationWhenUnanswered pins that a finding the
+// verifier did not answer keeps the evidence a previous run stored instead of
+// being overwritten with a zero-valued verification.
+func TestAutoTriageKeepsStoredVerificationWhenUnanswered(t *testing.T) {
+	f := newRunTestFixture(t)
+	stored := datatypes.JSON([]byte(`{"verdict":"refute","evidence":"guard()","head_sha":"old","verified_at":"2026-11-20T10:00:00Z"}`))
+	for _, finding := range []store.Finding{
+		{ID: "f_unanswered", PullRequestID: f.pr.ID, Fingerprint: "fp-unanswered",
+			Path: "auth.go", Severity: "minor", Category: "security", Title: "sin respuesta",
+			Status: store.FindingOpen, Verification: stored,
+			FirstSeenRunID: f.runID, LastSeenRunID: f.runID},
+		{ID: "f_answered", PullRequestID: f.pr.ID, Fingerprint: "fp-answered",
+			Path: "auth.go", Severity: "minor", Category: "style", Title: "respondido",
+			Status: store.FindingOpen,
+			FirstSeenRunID: f.runID, LastSeenRunID: f.runID},
+	} {
+		if _, err := f.s.UpsertFinding(f.ctx, finding); err != nil {
+			t.Fatalf("UpsertFinding(%s): %v", finding.ID, err)
+		}
+	}
+	cfg, err := f.s.ReviewConfigForPR(f.ctx, f.pr.ID)
+	if err != nil {
+		t.Fatalf("ReviewConfigForPR: %v", err)
+	}
+	out := runOutcome{decisions: []Decision{
+		{FindingID: "f_unanswered", Verdict: VerdictUncertain,
+			Verification: Verification{Verdict: VerdictUncertain}},
+		{FindingID: "f_answered", Verdict: VerdictConfirm,
+			Verification: Verification{
+				Verdict: VerdictConfirm, Evidence: "package main", HeadSHA: f.headSHA,
+				Model: "nemotron", VerifiedAt: time.Now().UTC(),
+			}},
+	}}
+
+	f.runner().applyAutoTriage(f.ctx, f.loadRun(t), cfg, out, nil)
+
+	var unanswered store.Finding
+	if err := f.s.DB.WithContext(f.ctx).Where("id = ?", "f_unanswered").Take(&unanswered).Error; err != nil {
+		t.Fatalf("reload unanswered finding: %v", err)
+	}
+	var kept Verification
+	if err := json.Unmarshal(unanswered.Verification, &kept); err != nil ||
+		kept.Verdict != VerdictRefute || kept.Evidence != "guard()" || kept.HeadSHA != "old" {
+		t.Errorf("unanswered verification = %s (err=%v), want the previous evidence preserved",
+			unanswered.Verification, err)
+	}
+
+	var answered store.Finding
+	if err := f.s.DB.WithContext(f.ctx).Where("id = ?", "f_answered").Take(&answered).Error; err != nil {
+		t.Fatalf("reload answered finding: %v", err)
+	}
+	var verification Verification
+	if err := json.Unmarshal(answered.Verification, &verification); err != nil ||
+		verification.Verdict != VerdictConfirm || verification.Evidence != "package main" {
+		t.Errorf("answered verification = %s (err=%v), want the stored confirm",
+			answered.Verification, err)
+	}
+}
+
 // TestRunNoOpenCodeInvocation pins that the review pipeline no longer runs the
 // OpenCode agent; Agent.Run remains only for the health-check fallback.
 func TestRunNoOpenCodeInvocation(t *testing.T) {

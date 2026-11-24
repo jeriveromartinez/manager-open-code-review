@@ -79,7 +79,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 
 	selected, paths := selectVerifyFindings(pending, policy)
 	if len(paths) > 0 {
-		timeout, budget := verifyBudget(ctx, cfg.Policy, policy)
+		timeout, budget := verifyBudget(ctx, cfg.Policy, policy, int64(out.tokens.Total))
 		switch {
 		case timeout > 0 && timeout < verifyMinTimeout:
 			out.verificationSkipped = "insufficient_time"
@@ -210,16 +210,23 @@ func verifyPriority(severity string) int {
 }
 
 // verifyBudget slices the run's remaining time and token budget for the second
-// pass. Without a run budget it uses the fixed cap, so teams that disabled the
-// budget still get verification.
-func verifyBudget(ctx context.Context, p store.QAPolicy, policy VerifyPolicy) (time.Duration, int64) {
+// pass. The share is a reservation, never extra: it cannot exceed what the main
+// pass left of the configured cap. Without a run budget it uses the fixed cap,
+// so teams that disabled the budget still get verification.
+func verifyBudget(ctx context.Context, p store.QAPolicy, policy VerifyPolicy, used int64) (time.Duration, int64) {
 	var timeout time.Duration
 	if deadline, ok := ctx.Deadline(); ok {
 		timeout = time.Until(deadline) * time.Duration(policy.TimeShare) / 100
 	}
-	budget := p.ReviewTokenBudget * int64(policy.TokenShare) / 100
 	if p.ReviewTokenBudget == 0 {
-		budget = policy.TokenMax
+		return timeout, policy.TokenMax
+	}
+	budget := p.ReviewTokenBudget * int64(policy.TokenShare) / 100
+	if remaining := p.ReviewTokenBudget - used; remaining < budget {
+		if remaining < 0 {
+			remaining = 0
+		}
+		budget = remaining
 	}
 	return timeout, budget
 }
@@ -255,7 +262,20 @@ func readRepoFile(workDir, path string) ([]byte, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return nil, fmt.Errorf("finding path escapes the checkout: %q", path)
 	}
-	info, err := os.Stat(full)
+	// The PR can commit a symlink, so the lexical check is not enough: resolve
+	// the real path and require it to stay inside the checkout too.
+	root, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		return nil, err
+	}
+	real, err := filepath.EvalSymlinks(full)
+	if err != nil {
+		return nil, err
+	}
+	if real != root && !strings.HasPrefix(real, root+string(filepath.Separator)) {
+		return nil, fmt.Errorf("finding path escapes the checkout: %q", path)
+	}
+	info, err := os.Stat(real)
 	if err != nil {
 		return nil, err
 	}
@@ -265,5 +285,5 @@ func readRepoFile(workDir, path string) ([]byte, error) {
 	if info.Size() > maxVerifyFileBytes {
 		return nil, fmt.Errorf("finding file is too large: %q", path)
 	}
-	return os.ReadFile(full)
+	return os.ReadFile(real)
 }
