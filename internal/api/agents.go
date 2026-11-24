@@ -431,30 +431,31 @@ func (s *server) enqueueLLMHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 type qaPolicyResponse struct {
-	ID                      uint     `json:"id"`
-	TeamID                  uint     `json:"team_id"`
-	LLMProfileID            uint     `json:"llm_profile_id"`
-	BlockingThreshold       string   `json:"blocking_threshold"`
-	ExtraInstructions       string   `json:"extra_instructions"`
-	ExcludeGlobs            []string `json:"exclude_globs"`
-	MaxFiles                int      `json:"max_files"`
-	MaxDiffLines            int      `json:"max_diff_lines"`
-	MaxPasses               int      `json:"max_passes"`
-	RequireGreenCI          bool     `json:"require_green_ci"`
-	ReviewContextCeiling    *int     `json:"review_context_ceiling"`
-	GlobalContextCeiling    int      `json:"global_context_ceiling"`
-	EffectiveContextCeiling int      `json:"effective_context_ceiling"`
-	ReviewEffort            string   `json:"review_effort"`
-	ReviewTokenBudget       int64    `json:"review_token_budget"`
-	AutoTriageMode          string   `json:"auto_triage_mode"`
-	AutoWithdraw            bool     `json:"auto_withdraw"`
-	VerifyMaxFindings       int      `json:"verify_max_findings"`
-	VerifyMaxFiles          int      `json:"verify_max_files"`
-	VerifyTokenShare        int      `json:"verify_token_share"`
-	VerifyTimeShare         int      `json:"verify_time_share"`
-	VerifyTokenMax          int64    `json:"verify_token_max"`
-	PromptCache             bool     `json:"prompt_cache"`
-	UpdatedAt               string   `json:"updated_at"`
+	ID                      uint                  `json:"id"`
+	TeamID                  uint                  `json:"team_id"`
+	LLMProfileID            uint                  `json:"llm_profile_id"`
+	BlockingThreshold       string                `json:"blocking_threshold"`
+	ExtraInstructions       string                `json:"extra_instructions"`
+	ExcludeGlobs            []string              `json:"exclude_globs"`
+	MaxFiles                int                   `json:"max_files"`
+	MaxDiffLines            int                   `json:"max_diff_lines"`
+	MaxPasses               int                   `json:"max_passes"`
+	RequireGreenCI          bool                  `json:"require_green_ci"`
+	RequiredChecks          []store.RequiredCheck `json:"required_checks"`
+	ReviewContextCeiling    *int                  `json:"review_context_ceiling"`
+	GlobalContextCeiling    int                   `json:"global_context_ceiling"`
+	EffectiveContextCeiling int                   `json:"effective_context_ceiling"`
+	ReviewEffort            string                `json:"review_effort"`
+	ReviewTokenBudget       int64                 `json:"review_token_budget"`
+	AutoTriageMode          string                `json:"auto_triage_mode"`
+	AutoWithdraw            bool                  `json:"auto_withdraw"`
+	VerifyMaxFindings       int                   `json:"verify_max_findings"`
+	VerifyMaxFiles          int                   `json:"verify_max_files"`
+	VerifyTokenShare        int                   `json:"verify_token_share"`
+	VerifyTimeShare         int                   `json:"verify_time_share"`
+	VerifyTokenMax          int64                 `json:"verify_token_max"`
+	PromptCache             bool                  `json:"prompt_cache"`
+	UpdatedAt               string                `json:"updated_at"`
 }
 
 // globalContextCeiling returns the global setting as the next start would load
@@ -519,6 +520,7 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 		ExcludeGlobs: globs, MaxFiles: p.MaxFilesPerPass,
 		MaxDiffLines: p.MaxDiffLinesPerPass, MaxPasses: p.MaxPasses,
 		RequireGreenCI:       p.RequireGreenCI,
+		RequiredChecks:       store.ParseRequiredChecks(p.RequiredChecks),
 		ReviewContextCeiling: p.ReviewContextCeiling,
 		GlobalContextCeiling: globalCeiling, EffectiveContextCeiling: effective,
 		ReviewEffort: effort, ReviewTokenBudget: p.ReviewTokenBudget,
@@ -669,6 +671,28 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, "invalid require_green_ci")
 			return
 		}
+	}
+
+	if value, present := raw["required_checks"]; present {
+		var checks []store.RequiredCheck
+		if err := json.Unmarshal(value, &checks); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid required_checks")
+			return
+		}
+		encoded, err := store.NormalizeRequiredChecks(checks)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid required_checks")
+			return
+		}
+		policy.RequiredChecks = encoded
+	} else if stored, err := s.Store.QAPolicyForTeam(r.Context(), teamID); err == nil {
+		// PUT rebuilds the policy from zero and the panel does not always send
+		// this field, so an omitted required_checks keeps the stored list. An
+		// explicit [] clears it.
+		policy.RequiredChecks = stored.RequiredChecks
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeAPIError(w, http.StatusInternalServerError, "load qa policy")
+		return
 	}
 
 	// A null or omitted ceiling clears the team override: PUT replaces the whole

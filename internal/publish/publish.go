@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -111,11 +112,17 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 	if err != nil {
 		return err
 	}
+	ci, ciErr := p.ciVerdict(ctx)
+	if ciErr != nil {
+		slog.Warn("read CI gate at publish", "pull_request_id", p.pr.ID, "run_id", p.run.ID, "error", ciErr)
+	}
 	conclusion := "action_required"
 	if p.run.Status == store.RunSucceeded {
-		conclusion = "success"
-		if p.hasBlocking(open) {
+		switch {
+		case p.hasBlocking(open):
 			conclusion = "failure"
+		case ci.Green():
+			conclusion = "success"
 		}
 	}
 
@@ -150,10 +157,17 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 	}
 
 	status := store.StatusInconclusive
-	if p.run.Status == store.RunSucceeded && conclusion == "failure" {
-		status = store.StatusChangesRequested
-	} else if p.run.Status == store.RunSucceeded {
-		status = store.StatusReadyForHuman
+	if p.run.Status == store.RunSucceeded {
+		switch conclusion {
+		case "failure":
+			status = store.StatusChangesRequested
+		case "success":
+			status = store.StatusReadyForHuman
+		default:
+			// The review concluded but the required checks did not: the head is
+			// still waiting for a CI verdict, not for a person.
+			status = store.StatusWaitingCI
+		}
 	}
 	return p.setPRStatus(ctx, status)
 }

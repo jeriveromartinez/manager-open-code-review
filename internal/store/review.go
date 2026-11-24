@@ -459,6 +459,17 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 	if len(globs) == 0 || bytes.Equal(globs, []byte("null")) {
 		p.ExcludeGlobs = datatypes.JSON([]byte(`[]`))
 	}
+	var configured []RequiredCheck
+	if raw := bytes.TrimSpace(p.RequiredChecks); len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
+		if err := json.Unmarshal(raw, &configured); err != nil {
+			return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid required checks: %w", p.TeamID, err)
+		}
+	}
+	required, normErr := NormalizeRequiredChecks(configured)
+	if normErr != nil {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: %w", p.TeamID, normErr)
+	}
+	p.RequiredChecks = required
 
 	// The primary key and timestamps belong to the database: a caller may pass
 	// a policy loaded earlier, and an upsert must not try to insert its ID.
@@ -471,7 +482,7 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		DoUpdates: clause.AssignmentColumns([]string{
 			"llm_profile_id", "blocking_threshold", "extra_instructions", "exclude_globs",
 			"max_files_per_pass", "max_diff_lines_per_pass", "max_passes",
-			"require_green_ci", "review_context_ceiling", "review_effort",
+			"require_green_ci", "required_checks", "review_context_ceiling", "review_effort",
 			"review_token_budget", "auto_triage_mode", "auto_withdraw",
 			"verify_max_findings", "verify_max_files", "verify_token_share",
 			"verify_time_share", "verify_token_max", "updated_at",
@@ -546,20 +557,21 @@ func (s *Store) ReviewConfigForPR(ctx context.Context, prID uint) (ReviewConfig,
 // run in an active or terminal state. A run covers the pull request only when
 // its head, base branch and resolved merge base match the current ones; legacy
 // runs without a key still cover it once. Superseded runs never suppress a PR.
-// Teams that gate reviews on CI only expose a PR once its head is green, so a
-// crowded batch of PRs still waiting for checks cannot push older eligible
-// candidates past the limit. Everything is filtered in SQL, including the limit
-// and the ordering.
+// Teams that gate reviews on CI only return a PR once its configured gate is
+// green. That verdict is applied to the ordered candidates before the limit, so
+// a crowded batch of PRs still waiting for checks (or missing a required one)
+// cannot push an eligible candidate past it.
 func (s *Store) PendingReviewPRs(ctx context.Context, limit int) ([]PullRequest, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
 	const query = `
-SELECT pr.* FROM pull_requests pr
+SELECT pr.*, q.require_green_ci, q.required_checks FROM pull_requests pr
 JOIN repositories r ON r.id = pr.repository_id
 JOIN qa_policies q ON q.team_id = r.team_id
 JOIN llm_profiles p ON p.id = q.llm_profile_id AND p.enabled = true
 WHERE pr.state = 'open' AND pr.draft = false AND pr.is_fork = false
   AND r.enabled = true AND r.team_id IS NOT NULL
-  AND (q.require_green_ci = false
-    OR (pr.validations_total > 0 AND pr.validations_passed = pr.validations_total))
   AND NOT EXISTS (
     SELECT 1 FROM review_runs rr
     WHERE rr.pull_request_id = pr.id
@@ -572,14 +584,45 @@ WHERE pr.state = 'open' AND pr.draft = false AND pr.is_fork = false
       )
       AND rr.status IN ('queued','running','succeeded','inconclusive','failed')
   )
-ORDER BY pr.updated_at DESC
-LIMIT ?`
+ORDER BY pr.updated_at DESC`
 
-	var prs []PullRequest
-	if err := s.DB.WithContext(ctx).Raw(query, limit).Scan(&prs).Error; err != nil {
+	// The named gate needs the policy, so it is evaluated here rather than in
+	// SQL: expression indexes cannot see the required_checks JSON and a
+	// counters-only prefilter would hide required-green/optional-red heads.
+	var candidates []pendingReviewCandidate
+	if err := s.DB.WithContext(ctx).Raw(query).Scan(&candidates).Error; err != nil {
 		return nil, fmt.Errorf("list pending review pull requests: %w", err)
 	}
+
+	prs := make([]PullRequest, 0, limit)
+	for i := range candidates {
+		candidate := &candidates[i]
+		if candidate.RequireGreenCI {
+			legacy := PRValidations{
+				Passed: candidate.ValidationsPassed,
+				Failed: candidate.ValidationsFailed,
+				Total:  candidate.ValidationsTotal,
+			}
+			verdict := EvaluateConfiguredCI(
+				decodeObservation(candidate.ValidationsDetail), legacy, candidate.RequiredChecks)
+			if !verdict.Green() {
+				continue
+			}
+		}
+		prs = append(prs, candidate.PullRequest)
+		if len(prs) == limit {
+			break
+		}
+	}
 	return prs, nil
+}
+
+// pendingReviewCandidate is one ordered candidate plus the policy facts the CI
+// gate needs. PullRequest is embedded so the query can keep selecting pr.*.
+type pendingReviewCandidate struct {
+	PullRequest
+	RequireGreenCI bool           `gorm:"column:require_green_ci"`
+	RequiredChecks datatypes.JSON `gorm:"column:required_checks"`
 }
 
 // QueuedRunWork flags the two pieces of work a queued review run depends on: a

@@ -22,6 +22,7 @@ type fakeChecksGitHub struct {
 	mu          sync.Mutex
 	runs        map[string][]map[string]any
 	statuses    map[string][]map[string]any
+	failLookup  bool
 	checkCalls  int
 	statusCalls int
 }
@@ -47,8 +48,13 @@ func newFakeChecksGitHub(t *testing.T) *fakeChecksGitHub {
 			}
 			f.mu.Lock()
 			f.checkCalls++
+			fail := f.failLookup
 			runs := f.runs[sha]
 			f.mu.Unlock()
+			if fail {
+				http.Error(w, "checks unavailable", http.StatusInternalServerError)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"total_count": len(runs),
@@ -152,6 +158,13 @@ func (f *fakeChecksGitHub) calls() (int, int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.checkCalls, f.statusCalls
+}
+
+// failChecks makes the next lookups fail the way a GitHub outage would.
+func (f *fakeChecksGitHub) failChecks(fail bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failLookup = fail
 }
 
 // enableChecks points the webhook handler at a fake GitHub API so deliveries
@@ -319,5 +332,80 @@ func TestWebhookCheckRunForDisabledRepoIgnored(t *testing.T) {
 	assertStatus(t, f.deliverBody("check_run", body, signWebhook(body)), http.StatusNoContent)
 	if got := f.reviews.checksSnapshot(); len(got) != 0 {
 		t.Fatalf("OnChecksUpdated calls = %v, want none", got)
+	}
+}
+
+// Every open pull request at the delivered SHA is refreshed and re-evaluated;
+// GitHub can legitimately have more than one PR pointing at the same commit.
+func TestWebhookCheckEventReevaluatesEveryPRSharingSHA(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+	first := f.seedOpenPR()
+	second := store.PullRequest{
+		RepositoryID: 501, Number: 143, Title: "Backport", HeadSHA: "aaa111",
+		State: "open", QAStatus: store.StatusChangesRequested,
+		GitHubUpdatedAt: first.GitHubUpdatedAt.Add(time.Minute),
+	}
+	if err := f.st.DB.WithContext(f.ctx).Create(&second).Error; err != nil {
+		t.Fatalf("seed second PR: %v", err)
+	}
+
+	api := newFakeChecksGitHub(t)
+	api.setRuns("aaa111", "success", "success")
+	f.enableChecks(t, api)
+
+	body := []byte(`{
+		"action": "completed",
+		"repository": {"id": 501, "full_name": "acme/backend-api"},
+		"check_run": {"id": 77, "head_sha": "aaa111", "status": "completed", "conclusion": "success"}
+	}`)
+	assertStatus(t, f.deliverBody("check_run", body, signWebhook(body)), http.StatusAccepted)
+
+	for _, pr := range []store.PullRequest{first, second} {
+		if got := f.validationsOf(t, pr.ID, "aaa111"); got != (store.PRValidations{Passed: 2, Total: 2}) {
+			t.Errorf("validations of PR #%d = %+v, want 2/2", pr.Number, got)
+		}
+	}
+	if got := f.reviews.checksSnapshot(); len(got) != 2 || got[0] != first.ID || got[1] != second.ID {
+		t.Fatalf("OnChecksUpdated calls = %v, want [%d %d]", got, first.ID, second.ID)
+	}
+}
+
+// A failed lookup is stored as an explicit failure and clears the counters, so
+// the gate can never keep using the verdict of the previous delivery.
+func TestWebhookCILookupFailureIsExplicit(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+	pr := f.seedOpenPR()
+	api := newFakeChecksGitHub(t)
+	api.setRuns("aaa111", "success")
+	f.enableChecks(t, api)
+
+	before := []byte(`{"action":"completed","repository":{"id":501},"check_run":{"head_sha":"aaa111"}}`)
+	assertStatus(t, f.deliverBody("check_run", before, signWebhook(before)), http.StatusAccepted)
+	if got := f.validationsOf(t, pr.ID, "aaa111"); got != (store.PRValidations{Passed: 1, Total: 1}) {
+		t.Fatalf("initial validations = %+v, want 1/1", got)
+	}
+
+	api.failChecks(true)
+	after := []byte(`{"action":"completed","repository":{"id":501},"check_run":{"head_sha":"aaa111"}}`)
+	assertStatus(t, f.deliverBody("check_run", after, signWebhook(after)), http.StatusInternalServerError)
+
+	if got := f.validationsOf(t, pr.ID, "aaa111"); got != (store.PRValidations{}) {
+		t.Errorf("stored counters after a failed lookup = %+v, want zero", got)
+	}
+	observation, err := f.st.PRValidationObservation(f.ctx, pr.ID, "aaa111")
+	if err != nil {
+		t.Fatalf("PRValidationObservation: %v", err)
+	}
+	if observation == nil || observation.Result != store.ObservationLookupFailed {
+		t.Fatalf("observation = %+v, want an explicit lookup failure", observation)
+	}
+	verdict, err := f.st.CIVerdictFor(f.ctx, pr.ID, "aaa111", nil)
+	if err != nil {
+		t.Fatalf("CIVerdictFor: %v", err)
+	}
+	if verdict.Green() || verdict.State != store.CIUnknown {
+		t.Fatalf("verdict after a failed lookup = %+v, want unknown and not green", verdict)
 	}
 }

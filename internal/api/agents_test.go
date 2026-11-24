@@ -431,18 +431,25 @@ func TestPolicyRequireGreenCIRoundTrip(t *testing.T) {
 	var current map[string]any
 	decodeJSON(t, rec, &current)
 	assertKeys(t, current, "team_id", "llm_profile_id", "blocking_threshold", "max_files",
-		"max_diff_lines", "max_passes", "exclude_globs", "require_green_ci")
+		"max_diff_lines", "max_passes", "exclude_globs", "require_green_ci", "required_checks")
 	if current["require_green_ci"] != false {
 		t.Errorf("default require_green_ci = %v, want false", current["require_green_ci"])
 	}
 
-	body := map[string]any{"llm_profile_id": profile.ID, "require_green_ci": true}
+	body := map[string]any{
+		"llm_profile_id":   profile.ID,
+		"require_green_ci": true,
+		"required_checks":  []map[string]string{{"name": "build", "origin": "app:7"}},
+	}
 	rec = f.request(http.MethodPut, path, body, cookie)
 	assertStatus(t, rec, http.StatusOK)
 	var saved map[string]any
 	decodeJSON(t, rec, &saved)
 	if saved["require_green_ci"] != true {
 		t.Errorf("PUT require_green_ci = %v, want true", saved["require_green_ci"])
+	}
+	if checks, ok := saved["required_checks"].([]any); !ok || len(checks) != 1 {
+		t.Errorf("PUT required_checks = %v, want one entry", saved["required_checks"])
 	}
 
 	policy, err := f.st.QAPolicyForTeam(f.ctx, team.ID)
@@ -452,6 +459,16 @@ func TestPolicyRequireGreenCIRoundTrip(t *testing.T) {
 	if !policy.RequireGreenCI {
 		t.Error("stored RequireGreenCI = false, want true")
 	}
+	if got := store.ParseRequiredChecks(policy.RequiredChecks); len(got) != 1 ||
+		got[0].Name != "build" || got[0].Origin != "app:7" {
+		t.Errorf("stored required checks = %+v, want build from app:7", got)
+	}
+
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id":  profile.ID,
+		"required_checks": []map[string]string{{"name": "build", "origin": "bogus"}},
+	}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
 
 	rec = f.request(http.MethodGet, path, nil, cookie)
 	assertStatus(t, rec, http.StatusOK)
@@ -470,6 +487,24 @@ func TestPolicyRequireGreenCIRoundTrip(t *testing.T) {
 	}
 	if policy.RequireGreenCI {
 		t.Error("RequireGreenCI = true after an explicit false")
+	}
+	// An omitted required_checks keeps the stored list: the panel does not
+	// always send it and PUT rebuilds the policy from zero.
+	if got := store.ParseRequiredChecks(policy.RequiredChecks); len(got) != 1 ||
+		got[0].Name != "build" || got[0].Origin != "app:7" {
+		t.Errorf("omitted required_checks cleared the stored list: %+v", got)
+	}
+
+	// An explicit empty list does clear it.
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": profile.ID, "required_checks": []map[string]string{},
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	if policy, err = f.st.QAPolicyForTeam(f.ctx, team.ID); err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if got := store.ParseRequiredChecks(policy.RequiredChecks); len(got) != 0 {
+		t.Errorf("explicit empty required_checks = %+v, want none", got)
 	}
 }
 

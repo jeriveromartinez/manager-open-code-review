@@ -113,6 +113,7 @@ const policy: QAPolicy = {
   max_diff_lines: 3000,
   max_passes: 3,
   require_green_ci: true,
+  required_checks: [],
   review_context_ceiling: 120000,
   global_context_ceiling: 120000,
   effective_context_ceiling: 120000,

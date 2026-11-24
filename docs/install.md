@@ -79,6 +79,19 @@ La App creada desde el manifiesto se suscribe a estos eventos. Sin webhooks solo
 
 La App necesita además la suscripción a `pull_request_review_thread`: una App creada antes de que este evento estuviera en el manifiesto debe añadirlo a mano en **Settings → GitHub Apps → Permissions & events**, o resolver los hilos solo se reflejará en el panel tras la siguiente revisión.
 
+### Gate de CI y checks requeridos
+
+Con `require_green_ci` activo en la política del equipo, la revisión no se encola y el check de QA no publica `success` hasta que el SHA actual tenga el CI aceptable. El estado se relee de GitHub en cada entrega de `check_suite`/`check_run`/`status`, al terminar la revisión y al republicar; una observación de otro SHA no se reutiliza. Si la consulta a GitHub falla, el gate queda en **desconocido** (nunca en verde) y el PR pasa a «esperando CI»: espera a la siguiente entrega o a la reconciliación.
+
+`required_checks` en la política del equipo es una lista JSON de checks que deben estar en verde. Se guarda con el resto de la política (`PUT /api/teams/<id>/policy`); si se omite al crear la política queda vacía, y en una actualización se conserva la lista ya guardada salvo que se envíe una lista explícita (una lista vacía la borra). Cada entrada es `{"name": "...", "origin": "..."}`:
+- `name` es el nombre del check run o el `context` del commit status.
+- `origin` es `app:<id>` para un check run de una App concreta o `status` para un commit status; si se omite, el nombre basta y se acepta cualquier origen.
+- Una lista vacía exige que **todos** los checks reportados estén en verde.
+
+Un check requerido que no aparece se trata como **ausente** y bloquea el gate; uno en cola o en ejecución se trata como **pendiente**. Esto permite, por ejemplo, exigir solo `{"name":"build","origin":"app:12345"}` aunque otro job opcional falle. El check `QA Control Center` de la propia App nunca cuenta como entrada: es el resultado de la revisión, no CI.
+
+La instalación de la App no puede leer la configuración de ramas protegidas de GitHub (requiere permisos de administración que la App no pide). QA no expone ese dato ni lo deduce: compruébalo a mano en **Settings → Branches → Branch protection rules → Require status checks to pass** del repositorio. Si `QA Control Center` no está en la lista, GitHub no bloqueará el merge por el check de QA aunque QA publique `success`. Los checks requeridos que sí conoce QA son los de `required_checks`; verifica que los nombres y el `origin` coincidan con los que reporta GitHub.
+
 ## Disputas en hilos y comandos `/qa`
 
 El estado del hilo en GitHub se guarda aparte del veredicto QA. Cuando un **admin**, el **lead** o **QA** del equipo al que pertenece el repositorio marca un hilo como **resuelto**, el hallazgo pasa a `resolved` y su check se recalcula; si lo **vuelve a abrir**, vuelve a `open`. Si quien lo hace no tiene ese permiso, solo se registra el estado del hilo: el hallazgo, su veredicto y el check no cambian. Una decisión ya tomada por una persona (desde el panel, `/qa` o un hilo autorizado) no se sobrescribe por ecos de la App, entregas repetidas, tardías o fuera de orden. El enlace se hace por el comentario en línea publicado, así que solo aplica a hallazgos que llegaron a GitHub.

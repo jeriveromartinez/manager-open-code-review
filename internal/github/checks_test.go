@@ -101,3 +101,38 @@ func TestValidationsOf(t *testing.T) {
 		})
 	}
 }
+
+func TestObservationOfKeepsNameOriginAndState(t *testing.T) {
+	runs := []*gh.CheckRun{
+		{Name: gh.String("build"), Status: gh.String("completed"), Conclusion: gh.String("success"), App: &gh.App{ID: gh.Int64(7)}},
+		{Name: gh.String("lint"), Status: gh.String("in_progress"), App: &gh.App{ID: gh.Int64(7)}},
+		{Name: gh.String("e2e"), Status: gh.String("completed"), Conclusion: gh.String("failure"), App: &gh.App{ID: gh.Int64(8)}},
+		{Name: gh.String("QA Control Center"), Status: gh.String("completed"), Conclusion: gh.String("failure"), App: &gh.App{ID: gh.Int64(12345)}},
+	}
+	statuses := []*gh.RepoStatus{
+		{Context: gh.String("ci/test"), State: gh.String("pending")},
+	}
+
+	got := ghapp.ObservationOf(runs, statuses, 12345)
+	want := []store.CheckObservation{
+		{Name: "build", Origin: "app:7", State: store.CheckPassed},
+		{Name: "lint", Origin: "app:7", State: store.CheckPending},
+		{Name: "e2e", Origin: "app:8", State: store.CheckFailed},
+		{Name: "ci/test", Origin: "status", State: store.CheckPending},
+	}
+	if len(got.Checks) != len(want) {
+		t.Fatalf("ObservationOf() = %+v, want %+v", got.Checks, want)
+	}
+	for i, check := range want {
+		if got.Checks[i] != check {
+			t.Errorf("check[%d] = %+v, want %+v", i, got.Checks[i], check)
+		}
+	}
+	if got.Result != store.ObservationOK {
+		t.Errorf("result = %q, want %q", got.Result, store.ObservationOK)
+	}
+	// The counters remain the same view of the same data.
+	if counters := ghapp.ValidationsFor(got); counters != (store.PRValidations{Passed: 1, Failed: 1, Total: 4}) {
+		t.Errorf("ValidationsFor() = %+v, want 1/1/4", counters)
+	}
+}

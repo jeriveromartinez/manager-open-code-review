@@ -38,6 +38,12 @@ type MergeBaseResolver interface {
 	MergeBase(ctx context.Context, installationID int64, repoFullName, base, head string) (string, error)
 }
 
+// Republisher recomputes and republishes the verdict of a pull request when
+// its CI state changed. It is the publisher worker, which owns the check run.
+type Republisher interface {
+	Republish(ctx context.Context, prID uint) error
+}
+
 // Trigger turns webhook deliveries and the periodic reconciliation into queued
 // review runs. It notifies browsers only when it creates a run; the runner
 // reports the claim and the terminal state.
@@ -47,8 +53,11 @@ type Trigger struct {
 	Jobs    TriggerEnqueuer
 	Checks  CheckStarter
 	Compare MergeBaseResolver
-	Box     *crypto.Box // QA_WORKER_KEY
-	Events  events.Publisher
+	// Republish corrects an existing verdict when the required checks change,
+	// so red -> green -> red converges without repeating the analysis.
+	Republish Republisher
+	Box       *crypto.Box // QA_WORKER_KEY
+	Events    events.Publisher
 	// Debounce delays the webhook review until the head has been quiet for this
 	// long. Zero keeps the immediate path.
 	Debounce time.Duration
@@ -131,6 +140,11 @@ func (t *Trigger) reviewConfig(ctx context.Context, prID uint) (*store.ReviewCon
 // changed on GitHub. Only teams that gate reviews on CI are acted on: for
 // everyone else a check delivery must not become a second review trigger, so
 // the gate stays exactly where it was.
+//
+// With the gate active, a green required-check set may schedule a review; an
+// existing terminal review of the current comparison is never repeated. In
+// every case the publisher recomputes the stored verdict, so a head that turned
+// red after publishing stops reporting success.
 func (t *Trigger) OnChecksUpdated(ctx context.Context, prID uint) error {
 	cfg, err := t.Store.ReviewConfigForPR(ctx, prID)
 	if errors.Is(err, store.ErrNoReviewConfig) {
@@ -142,8 +156,21 @@ func (t *Trigger) OnChecksUpdated(ctx context.Context, prID uint) error {
 	if !cfg.Policy.RequireGreenCI {
 		return nil
 	}
-	_, err = t.enqueue(ctx, prID, "webhook", false)
-	return err
+	verdict, err := t.Store.CIVerdictFor(ctx, prID, cfg.PR.HeadSHA, cfg.Policy.RequiredChecks)
+	if err != nil {
+		return fmt.Errorf("evaluate CI gate of pull request %d: %w", prID, err)
+	}
+	if verdict.Green() {
+		if _, err := t.enqueue(ctx, prID, "webhook", false); err != nil {
+			return err
+		}
+	}
+	if t.Republish != nil {
+		if err := t.Republish.Republish(ctx, prID); err != nil {
+			return fmt.Errorf("republish verdict of pull request %d: %w", prID, err)
+		}
+	}
+	return nil
 }
 
 // Retry queues a fresh run even when the current comparison already has a
@@ -433,11 +460,11 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 	// every delivery, so the head is released by the very event that makes CI
 	// green instead of waiting for a human retry.
 	if cfg.Policy.RequireGreenCI {
-		validations, err := t.Store.PRValidationsFor(ctx, prID, cfg.PR.HeadSHA)
+		verdict, err := t.Store.CIVerdictFor(ctx, prID, cfg.PR.HeadSHA, cfg.Policy.RequiredChecks)
 		if err != nil {
-			return false, fmt.Errorf("load validations of pull request %d: %w", prID, err)
+			return false, fmt.Errorf("evaluate CI gate of pull request %d: %w", prID, err)
 		}
-		if !validations.Green() {
+		if !verdict.Green() {
 			return false, nil
 		}
 	}

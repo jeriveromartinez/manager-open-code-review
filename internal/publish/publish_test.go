@@ -78,6 +78,9 @@ type fakeGitHub struct {
 	reviews            []fakeReview
 	replies            []string
 	checkPatches       []checkPatch
+	checkRuns          []map[string]any
+	commitStatuses     []map[string]any
+	checksFailure      bool
 	gqlQueries         []string
 	nextCommentID      int64
 	omitReviewComments bool
@@ -96,6 +99,54 @@ func (g *fakeGitHub) failNextResolve() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.failResolveOnce = true
+}
+
+// setChecks programs the CI endpoints the publisher reads when the team gates
+// reviews on green CI. Each conclusion becomes a check run named job-N.
+func (g *fakeGitHub) setChecks(conclusions ...string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	runs := make([]map[string]any, 0, len(conclusions))
+	for i, conclusion := range conclusions {
+		runs = append(runs, map[string]any{
+			"id": i + 1, "name": fmt.Sprintf("job-%d", i+1),
+			"status": "completed", "conclusion": conclusion,
+			"app": map[string]any{"id": 7},
+		})
+	}
+	g.checkRuns = runs
+}
+
+// setCheckTasks programs named check runs with an explicit App origin.
+func (g *fakeGitHub) setCheckTasks(checks ...store.CheckObservation) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	runs := make([]map[string]any, 0, len(checks))
+	for i, check := range checks {
+		status, conclusion := "completed", "success"
+		switch check.State {
+		case store.CheckFailed:
+			conclusion = "failure"
+		case store.CheckPending:
+			status, conclusion = "in_progress", ""
+		}
+		run := map[string]any{
+			"id": i + 1, "name": check.Name, "status": status, "conclusion": conclusion,
+		}
+		if strings.HasPrefix(check.Origin, "app:") {
+			var appID int64
+			_, _ = fmt.Sscanf(check.Origin, "app:%d", &appID)
+			run["app"] = map[string]any{"id": appID}
+		}
+		runs = append(runs, run)
+	}
+	g.checkRuns = runs
+}
+
+func (g *fakeGitHub) failChecks(fail bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.checksFailure = fail
 }
 
 func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +168,24 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/commits/") &&
+		strings.HasSuffix(r.URL.Path, "/check-runs"):
+		if g.checksFailure {
+			http.Error(w, "checks unavailable", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(map[string]any{"total_count": len(g.checkRuns), "check_runs": g.checkRuns}, http.StatusOK)
+
+	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/commits/") &&
+		strings.HasSuffix(r.URL.Path, "/status"):
+		if g.checksFailure {
+			http.Error(w, "statuses unavailable", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(map[string]any{
+			"state": "success", "total_count": len(g.commitStatuses), "statuses": g.commitStatuses,
+		}, http.StatusOK)
+
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/issues/7/comments":
 		comments := g.comments
 		if comments == nil {
@@ -1679,6 +1748,225 @@ func TestPublishDoesNotTrustAVerdictFromAnotherHead(t *testing.T) {
 			if strings.Contains(comment.Body, "Título stale") {
 				t.Errorf("a stale confirmation was published inline: %q", comment.Body)
 			}
+		}
+	}
+}
+
+// enableCI turns on the CI gate for the seeded team and configures the checks
+// it must see green.
+func enableCI(t *testing.T, st *store.Store, pr store.PullRequest, checks ...store.RequiredCheck) {
+	t.Helper()
+	ctx := context.Background()
+	var repo store.Repository
+	if err := st.DB.WithContext(ctx).Take(&repo, pr.RepositoryID).Error; err != nil {
+		t.Fatalf("load repository: %v", err)
+	}
+	if repo.TeamID == nil {
+		t.Fatal("repository has no team")
+	}
+	policy, err := st.QAPolicyForTeam(ctx, *repo.TeamID)
+	if err != nil {
+		t.Fatalf("load policy: %v", err)
+	}
+	encoded, err := store.NormalizeRequiredChecks(checks)
+	if err != nil {
+		t.Fatalf("normalize required checks: %v", err)
+	}
+	policy.RequireGreenCI = true
+	policy.RequiredChecks = encoded
+	if _, err := st.SaveQAPolicy(ctx, policy); err != nil {
+		t.Fatalf("save policy: %v", err)
+	}
+}
+
+func publishedConclusion(t *testing.T, gh *fakeGitHub) string {
+	t.Helper()
+	gh.mu.Lock()
+	defer gh.mu.Unlock()
+	if len(gh.checkPatches) == 0 {
+		t.Fatal("no check patch published")
+	}
+	return gh.checkPatches[len(gh.checkPatches)-1].Conclusion
+}
+
+func storedQAStatus(t *testing.T, st *store.Store, prID uint) string {
+	t.Helper()
+	var pr store.PullRequest
+	if err := st.DB.WithContext(context.Background()).Take(&pr, prID).Error; err != nil {
+		t.Fatalf("reload PR: %v", err)
+	}
+	return pr.QAStatus
+}
+
+// A run scheduled while CI was green must not publish a success after the same
+// head turned red: publication re-reads the gate instead of trusting the
+// enqueue-time snapshot.
+func TestPublishDoesNotSucceedWhenCITurnedRed(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableCI(t, st, pr)
+	gh := newFakeGitHub(t)
+	gh.setChecks("failure", "success")
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if got := publishedConclusion(t, gh); got != "action_required" {
+		t.Errorf("check conclusion = %q, want action_required", got)
+	}
+	if got := storedQAStatus(t, st, pr.ID); got != store.StatusWaitingCI {
+		t.Errorf("qa_status = %q, want %q", got, store.StatusWaitingCI)
+	}
+}
+
+func TestPublishWaitsForPendingCI(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableCI(t, st, pr)
+	gh := newFakeGitHub(t)
+	gh.setCheckTasks(store.CheckObservation{Name: "build", Origin: "app:7", State: store.CheckPending})
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if got := publishedConclusion(t, gh); got != "action_required" {
+		t.Errorf("check conclusion = %q, want action_required while CI is pending", got)
+	}
+	if got := storedQAStatus(t, st, pr.ID); got != store.StatusWaitingCI {
+		t.Errorf("qa_status = %q, want %q", got, store.StatusWaitingCI)
+	}
+}
+
+func TestPublishGreenCIAllowsSuccess(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableCI(t, st, pr)
+	gh := newFakeGitHub(t)
+	gh.setChecks("success", "success")
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if got := publishedConclusion(t, gh); got != "success" {
+		t.Errorf("check conclusion = %q, want success", got)
+	}
+	if got := storedQAStatus(t, st, pr.ID); got != store.StatusReadyForHuman {
+		t.Errorf("qa_status = %q, want %q", got, store.StatusReadyForHuman)
+	}
+}
+
+// A failed lookup is explicit: no success is published and the previous
+// counters are replaced by an unknown observation.
+func TestPublishCILookupFailureIsExplicit(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableCI(t, st, pr)
+	gh := newFakeGitHub(t)
+	gh.failChecks(true)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if got := publishedConclusion(t, gh); got != "action_required" {
+		t.Errorf("check conclusion = %q, want action_required after a failed lookup", got)
+	}
+	if got := storedQAStatus(t, st, pr.ID); got != store.StatusWaitingCI {
+		t.Errorf("qa_status = %q, want %q", got, store.StatusWaitingCI)
+	}
+	observation, err := st.PRValidationObservation(ctx, pr.ID, run.HeadSHA)
+	if err != nil {
+		t.Fatalf("PRValidationObservation: %v", err)
+	}
+	if observation == nil || observation.Result != store.ObservationLookupFailed {
+		t.Errorf("stored observation = %+v, want an explicit lookup failure", observation)
+	}
+}
+
+// Only the configured required checks decide the gate; a failure elsewhere
+// does not block a success, and an absent required check blocks it.
+func TestPublishRequiredCheckSelection(t *testing.T) {
+	tests := []struct {
+		name     string
+		required []store.RequiredCheck
+		checks   []store.CheckObservation
+		want     string
+	}{
+		{
+			name:     "required check green while another fails",
+			required: []store.RequiredCheck{{Name: "build", Origin: "app:7"}},
+			checks: []store.CheckObservation{
+				{Name: "build", Origin: "app:7", State: store.CheckPassed},
+				{Name: "optional", Origin: "app:8", State: store.CheckFailed},
+			},
+			want: "success",
+		},
+		{
+			name:     "required check absent",
+			required: []store.RequiredCheck{{Name: "build", Origin: "app:7"}},
+			checks: []store.CheckObservation{
+				{Name: "build", Origin: "app:8", State: store.CheckPassed},
+			},
+			want: "action_required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := testutil.NewStore(t)
+			ctx := context.Background()
+			run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+			enableCI(t, st, pr, tt.required...)
+			gh := newFakeGitHub(t)
+			gh.setCheckTasks(tt.checks...)
+			w, _ := newPublishWorker(t, st, gh)
+
+			if err := w.Publish(ctx, run.ID); err != nil {
+				t.Fatalf("Publish() error = %v", err)
+			}
+			if got := publishedConclusion(t, gh); got != tt.want {
+				t.Errorf("check conclusion = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Republishing applies the same gate, so red -> green -> red converges on the
+// same SHA without repeating the review.
+func TestRepublishConvergesRedGreenRed(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	_, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableCI(t, st, pr)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	steps := []struct {
+		ci        string
+		wantCheck string
+		status    string
+	}{
+		{"failure", "action_required", store.StatusWaitingCI},
+		{"success", "success", store.StatusReadyForHuman},
+		{"failure", "action_required", store.StatusWaitingCI},
+	}
+	for i, step := range steps {
+		gh.setChecks(step.ci)
+		if err := w.Republish(ctx, pr.ID); err != nil {
+			t.Fatalf("Republish() #%d error = %v", i+1, err)
+		}
+		if got := publishedConclusion(t, gh); got != step.wantCheck {
+			t.Errorf("step %d conclusion = %q, want %q", i+1, got, step.wantCheck)
+		}
+		if got := storedQAStatus(t, st, pr.ID); got != step.status {
+			t.Errorf("step %d qa_status = %q, want %q", i+1, got, step.status)
 		}
 	}
 }

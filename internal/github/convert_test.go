@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 
@@ -145,7 +146,9 @@ func TestPRFromGitHub(t *testing.T) {
 				QAStatus:          "",
 				GitHubUpdatedAt:   updated,
 			}
-			if got != want {
+			// PullRequest now carries a JSON observation, so it is no longer
+			// comparable with ==.
+			if !reflect.DeepEqual(got, want) {
 				t.Errorf("PRFromGitHub() = %+v, want %+v", got, want)
 			}
 		})

@@ -102,11 +102,16 @@ func (c *Checks) storeValidations(ctx context.Context, client *gh.Client, ownApp
 	if !ok || owner == "" || name == "" {
 		return store.PRValidations{}, false, fmt.Errorf("invalid repository full name %q", repo.FullName)
 	}
-	state, err := ReadValidations(ctx, client, owner, name, pr.HeadSHA, ownAppID)
+	state, observation, err := ReadObservation(ctx, client, owner, name, pr.HeadSHA, ownAppID)
 	if err != nil {
+		// The previous counters must not survive a failed lookup: the gate would
+		// keep using a verdict GitHub did not confirm.
+		if _, markErr := c.Store.SetPRValidationLookupFailure(ctx, pr.ID, pr.HeadSHA); markErr != nil {
+			return store.PRValidations{}, false, errors.Join(err, markErr)
+		}
 		return store.PRValidations{}, false, err
 	}
-	changed, err := c.Store.SetPRValidations(ctx, pr.ID, pr.HeadSHA, state)
+	changed, err := c.Store.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA, state, observation)
 	if err != nil {
 		return store.PRValidations{}, false, err
 	}
@@ -118,15 +123,23 @@ func (c *Checks) storeValidations(ctx context.Context, client *gh.Client, ownApp
 // is a result, not an input, so counting it would let a review block the next
 // review of the same commit.
 func ReadValidations(ctx context.Context, client *gh.Client, owner, repo, headSHA string, ownAppID int64) (store.PRValidations, error) {
+	state, _, err := ReadObservation(ctx, client, owner, repo, headSHA, ownAppID)
+	return state, err
+}
+
+// ReadObservation reads the check runs and commit statuses of one commit and
+// returns both the counters and the named observation the gate evaluates.
+func ReadObservation(ctx context.Context, client *gh.Client, owner, repo, headSHA string, ownAppID int64) (store.PRValidations, store.ValidationObservation, error) {
 	runs, err := listCheckRuns(ctx, client, owner, repo, headSHA)
 	if err != nil {
-		return store.PRValidations{}, fmt.Errorf("list check runs of %s/%s at %q: %w", owner, repo, headSHA, err)
+		return store.PRValidations{}, store.ValidationObservation{}, fmt.Errorf("list check runs of %s/%s at %q: %w", owner, repo, headSHA, err)
 	}
 	statuses, err := listStatuses(ctx, client, owner, repo, headSHA)
 	if err != nil {
-		return store.PRValidations{}, fmt.Errorf("list commit statuses of %s/%s at %q: %w", owner, repo, headSHA, err)
+		return store.PRValidations{}, store.ValidationObservation{}, fmt.Errorf("list commit statuses of %s/%s at %q: %w", owner, repo, headSHA, err)
 	}
-	return ValidationsOf(runs, statuses, ownAppID), nil
+	observation := ObservationOf(runs, statuses, ownAppID)
+	return ValidationsFor(observation), observation, nil
 }
 
 // listCheckRuns follows the pagination of the check runs endpoint. A commit can
@@ -181,7 +194,31 @@ func listStatuses(ctx context.Context, client *gh.Client, owner, repo, ref strin
 // as pending while it is still queued or running. Check runs of ownAppID are
 // skipped.
 func ValidationsOf(runs []*gh.CheckRun, statuses []*gh.RepoStatus, ownAppID int64) store.PRValidations {
+	return ValidationsFor(ObservationOf(runs, statuses, ownAppID))
+}
+
+// ValidationsFor derives the counters from a named observation, so both views
+// of the same head always agree.
+func ValidationsFor(observation store.ValidationObservation) store.PRValidations {
 	var v store.PRValidations
+	for _, check := range observation.Checks {
+		v.Total++
+		switch check.State {
+		case store.CheckPassed:
+			v.Passed++
+		case store.CheckFailed:
+			v.Failed++
+		}
+	}
+	return v
+}
+
+// ObservationOf keeps the name, origin and state of every check of the head.
+// Origin is "app:<id>" for a check run reported by an App and "status" for a
+// legacy commit status, which lets the policy require a check by both name and
+// origin. Check runs of ownAppID are skipped.
+func ObservationOf(runs []*gh.CheckRun, statuses []*gh.RepoStatus, ownAppID int64) store.ValidationObservation {
+	observation := store.ValidationObservation{Result: store.ObservationOK}
 	for _, run := range runs {
 		if run == nil {
 			continue
@@ -189,29 +226,44 @@ func ValidationsOf(runs []*gh.CheckRun, statuses []*gh.RepoStatus, ownAppID int6
 		if ownAppID != 0 && run.GetApp().GetID() == ownAppID {
 			continue
 		}
-		v.Total++
-		if run.GetStatus() != "completed" {
-			continue
+		state := store.CheckPending
+		if run.GetStatus() == "completed" {
+			switch run.GetConclusion() {
+			case "success", "neutral", "skipped":
+				state = store.CheckPassed
+			default:
+				state = store.CheckFailed
+			}
 		}
-		switch run.GetConclusion() {
-		case "success", "neutral", "skipped":
-			v.Passed++
-		default:
-			v.Failed++
-		}
+		observation.Checks = append(observation.Checks, store.CheckObservation{
+			Name:   run.GetName(),
+			Origin: checkRunOrigin(run.GetApp()),
+			State:  state,
+		})
 	}
 	for _, status := range statuses {
 		if status == nil {
 			continue
 		}
-		v.Total++
+		state := store.CheckFailed
 		switch status.GetState() {
 		case "success":
-			v.Passed++
+			state = store.CheckPassed
 		case "pending":
-		default:
-			v.Failed++
+			state = store.CheckPending
 		}
+		observation.Checks = append(observation.Checks, store.CheckObservation{
+			Name:   status.GetContext(),
+			Origin: "status",
+			State:  state,
+		})
 	}
-	return v
+	return observation
+}
+
+func checkRunOrigin(app *gh.App) string {
+	if app == nil || app.GetID() == 0 {
+		return ""
+	}
+	return fmt.Sprintf("app:%d", app.GetID())
 }

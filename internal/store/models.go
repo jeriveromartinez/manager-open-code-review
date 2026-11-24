@@ -171,6 +171,9 @@ type PullRequest struct {
 	ValidationsPassed int       `gorm:"column:validations_passed"`
 	ValidationsFailed int       `gorm:"column:validations_failed"`
 	ValidationsTotal  int       `gorm:"column:validations_total"`
+	// ValidationsDetail is the named observation behind the counters: which
+	// checks GitHub reported, from which origin and in which state (#143).
+	ValidationsDetail datatypes.JSON `gorm:"column:validations_detail"`
 	// Maintained by a database trigger whenever qa_status changes, so GORM
 	// must never write it.
 	QAStatusChangedAt time.Time `gorm:"column:qa_status_changed_at;<-:false"`
@@ -305,6 +308,9 @@ type QAPolicy struct {
 	MaxDiffLinesPerPass int            `gorm:"column:max_diff_lines_per_pass"`
 	MaxPasses           int            `gorm:"column:max_passes"`
 	RequireGreenCI      bool           `gorm:"column:require_green_ci"`
+	// RequiredChecks is a JSON array of checks that must be green before the
+	// gate opens. An empty array requires every reported check (#143).
+	RequiredChecks datatypes.JSON `gorm:"column:required_checks"`
 	// ReviewContextCeiling overrides the global review_context_ceiling for this
 	// team. Nil inherits the global setting.
 	ReviewContextCeiling *int   `gorm:"column:review_context_ceiling"`

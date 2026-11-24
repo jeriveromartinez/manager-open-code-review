@@ -213,6 +213,7 @@ func syncExisting(tx *gorm.DB, prev *PullRequest, in PullRequest, out *PullReque
 		updates["validations_passed"] = 0
 		updates["validations_failed"] = 0
 		updates["validations_total"] = 0
+		updates["validations_detail"] = nil
 	}
 	if prev.HeadSHA != in.HeadSHA || prev.BaseRef != in.BaseRef || prev.BaseSHA != in.BaseSHA {
 		// The merge base belongs to the comparison it was resolved for. Once
