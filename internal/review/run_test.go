@@ -1204,8 +1204,18 @@ func TestRunVerifierTokensAreAddedToRunUsage(t *testing.T) {
 		t.Errorf("verify usage/session = %q/%q, want the scan recorded",
 			run.VerifyUsage, run.VerifySessionID)
 	}
-	if !strings.Contains(string(run.VerifyUsage), `"total":90`) {
-		t.Errorf("verify usage = %s", run.VerifyUsage)
+	// PostgreSQL normalizes jsonb spacing, so the usage is decoded instead of
+	// matched as text.
+	var verifyUsage struct {
+		Input  int `json:"input"`
+		Output int `json:"output"`
+		Total  int `json:"total"`
+	}
+	if err := json.Unmarshal(run.VerifyUsage, &verifyUsage); err != nil {
+		t.Fatalf("verify usage %s is not JSON: %v", run.VerifyUsage, err)
+	}
+	if verifyUsage.Input != 60 || verifyUsage.Output != 30 || verifyUsage.Total != 90 {
+		t.Errorf("verify usage = %+v, want the scan's 60/30/90", verifyUsage)
 	}
 }
 

@@ -198,7 +198,7 @@ func (g *e2eGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON([]map[string]string{
 			{
 				"filename": "auth.go", "status": "modified",
-				"patch": "@@ -1,4 +1,4 @@\n package main\n \n+var insecure = true\n var next = 1\n",
+				"patch": "@@ -1,3 +1,5 @@\n package main\n \n+var insecure = true\n var next = 1\n+var last = 2\n",
 			},
 			{
 				"filename": "main.go", "status": "modified",
@@ -810,7 +810,9 @@ func testE2ESuccess(t *testing.T) {
 
 func testE2ETimeout(t *testing.T) {
 	f := newE2EFixture(t)
-	f.runner.Cfg.Timeout = 300 * time.Millisecond
+	// The OCR double sleeps far longer than the deadline, so the timeout always
+	// fires inside the review instead of racing the local clone and fetch.
+	f.runner.Cfg.Timeout = 5 * time.Second
 	t.Setenv("RUN_FAKE_OCR_SLEEP", "30")
 
 	seed := store.Finding{
@@ -824,6 +826,10 @@ func testE2ETimeout(t *testing.T) {
 	runID := f.enqueue(t, false)
 	f.events.reset()
 	f.execute(t, runID)
+
+	if got := f.ocrCalls(t); got != 1 {
+		t.Fatalf("ocr invocations = %d, want the review to start before the deadline", got)
+	}
 
 	run := f.loadRun(t, runID)
 	assertE2ERun(t, run, store.RunInconclusive, "timeout")
@@ -1181,6 +1187,10 @@ func testE2EAutoTriagePublishesCuratedSummary(t *testing.T) {
 	comment := reviews[0].Comments[0]
 	if !strings.Contains(comment.Body, "Nombre confuso") {
 		t.Errorf("inline comment body = %q, want the confirmed finding", comment.Body)
+	}
+	if comment.Path != "auth.go" || comment.Line != 5 {
+		t.Errorf("inline comment at %s:%d, want the confirmed finding's added line",
+			comment.Path, comment.Line)
 	}
 }
 
