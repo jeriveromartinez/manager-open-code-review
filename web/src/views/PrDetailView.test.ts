@@ -759,6 +759,28 @@ describe('PrDetailView', () => {
     wrapper.unmount()
   })
 
+  it('shows a simulated verdict without touching the triage', async () => {
+    const simulated = {
+      ...detail.findings[1],
+      verification: { verdict: 'refute' as const, evidence: 'return nil' },
+    }
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      findings: [detail.findings[0], simulated, detail.findings[2]],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const major = wrapper.get('[data-severity="major"]')
+    expect(major.get('[data-verification-verdict]').text()).toBe('Descartado')
+    expect(major.get('[data-verification-evidence]').text()).toBe('return nil')
+    expect(major.get('[data-triage-note]').text()).toBe('Sin triar')
+    expect(major.find('[data-withdraw]').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
   it('explains that a resolved finding cannot be triaged', async () => {
     mocks.api.confirmFinding.mockRejectedValue(Object.assign(new Error('conflict'), { status: 409 }))
     const wrapper = mountDetail()

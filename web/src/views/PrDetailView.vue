@@ -132,14 +132,14 @@ const verificationLabels: Record<string, string> = {
   uncertain: 'Sin confirmar',
 }
 
-// Solo la segunda pasada de OCR deja una verificación; un veredicto humano no.
+// La segunda pasada deja su veredicto aunque la política no lo aplique (una
+// simulación), así que el bloque sigue al veredicto guardado y no al triage.
 function verificationLabel(finding: Finding): string {
-  if (finding.triage_source !== 'verifier') return ''
-  return verificationLabels[finding.verification.verdict ?? ''] ?? 'Sin confirmar'
+  if (!finding.verification.verdict) return ''
+  return verificationLabels[finding.verification.verdict] ?? 'Sin confirmar'
 }
 
 function verificationEvidence(finding: Finding): string {
-  if (finding.triage_source !== 'verifier') return ''
   return (finding.verification.evidence ?? '').trim()
 }
 
