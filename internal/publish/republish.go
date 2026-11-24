@@ -131,29 +131,7 @@ type threadMutationResult struct {
 // currentRun returns the latest run of the PR's current head, and false when
 // that head has no run that produced a verdict.
 func (w *Worker) currentRun(ctx context.Context, pr store.PullRequest) (store.ReviewRun, bool, error) {
-	if pr.HeadSHA == "" {
-		return store.ReviewRun{}, false, nil
-	}
-	runs, err := w.Store.ListReviewRuns(ctx, pr.ID)
-	if err != nil {
-		return store.ReviewRun{}, false, err
-	}
-	for i := len(runs) - 1; i >= 0; i-- {
-		if runs[i].HeadSHA != pr.HeadSHA {
-			continue
-		}
-		switch runs[i].Status {
-		case store.RunSucceeded, store.RunInconclusive, store.RunFailed:
-			// A verdict of another comparison must not drive the shared check
-			// or the QA status (#141).
-			if !pr.CoveredBy(runs[i]) {
-				return store.ReviewRun{}, false, nil
-			}
-			return runs[i], true, nil
-		}
-		return store.ReviewRun{}, false, nil
-	}
-	return store.ReviewRun{}, false, nil
+	return w.Store.CurrentVerdictRun(ctx, pr)
 }
 
 func (w *Worker) loadRepublishContext(ctx context.Context, run store.ReviewRun, pr store.PullRequest) (*publishContext, error) {

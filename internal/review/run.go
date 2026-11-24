@@ -399,19 +399,33 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	}
 
 	if outcome.status != store.RunSuperseded {
-		prStatus := store.StatusInconclusive
-		if outcome.status == store.RunSucceeded {
-			prStatus = store.StatusReadyForHuman
-			open, err := r.Store.OpenFindingsForPR(persistCtx, run.PullRequestID)
-			if err != nil {
-				return fmt.Errorf("list open findings of pull request %d: %w", run.PullRequestID, err)
-			}
-			if hasBlockingFinding(open, cfg.Policy.BlockingThreshold, run.HeadSHA) {
-				prStatus = store.StatusChangesRequested
-			}
+		pr, err := r.Store.PullRequest(persistCtx, run.PullRequestID)
+		if err != nil {
+			return fmt.Errorf("load pull request %d: %w", run.PullRequestID, err)
 		}
-		if err := r.Store.SetPRStatus(persistCtx, run.PullRequestID, prStatus); err != nil {
-			return fmt.Errorf("set QA status of pull request %d: %w", run.PullRequestID, err)
+		// The QA status is shared by every run of the comparison. Only the run
+		// that owns the current one may write it: a stale head, a moved base or
+		// an unresolved comparison must be left to the run that does, or to the
+		// publish path once the trigger adopts the comparison (#138).
+		owner, current, err := r.Store.CurrentVerdictRun(persistCtx, pr)
+		if err != nil {
+			return fmt.Errorf("resolve current verdict of pull request %d: %w", run.PullRequestID, err)
+		}
+		if current && owner.ID == run.ID {
+			prStatus := store.StatusInconclusive
+			if outcome.status == store.RunSucceeded {
+				prStatus = store.StatusReadyForHuman
+				open, err := r.Store.OpenFindingsForPR(persistCtx, run.PullRequestID)
+				if err != nil {
+					return fmt.Errorf("list open findings of pull request %d: %w", run.PullRequestID, err)
+				}
+				if hasBlockingFinding(open, cfg.Policy.BlockingThreshold, run.HeadSHA) {
+					prStatus = store.StatusChangesRequested
+				}
+			}
+			if err := r.Store.SetPRStatus(persistCtx, run.PullRequestID, prStatus); err != nil {
+				return fmt.Errorf("set QA status of pull request %d: %w", run.PullRequestID, err)
+			}
 		}
 	}
 

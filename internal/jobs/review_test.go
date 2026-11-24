@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/riverqueue/river/rivertype"
+
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
 	"github.com/jeriveromartinez/qa-control-center/internal/jobs"
 	"github.com/jeriveromartinez/qa-control-center/internal/review"
@@ -48,6 +50,70 @@ func TestNewReviewClientEnqueuesPublish(t *testing.T) {
 	}
 	if err := jobs.NewEnqueuer(client).EnqueuePublish(context.Background(), 3); err != nil {
 		t.Errorf("EnqueuePublish() error = %v", err)
+	}
+}
+
+func TestPublishReviewArgsAreUniquePerRun(t *testing.T) {
+	opts := jobs.PublishReviewArgs{}.InsertOpts()
+	if opts.Queue != "publish" {
+		t.Errorf("queue = %q, want publish", opts.Queue)
+	}
+	if !opts.UniqueOpts.ByArgs {
+		t.Error("publish jobs must be unique per run: the terminal write and the reconciler can both enqueue it")
+	}
+	for _, state := range opts.UniqueOpts.ByState {
+		switch state {
+		case rivertype.JobStateCompleted, rivertype.JobStateDiscarded, rivertype.JobStateCancelled:
+			t.Errorf("unique state %q would block a later delivery of an unsettled run", state)
+		}
+	}
+}
+
+// A publish that returns without settling (an unresolved comparison) completes
+// its job; the adoption trigger and the reconciler must still be able to
+// enqueue that run again.
+func TestPublishJobCanBeReinsertedAfterCompletion(t *testing.T) {
+	s := testutil.NewStore(t)
+	box, err := crypto.NewBox(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatalf("create crypto box: %v", err)
+	}
+	client, err := jobs.NewReviewClient(s.Pool, &review.Runner{Store: s, Box: box},
+		&review.ProfileChecker{Store: s, Box: box}, 1)
+	if err != nil {
+		t.Fatalf("NewReviewClient() error = %v", err)
+	}
+	ctx := context.Background()
+	args := jobs.PublishReviewArgs{RunID: 42}
+
+	first, err := client.Insert(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("first Insert() error = %v", err)
+	}
+	if first.UniqueSkippedAsDuplicate {
+		t.Fatal("first publish job was deduplicated")
+	}
+
+	live, err := client.Insert(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("live Insert() error = %v", err)
+	}
+	if !live.UniqueSkippedAsDuplicate {
+		t.Error("a second live publish job for the same run was not deduplicated")
+	}
+
+	// The job ran and returned without settling the run's delivery.
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE river_job SET state = 'completed', finalized_at = now() WHERE id = $1`, first.Job.ID); err != nil {
+		t.Fatalf("complete first job: %v", err)
+	}
+
+	again, err := client.Insert(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("reinsert Insert() error = %v", err)
+	}
+	if again.UniqueSkippedAsDuplicate {
+		t.Error("a settled job blocked the re-enqueue of a still-pending run")
 	}
 }
 

@@ -33,6 +33,9 @@ type Worker struct {
 	Box       *crypto.Box
 	Events    events.Publisher
 	PublicURL string
+	// Jobs re-enqueues publications the reconciler finds pending. It is nil in
+	// tests and callers that deliver the run directly.
+	Jobs PublishEnqueuer
 }
 
 // StartCheck opens (or reopens) the QA check run for a review run's head SHA and

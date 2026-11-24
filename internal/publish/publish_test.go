@@ -76,6 +76,7 @@ type fakeGitHub struct {
 	comments           []fakeComment
 	commentPatches     map[int64]string
 	reviews            []fakeReview
+	reviewIDs          []int64
 	replies            []string
 	checkPatches       []checkPatch
 	checkRuns          []map[string]any
@@ -83,16 +84,19 @@ type fakeGitHub struct {
 	checksFailure      bool
 	gqlQueries         []string
 	nextCommentID      int64
+	nextReviewID       int64
 	omitReviewComments bool
 	// reviewCommentsWithoutLine mimics GitHub returning a just-created review's
 	// comments with no line fields, only their position.
 	reviewCommentsWithoutLine bool
 	failResolveOnce           bool
+	failCheckOnce             bool
+	failReviewCommentsOnce    bool
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	t.Helper()
-	return &fakeGitHub{t: t, files: defaultPRFiles, nextCommentID: 1000}
+	return &fakeGitHub{t: t, files: defaultPRFiles, nextCommentID: 1000, nextReviewID: 899}
 }
 
 func (g *fakeGitHub) failNextResolve() {
@@ -147,6 +151,18 @@ func (g *fakeGitHub) failChecks(fail bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.checksFailure = fail
+}
+
+func (g *fakeGitHub) failNextCheck() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.failCheckOnce = true
+}
+
+func (g *fakeGitHub) failNextReviewComments() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.failReviewCommentsOnce = true
 }
 
 func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
@@ -228,15 +244,41 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, g.files)
 
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/7/reviews":
+		var out []struct {
+			ID   int64  `json:"id"`
+			Body string `json:"body"`
+		}
+		for i, review := range g.reviews {
+			out = append(out, struct {
+				ID   int64  `json:"id"`
+				Body string `json:"body"`
+			}{ID: g.reviewIDs[i], Body: review.Body})
+		}
+		if out == nil {
+			out = []struct {
+				ID   int64  `json:"id"`
+				Body string `json:"body"`
+			}{}
+		}
+		writeJSON(out, http.StatusOK)
+
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/pulls/7/reviews":
 		var review fakeReview
 		_ = json.Unmarshal(body, &review)
+		g.nextReviewID++
 		g.reviews = append(g.reviews, review)
+		g.reviewIDs = append(g.reviewIDs, g.nextReviewID)
 		writeJSON(struct {
 			ID int64 `json:"id"`
-		}{ID: 900}, http.StatusOK)
+		}{ID: g.nextReviewID}, http.StatusOK)
 
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/repo/pulls/7/reviews/"):
+		if g.failReviewCommentsOnce {
+			g.failReviewCommentsOnce = false
+			http.Error(w, "review comments temporarily unavailable", http.StatusInternalServerError)
+			return
+		}
 		var posted []struct {
 			ID     int64  `json:"id"`
 			NodeID string `json:"node_id"`
@@ -272,6 +314,11 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(map[string]any{"id": 7000}, http.StatusCreated)
 
 	case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/check-runs/555":
+		if g.failCheckOnce {
+			g.failCheckOnce = false
+			http.Error(w, "check temporarily unavailable", http.StatusInternalServerError)
+			return
+		}
 		var patch checkPatch
 		if err := json.Unmarshal(body, &patch); err != nil {
 			http.Error(w, "bad check payload", http.StatusBadRequest)
@@ -471,6 +518,12 @@ func TestPublishSummaryIsEditedNotDuplicated(t *testing.T) {
 	ctx := context.Background()
 	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
 	gh := newFakeGitHub(t)
+	// An earlier delivery already left the shared summary comment; publishing
+	// must edit it and a redelivery must not touch it again.
+	gh.comments = []fakeComment{{
+		ID: 1, NodeID: "IC_1",
+		Body: "<!-- qa-control-center:summary -->\nresumen anterior",
+	}}
 	w, _ := newPublishWorker(t, st, gh)
 
 	for i := 0; i < 2; i++ {
@@ -1968,5 +2021,422 @@ func TestRepublishConvergesRedGreenRed(t *testing.T) {
 		if got := storedQAStatus(t, st, pr.ID); got != step.status {
 			t.Errorf("step %d qa_status = %q, want %q", i+1, got, step.status)
 		}
+	}
+}
+
+type recordingEnqueuer struct {
+	mu  sync.Mutex
+	ids []uint
+}
+
+func (e *recordingEnqueuer) EnqueuePublish(_ context.Context, id uint) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ids = append(e.ids, id)
+	return nil
+}
+
+func (e *recordingEnqueuer) published() []uint {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]uint(nil), e.ids...)
+}
+
+func setPublishPending(t *testing.T, st *store.Store, runID uint) {
+	t.Helper()
+	if err := st.DB.Model(&store.ReviewRun{}).Where("id = ?", runID).
+		Update("publish_pending", true).Error; err != nil {
+		t.Fatalf("set publish pending: %v", err)
+	}
+}
+
+func loadRun(t *testing.T, st *store.Store, runID uint) store.ReviewRun {
+	t.Helper()
+	run, err := st.ReviewRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("ReviewRun() error = %v", err)
+	}
+	return run
+}
+
+// A terminal run whose publish job was lost is found by the reconciler and its
+// delivery succeeds on the next publish.
+func TestPublishReconcilesRunWhoseJobWasLost(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+	setPublishPending(t, st, run.ID)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+	enqueuer := &recordingEnqueuer{}
+	w.Jobs = enqueuer
+
+	enqueued, err := w.ReconcilePendingPublishes(ctx, 10)
+	if err != nil {
+		t.Fatalf("ReconcilePendingPublishes() error = %v", err)
+	}
+	if enqueued != 1 {
+		t.Fatalf("enqueued = %d, want 1", enqueued)
+	}
+	if got := enqueuer.published(); len(got) != 1 || got[0] != run.ID {
+		t.Fatalf("enqueued runs = %v, want [%d]", got, run.ID)
+	}
+
+	// The queued job then delivers the run.
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if got := len(summaryBodies(t, gh)); got != 1 {
+		t.Errorf("summary comments = %d, want 1", got)
+	}
+	saved := loadRun(t, st, run.ID)
+	if saved.PublishPending {
+		t.Error("publish_pending is still true after a successful delivery")
+	}
+	state := map[string]bool{}
+	if err := json.Unmarshal(saved.PublishState, &state); err != nil {
+		t.Fatalf("decode publish_state %s: %v", saved.PublishState, err)
+	}
+	if !state["completed"] {
+		t.Errorf("publish_state = %s, want completed", saved.PublishState)
+	}
+}
+
+// A redelivery of a settled run writes nothing.
+func TestPublishDuplicateIsNoOp(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("first Publish() error = %v", err)
+	}
+	gh.mu.Lock()
+	before := struct {
+		comments, reviews, checks, patches int
+	}{len(gh.comments), len(gh.reviews), len(gh.checkPatches), len(gh.commentPatches)}
+	gh.mu.Unlock()
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("duplicate Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	after := struct {
+		comments, reviews, checks, patches int
+	}{len(gh.comments), len(gh.reviews), len(gh.checkPatches), len(gh.commentPatches)}
+	gh.mu.Unlock()
+	if after != before {
+		t.Errorf("redelivery wrote again: before %+v, after %+v", before, after)
+	}
+}
+
+// A late publish of an old head or an old run of the same comparison writes
+// nothing shared and settles instead of retrying forever.
+func TestPublishLateRunWritesNothing(t *testing.T) {
+	cases := []struct {
+		name string
+		set  func(t *testing.T, st *store.Store, run store.ReviewRun, pr store.PullRequest)
+	}{
+		{
+			name: "head moved",
+			set: func(t *testing.T, st *store.Store, run store.ReviewRun, pr store.PullRequest) {
+				if err := st.DB.Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+					Update("head_sha", "old-head").Error; err != nil {
+					t.Fatalf("move run head: %v", err)
+				}
+				if err := st.DB.Model(&store.PullRequest{}).Where("id = ?", pr.ID).
+					Update("head_sha", "new-head").Error; err != nil {
+					t.Fatalf("move PR head: %v", err)
+				}
+			},
+		},
+		{
+			name: "newer run owns the comparison",
+			set: func(t *testing.T, st *store.Store, run store.ReviewRun, pr store.PullRequest) {
+				if _, err := st.CreateReviewRun(context.Background(), store.ReviewRun{
+					PullRequestID: pr.ID, ProfileID: run.ProfileID, HeadSHA: run.HeadSHA,
+					Status: store.RunSucceeded, Summary: "más reciente",
+				}); err != nil {
+					t.Fatalf("create newer run: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := testutil.NewStore(t)
+			ctx := context.Background()
+			run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+			seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+			setPublishPending(t, st, run.ID)
+			tc.set(t, st, run, pr)
+			gh := newFakeGitHub(t)
+			w, pub := newPublishWorker(t, st, gh)
+
+			if err := w.Publish(ctx, run.ID); err != nil {
+				t.Fatalf("Publish() error = %v", err)
+			}
+
+			gh.mu.Lock()
+			comments, reviews, checks := len(gh.comments), len(gh.reviews), len(gh.checkPatches)
+			gh.mu.Unlock()
+			if comments != 0 || reviews != 0 || checks != 0 {
+				t.Errorf("writes = comments %d, reviews %d, checks %d; want none",
+					comments, reviews, checks)
+			}
+			if events := pub.all(); len(events) != 0 {
+				t.Errorf("events = %+v, want none", events)
+			}
+			if saved := loadRun(t, st, run.ID); saved.PublishPending {
+				t.Error("a stale run stayed pending publication")
+			}
+		})
+	}
+}
+
+// A partial delivery resumes only the step that failed: the summary and the
+// inline review were already written and are not touched again.
+func TestPublishRetriesOnlyMissingSteps(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+	setPublishPending(t, st, run.ID)
+	gh := newFakeGitHub(t)
+	gh.failNextCheck()
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err == nil {
+		t.Fatal("first Publish() error = nil, want the injected check failure")
+	}
+	gh.mu.Lock()
+	firstPosts, firstReviews, firstPatches := len(gh.comments), len(gh.reviews), len(gh.commentPatches)
+	gh.mu.Unlock()
+	if firstPosts != 1 || firstReviews != 1 {
+		t.Fatalf("first attempt wrote posts %d, reviews %d; want the summary and the inline review",
+			firstPosts, firstReviews)
+	}
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("retry Publish() error = %v", err)
+	}
+	gh.mu.Lock()
+	posts, reviews, patches, checks := len(gh.comments), len(gh.reviews), len(gh.commentPatches), len(gh.checkPatches)
+	gh.mu.Unlock()
+	if posts != 1 || reviews != 1 {
+		t.Errorf("retry duplicated a finished step: posts %d, reviews %d", posts, reviews)
+	}
+	if patches != firstPatches {
+		t.Errorf("retry re-edited the summary: PATCHes %d, want %d", patches, firstPatches)
+	}
+	if checks != 1 {
+		t.Errorf("check patches = %d, want the one missing step", checks)
+	}
+}
+
+// A review created on GitHub before the response was stored is recovered by its
+// run marker on retry instead of being posted a second time.
+func TestPublishRecoversReviewAfterPartialResponse(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+	setPublishPending(t, st, run.ID)
+	gh := newFakeGitHub(t)
+	gh.failNextReviewComments()
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err == nil {
+		t.Fatal("first Publish() error = nil, want the injected comment-listing failure")
+	}
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("retry Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	reviews := len(gh.reviews)
+	gh.mu.Unlock()
+	if reviews != 1 {
+		t.Errorf("reviews = %d, want one recovered review", reviews)
+	}
+	saved, err := st.FindingsForPR(ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("FindingsForPR() error = %v", err)
+	}
+	for _, f := range saved {
+		if f.ID == "f1" && f.GithubCommentID == 0 {
+			t.Error("the recovered review did not link its finding")
+		}
+	}
+}
+
+// publishProbe observes how many publishers are inside the context-load phase
+// at once. With the per-PR lock only one may be there; without it two overlap.
+type publishProbe struct {
+	mu     sync.Mutex
+	active int
+	max    int
+}
+
+func (p *publishProbe) enter() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.active++
+	if p.active > p.max {
+		p.max = p.active
+	}
+	// Hold the phase long enough that an unlocked second publisher must overlap.
+	time.Sleep(25 * time.Millisecond)
+}
+
+func (p *publishProbe) leave() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.active--
+}
+
+func (p *publishProbe) maxActive() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.max
+}
+
+type probingAppProvider struct {
+	base  ghapp.AppProvider
+	probe *publishProbe
+}
+
+func (p probingAppProvider) App(ctx context.Context) (*ghapp.App, error) {
+	p.probe.enter()
+	defer p.probe.leave()
+	return p.base.App(ctx)
+}
+
+// A run that finishes while the pull request's merge base is unresolved must
+// stay pending, so the trigger can adopt the comparison and publish it later.
+func TestPublishAfterComparisonAdoption(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+	setPublishPending(t, st, run.ID)
+	if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+		Updates(map[string]any{"base_ref": "main", "base_sha": "mb-1"}).Error; err != nil {
+		t.Fatalf("set run comparison: %v", err)
+	}
+	if err := st.DB.WithContext(ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).
+		Updates(map[string]any{"base_ref": "main", "merge_base_sha": ""}).Error; err != nil {
+		t.Fatalf("set unresolved PR comparison: %v", err)
+	}
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() with an unresolved comparison error = %v", err)
+	}
+	gh.mu.Lock()
+	comments, reviews, checks := len(gh.comments), len(gh.reviews), len(gh.checkPatches)
+	gh.mu.Unlock()
+	if comments != 0 || reviews != 0 || checks != 0 {
+		t.Fatalf("unresolved comparison wrote comments %d, reviews %d, checks %d",
+			comments, reviews, checks)
+	}
+	pending := loadRun(t, st, run.ID)
+	if !pending.PublishPending {
+		t.Fatal("an unresolved comparison settled its publish intent")
+	}
+	state := map[string]bool{}
+	if len(pending.PublishState) > 0 {
+		if err := json.Unmarshal(pending.PublishState, &state); err != nil {
+			t.Fatalf("decode publish_state %s: %v", pending.PublishState, err)
+		}
+	}
+	if state["completed"] {
+		t.Fatal("an unresolved comparison was marked completed")
+	}
+
+	// The trigger resolves the comparison and adopts the existing run.
+	if err := st.DB.WithContext(ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).
+		Update("merge_base_sha", "mb-1").Error; err != nil {
+		t.Fatalf("adopt the comparison: %v", err)
+	}
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() after adoption error = %v", err)
+	}
+	gh.mu.Lock()
+	comments, reviews, checks = len(gh.comments), len(gh.reviews), len(gh.checkPatches)
+	gh.mu.Unlock()
+	if comments != 1 || reviews != 1 || checks != 1 {
+		t.Errorf("adopted publication = comments %d, reviews %d, checks %d; want one of each",
+			comments, reviews, checks)
+	}
+	var adoptedPR store.PullRequest
+	if err := st.DB.WithContext(ctx).Take(&adoptedPR, pr.ID).Error; err != nil {
+		t.Fatalf("load adopted pull request: %v", err)
+	}
+	if adoptedPR.QAStatus != store.StatusChangesRequested {
+		t.Errorf("qa_status after adoption = %q, want %q", adoptedPR.QAStatus, store.StatusChangesRequested)
+	}
+	saved := loadRun(t, st, run.ID)
+	if saved.PublishPending {
+		t.Error("adopted publication left publish_pending true")
+	}
+}
+
+// Two concurrent deliveries of the same run stay idempotent and never overlap
+// in the shared publication phase.
+func TestPublishConcurrentIsIdempotent(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+	setPublishPending(t, st, run.ID)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+	probe := &publishProbe{}
+	w.Apps = probingAppProvider{base: w.Apps, probe: probe}
+
+	start := make(chan struct{})
+	var ready sync.WaitGroup
+	ready.Add(2)
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ready.Done()
+			<-start
+			errs <- w.Publish(ctx, run.ID)
+		}()
+	}
+	ready.Wait()
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Publish() error = %v", err)
+		}
+	}
+
+	if got := probe.maxActive(); got != 1 {
+		t.Errorf("concurrent publishers in the shared phase = %d, want 1", got)
+	}
+	gh.mu.Lock()
+	posts, reviews, checks := len(gh.comments), len(gh.reviews), len(gh.checkPatches)
+	gh.mu.Unlock()
+	if posts != 1 || reviews != 1 || checks != 1 {
+		t.Errorf("concurrent delivery = posts %d, reviews %d, checks %d; want one of each",
+			posts, reviews, checks)
+	}
+	saved := loadRun(t, st, run.ID)
+	if saved.PublishPending {
+		t.Error("publish_pending is still true after concurrent deliveries")
 	}
 }
