@@ -118,6 +118,9 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 		if f.Status == store.FindingWithdrawn || f.GithubCommentID != 0 || f.StartLine <= 0 {
 			continue
 		}
+		if !p.inlineAllowed(f) {
+			continue
+		}
 		if added.has(f.Path, f.StartLine) {
 			candidates = append(candidates, f)
 		}

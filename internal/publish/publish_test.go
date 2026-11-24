@@ -1078,3 +1078,182 @@ func TestPublishLeavesCommentIDUnsetWithoutCoordinates(t *testing.T) {
 		}
 	}
 }
+
+// enableAutoTriage flips the only policy of the freshly seeded database.
+func enableAutoTriage(t *testing.T, st *store.Store, mode string) {
+	t.Helper()
+	if err := st.DB.Exec("UPDATE qa_policies SET auto_triage_mode = ?", mode).Error; err != nil {
+		t.Fatalf("enable auto-triage: %v", err)
+	}
+}
+
+func setRunVerificationSession(t *testing.T, st *store.Store, runID uint, session string) {
+	t.Helper()
+	if err := st.DB.Exec("UPDATE review_runs SET verify_session_id = ? WHERE id = ?", session, runID).
+		Error; err != nil {
+		t.Fatalf("set verify session: %v", err)
+	}
+}
+
+// markVerified stores the verifier's answer and, when applied, its triage.
+func markVerified(t *testing.T, st *store.Store, id, verdict, triageVerdict string) {
+	t.Helper()
+	raw, err := json.Marshal(map[string]string{
+		"verdict": verdict, "evidence": "guard()", "head_sha": "abcdef1234567890",
+	})
+	if err != nil {
+		t.Fatalf("marshal verification: %v", err)
+	}
+	updates := map[string]any{
+		"verification":  datatypes.JSON(raw),
+		"triage_source": store.TriageSourceVerifier,
+	}
+	if triageVerdict != "" {
+		updates["triage_verdict"] = triageVerdict
+	}
+	if err := st.DB.Model(&store.Finding{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		t.Fatalf("mark finding %s verified: %v", id, err)
+	}
+}
+
+func publishedSummary(t *testing.T, gh *fakeGitHub) string {
+	t.Helper()
+	bodies := summaryBodies(t, gh)
+	if len(bodies) == 0 {
+		t.Fatal("no summary comment was published")
+	}
+	return bodies[len(bodies)-1]
+}
+
+func TestSummaryListsValidatedAndUncertain(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	seedFinding(t, st, pr.ID, run.ID, "confirmed", 2, "minor", store.FindingOpen)
+	markVerified(t, st, "confirmed", "confirm", store.VerdictConfirmed)
+	seedFinding(t, st, pr.ID, run.ID, "uncertain", 3, "minor", store.FindingOpen)
+	markVerified(t, st, "uncertain", "uncertain", "")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	body := publishedSummary(t, gh)
+	for _, want := range []string{
+		"**Verificación automática:** 1 validados · 1 para tu criterio · 0 descartados",
+		"**Validado por la verificación:**",
+		"Título confirmed",
+		"<details><summary>Necesita tu criterio (1)</summary>",
+		"Título uncertain",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("summary does not contain %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestSummaryCountsAutoDismissed(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	seedFinding(t, st, pr.ID, run.ID, "dismissed", 2, "nit", store.FindingWithdrawn)
+	markVerified(t, st, "dismissed", "refute", store.VerdictFalsePositive)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	body := publishedSummary(t, gh)
+	if !strings.Contains(body, "**Verificación automática:** 0 validados · 0 para tu criterio · 1 descartados") {
+		t.Errorf("summary does not count the dismissal:\n%s", body)
+	}
+	if !strings.Contains(body, "1 descartados automáticamente · [ver en el panel](https://qa.example/prs/") {
+		t.Errorf("summary does not link the dismissed findings:\n%s", body)
+	}
+	if strings.Contains(body, "Título dismissed") {
+		t.Errorf("summary lists a dismissed finding:\n%s", body)
+	}
+}
+
+func TestSummaryNotesSkippedVerification(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	seedFinding(t, st, pr.ID, run.ID, "pending", 2, "minor", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	body := publishedSummary(t, gh)
+	if !strings.Contains(body, "La verificación automática no se ejecutó") {
+		t.Errorf("summary does not explain the skipped verification:\n%s", body)
+	}
+	if !strings.Contains(body, "0 validados · 1 para tu criterio") {
+		t.Errorf("summary does not list the unverified finding:\n%s", body)
+	}
+}
+
+func TestInlineOnlyForConfirmedWhenVerificationRan(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	seedFinding(t, st, pr.ID, run.ID, "confirmed", 2, "minor", store.FindingOpen)
+	markVerified(t, st, "confirmed", "confirm", store.VerdictConfirmed)
+	seedFinding(t, st, pr.ID, run.ID, "pending", 3, "minor", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	reviews := append([]fakeReview(nil), gh.reviews...)
+	gh.mu.Unlock()
+	if len(reviews) != 1 || len(reviews[0].Comments) != 1 {
+		t.Fatalf("reviews = %+v, want one review with only the confirmed finding", reviews)
+	}
+	body := reviews[0].Comments[0].Body
+	if !strings.Contains(body, "Título confirmed") || strings.Contains(body, "Título pending") {
+		t.Errorf("inline comment = %q, want the confirmed finding only", body)
+	}
+}
+
+func TestInlineFallsBackWhenVerificationDisabled(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "first", 2, "minor", store.FindingOpen)
+	seedFinding(t, st, pr.ID, run.ID, "second", 3, "minor", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	reviews := append([]fakeReview(nil), gh.reviews...)
+	gh.mu.Unlock()
+	if len(reviews) != 1 || len(reviews[0].Comments) != 2 {
+		t.Fatalf("reviews = %+v, want both findings inline when verification is off", reviews)
+	}
+	body := publishedSummary(t, gh)
+	if strings.Contains(body, "Verificación automática") {
+		t.Errorf("summary carries a verification block with the mode off:\n%s", body)
+	}
+}
