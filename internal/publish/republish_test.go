@@ -73,6 +73,54 @@ func TestRepublishRestoresFailureWhenFindingsReopen(t *testing.T) {
 	}
 }
 
+// The gate of another comparison must not be rewritten from a stale terminal
+// run, and the shared review thread must not be moved either.
+func TestRepublishSkipsRunOfAnotherComparison(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+		Updates(map[string]any{"base_ref": "main", "base_sha": "mb-old"}).Error; err != nil {
+		t.Fatalf("set run comparison: %v", err)
+	}
+	if err := st.DB.WithContext(ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).
+		Updates(map[string]any{"base_ref": "release", "merge_base_sha": "mb-old"}).Error; err != nil {
+		t.Fatalf("set PR comparison: %v", err)
+	}
+	f := seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+	if err := st.SetFindingPublished(ctx, f.ID, 123, "NC_resolve", ""); err != nil {
+		t.Fatalf("publish finding: %v", err)
+	}
+	f.GithubCommentID, f.GithubCommentNodeID = 123, "NC_resolve"
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Republish(ctx, pr.ID); err != nil {
+		t.Fatalf("Republish() error = %v", err)
+	}
+	supported, err := w.SetFindingThread(ctx, pr.ID, f, true)
+	if err != nil {
+		t.Fatalf("SetFindingThread() error = %v", err)
+	}
+	if supported {
+		t.Error("SetFindingThread() = true, want false for another comparison")
+	}
+
+	gh.mu.Lock()
+	patches, queries := len(gh.checkPatches), len(gh.gqlQueries)
+	gh.mu.Unlock()
+	if patches != 0 || queries != 0 {
+		t.Errorf("check patches = %d, graphql queries = %d; want none for another comparison", patches, queries)
+	}
+	var saved store.PullRequest
+	if err := st.DB.WithContext(ctx).Take(&saved, pr.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if saved.QAStatus != store.StatusReviewing {
+		t.Errorf("qa_status = %q, want unchanged", saved.QAStatus)
+	}
+}
+
 func TestRepublishWithoutFinishedRunIsNoOp(t *testing.T) {
 	st := testutil.NewStore(t)
 	ctx := context.Background()
@@ -158,4 +206,3 @@ func TestSetFindingThreadWithoutCoordinatesIsUnsupported(t *testing.T) {
 		t.Error("SetFindingThread() = true, want false without published coordinates")
 	}
 }
-

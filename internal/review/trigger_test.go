@@ -126,6 +126,11 @@ type triggerFixture struct {
 	trigger      *Trigger
 	seq          int64
 	tokenExpires time.Time
+
+	mu           sync.Mutex
+	mergeBase    string
+	compareErr   bool
+	compareCalls int
 }
 
 type seedOpts struct {
@@ -149,7 +154,28 @@ func newTriggerFixture(t *testing.T) *triggerFixture {
 	}
 
 	expiresAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	f := &triggerFixture{
+		t:            t,
+		ctx:          context.Background(),
+		st:           st,
+		jobs:         &triggerTestJobs{},
+		checks:       &triggerTestChecks{},
+		tokenExpires: expiresAt,
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/compare/") {
+			f.mu.Lock()
+			f.compareCalls++
+			mergeBase, fail := f.mergeBase, f.compareErr
+			f.mu.Unlock()
+			if fail {
+				http.Error(w, "compare unavailable", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"merge_base_commit":{"sha":%q}}`, mergeBase)
+			return
+		}
 		if r.Method != http.MethodPost ||
 			!strings.HasPrefix(r.URL.Path, "/app/installations/") ||
 			!strings.HasSuffix(r.URL.Path, "/access_tokens") {
@@ -165,23 +191,58 @@ func newTriggerFixture(t *testing.T) *triggerFixture {
 		Creds:  github.AppCredentials{AppID: 12345, PEM: triggerTestPEM(t)},
 		APIURL: srv.URL,
 	}
-	jobs := &triggerTestJobs{}
-	checks := &triggerTestChecks{}
-	return &triggerFixture{
-		t:            t,
-		ctx:          context.Background(),
-		st:           st,
-		jobs:         jobs,
-		checks:       checks,
-		tokenExpires: expiresAt,
-		trigger: &Trigger{
-			Store:  st,
-			Apps:   triggerTestApps{app: app},
-			Jobs:   jobs,
-			Checks: checks,
-			Box:    box,
-		},
+	f.trigger = &Trigger{
+		Store:   st,
+		Apps:    triggerTestApps{app: app},
+		Jobs:    f.jobs,
+		Checks:  f.checks,
+		Box:     box,
+		Compare: &github.Compare{Apps: triggerTestApps{app: app}},
 	}
+	return f
+}
+
+// setCompare programs the fake Compare API for the next resolutions.
+func (f *triggerFixture) setCompare(mergeBase string, fail bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mergeBase = mergeBase
+	f.compareErr = fail
+}
+
+func (f *triggerFixture) compares() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.compareCalls
+}
+
+// setPRComparison rewrites the comparison columns the way a webhook sync or the
+// poller would, without going through a GitHub payload.
+func (f *triggerFixture) setPRComparison(pr store.PullRequest, baseRef, baseSHA, mergeBase string) store.PullRequest {
+	f.t.Helper()
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).Updates(map[string]any{
+		"base_ref": baseRef, "base_sha": baseSHA, "merge_base_sha": mergeBase,
+	}).Error; err != nil {
+		f.t.Fatalf("set comparison of PR %d: %v", pr.ID, err)
+	}
+	var updated store.PullRequest
+	if err := f.st.DB.WithContext(f.ctx).Take(&updated, pr.ID).Error; err != nil {
+		f.t.Fatalf("reload PR %d: %v", pr.ID, err)
+	}
+	return updated
+}
+
+// seedRun creates a review run with a comparison snapshot.
+func (f *triggerFixture) seedRun(pr store.PullRequest, headSHA, baseRef, baseSHA, status string) store.ReviewRun {
+	f.t.Helper()
+	run, err := f.st.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: pr.ID, HeadSHA: headSHA, BaseRef: baseRef, BaseSHA: baseSHA,
+		Status: status, Attempt: 1,
+	})
+	if err != nil {
+		f.t.Fatalf("seed run: %v", err)
+	}
+	return run
 }
 
 func (f *triggerFixture) seed(name string, opts seedOpts) store.PullRequest {
@@ -572,6 +633,253 @@ func TestTriggerRetryRepairsActiveSameSHARun(t *testing.T) {
 	}
 }
 
+// A retarget keeps the head but changes the prompt context: the active run of
+// the old comparison is superseded and a new run is queued without needing
+// Compare.
+func TestTriggerRetargetSupersedesSameHeadComparison(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	old := f.seedRun(pr, pr.HeadSHA, "main", "mb-main", store.RunRunning)
+	pr = f.setPRComparison(pr, "release", "tip-release", "")
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+
+	updated, err := f.st.ReviewRun(f.ctx, old.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun(old): %v", err)
+	}
+	if updated.Status != store.RunSuperseded {
+		t.Errorf("old run status = %q, want superseded", updated.Status)
+	}
+	if len(f.checks.cancelled) != 1 || f.checks.cancelled[0] != old.ID {
+		t.Errorf("CancelCheck calls = %v, want [%d]", f.checks.cancelled, old.ID)
+	}
+	if got := f.compares(); got != 0 {
+		t.Errorf("Compare calls = %d, want none for a retarget", got)
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d, want 2", len(runs))
+	}
+	created := runs[1]
+	if created.Status != store.RunQueued || created.HeadSHA != pr.HeadSHA ||
+		created.BaseRef != "release" || created.BaseSHA != "" {
+		t.Errorf("new run = %+v, want queued at the same head with the new base", created)
+	}
+	if len(f.jobs.reviews) != 1 || f.jobs.reviews[0] != created.ID {
+		t.Errorf("EnqueueReview calls = %v, want [%d]", f.jobs.reviews, created.ID)
+	}
+}
+
+// The base advanced without changing the merge base: Compare proves the
+// comparison is equivalent and the existing result is reused.
+func TestTriggerReusesComparisonWhenBaseAdvances(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	f.seedRun(pr, pr.HeadSHA, "main", "mb-1", store.RunSucceeded)
+	pr = f.setPRComparison(pr, "main", "tip-2", "")
+	f.setCompare("mb-1", false)
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want the existing one to be reused", len(runs))
+	}
+	if got := f.compares(); got != 1 {
+		t.Errorf("Compare calls = %d, want 1", got)
+	}
+	var saved store.PullRequest
+	if err := f.st.DB.WithContext(f.ctx).Take(&saved, pr.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if saved.MergeBaseSHA != "mb-1" {
+		t.Errorf("merge_base_sha = %q, want mb-1", saved.MergeBaseSHA)
+	}
+	if len(f.jobs.reviews) != 0 || len(f.checks.started) != 0 {
+		t.Errorf("unexpected enqueues/checks: %v / %v", f.jobs.reviews, f.checks.started)
+	}
+	// The terminal run finished while its comparison was unresolved, so its
+	// publication had been skipped; adopting the comparison republishes it.
+	if len(f.jobs.publishes) != 1 || f.jobs.publishes[0] != runs[0].ID {
+		t.Errorf("EnqueuePublish calls = %v, want [%d]", f.jobs.publishes, runs[0].ID)
+	}
+}
+
+// A rewritten base reports a different merge base through Compare: the run is
+// a new comparison even with the same head.
+func TestTriggerNewRunWhenBaseRewritten(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	f.seedRun(pr, pr.HeadSHA, "main", "mb-old", store.RunSucceeded)
+	pr = f.setPRComparison(pr, "main", "tip-rewritten", "")
+	f.setCompare("mb-new", false)
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d, want a new run", len(runs))
+	}
+	if got := runs[1]; got.Status != store.RunQueued || got.BaseRef != "main" || got.BaseSHA != "mb-new" {
+		t.Errorf("new run = %+v, want queued with the resolved merge base", got)
+	}
+	if got := f.compares(); got != 1 {
+		t.Errorf("Compare calls = %d, want 1", got)
+	}
+	var saved store.PullRequest
+	if err := f.st.DB.WithContext(f.ctx).Take(&saved, pr.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if saved.MergeBaseSHA != "mb-new" {
+		t.Errorf("merge_base_sha = %q, want mb-new", saved.MergeBaseSHA)
+	}
+}
+
+// A failing Compare must never make the trigger reuse a result silently.
+func TestTriggerCompareFailureEnqueuesConservativeRun(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	f.seedRun(pr, pr.HeadSHA, "main", "mb-old", store.RunSucceeded)
+	pr = f.setPRComparison(pr, "main", "tip-force-push", "")
+	f.setCompare("", true)
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs = %d, want a conservative new run", len(runs))
+	}
+	if got := runs[1]; got.Status != store.RunQueued || got.BaseSHA != "" {
+		t.Errorf("new run = %+v, want queued with an unknown merge base", got)
+	}
+	if got := f.compares(); got != 1 {
+		t.Errorf("Compare calls = %d, want 1", got)
+	}
+}
+
+// A metadata edit keeps the same comparison, so the existing result covers it;
+// a legacy run without key fields keeps covering it too.
+func TestTriggerSameComparisonReusesResult(t *testing.T) {
+	t.Run("resolved comparison", func(t *testing.T) {
+		f := newTriggerFixture(t)
+		pr := f.seed("app", eligibleOpts())
+		f.seedRun(pr, pr.HeadSHA, "main", "mb-1", store.RunSucceeded)
+		f.setPRComparison(pr, "main", "tip", "mb-1")
+
+		if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+			t.Fatalf("OnPullRequest() error = %v", err)
+		}
+		runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+		if err != nil {
+			t.Fatalf("ListReviewRuns: %v", err)
+		}
+		if len(runs) != 1 {
+			t.Fatalf("runs = %d, want the existing one", len(runs))
+		}
+		if got := f.compares(); got != 0 {
+			t.Errorf("Compare calls = %d, want none for an unchanged comparison", got)
+		}
+	})
+
+	t.Run("legacy empty key", func(t *testing.T) {
+		f := newTriggerFixture(t)
+		pr := f.seed("app", eligibleOpts())
+		f.seedRun(pr, pr.HeadSHA, "", "", store.RunSucceeded)
+		f.setPRComparison(pr, "main", "tip", "mb-1")
+
+		if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+			t.Fatalf("OnPullRequest() error = %v", err)
+		}
+		runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+		if err != nil {
+			t.Fatalf("ListReviewRuns: %v", err)
+		}
+		if len(runs) != 1 {
+			t.Fatalf("runs = %d, want the legacy run to keep covering the PR", len(runs))
+		}
+	})
+}
+
+// The periodic reconciliation must schedule a pull request whose head moved
+// while its webhook was lost, and reuse the result when only the base advanced.
+func TestEnqueuePendingResolvesMissedWebhooks(t *testing.T) {
+	t.Run("new head schedules", func(t *testing.T) {
+		f := newTriggerFixture(t)
+		pr := f.seed("app", eligibleOpts())
+		f.seedRun(pr, pr.HeadSHA, "main", "mb-1", store.RunSucceeded)
+		if err := f.st.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).
+			Updates(map[string]any{"head_sha": "sha-new", "base_sha": "tip-2", "merge_base_sha": ""}).Error; err != nil {
+			t.Fatalf("move the head: %v", err)
+		}
+
+		created, err := f.trigger.EnqueuePending(f.ctx, 50)
+		if err != nil {
+			t.Fatalf("EnqueuePending() error = %v", err)
+		}
+		if created != 1 {
+			t.Fatalf("created = %d, want 1", created)
+		}
+		runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+		if err != nil {
+			t.Fatalf("ListReviewRuns: %v", err)
+		}
+		if len(runs) != 2 || runs[1].HeadSHA != "sha-new" {
+			t.Fatalf("runs = %+v, want a run for the new head", runs)
+		}
+	})
+
+	t.Run("base move with the same merge base reuses", func(t *testing.T) {
+		f := newTriggerFixture(t)
+		pr := f.seed("app", eligibleOpts())
+		f.seedRun(pr, pr.HeadSHA, "main", "mb-1", store.RunSucceeded)
+		if err := f.st.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).
+			Updates(map[string]any{"base_sha": "tip-2", "merge_base_sha": ""}).Error; err != nil {
+			t.Fatalf("move the base: %v", err)
+		}
+		f.setCompare("mb-1", false)
+
+		created, err := f.trigger.EnqueuePending(f.ctx, 50)
+		if err != nil {
+			t.Fatalf("EnqueuePending() error = %v", err)
+		}
+		if created != 0 {
+			t.Fatalf("created = %d, want the equivalent comparison to be reused", created)
+		}
+		runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+		if err != nil {
+			t.Fatalf("ListReviewRuns: %v", err)
+		}
+		if len(runs) != 1 {
+			t.Fatalf("runs = %d, want only the existing run", len(runs))
+		}
+		if got := f.compares(); got != 1 {
+			t.Errorf("Compare calls = %d, want 1", got)
+		}
+	})
+}
+
 // A failed StartCheck leaves a queued run behind. Redelivery must heal it
 // instead of silently skipping the SHA forever.
 func TestTriggerRepairsStrandedQueuedRunAfterStartCheckFailure(t *testing.T) {
@@ -893,7 +1201,7 @@ func TestEnqueueForHeadRejectsStaleHeadUnderLock(t *testing.T) {
 		t.Fatalf("move the head: %v", err)
 	}
 
-	created, err := f.trigger.enqueueForHead(f.ctx, pr.ID, oldHead, "webhook", false)
+	created, err := f.trigger.enqueueForHead(f.ctx, pr.ID, oldHead, "webhook", false, comparisonHint{})
 	if err != nil {
 		t.Fatalf("enqueueForHead(old head) error = %v", err)
 	}
@@ -907,7 +1215,7 @@ func TestEnqueueForHeadRejectsStaleHeadUnderLock(t *testing.T) {
 		t.Errorf("unexpected enqueues/checks: %v / %v", f.jobs.reviews, f.checks.started)
 	}
 
-	created, err = f.trigger.enqueueForHead(f.ctx, pr.ID, "sha-newer", "webhook", false)
+	created, err = f.trigger.enqueueForHead(f.ctx, pr.ID, "sha-newer", "webhook", false, comparisonHint{})
 	if err != nil || !created {
 		t.Fatalf("enqueueForHead(current head) = %v, %v; want a created run", created, err)
 	}

@@ -262,6 +262,25 @@ func (h *WebhookHandler) handlePullRequest(ctx context.Context, w http.ResponseW
 		return
 	}
 
+	// An edit can change the base branch of the pull request. Loading the row
+	// before the sync tells us whether the comparison actually moved, so a
+	// metadata-only edit does not schedule a review (#141).
+	var prev store.PullRequest
+	prevKnown := false
+	if e.GetAction() == "edited" {
+		err := h.Store.DB.WithContext(ctx).
+			Where("repository_id = ? AND number = ?", repo.ID, pr.GetNumber()).
+			Take(&prev).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+		case err != nil:
+			h.serverError(w)
+			return
+		default:
+			prevKnown = true
+		}
+	}
+
 	row, changed, err := h.Store.SyncPullRequest(ctx, PRFromGitHub(repo.ID, pr))
 	if err != nil {
 		h.serverError(w)
@@ -278,7 +297,11 @@ func (h *WebhookHandler) handlePullRequest(ctx context.Context, w http.ResponseW
 				return
 			}
 		}
-		if isReviewTriggerAction(e.GetAction()) && !row.Draft && !row.IsFork && h.Reviews != nil {
+		trigger := isReviewTriggerAction(e.GetAction())
+		if e.GetAction() == "edited" {
+			trigger = !prevKnown || store.ComparisonMoved(prev, row)
+		}
+		if trigger && !row.Draft && !row.IsFork && h.Reviews != nil {
 			if err := h.Reviews.OnPullRequest(ctx, row.ID); err != nil {
 				h.serverError(w)
 				return
@@ -289,10 +312,12 @@ func (h *WebhookHandler) handlePullRequest(ctx context.Context, w http.ResponseW
 }
 
 // isReviewTriggerAction reports which pull request deliveries may start a
-// review. Other actions still sync the PR but never trigger one.
+// review. Other actions still sync the PR but never trigger one. "edited" is
+// gated separately on the comparison identity, because most edits are metadata
+// only.
 func isReviewTriggerAction(action string) bool {
 	switch action {
-	case "opened", "synchronize", "reopened", "ready_for_review":
+	case "opened", "synchronize", "reopened", "ready_for_review", "edited":
 		return true
 	default:
 		return false

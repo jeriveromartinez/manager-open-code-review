@@ -538,9 +538,11 @@ func (s *Store) ReviewConfigForPR(ctx context.Context, prID uint) (ReviewConfig,
 }
 
 // PendingReviewPRs lists open, non-draft, non-fork PRs of enabled repositories
-// with a team, a policy and an enabled profile, whose current head has no run in
-// an active or terminal state. Superseded runs do not suppress a PR. Everything
-// is filtered in SQL, including the limit and the ordering.
+// with a team, a policy and an enabled profile, whose current comparison has no
+// run in an active or terminal state. A run covers the pull request only when
+// its head, base branch and resolved merge base match the current ones; legacy
+// runs without a key still cover it once. Superseded runs never suppress a PR.
+// Everything is filtered in SQL, including the limit and the ordering.
 func (s *Store) PendingReviewPRs(ctx context.Context, limit int) ([]PullRequest, error) {
 	const query = `
 SELECT pr.* FROM pull_requests pr
@@ -553,6 +555,12 @@ WHERE pr.state = 'open' AND pr.draft = false AND pr.is_fork = false
     SELECT 1 FROM review_runs rr
     WHERE rr.pull_request_id = pr.id
       AND rr.head_sha = pr.head_sha
+      AND (
+        (rr.base_ref = '' AND rr.base_sha = '')
+        OR ((rr.base_ref = '' OR rr.base_ref = pr.base_ref)
+          AND rr.base_sha <> '' AND pr.merge_base_sha <> '' AND rr.base_sha = pr.merge_base_sha)
+        OR (rr.base_ref <> '' AND rr.base_ref = pr.base_ref AND rr.base_sha = '' AND pr.merge_base_sha = '')
+      )
       AND rr.status IN ('queued','running','succeeded','inconclusive','failed')
   )
 ORDER BY pr.updated_at DESC
@@ -762,12 +770,22 @@ func (s *Store) SupersedeActiveRuns(ctx context.Context, prID uint) error {
 }
 
 // SupersedeOtherActiveRuns cancels queued and running runs of a pull request
-// whose head SHA differs from headSHA. The run currently being (re)enqueued is
-// left untouched, so a trigger can never discard its own freshly created run.
-// Superseded runs lose their clone token: they will never publish.
-func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, headSHA string) error {
+// whose comparison differs from the given one, even when they share the head.
+// The run currently being (re)enqueued is left untouched, so a trigger can
+// never discard its own freshly created run. Legacy runs with empty key fields
+// match any comparison. Superseded runs lose their clone token and never
+// publish.
+func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, comparison Comparison) error {
 	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
-		Where("pull_request_id = ? AND head_sha <> ? AND status IN ?", prID, headSHA, []string{RunQueued, RunRunning}).
+		Where("pull_request_id = ? AND status IN ?", prID, []string{RunQueued, RunRunning}).
+		Where(`NOT (
+			head_sha = ? AND (
+				(base_ref = '' AND base_sha = '')
+				OR ((base_ref = '' OR base_ref = ?) AND base_sha <> '' AND ? <> '' AND base_sha = ?)
+				OR (base_ref <> '' AND base_ref = ? AND base_sha = '' AND ? = '')
+			)
+		)`, comparison.HeadSHA, comparison.BaseRef, comparison.MergeBaseSHA,
+			comparison.MergeBaseSHA, comparison.BaseRef, comparison.MergeBaseSHA).
 		Updates(map[string]any{
 			"status":           RunSuperseded,
 			"clone_token_enc":  "",
@@ -779,6 +797,30 @@ func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, headSHA
 		return fmt.Errorf("supersede other runs of pull request %d: %w", prID, res.Error)
 	}
 	return nil
+}
+
+// SetPRMergeBase records the resolved merge base of the pull request's current
+// comparison. The update is conditional on the head, base branch and base tip
+// still being the ones the resolution was made for, so a retarget or a
+// force-push landing between the Compare call and this write cannot overwrite
+// the newer comparison. It reports whether the row was updated; false means the
+// comparison moved.
+func (s *Store) SetPRMergeBase(ctx context.Context, prID uint, headSHA, baseRef, baseTipSHA, mergeBase string) (bool, error) {
+	if mergeBase == "" {
+		return false, nil
+	}
+	res := s.DB.WithContext(ctx).Model(&PullRequest{}).
+		Where("id = ? AND head_sha = ? AND base_ref = ? AND base_sha = ?",
+			prID, headSHA, baseRef, baseTipSHA).
+		Where("merge_base_sha = '' OR merge_base_sha = ?", mergeBase).
+		Updates(map[string]any{
+			"merge_base_sha": mergeBase,
+			"updated_at":     time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return false, fmt.Errorf("set merge base of pull request %d: %w", prID, res.Error)
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // RunUsage is the structured token consumption of one review run, summed over

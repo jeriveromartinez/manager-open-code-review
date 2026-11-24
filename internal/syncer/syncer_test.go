@@ -453,6 +453,58 @@ func TestSyncRemovesRepo(t *testing.T) {
 	}
 }
 
+// Polling must announce a base move so the reconciler can resolve the new
+// comparison, and it must drop the merge base resolved for the old one.
+func TestSyncClearsMergeBaseWhenTheBaseMoves(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 1, testInstallationID, "acme/repo-1", true)
+	updated := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	pr := seedPR(t, s, 1, 1, updated)
+	if err := s.DB.WithContext(ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).
+		Updates(map[string]any{"base_sha": "tip-1", "merge_base_sha": "mb-1"}).Error; err != nil {
+		t.Fatalf("seed comparison: %v", err)
+	}
+
+	pub := &recordingPublisher{}
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(1, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]*gh.PullRequest{{
+				Number:    gh.Int(1),
+				Title:     gh.String("PR 1"),
+				User:      &gh.User{Login: gh.String("alice")},
+				Head:      &gh.PullRequestBranch{Ref: gh.String("feature"), SHA: gh.String("sha-1")},
+				Base:      &gh.PullRequestBranch{Ref: gh.String("main"), SHA: gh.String("tip-2")},
+				State:     gh.String("open"),
+				UpdatedAt: &gh.Timestamp{Time: updated.Add(time.Hour)},
+			}})
+		}, nil)
+
+	if err := newSyncer(s, f.srv.URL, pub).SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v", err)
+	}
+
+	var saved store.PullRequest
+	if err := s.DB.WithContext(ctx).Take(&saved, pr.ID).Error; err != nil {
+		t.Fatalf("reload pull request: %v", err)
+	}
+	if saved.BaseSHA != "tip-2" {
+		t.Errorf("base_sha = %q, want tip-2", saved.BaseSHA)
+	}
+	if saved.MergeBaseSHA != "" {
+		t.Errorf("merge_base_sha = %q, want the old comparison cleared", saved.MergeBaseSHA)
+	}
+	want := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)}
+	if got := pub.snapshot(); len(got) != 1 || got[0] != want {
+		t.Errorf("events = %+v, want [%+v]", got, want)
+	}
+}
+
 func TestSyncSkipsDisabledRepos(t *testing.T) {
 	ctx := context.Background()
 	s := testutil.NewStore(t)
