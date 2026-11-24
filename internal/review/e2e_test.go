@@ -41,6 +41,7 @@ func (e2eTriggerJobs) EnqueueReviewTrigger(context.Context, uint, string, time.D
 
 func TestE2EFlow(t *testing.T) {
 	t.Run("success publishes summary, inline comments, check and status", testE2ESuccess)
+	t.Run("mixed coverage reports pending files and keeps the finding open", testE2EMixedCoverage)
 	t.Run("timeout ends inconclusive without resolving findings", testE2ETimeout)
 	t.Run("invalid config fails and the retry publishes", testE2EFailedThenRetry)
 	t.Run("push before checkout supersedes and the new head is reviewed", testE2ESuperseded)
@@ -808,6 +809,82 @@ func testE2ESuccess(t *testing.T) {
 	sse.waitFor(t, "pr.updated", f.pr.ID)
 }
 
+// testE2EMixedCoverage is the #135 end-to-end regression: the diff inventory
+// sees a second changed file that OCR excludes internally, so the run cannot
+// claim completeness even though the engine returned complete.
+func testE2EMixedCoverage(t *testing.T) {
+	f := newE2EFixture(t)
+	head := f.push(t, "notes.md")
+	f.setHead(t, head)
+	f.setOCR(t, `{
+	  "status": "complete",
+	  "summary": {"files_reviewed": 1, "comments": 0, "total_tokens": 100,
+	    "input_tokens": 80, "output_tokens": 20},
+	  "comments": [],
+	  "manifest": {
+	    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
+	    "coverage": {
+	      "selected": [{"path": "auth.go"}, {"path": "notes.md"}],
+	      "completed": [{"path": "auth.go"}],
+	      "reused": [], "failed": [], "waived": [],
+	      "excluded": [{"path": "notes.md", "exclude_reason": "unsupported_ext"}]
+	    }
+	  }
+	}`)
+
+	seed := store.Finding{
+		ID: "previous-notes", PullRequestID: f.pr.ID, Fingerprint: "previous-notes-fp",
+		Path: "notes.md", StartLine: 1, EndLine: 1, Severity: "major",
+		Status: store.FindingOpen, GithubCommentID: 77, GithubCommentNodeID: "NC_notes",
+		FirstSeenRunID: 1, LastSeenRunID: 1,
+	}
+	mustCreateRunTest(t, f.s, f.ctx, &seed)
+
+	runID := f.enqueue(t, false)
+	f.events.reset()
+	f.execute(t, runID)
+
+	run := f.loadRun(t, runID)
+	assertE2ERun(t, run, store.RunInconclusive, "coverage_incomplete")
+	assertE2EPRStatus(t, f, store.StatusInconclusive)
+	check := assertE2ECheck(t, f, "action_required")
+	if !strings.Contains(check.Output.Text, "notes.md") {
+		t.Errorf("check output %q does not list the pending file", check.Output.Text)
+	}
+	body := assertE2ESummary(t, f,
+		"Archivos pendientes de revisión", "`notes.md`", "unsupported_ext")
+	if strings.Contains(body, "Revisión completada") {
+		t.Errorf("summary claims completion with pending coverage: %q", body)
+	}
+
+	var coverage struct {
+		Files []coverageFile `json:"files"`
+	}
+	if err := json.Unmarshal(run.Coverage, &coverage); err != nil {
+		t.Fatalf("decode coverage: %v", err)
+	}
+	found := false
+	for _, file := range coverage.Files {
+		if file.Path == "notes.md" {
+			found = true
+			if file.Status != coveragePending || file.Reason != "unsupported_ext" {
+				t.Errorf("notes.md coverage = %+v, want pending/unsupported_ext", file)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("coverage files = %+v, want the pending notes.md entry", coverage.Files)
+	}
+
+	var reloaded store.Finding
+	if err := f.s.DB.WithContext(f.ctx).Where("id = ?", seed.ID).Take(&reloaded).Error; err != nil {
+		t.Fatalf("reload seeded finding: %v", err)
+	}
+	if reloaded.Status != store.FindingOpen || reloaded.LastSeenRunID != seed.LastSeenRunID {
+		t.Errorf("seeded finding = %+v, want it open and untouched", reloaded)
+	}
+}
+
 func testE2ETimeout(t *testing.T) {
 	f := newE2EFixture(t)
 	// The OCR double sleeps far longer than the deadline, so the timeout always
@@ -970,6 +1047,7 @@ func testE2ESuperseded(t *testing.T) {
 	)
 	f.events.absent(t, events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(f.pr.ID), 10)})
 
+	f.setOCR(t, runTestNativeFindingCovering("auth.go", "main.go", "fix.go"))
 	retryID := f.enqueue(t, false)
 	if got := f.loadRun(t, retryID); got.HeadSHA != head2 {
 		t.Fatalf("new run head = %q, want %q", got.HeadSHA, head2)
@@ -1072,7 +1150,7 @@ func testE2EFindingsLifecycle(t *testing.T) {
 	head4 := f.push(t, "fix2.go")
 	f.setHead(t, head4)
 	f.runner.Cfg.OCRBin = ocrBin
-	f.setOCR(t, runTestNativeNoFindings())
+	f.setOCR(t, runTestNativeCovering("auth.go", "main.go", "chore.go", "chore2.go", "fix2.go"))
 	run4 := f.enqueue(t, false)
 	f.events.reset()
 	f.execute(t, run4)

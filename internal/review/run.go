@@ -658,12 +658,13 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	}
 
 	r.setPhase(runCtx, run.ID, store.RunPhasePreparing, log)
-	excludes, dropped, err := policyExcludes(cfg.Policy.ExcludeGlobs)
+	excludePatterns, dropped, err := policyExcludePatterns(cfg.Policy.ExcludeGlobs)
 	if err != nil {
 		log.Log(runCtx, "worker", "", "error", logPhasePolicy,
 			fmt.Sprintf("exclusiones de la política: %v", err))
 		return out.failed(fmt.Errorf("leer exclusiones de la política: %w", err), "config"), nil
 	}
+	excludes := strings.Join(excludePatterns, ",")
 	if len(dropped) > 0 {
 		// OCR splits --exclude on commas without escaping, so these patterns
 		// cannot reach it intact; warn instead of applying a mangled glob.
@@ -829,18 +830,28 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		}
 	}
 
-	// Only findings of covered files may be resolved on an incremental run:
-	// everything outside the reviewed range was never seen by OCR. Empty
-	// coverage scopes the list to nothing instead of broadening it to the PR.
-	if incremental {
-		out.open = findingsInPaths(out.open, scopePaths)
+	// The engine's own coverage is not enough: inventory the files this range
+	// actually changed and confront them with the per-file coverage of the main
+	// and chunked passes. An OCR-internal exclusion, failure or waiver leaves a
+	// required file pending; only a policy exclusion takes it out of scope.
+	var pending []coverageFile
+	var coverageErr error
+	inventory, invErr := gitChangedFiles(runCtx, workDir, fromSHA, headSHA)
+	if invErr != nil {
+		coverageErr = fmt.Errorf("no se pudo inventariar el diff revisado: %w", invErr)
+		log.Log(runCtx, "worker", "", "error", logPhaseFinish, coverageErr.Error())
+		if status == store.RunSucceeded {
+			status, code = store.RunInconclusive, "coverage_incomplete"
+		}
+	} else {
+		files, pending = inventoryCoverage(files, inventory, excludePatterns, coverageSignalFrom(res))
 	}
+	reviewed, skipped, excluded = coverageCountsFromFiles(files)
+	notRequired := coverageNotRequiredFromFiles(files)
+	status, code = pendingRunStatus(status, code, pending)
+	out.summary = coverageSummaryText(status, reviewed, len(out.merged.Findings))
 
-	if len(files) > 0 {
-		reviewed, skipped, excluded = coverageCountsFromFiles(files)
-		out.summary = coverageSummaryText(status, reviewed, len(out.merged.Findings))
-	}
-	out.coverage = coverageJSONWithFiles(reviewed, skipped, excluded, files)
+	out.coverage = coverageJSONWithFiles(reviewed, skipped, excluded, notRequired, files)
 	r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
 	log.Log(runCtx, "worker", "", "info", logPhaseFinish, fmt.Sprintf(
 		"cobertura final: %d revisados, %d omitidos, %d excluidos; %d hallazgo(s) tras deduplicar",
@@ -848,7 +859,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 	switch status {
 	case store.RunSucceeded:
-		upserts, resolved := Reconcile(out.open, out.merged, run.ID, true, run.PullRequestID, out.anchors)
+		// Identity matching sees every known finding; resolution is limited to
+		// the paths this run actually reviewed.
+		upserts, resolved := ReconcileScoped(out.open, out.merged, run.ID, true, run.PullRequestID, out.anchors, scopePaths)
 		for i := range upserts {
 			upserts[i].PullRequestID = run.PullRequestID
 		}
@@ -862,7 +875,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
 		return out, nil
 	case store.RunInconclusive:
-		return out.inconclusive(errors.New(chunkedInconclusiveMessage(res, code, reviewed, skipped)), code), nil
+		message := chunkedInconclusiveMessage(res, code, reviewed, skipped)
+		if coverageErr != nil {
+			message = coverageErr.Error()
+		}
+		return out.inconclusive(errors.New(message), code), nil
 	default:
 		return out.failed(errors.New(nativeStatusMessage(res, code)), code), nil
 	}
@@ -954,22 +971,20 @@ func withCloneToken(remote string, token []byte) string {
 }
 
 func coverageJSON(reviewed, skipped, excluded int) []byte {
-	return coverageJSONWithFiles(reviewed, skipped, excluded, nil)
+	return coverageJSONWithFiles(reviewed, skipped, excluded, 0, nil)
 }
 
-// policyExcludes builds the value of OCR's --exclude flag. OCR splits the value
-// on commas and offers no escaping, so a brace pattern or any other glob with a
-// comma cannot survive the flag: those are returned as dropped so the caller
-// warns instead of applying a mangled glob. Blank entries are ignored.
-func policyExcludes(raw []byte) (string, []string, error) {
+// policyExcludePatterns returns the patterns OCR can actually receive and the
+// ones dropped for carrying a comma. The inventory uses the same kept list to
+// decide which changed files the team excluded by policy.
+func policyExcludePatterns(raw []byte) (kept, dropped []string, err error) {
 	var patterns []string
 	if len(bytes.TrimSpace(raw)) > 0 {
 		if err := json.Unmarshal(raw, &patterns); err != nil {
-			return "", nil, fmt.Errorf("exclude_globs no es una lista: %w", err)
+			return nil, nil, fmt.Errorf("exclude_globs no es una lista: %w", err)
 		}
 	}
-	kept := make([]string, 0, len(patterns))
-	var dropped []string
+	kept = make([]string, 0, len(patterns))
 	for _, pattern := range patterns {
 		p := strings.TrimSpace(pattern)
 		switch {
@@ -981,7 +996,7 @@ func policyExcludes(raw []byte) (string, []string, error) {
 			kept = append(kept, p)
 		}
 	}
-	return strings.Join(kept, ","), dropped, nil
+	return kept, dropped, nil
 }
 
 // incrementalSource returns the previous head a push can be reviewed from. It

@@ -25,6 +25,9 @@ const (
 	coverageReviewedByParts = "reviewed_by_parts"
 	coverageNotReviewed     = "not_reviewed"
 	coverageExcluded        = "excluded"
+	// coveragePending marks a changed file the review still owes: it was not
+	// completed and no policy excluded it, so the run cannot claim full cover.
+	coveragePending = "pending"
 
 	// chunkBudgetPercent is the fraction of --max-tokens a chunk may use. OCR
 	// excludes a file as too_large above 80% of the ceiling; 30% leaves a wide
@@ -87,13 +90,14 @@ func (s chunkSummary) reviewedPaths() map[string]bool {
 // coverageJSONWithFiles serializes the headline counters and the per-file array
 // the panel already expects. files stays omitted when the engine reported no
 // manifest, so old runs and empty-coverage responses keep their previous shape.
-func coverageJSONWithFiles(reviewed, skipped, excluded int, files []coverageFile) []byte {
+func coverageJSONWithFiles(reviewed, skipped, excluded, notRequired int, files []coverageFile) []byte {
 	raw, err := json.Marshal(struct {
-		ReviewedFiles int            `json:"reviewed_files"`
-		SkippedFiles  int            `json:"skipped_files"`
-		ExcludedFiles int            `json:"excluded_files"`
-		Files         []coverageFile `json:"files,omitempty"`
-	}{reviewed, skipped, excluded, files})
+		ReviewedFiles    int            `json:"reviewed_files"`
+		SkippedFiles     int            `json:"skipped_files"`
+		ExcludedFiles    int            `json:"excluded_files"`
+		NotRequiredFiles int            `json:"not_required_files"`
+		Files            []coverageFile `json:"files,omitempty"`
+	}{reviewed, skipped, excluded, notRequired, files})
 	if err != nil {
 		return []byte(`{}`)
 	}
@@ -123,16 +127,25 @@ func nativeCoverageFiles(res nativeReview) []coverageFile {
 		if class := strings.TrimSpace(item.Classification); class != "" {
 			return class
 		}
-		return strings.TrimSpace(item.Reason)
+		if reason := strings.TrimSpace(item.Reason); reason != "" {
+			return reason
+		}
+		return "failed"
 	})
 	add(coverage.Waived, coverageNotReviewed, func(item nativeCoverageItem) string {
-		return strings.TrimSpace(item.Reason)
+		if reason := strings.TrimSpace(item.Reason); reason != "" {
+			return reason
+		}
+		return "waived"
 	})
 	add(coverage.Excluded, coverageExcluded, func(item nativeCoverageItem) string {
 		if reason := strings.TrimSpace(item.ExcludeReason); reason != "" {
 			return reason
 		}
-		return strings.TrimSpace(item.Reason)
+		if reason := strings.TrimSpace(item.Reason); reason != "" {
+			return reason
+		}
+		return "excluded"
 	})
 	return files
 }
@@ -143,7 +156,7 @@ func coverageCountsFromFiles(files []coverageFile) (reviewed, skipped, excluded 
 		switch file.Status {
 		case coverageReviewed, coverageReviewedByParts:
 			reviewed++
-		case coverageNotReviewed:
+		case coverageNotReviewed, coveragePending:
 			skipped++
 		case coverageExcluded:
 			excluded++

@@ -319,10 +319,15 @@ func TestNativeFixtures(t *testing.T) {
 		failedClass    string
 		retryFailures  int
 		budgetExceeded bool
+		// pending is the number of changed files the engine left without
+		// coverage. A complete result with an internal exclusion is not full
+		// coverage once the diff inventory is considered (#135).
+		pending int
 	}{
 		{
 			file: "ocr-review-complete.json", state: "complete", comments: 2,
 			reviewed: 2, excluded: 1, totalTokens: 4960, status: store.RunSucceeded,
+			pending: 1,
 		},
 		{
 			file: "ocr-review-partial-budget.json", state: "partial", comments: 3,
@@ -382,6 +387,26 @@ func TestNativeFixtures(t *testing.T) {
 			status, code := nativeOutcome(res)
 			if status != tt.status || code != tt.code {
 				t.Errorf("nativeOutcome = %q/%q, want %q/%q", status, code, tt.status, tt.code)
+			}
+			if tt.pending > 0 {
+				// The engine alone cannot see the diff inventory: the excluded
+				// README.md changed in this comparison, so the run-level decision
+				// escalates even though nativeOutcome reported success.
+				var changed []changedFile
+				for _, item := range res.Manifest.Coverage.Selected {
+					changed = append(changed, changedFile{Path: item.Path, Kind: changedModified})
+				}
+				for _, item := range res.Manifest.Coverage.Excluded {
+					changed = append(changed, changedFile{Path: item.Path, Kind: changedModified})
+				}
+				_, pending := inventoryCoverage(nativeCoverageFiles(res), changed, nil, coverageSignalFrom(res))
+				if len(pending) != tt.pending {
+					t.Fatalf("pending = %+v, want %d file(s)", pending, tt.pending)
+				}
+				baseStatus, baseCode := nativeOutcome(res)
+				if got, code := pendingRunStatus(baseStatus, baseCode, pending); got != store.RunInconclusive || code != "coverage_incomplete" {
+					t.Errorf("run outcome with pending coverage = %q/%q, want inconclusive/coverage_incomplete", got, code)
+				}
 			}
 		})
 	}

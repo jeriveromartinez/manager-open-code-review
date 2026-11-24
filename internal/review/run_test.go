@@ -303,6 +303,56 @@ func runTestNativeNoFindings() string {
 }`
 }
 
+// runTestNativeCovering is a successful review whose manifest completed exactly
+// the given paths, so the diff inventory can verify full coverage.
+func runTestNativeCovering(paths ...string) string {
+	items := make([]string, 0, len(paths))
+	for _, path := range paths {
+		items = append(items, fmt.Sprintf(`{"path": %q}`, path))
+	}
+	joined := strings.Join(items, ", ")
+	return fmt.Sprintf(`{
+  "status": "complete",
+  "summary": {"files_reviewed": %d, "comments": 0, "total_tokens": 100,
+    "input_tokens": 80, "output_tokens": 20, "elapsed": "1s"},
+  "comments": [],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
+    "coverage": {
+      "selected": [%s], "completed": [%s],
+      "reused": [], "failed": [], "waived": [], "excluded": []
+    }
+  }
+}`, len(paths), joined, joined)
+}
+
+// runTestNativeFindingCovering is a successful review with the usual high
+// finding on auth.go and completed coverage for every given path.
+func runTestNativeFindingCovering(paths ...string) string {
+	items := make([]string, 0, len(paths))
+	for _, path := range paths {
+		items = append(items, fmt.Sprintf(`{"path": %q}`, path))
+	}
+	joined := strings.Join(items, ", ")
+	return fmt.Sprintf(`{
+  "status": "complete",
+  "summary": {"files_reviewed": %d, "comments": 1, "total_tokens": 150,
+    "input_tokens": 100, "output_tokens": 50, "elapsed": "1s"},
+  "comments": [{
+    "path": "auth.go", "content": "Comparación insegura\n\nusar hash seguro",
+    "start_line": 3, "end_line": 3, "category": "security",
+    "severity": "high", "suggestion_code": ""
+  }],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
+    "coverage": {
+      "selected": [%s], "completed": [%s],
+      "reused": [], "failed": [], "waived": [], "excluded": []
+    }
+  }
+}`, len(paths), joined, joined)
+}
+
 // runTestOutput is the OpenCode-shaped answer used by the health fallback.
 func runTestOutput(path string) string {
 	return fmt.Sprintf(`{"summary":"Revisión completada","coverage":{"reviewed_files":2,"skipped_files":0},"previous_findings":[],"findings":[{"path":%q,"severity":"major","category":"security","title":"Comparación insegura","body":"usar hash seguro","suggestion":"","confidence":"high","start_line":3,"end_line":3}]}`, path)
@@ -1806,7 +1856,9 @@ func TestRunWithoutOCRSummaryStoresNullTokens(t *testing.T) {
 	if err := f.runner().Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+	// A complete result without a manifest cannot prove coverage, so #135
+	// escalates the run while the token columns still stay NULL.
+	run := assertRunTerminal(t, f, store.RunInconclusive, "coverage_incomplete")
 	if run.InputTokens != nil || run.OutputTokens != nil || run.TotalTokens != nil {
 		t.Errorf("token columns = %v/%v/%v, want NULL without an OCR summary",
 			run.InputTokens, run.OutputTokens, run.TotalTokens)
@@ -2400,6 +2452,14 @@ func TestRunnerCheckProfileDelegates(t *testing.T) {
 
 func TestRunCompleteCoversAllFiles(t *testing.T) {
 	f := newRunTestFixture(t)
+	// The fixture's feature adds auth.go, but the team excludes it on purpose.
+	// The five manifest files are then the whole required set and the run can
+	// still succeed with complete coverage (#135).
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).
+		Update("exclude_globs", datatypes.JSON([]byte(`["auth.go"]`))).Error; err != nil {
+		t.Fatalf("set policy excludes: %v", err)
+	}
 	f.setOCR(t, `{
 	  "status": "complete",
 	  "summary": {"files_reviewed": 5, "comments": 0, "total_tokens": 500,
@@ -2421,14 +2481,28 @@ func TestRunCompleteCoversAllFiles(t *testing.T) {
 	run := assertRunTerminal(t, f, store.RunSucceeded, "")
 
 	var coverage struct {
-		ReviewedFiles int `json:"reviewed_files"`
-		SkippedFiles  int `json:"skipped_files"`
+		ReviewedFiles int            `json:"reviewed_files"`
+		SkippedFiles  int            `json:"skipped_files"`
+		Files         []coverageFile `json:"files"`
 	}
 	if err := json.Unmarshal(run.Coverage, &coverage); err != nil {
 		t.Fatalf("decode coverage %q: %v", run.Coverage, err)
 	}
 	if coverage.ReviewedFiles != 5 || coverage.SkippedFiles != 0 {
 		t.Errorf("coverage = %+v, want 5 reviewed / 0 skipped", coverage)
+	}
+	excluded := false
+	for _, file := range coverage.Files {
+		if file.Path != "auth.go" {
+			continue
+		}
+		excluded = true
+		if file.Status != coverageExcluded || file.Reason != "policy" {
+			t.Errorf("auth.go coverage = %+v, want excluded/policy", file)
+		}
+	}
+	if !excluded {
+		t.Errorf("coverage files = %+v, want the policy exclusion for auth.go", coverage.Files)
 	}
 	if got := f.ocrCalls(t); got != 1 {
 		t.Errorf("ocr calls = %d, want one invocation for all files", got)
@@ -2674,6 +2748,7 @@ func TestRunIncrementalReviewsOnlyNewCommits(t *testing.T) {
 	firstHead := f.headSHA
 
 	secondHead := f.advanceHead(t, "second.go")
+	f.setOCR(t, runTestNativeCovering("second.go"))
 	second := f.createRun(t, secondHead, "")
 
 	if err := f.runner().Run(f.ctx, second.ID); err != nil {
@@ -2778,7 +2853,7 @@ func TestRunIncrementalKeepsFindingsOutsideReviewedPathsOpen(t *testing.T) {
 	  "manifest": {
 	    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
 	    "coverage": {
-	      "selected": [{"path": "auth.go"}], "completed": [{"path": "auth.go"}],
+	      "selected": [{"path": "second.go"}], "completed": [{"path": "second.go"}],
 	      "reused": [], "failed": [], "waived": [], "excluded": []
 	    }
 	  }
@@ -2797,7 +2872,7 @@ func TestRunIncrementalKeepsFindingsOutsideReviewedPathsOpen(t *testing.T) {
 	// Force a full review (the previous base no longer matches) and let OCR
 	// cover main.go again without re-reporting the finding.
 	f.updateRun(t, second.ID, map[string]any{"base_sha": strings.Repeat("b", 40)})
-	f.setOCR(t, runTestNativeNoFindings())
+	f.setOCR(t, runTestNativeCovering("auth.go", "main.go", "second.go", "third.go"))
 	thirdHead := f.advanceHead(t, "third.go")
 	third := f.createRun(t, thirdHead, "")
 	if err := f.runner().Run(f.ctx, third.ID); err != nil {

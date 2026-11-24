@@ -164,8 +164,16 @@ function coverageFileLabel(file: CoverageFile): string {
         : 'Revisado por partes'
     case 'not_reviewed':
       return file.reason ? `No revisado: ${file.reason}` : 'No revisado'
+    case 'pending':
+      return file.reason ? `Pendiente: ${file.reason}` : 'Pendiente'
     case 'excluded':
       return file.reason ? `Excluido: ${file.reason}` : 'Excluido'
+    case 'deleted':
+      return 'Eliminado'
+    case 'binary':
+      return 'Binario'
+    case 'submodule':
+      return 'Submódulo'
     default:
       return file.status
   }
@@ -173,7 +181,7 @@ function coverageFileLabel(file: CoverageFile): string {
 
 function coverageFileTone(status: string): string {
   if (status === 'reviewed' || status === 'reviewed_by_parts') return 'badge--ok'
-  if (status === 'not_reviewed') return 'badge--bad'
+  if (status === 'not_reviewed' || status === 'pending') return 'badge--bad'
   return 'badge--muted'
 }
 
@@ -495,6 +503,10 @@ onBeforeUnmount(() => {
             <div class="coverage__item" data-coverage-excluded>
               <dt>Archivos excluidos por la política</dt>
               <dd><code>{{ coverageCount('excluded_files') }}</code></dd>
+            </div>
+            <div class="coverage__item" data-coverage-not-required>
+              <dt>Archivos no requeridos</dt>
+              <dd><code>{{ coverageCount('not_required_files') }}</code></dd>
             </div>
           </dl>
 
