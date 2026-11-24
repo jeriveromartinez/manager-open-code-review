@@ -163,6 +163,14 @@ type runOutcome struct {
 	// NULL instead of a fake zero (#129).
 	tokensKnown bool
 
+	// decisions is the verifier's answer per finding. verificationSkipped names
+	// why the second pass did not run, so the panel can explain the missing
+	// triage instead of showing it as an empty answer.
+	decisions           []Decision
+	verifyUsage         []byte
+	verifySessionID     string
+	verificationSkipped string
+
 	// Context needed to reconcile findings from passes that already completed
 	// when the run ends inconclusively.
 	merged AgentOutput
@@ -335,17 +343,19 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		outcome.usage = []byte(`{}`)
 	}
 	completion := store.RunCompletion{
-		Status:       outcome.status,
-		ErrorCode:    outcome.code,
-		ErrorMessage: truncateRunMessage(outcome.message),
-		Summary:      outcome.summary,
-		Coverage:     outcome.coverage,
-		Usage:        outcome.usage,
-		Tokens:       outcome.tokenTotals(),
-		TokensKnown:  outcome.tokensKnown,
-		Findings:     outcome.findings,
-		Resolved:     outcome.resolved,
-		BaseSHA:      outcome.baseSHA,
+		Status:          outcome.status,
+		ErrorCode:       outcome.code,
+		ErrorMessage:    truncateRunMessage(outcome.message),
+		Summary:         outcome.summary,
+		Coverage:        outcome.coverage,
+		Usage:           outcome.usage,
+		Tokens:          outcome.tokenTotals(),
+		TokensKnown:     outcome.tokensKnown,
+		Findings:        outcome.findings,
+		Resolved:        outcome.resolved,
+		BaseSHA:         outcome.baseSHA,
+		VerifySessionID: outcome.verifySessionID,
+		VerifyUsage:     outcome.verifyUsage,
 	}
 	if err := r.Store.CompleteReviewRun(persistCtx, runID, completion); err != nil {
 		if errors.Is(err, store.ErrRunNotActive) {
@@ -713,6 +723,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		out.status = store.RunSucceeded
 		out.findings = upserts
 		out.resolved = resolved
+		// Verification runs against the checkout before it is deleted. It only
+		// annotates the findings; applying the decisions happens after they are
+		// persisted, so a crash here loses verdicts but never corrupts state.
+		r.verifyFindings(runCtx, run, cfg, key, workDir, headSHA, &out, log)
+		r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
 		return out, nil
 	case store.RunInconclusive:
 		return out.inconclusive(errors.New(chunkedInconclusiveMessage(res, code, reviewed, skipped)), code), nil
@@ -764,8 +779,13 @@ func (r *Runner) heartbeat(ctx context.Context, runID uint, log *runLogSink, abo
 	}
 }
 
+// nativeCaller is one OCR invocation: a review or a focused verification.
+type nativeCaller interface {
+	Review(ctx context.Context) (nativeReview, []byte, error)
+}
+
 // runNativeReview holds one profile slot for exactly one OCR invocation.
-func (r *Runner) runNativeReview(ctx context.Context, profileID uint, reviewer *NativeReviewer, log *runLogSink, invocation string) (nativeReview, []byte, error) {
+func (r *Runner) runNativeReview(ctx context.Context, profileID uint, reviewer nativeCaller, log *runLogSink, invocation string) (nativeReview, []byte, error) {
 	log.Log(ctx, "worker", invocation, "info", logPhaseOCR,
 		fmt.Sprintf("esperando un slot del perfil %d", profileID))
 	release, acquired, err := r.Store.AcquireProfileSlot(ctx, profileID)

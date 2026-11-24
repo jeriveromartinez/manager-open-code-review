@@ -26,6 +26,7 @@ const (
 	RunPhasePreparing = "preparing"
 	RunPhaseReviewing = "reviewing"
 	RunPhaseChunking  = "chunking"
+	RunPhaseVerifying = "verifying"
 	RunPhaseFinishing = "finishing"
 
 	HealthUnknown = "unknown"

@@ -763,6 +763,10 @@ type RunCompletion struct {
 	// push can be reviewed incrementally. An empty value never overwrites the
 	// base a run already carried.
 	BaseSHA string
+	// VerifySessionID and VerifyUsage are the second OCR pass's session and
+	// consumption. Empty values mean no verification ran.
+	VerifySessionID string
+	VerifyUsage     []byte
 }
 
 // CompleteReviewRun stores a run's outcome in a single transaction: the run is
@@ -793,6 +797,10 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 		if c.TokensKnown && c.Tokens.MaxContext != nil {
 			maxContext = *c.Tokens.MaxContext
 		}
+		var verifyUsage any
+		if len(c.VerifyUsage) > 0 {
+			verifyUsage = datatypes.JSON(c.VerifyUsage)
+		}
 		updates := map[string]any{
 			"status":             c.Status,
 			"error_code":         c.ErrorCode,
@@ -807,6 +815,8 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 			"cache_write_tokens": cacheWrite,
 			"total_tokens":       total,
 			"max_context_tokens": maxContext,
+			"verify_session_id":  c.VerifySessionID,
+			"verify_usage":       verifyUsage,
 			"clone_token_enc":    "",
 			// A finished run has no phase: keeping the last one would make the
 			// panel show a step that is no longer running.

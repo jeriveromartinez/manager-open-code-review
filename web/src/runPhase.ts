@@ -3,6 +3,7 @@ const phaseLabels: Record<string, string> = {
   preparing: 'Preparando base y política',
   reviewing: 'Revisando con OCR',
   chunking: 'Revisando por trozos',
+  verifying: 'Verificando con OCR',
   finishing: 'Cerrando la revisión',
 }
 
