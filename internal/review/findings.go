@@ -123,10 +123,11 @@ func findingsInPaths(open []store.Finding, paths map[string]bool) []store.Findin
 	return kept
 }
 
-// Reconcile concilia los hallazgos de una corrida con los abiertos. Los que
-// coinciden por huella se actualizan conservando su ID; los nuevos reciben un
-// ID determinista derivado de la huella. Solo con complete=true se devuelven
-// los IDs abiertos que ya no aparecen.
+// Reconcile concilia los hallazgos de una corrida con los conocidos del PR. Los
+// que coinciden por huella se actualizan conservando su ID; los nuevos reciben
+// un ID determinista derivado de la huella. Solo con complete=true se devuelven
+// los IDs abiertos que ya no aparecen; un hallazgo descartado o resuelto antes
+// nunca se resuelve por ausencia.
 func Reconcile(open []store.Finding, out AgentOutput, runID uint, complete bool) (upserts []store.Finding, resolvedIDs []string) {
 	byFingerprint := make(map[string]store.Finding, len(open))
 	var pullRequestID uint
@@ -180,7 +181,9 @@ func Reconcile(open []store.Finding, out AgentOutput, runID uint, complete bool)
 
 	if complete {
 		for _, f := range open {
-			if !seen[f.Fingerprint] {
+			// Only an open finding can be resolved by its absence: withdrawn and
+			// resolved rows are not part of the review's open set.
+			if f.Status == store.FindingOpen && !seen[f.Fingerprint] {
 				resolvedIDs = append(resolvedIDs, f.ID)
 			}
 		}

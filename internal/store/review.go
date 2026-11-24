@@ -990,6 +990,24 @@ func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
 	return saved, nil
 }
 
+// RecordFindingVerification stores the verifier's answer for one finding
+// without touching its status. Every decision keeps its evidence, whether it
+// was applied or not.
+func (s *Store) RecordFindingVerification(ctx context.Context, findingID string, verification []byte) error {
+	res := s.DB.WithContext(ctx).Model(&Finding{}).Where("id = ?", findingID).
+		Updates(map[string]any{
+			"verification": datatypes.JSON(verification),
+			"updated_at":   time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return fmt.Errorf("record verification of finding %q: %w", findingID, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("record verification of finding %q: %w", findingID, ErrNotFound)
+	}
+	return nil
+}
+
 // FindingsForPR lists every finding of a pull request, oldest first.
 func (s *Store) FindingsForPR(ctx context.Context, prID uint) ([]Finding, error) {
 	var findings []Finding

@@ -2383,3 +2383,37 @@ func TestUpsertFindingStillUpdatesUntriaged(t *testing.T) {
 			updated.Title, updated.Severity)
 	}
 }
+
+func TestRecordFindingVerificationStoresJSON(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/verification", nil, true)
+	pr := f.openPR(repo.ID, 28, store.StatusPending, false)
+	f.finding(pr, "f_verify", "minor", "style", store.FindingOpen)
+
+	payload := []byte(`{"verdict":"confirm","evidence":"guard()","head_sha":"abc"}`)
+	if err := f.s.RecordFindingVerification(f.ctx, "f_verify", payload); err != nil {
+		t.Fatalf("RecordFindingVerification: %v", err)
+	}
+	got, err := f.s.Finding(f.ctx, "f_verify")
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(got.Verification, &stored); err != nil {
+		t.Fatalf("stored verification is not JSON: %v", err)
+	}
+	if stored["verdict"] != "confirm" || stored["evidence"] != "guard()" {
+		t.Errorf("verification = %v, want the stored payload", stored)
+	}
+	if got.Status != store.FindingOpen || got.TriageVerdict != "" {
+		t.Errorf("finding = %s/%q, want the status and triage untouched",
+			got.Status, got.TriageVerdict)
+	}
+
+	err = f.s.RecordFindingVerification(f.ctx, "missing", payload)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("RecordFindingVerification(missing) = %v, want ErrNotFound", err)
+	}
+}

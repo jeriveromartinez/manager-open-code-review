@@ -74,6 +74,18 @@ func TestReconcileResolvesOnlyWhenComplete(t *testing.T) {
 	}
 }
 
+func TestReconcileDoesNotResolveClosedFindings(t *testing.T) {
+	known := []store.Finding{
+		{ID: "f_open", Fingerprint: "fp-open", Status: store.FindingOpen},
+		{ID: "f_withdrawn", Fingerprint: "fp-withdrawn", Status: store.FindingWithdrawn},
+		{ID: "f_resolved", Fingerprint: "fp-resolved", Status: store.FindingResolved},
+	}
+	_, resolved := Reconcile(known, AgentOutput{}, 9, true)
+	if len(resolved) != 1 || resolved[0] != "f_open" {
+		t.Fatalf("resolved = %v, want only the open finding", resolved)
+	}
+}
+
 func TestReconcileDeterministicIDs(t *testing.T) {
 	af := AgentFinding{Path: "src/b.go", Severity: "minor", Category: "style", Title: "Nuevo", StartLine: 2, EndLine: 2}
 	fp := Fingerprint(af, nil)

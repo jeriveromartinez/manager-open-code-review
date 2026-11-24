@@ -371,6 +371,10 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	log.Log(persistCtx, "worker", "", terminalLogLevel(outcome.status), logPhaseFinish,
 		fmt.Sprintf("run %s%s: %s", outcome.status, terminalCodeSuffix(outcome.code), outcome.message))
 
+	if outcome.status == store.RunSucceeded {
+		r.applyAutoTriage(persistCtx, run, cfg, outcome, log)
+	}
+
 	if outcome.status != store.RunSuperseded {
 		prStatus := store.StatusInconclusive
 		if outcome.status == store.RunSucceeded {
@@ -415,6 +419,69 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	return notifyErr
 }
 
+// applyAutoTriage records every verifier answer and applies the decisions the
+// policy accepted. It runs after the findings are durable, so a crash here
+// loses the triage but never the review. A pull request whose head moved while
+// the run was verifying keeps its findings untouched: the verdicts describe
+// code that is no longer there.
+func (r *Runner) applyAutoTriage(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig, out runOutcome, log *runLogSink) {
+	if len(out.decisions) == 0 {
+		if out.verificationSkipped != "" {
+			log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+				"verificación omitida: "+out.verificationSkipped)
+		}
+		return
+	}
+	current, err := r.Store.ReviewConfigForPR(ctx, run.PullRequestID)
+	if err != nil {
+		log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+			fmt.Sprintf("no se pudo recargar el PR; no se aplica el triage: %v", err))
+		return
+	}
+	if !strings.EqualFold(current.PR.HeadSHA, run.HeadSHA) {
+		log.Log(ctx, "worker", "verify", "warn", logPhaseOCR, fmt.Sprintf(
+			"el head del PR cambió de %s a %s; no se aplica el triage",
+			run.HeadSHA, current.PR.HeadSHA))
+		return
+	}
+
+	actor := "ocr-verify:" + cfg.Profile.Model
+	confirmed, withdrawn, skipped := 0, 0, 0
+	for _, decision := range out.decisions {
+		raw, err := json.Marshal(decision.Verification)
+		if err != nil {
+			log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+				fmt.Sprintf("no se pudo serializar la verificación de %s: %v", decision.FindingID, err))
+		} else if err := r.Store.RecordFindingVerification(ctx, decision.FindingID, raw); err != nil {
+			log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+				fmt.Sprintf("no se pudo guardar la verificación de %s: %v", decision.FindingID, err))
+		}
+		if !decision.Apply {
+			continue
+		}
+		if _, err := r.Store.TriageFinding(ctx, decision.FindingID, decision.Status, store.FindingAudit{
+			Action: "finding.auto_triaged",
+			Actor:  actor,
+			Source: store.TriageSourceVerifier,
+			Reason: decision.Reason,
+		}); err != nil {
+			if !errors.Is(err, store.ErrFindingHumanTriaged) {
+				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+					fmt.Sprintf("no se pudo aplicar el triage de %s: %v", decision.FindingID, err))
+			}
+			skipped++
+			continue
+		}
+		if decision.Status == store.FindingWithdrawn {
+			withdrawn++
+		} else {
+			confirmed++
+		}
+	}
+	log.Log(ctx, "worker", "verify", "info", logPhaseOCR, fmt.Sprintf(
+		"auto-triage: %d confirmados, %d descartados, %d omitidos", confirmed, withdrawn, skipped))
+}
+
 // requeueInterrupted returns a claimed run to the queue when River cancels the
 // job context on shutdown. The claim already stored the run as running, so
 // leaving it there would keep it stuck until the stale watchdog. The write runs
@@ -452,15 +519,18 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	log.Log(ctx, "worker", "", "info", logPhasePolicy, fmt.Sprintf(
 		"perfil %d (%s/%s), esfuerzo %s", cfg.Profile.ID, cfg.Profile.Provider, cfg.Profile.Model, cfg.Policy.ReviewEffort))
 
-	open, err := r.Store.OpenFindingsForPR(ctx, run.PullRequestID)
+	// Every known finding, not only the open ones: a withdrawn finding keeps its
+	// ID, triage and stored verdict across runs only if Reconcile can match it.
+	// Its absence from the review does not resolve it either.
+	known, err := r.Store.FindingsForPR(ctx, run.PullRequestID)
 	if err != nil {
 		log.Log(ctx, "worker", "", "error", logPhasePrepare,
-			fmt.Sprintf("no se pudieron listar los hallazgos abiertos: %v", err))
-		return out.failed(fmt.Errorf("listar hallazgos abiertos: %w", err), "config"), nil
+			fmt.Sprintf("no se pudieron listar los hallazgos conocidos: %v", err))
+		return out.failed(fmt.Errorf("listar hallazgos conocidos: %w", err), "config"), nil
 	}
-	out.open = open
+	out.open = known
 	log.Log(ctx, "worker", "", "info", logPhasePrepare,
-		fmt.Sprintf("hallazgos abiertos antes de revisar: %d", len(open)))
+		fmt.Sprintf("hallazgos conocidos antes de revisar: %d", len(known)))
 
 	token, err := r.boxOpen(run.CloneTokenEnc)
 	if err != nil || len(strings.TrimSpace(string(token))) == 0 {
