@@ -1264,8 +1264,13 @@ func setRunVerificationSession(t *testing.T, st *store.Store, runID uint, sessio
 // markVerified stores the verifier's answer and, when applied, its triage.
 func markVerified(t *testing.T, st *store.Store, id, verdict, triageVerdict string) {
 	t.Helper()
+	markVerifiedAtHead(t, st, id, verdict, triageVerdict, "abcdef1234567890")
+}
+
+func markVerifiedAtHead(t *testing.T, st *store.Store, id, verdict, triageVerdict, head string) {
+	t.Helper()
 	raw, err := json.Marshal(map[string]string{
-		"verdict": verdict, "evidence": "guard()", "head_sha": "abcdef1234567890",
+		"verdict": verdict, "evidence": "guard()", "head_sha": head,
 	})
 	if err != nil {
 		t.Fatalf("marshal verification: %v", err)
@@ -1481,5 +1486,199 @@ func TestInlineFallsBackWhenVerificationDisabled(t *testing.T) {
 	body := publishedSummary(t, gh)
 	if strings.Contains(body, "Verificación automática") {
 		t.Errorf("summary carries a verification block with the mode off:\n%s", body)
+	}
+}
+
+// publishConclusion returns the conclusion and QA status of the last publish.
+func publishConclusion(t *testing.T, st *store.Store, gh *fakeGitHub, prID uint) (string, string) {
+	t.Helper()
+	gh.mu.Lock()
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	gh.mu.Unlock()
+	if len(patches) == 0 {
+		t.Fatal("no check run was completed")
+	}
+	var pr store.PullRequest
+	if err := st.DB.Take(&pr, prID).Error; err != nil {
+		t.Fatalf("reload pull request: %v", err)
+	}
+	return patches[len(patches)-1].Conclusion, pr.QAStatus
+}
+
+func TestPublishBlocksOnValidatedConfirmation(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	seedFinding(t, st, pr.ID, run.ID, "confirmed", 2, "major", store.FindingOpen)
+	markVerified(t, st, "confirmed", "confirm", store.VerdictConfirmed)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	conclusion, status := publishConclusion(t, st, gh, pr.ID)
+	if conclusion != "failure" || status != store.StatusChangesRequested {
+		t.Errorf("conclusion/status = %q/%q, want a validated confirmation to block", conclusion, status)
+	}
+}
+
+func TestPublishBlocksOnHumanConfirmationDespiteVerifierUncertainty(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	seedFinding(t, st, pr.ID, run.ID, "confirmed", 2, "major", store.FindingOpen)
+	markVerified(t, st, "confirmed", "uncertain", "")
+	if err := st.DB.Exec(
+		"UPDATE findings SET triage_source = ?, triage_verdict = ? WHERE id = ?",
+		store.TriageSourceHuman, store.VerdictConfirmed, "confirmed",
+	).Error; err != nil {
+		t.Fatalf("set human triage: %v", err)
+	}
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	conclusion, status := publishConclusion(t, st, gh, pr.ID)
+	if conclusion != "failure" || status != store.StatusChangesRequested {
+		t.Errorf("conclusion/status = %q/%q, want a human confirmation to block", conclusion, status)
+	}
+}
+
+func TestPublishDoesNotBlockOnUncertainVerification(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	seedFinding(t, st, pr.ID, run.ID, "uncertain", 2, "major", store.FindingOpen)
+	markVerified(t, st, "uncertain", "uncertain", "")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	conclusion, status := publishConclusion(t, st, gh, pr.ID)
+	if conclusion != "success" || status != store.StatusReadyForHuman {
+		t.Errorf("conclusion/status = %q/%q, want an uncertainty to leave the human in charge", conclusion, status)
+	}
+}
+
+func TestSummaryListsInvalidatedDismissalForTheHuman(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	seedFinding(t, st, pr.ID, run.ID, "reopened", 2, "nit", store.FindingWithdrawn)
+	markVerified(t, st, "reopened", "uncertain", "")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	body := publishedSummary(t, gh)
+	if !strings.Contains(body, "**Verificación automática:** 0 validados · 1 para tu criterio · 0 descartados") {
+		t.Errorf("summary drops an invalidated dismissal:\n%s", body)
+	}
+	if !strings.Contains(body, "Necesita tu criterio (1)") || !strings.Contains(body, "Título reopened") {
+		t.Errorf("summary hides the invalidated dismissal from the human:\n%s", body)
+	}
+}
+
+func TestPublishDoesNotTrustAConfirmationWithoutEvidence(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	seedFinding(t, st, pr.ID, run.ID, "legacy", 2, "major", store.FindingOpen)
+	raw := datatypes.JSON([]byte(`{"verdict":"confirm","head_sha":"abcdef1234567890"}`))
+	if err := st.DB.Model(&store.Finding{}).Where("id = ?", "legacy").Updates(map[string]any{
+		"verification":   raw,
+		"triage_source":  store.TriageSourceVerifier,
+		"triage_verdict": store.VerdictConfirmed,
+	}).Error; err != nil {
+		t.Fatalf("store pre-#136 confirmation: %v", err)
+	}
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	conclusion, status := publishConclusion(t, st, gh, pr.ID)
+	if conclusion != "success" || status != store.StatusReadyForHuman {
+		t.Errorf("conclusion/status = %q/%q, want an evidence-less confirmation not to block", conclusion, status)
+	}
+	body := publishedSummary(t, gh)
+	if !strings.Contains(body, "0 validados · 1 para tu criterio") {
+		t.Errorf("summary presents an evidence-less confirmation as validated:\n%s", body)
+	}
+	gh.mu.Lock()
+	reviews := append([]fakeReview(nil), gh.reviews...)
+	gh.mu.Unlock()
+	for _, review := range reviews {
+		for _, comment := range review.Comments {
+			if strings.Contains(comment.Body, "Título legacy") {
+				t.Errorf("an evidence-less confirmation was published inline: %q", comment.Body)
+			}
+		}
+	}
+}
+
+func TestPublishDoesNotTrustAVerdictFromAnotherHead(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	seedFinding(t, st, pr.ID, run.ID, "stale", 2, "major", store.FindingOpen)
+	markVerifiedAtHead(t, st, "stale", "confirm", store.VerdictConfirmed, "oldsha111")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	conclusion, status := publishConclusion(t, st, gh, pr.ID)
+	if conclusion != "success" || status != store.StatusReadyForHuman {
+		t.Errorf("conclusion/status = %q/%q, want a stale verdict not to block", conclusion, status)
+	}
+	body := publishedSummary(t, gh)
+	for _, want := range []string{
+		"0 validados · 1 para tu criterio",
+		"la verificación corresponde a otro commit",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("summary does not contain %q:\n%s", want, body)
+		}
+	}
+	if strings.Contains(body, "Validado por la verificación") {
+		t.Errorf("summary presents a verdict from another head as validated:\n%s", body)
+	}
+	gh.mu.Lock()
+	reviews := append([]fakeReview(nil), gh.reviews...)
+	gh.mu.Unlock()
+	for _, review := range reviews {
+		for _, comment := range review.Comments {
+			if strings.Contains(comment.Body, "Título stale") {
+				t.Errorf("a stale confirmation was published inline: %q", comment.Body)
+			}
+		}
 	}
 }

@@ -47,7 +47,7 @@ func (w *Worker) Republish(ctx context.Context, prID uint) error {
 	if run.Status == store.RunSucceeded {
 		conclusion = "success"
 		status = store.StatusReadyForHuman
-		if hasBlocking(open, p.policy.BlockingThreshold) {
+		if p.hasBlocking(open) {
 			conclusion = "failure"
 			status = store.StatusChangesRequested
 		}

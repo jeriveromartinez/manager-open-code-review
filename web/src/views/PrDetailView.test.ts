@@ -755,7 +755,11 @@ describe('PrDetailView', () => {
       triaged_by: 'ocr-verify:nemotron',
       triaged_at: '2026-11-19T11:00:00Z',
       triage_source: 'verifier' as const,
-      verification: { verdict: 'confirm' as const, evidence: 'if err != nil {' },
+      verification: {
+        verdict: 'confirm' as const,
+        evidence: 'if err != nil {',
+        head_sha: 'abc123def',
+      },
     }
     const dismissed = {
       ...detail.findings[2],
@@ -764,7 +768,11 @@ describe('PrDetailView', () => {
       triaged_by: 'ocr-verify:nemotron',
       triaged_at: '2026-11-19T11:00:00Z',
       triage_source: 'verifier' as const,
-      verification: { verdict: 'refute' as const, evidence: 'return nil' },
+      verification: {
+        verdict: 'refute' as const,
+        evidence: 'return nil',
+        head_sha: 'abc123def',
+      },
     }
     mocks.api.prDetail.mockResolvedValue({
       ...detail,
@@ -796,7 +804,11 @@ describe('PrDetailView', () => {
   it('shows a simulated verdict without touching the triage', async () => {
     const simulated = {
       ...detail.findings[1],
-      verification: { verdict: 'refute' as const, evidence: 'return nil' },
+      verification: {
+        verdict: 'refute' as const,
+        evidence: 'return nil',
+        head_sha: 'abc123def',
+      },
     }
     mocks.api.prDetail.mockResolvedValue({
       ...detail,
@@ -811,6 +823,35 @@ describe('PrDetailView', () => {
     expect(major.get('[data-verification-evidence]').text()).toBe('return nil')
     expect(major.get('[data-triage-note]').text()).toBe('Sin triar')
     expect(major.find('[data-withdraw]').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('does not present a verdict from another commit as evidence', async () => {
+    const stale = {
+      ...detail.findings[1],
+      verification: {
+        verdict: 'confirm' as const,
+        evidence: 'if err != nil {',
+        head_sha: 'oldsha111',
+        reason: 'la verificación no corresponde al head revisado',
+      },
+    }
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      findings: [detail.findings[0], stale, detail.findings[2]],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const major = wrapper.get('[data-severity="major"]')
+    expect(major.get('[data-verification-verdict]').text()).toBe('Sin confirmar')
+    expect(major.find('[data-verification-evidence]').exists()).toBe(false)
+    expect(major.get('[data-verification-reason]').text()).toBe(
+      'La verificación corresponde a otro commit',
+    )
+    expect(major.get('[data-triage-note]').text()).toBe('Sin triar')
 
     wrapper.unmount()
   })

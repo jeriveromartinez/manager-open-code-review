@@ -114,7 +114,7 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 	conclusion := "action_required"
 	if p.run.Status == store.RunSucceeded {
 		conclusion = "success"
-		if hasBlocking(open, p.policy.BlockingThreshold) {
+		if p.hasBlocking(open) {
 			conclusion = "failure"
 		}
 	}
@@ -256,17 +256,75 @@ var severityRank = map[string]int{
 	"nit":     1,
 }
 
-func hasBlocking(findings []store.Finding, threshold string) bool {
-	minimum := severityRank[threshold]
+// storedVerification is the subset of the verifier's JSON the publisher needs
+// to decide whether a finding may be presented as validated or block a check.
+type storedVerification struct {
+	Verdict  string `json:"verdict"`
+	Evidence string `json:"evidence"`
+	HeadSHA  string `json:"head_sha"`
+	Reason   string `json:"reason"`
+}
+
+func parseVerification(f store.Finding) storedVerification {
+	var v storedVerification
+	if len(f.Verification) > 0 {
+		_ = json.Unmarshal(f.Verification, &v)
+	}
+	return v
+}
+
+// verificationAtHead reports whether the stored answer still describes the
+// reviewed head and carries the evidence a verdict needs. A confirmation
+// without a cited line is not trusted, even when it predates #136.
+func (p *publishContext) verificationAtHead(f store.Finding) (storedVerification, bool) {
+	v := parseVerification(f)
+	if v.HeadSHA == "" || p.run.HeadSHA == "" ||
+		!strings.EqualFold(v.HeadSHA, p.run.HeadSHA) {
+		return v, false
+	}
+	switch v.Verdict {
+	case "confirm":
+		if strings.TrimSpace(v.Evidence) == "" {
+			return v, false
+		}
+	case "refute", "uncertain":
+	default:
+		return v, false
+	}
+	return v, true
+}
+
+// hasBlocking counts the open findings the check may fail on. A finding the
+// verifier could not validate at this head never blocks: its uncertainty is the
+// human's call. A finding the verifier never answered keeps the pre-verifier
+// behaviour and still blocks.
+func (p *publishContext) hasBlocking(findings []store.Finding) bool {
+	minimum := severityRank[p.policy.BlockingThreshold]
 	if minimum == 0 {
 		minimum = severityRank[defaultBlockingThreshold]
 	}
 	for _, f := range findings {
-		if severityRank[f.Severity] >= minimum {
-			return true
+		if severityRank[f.Severity] < minimum || !p.blocksOnVerification(f) {
+			continue
 		}
+		return true
 	}
 	return false
+}
+
+func (p *publishContext) blocksOnVerification(f store.Finding) bool {
+	// A human decision wins over the verifier's stored answer.
+	if f.TriageSource == store.TriageSourceHuman {
+		return true
+	}
+	if len(f.Verification) == 0 {
+		return true
+	}
+	v, trusted := p.verificationAtHead(f)
+	if v.Verdict == "" {
+		return true
+	}
+	return trusted && v.Verdict != "uncertain"
 }
 
 func shortSHA(sha string) string {
@@ -380,7 +438,7 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 			end = f.StartLine
 		}
 		level := "warning"
-		if hasBlocking([]store.Finding{f}, p.policy.BlockingThreshold) {
+		if p.hasBlocking([]store.Finding{f}) {
 			level = "failure"
 		}
 		title := p.sanitize(f.Title)

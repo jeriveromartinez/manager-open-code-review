@@ -406,7 +406,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 			if err != nil {
 				return fmt.Errorf("list open findings of pull request %d: %w", run.PullRequestID, err)
 			}
-			if hasBlockingFinding(open, cfg.Policy.BlockingThreshold) {
+			if hasBlockingFinding(open, cfg.Policy.BlockingThreshold, run.HeadSHA) {
 				prStatus = store.StatusChangesRequested
 			}
 		}
@@ -471,9 +471,10 @@ func (r *Runner) applyAutoTriage(ctx context.Context, run store.ReviewRun, cfg s
 	actor := "ocr-verify:" + cfg.Profile.Model
 	confirmed, withdrawn, skipped := 0, 0, 0
 	for _, decision := range out.decisions {
-		// A finding the verifier never answered has no verification: recording
-		// the zero value would erase the evidence a previous run stored.
-		if !decision.Verification.VerifiedAt.IsZero() {
+		// A finding the verifier never answered gets an explicit uncertain
+		// record with its reason; a previous run's evidence is stale at this
+		// head and must not stay published as a confirmation.
+		if !decision.Verification.VerifiedAt.IsZero() || decision.Verification.Reason != "" {
 			raw, err := json.Marshal(decision.Verification)
 			if err != nil {
 				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
@@ -1048,14 +1049,48 @@ func incrementalSource(run, prev store.ReviewRun, reviewedBase, headSHA string) 
 	return prev.HeadSHA, true
 }
 
-func hasBlockingFinding(findings []store.Finding, threshold string) bool {
+func hasBlockingFinding(findings []store.Finding, threshold, headSHA string) bool {
 	limit := severityRank(threshold)
 	for _, f := range findings {
-		if f.Status == store.FindingOpen && severityRank(f.Severity) >= limit {
+		if f.Status != store.FindingOpen || severityRank(f.Severity) < limit {
+			continue
+		}
+		if findingBlocks(f, headSHA) {
 			return true
 		}
 	}
 	return false
+}
+
+// findingBlocks mirrors the publisher's gate: an uncertainty or a verdict from
+// another head never blocks, and a confirmation needs its cited evidence. A
+// finding the verifier never answered keeps the pre-verifier behaviour.
+func findingBlocks(f store.Finding, headSHA string) bool {
+	if f.TriageSource == store.TriageSourceHuman {
+		return true
+	}
+	if len(f.Verification) == 0 {
+		return true
+	}
+	var evidence struct {
+		Verdict  string `json:"verdict"`
+		Evidence string `json:"evidence"`
+		HeadSHA  string `json:"head_sha"`
+	}
+	if err := json.Unmarshal(f.Verification, &evidence); err != nil || evidence.Verdict == "" {
+		return true
+	}
+	if headSHA == "" || evidence.HeadSHA == "" || !strings.EqualFold(evidence.HeadSHA, headSHA) {
+		return false
+	}
+	switch evidence.Verdict {
+	case "confirm":
+		return strings.TrimSpace(evidence.Evidence) != ""
+	case "refute":
+		return true
+	default:
+		return false
+	}
 }
 
 func severityRank(severity string) int {

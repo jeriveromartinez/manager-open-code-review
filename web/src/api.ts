@@ -176,6 +176,8 @@ export type FindingVerification = {
   model?: string
   session_id?: string
   verified_at?: string
+  /** Why the verdict could not be applied; empty when it validated. */
+  reason?: string
 }
 
 export type Finding = {

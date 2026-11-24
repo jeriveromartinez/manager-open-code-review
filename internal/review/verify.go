@@ -1,7 +1,6 @@
 package review
 
 import (
-	"bytes"
 	"strings"
 	"time"
 
@@ -27,6 +26,11 @@ type Verification struct {
 	Model      string    `json:"model"`
 	SessionID  string    `json:"session_id"`
 	VerifiedAt time.Time `json:"verified_at"`
+	// Reason explains why a verdict could not be applied. It is set when the
+	// evidence does not validate at the reviewed head or when the policy
+	// degrades the answer, so the panel and the summary can show why the
+	// finding is still the human's call.
+	Reason string `json:"reason,omitempty"`
 }
 
 // VerifyPolicy is the deterministic policy applied to the verifier's answers.
@@ -106,18 +110,52 @@ func parseVerdict(raw string) (Verdict, bool) {
 	}
 }
 
-// EvidenceInFile reports whether the cited evidence appears literally in the
-// head file. A refutation that cannot be found there is a hallucination or an
-// injection, so it never withdraws a finding.
-func EvidenceInFile(v Verification, content []byte) bool {
+// validateEvidence is the single gate for a verdict that would confirm or
+// dismiss a finding. It requires the answer to describe the reviewed head, the
+// cited path to exist at that head, and the quoted line to match exactly one of
+// the lines the finding cited (or its own ExistingCode). Anything else is not
+// evidence: the caller degrades the verdict to uncertain instead of trusting a
+// quote from another commit, another file or another part of the file.
+func validateEvidence(f store.Finding, v Verification, files map[string][]byte, headSHA string) string {
+	if headSHA == "" || !strings.EqualFold(strings.TrimSpace(v.HeadSHA), headSHA) {
+		return "la verificación no corresponde al head revisado"
+	}
+	content, ok := files[f.Path]
+	if !ok {
+		return "el archivo citado no existe en el head revisado"
+	}
 	evidence := strings.TrimSpace(v.Evidence)
-	return evidence != "" && bytes.Contains(content, []byte(evidence))
+	if evidence == "" {
+		return "el verificador no citó evidencia"
+	}
+	if strings.ContainsAny(evidence, "\r\n") {
+		return "la evidencia no es una sola línea del archivo"
+	}
+	start, end := f.StartLine, f.EndLine
+	if end < start {
+		end = start
+	}
+	if start <= 0 {
+		return "el hallazgo no cita un rango de líneas"
+	}
+	lines := strings.Split(string(content), "\n")
+	for line := start; line <= end && line <= len(lines); line++ {
+		if strings.TrimSpace(lines[line-1]) == evidence {
+			return ""
+		}
+	}
+	for _, line := range strings.Split(f.ExistingCode, "\n") {
+		if strings.TrimSpace(line) == evidence {
+			return ""
+		}
+	}
+	return "la evidencia no coincide con las líneas citadas del hallazgo"
 }
 
 // Decide applies the policy to every finding of the run. Human-triaged
 // findings are not touched at all; the rest always get a decision, applied
 // only in apply mode and only when the policy accepts it.
-func Decide(findings []store.Finding, verdicts map[string]Verification, files map[string][]byte, p VerifyPolicy) []Decision {
+func Decide(findings []store.Finding, verdicts map[string]Verification, files map[string][]byte, headSHA string, p VerifyPolicy) []Decision {
 	decisions := make([]Decision, 0, len(findings))
 	for _, f := range findings {
 		if f.TriageSource == store.TriageSourceHuman {
@@ -125,14 +163,43 @@ func Decide(findings []store.Finding, verdicts map[string]Verification, files ma
 		}
 		verdict, answered := verdicts[f.ID]
 		if !answered {
-			verdict = Verification{Verdict: VerdictUncertain}
+			verdict = Verification{
+				Verdict: VerdictUncertain,
+				HeadSHA: headSHA,
+				Reason:  "OCR no respondió por este hallazgo",
+			}
 		}
-		decisions = append(decisions, decideFinding(f, verdict, files, p))
+		decisions = append(decisions, decideFinding(f, verdict, files, headSHA, p))
 	}
 	return decisions
 }
 
-func decideFinding(f store.Finding, verification Verification, files map[string][]byte, p VerifyPolicy) Decision {
+// degradeEvidence turns an answer whose evidence cannot be validated into an
+// explicit uncertainty. The recorded verdict becomes uncertain too: the quote
+// from another commit, file or line must never keep confirming or dismissing.
+func degradeEvidence(decision Decision, f store.Finding, reason string) Decision {
+	decision.Verdict = VerdictUncertain
+	decision.Status = f.Status
+	decision.Apply = false
+	decision.Reason = reason
+	decision.Verification.Verdict = VerdictUncertain
+	decision.Verification.Reason = reason
+	return decision
+}
+
+// degradePolicy keeps the verifier's raw answer and evidence, so a dry run
+// still shows what OCR actually said, and only degrades the decision the policy
+// refuses to apply. The reason is recorded for the human.
+func degradePolicy(decision Decision, f store.Finding, reason string) Decision {
+	decision.Verdict = VerdictUncertain
+	decision.Status = f.Status
+	decision.Apply = false
+	decision.Reason = reason
+	decision.Verification.Reason = reason
+	return decision
+}
+
+func decideFinding(f store.Finding, verification Verification, files map[string][]byte, headSHA string, p VerifyPolicy) Decision {
 	decision := Decision{
 		FindingID:    f.ID,
 		Verdict:      verification.Verdict,
@@ -141,31 +208,31 @@ func decideFinding(f store.Finding, verification Verification, files map[string]
 	}
 	switch verification.Verdict {
 	case VerdictConfirm:
+		if reason := validateEvidence(f, verification, files, headSHA); reason != "" {
+			return degradeEvidence(decision, f, reason)
+		}
 		decision.Status = store.FindingOpen
 		decision.Reason = "OCR confirmó el hallazgo"
 		decision.Apply = p.Mode == store.AutoTriageApply
 	case VerdictRefute:
-		decision.Status = store.FindingWithdrawn
-		decision.Reason = "OCR descartó el hallazgo"
 		switch {
 		case severityRank(f.Severity) >= severityRank("major"):
-			decision.Verdict = VerdictUncertain
-			decision.Status = f.Status
-			decision.Reason = "no se descarta una severidad bloqueante sin humano"
+			return degradePolicy(decision, f, "no se descarta una severidad bloqueante sin humano")
 		case !p.AutoWithdraw:
-			decision.Verdict = VerdictUncertain
-			decision.Status = f.Status
-			decision.Reason = "el descarte automático está apagado"
-		case !EvidenceInFile(verification, files[f.Path]):
-			decision.Verdict = VerdictUncertain
-			decision.Status = f.Status
-			decision.Reason = "la evidencia no aparece en el archivo del head"
-		default:
-			decision.Apply = p.Mode == store.AutoTriageApply
+			return degradePolicy(decision, f, "el descarte automático está apagado")
 		}
+		if reason := validateEvidence(f, verification, files, headSHA); reason != "" {
+			return degradeEvidence(decision, f, reason)
+		}
+		decision.Status = store.FindingWithdrawn
+		decision.Reason = "OCR descartó el hallazgo"
+		decision.Apply = p.Mode == store.AutoTriageApply
 	default:
 		decision.Verdict = VerdictUncertain
-		decision.Reason = "OCR no pudo verificar el hallazgo"
+		if decision.Verification.Reason == "" {
+			decision.Verification.Reason = "OCR no pudo verificar el hallazgo"
+		}
+		decision.Reason = decision.Verification.Reason
 	}
 	return decision
 }
