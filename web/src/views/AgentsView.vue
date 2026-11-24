@@ -10,6 +10,7 @@ import {
   type QAPolicy,
   type QAPolicyInput,
   type ReviewEffort,
+  type AutoTriageMode,
   type ReviewEvent,
   type Team,
 } from '../api'
@@ -105,6 +106,13 @@ const policyExcludeGlobs = ref('')
 const policyContextCeiling = ref<number | ''>('')
 const policyReviewEffort = ref<ReviewEffort>('low')
 const policyReviewTokenBudget = ref(0)
+const policyAutoTriageMode = ref<AutoTriageMode>('off')
+const policyAutoWithdraw = ref(false)
+const policyVerifyMaxFindings = ref(50)
+const policyVerifyMaxFiles = ref(20)
+const policyVerifyTokenShare = ref(20)
+const policyVerifyTimeShare = ref(15)
+const policyVerifyTokenMax = ref(100000)
 const policyError = ref<string | null>(null)
 const policyMessage = ref<string | null>(null)
 // Set when someone else changed what is on screen while it had unsaved edits.
@@ -165,6 +173,13 @@ function applyPolicy(saved: QAPolicy): void {
   policyContextCeiling.value = saved.review_context_ceiling ?? ''
   policyReviewEffort.value = saved.review_effort || 'low'
   policyReviewTokenBudget.value = saved.review_token_budget ?? 0
+  policyAutoTriageMode.value = saved.auto_triage_mode || 'off'
+  policyAutoWithdraw.value = saved.auto_withdraw ?? false
+  policyVerifyMaxFindings.value = saved.verify_max_findings || 50
+  policyVerifyMaxFiles.value = saved.verify_max_files || 20
+  policyVerifyTokenShare.value = saved.verify_token_share || 20
+  policyVerifyTimeShare.value = saved.verify_time_share || 15
+  policyVerifyTokenMax.value = saved.verify_token_max || 100000
   stalePolicy.value = false
 }
 
@@ -195,7 +210,14 @@ const policyDirty = computed(
       policyExcludeGlobs.value !== policy.value.exclude_globs.join('\n') ||
       policyContextCeiling.value !== (policy.value.review_context_ceiling ?? '') ||
       policyReviewEffort.value !== (policy.value.review_effort || 'low') ||
-      policyReviewTokenBudget.value !== (policy.value.review_token_budget ?? 0)),
+      policyReviewTokenBudget.value !== (policy.value.review_token_budget ?? 0) ||
+      policyAutoTriageMode.value !== (policy.value.auto_triage_mode || 'off') ||
+      policyAutoWithdraw.value !== (policy.value.auto_withdraw ?? false) ||
+      policyVerifyMaxFindings.value !== (policy.value.verify_max_findings || 50) ||
+      policyVerifyMaxFiles.value !== (policy.value.verify_max_files || 20) ||
+      policyVerifyTokenShare.value !== (policy.value.verify_token_share || 20) ||
+      policyVerifyTimeShare.value !== (policy.value.verify_time_share || 15) ||
+      policyVerifyTokenMax.value !== (policy.value.verify_token_max || 100000)),
 )
 
 // Health checks also announce a profile; only these fields are someone's edit.
@@ -541,6 +563,13 @@ async function savePolicy(): Promise<void> {
     review_context_ceiling: ceiling === '' ? null : ceiling,
     review_effort: policyReviewEffort.value,
     review_token_budget: Number(policyReviewTokenBudget.value) || 0,
+    auto_triage_mode: policyAutoTriageMode.value,
+    auto_withdraw: policyAutoWithdraw.value,
+    verify_max_findings: Number(policyVerifyMaxFindings.value) || 0,
+    verify_max_files: Number(policyVerifyMaxFiles.value) || 0,
+    verify_token_share: Number(policyVerifyTokenShare.value) || 0,
+    verify_time_share: Number(policyVerifyTimeShare.value) || 0,
+    verify_token_max: Number(policyVerifyTokenMax.value) || 0,
   }
   try {
     applyPolicy(await api.savePolicy(selectedTeamId.value, body))
@@ -799,6 +828,100 @@ onMounted(() => {
                 </span>
               </label>
             </div>
+          </div>
+
+          <div class="policy__cost" data-policy-triage>
+            <h3 class="policy__section-title">Verificación automática</h3>
+            <div class="policy__cost-fields">
+              <label class="field">
+                <span class="field__label">Modo</span>
+                <select
+                  v-model="policyAutoTriageMode"
+                  class="field__input"
+                  data-policy-auto-triage
+                >
+                  <option value="off">Apagada</option>
+                  <option value="dry_run">Solo simular</option>
+                  <option value="apply">Aplicar</option>
+                </select>
+                <span class="field__hint">
+                  Segunda pasada de OCR sobre los hallazgos. «Solo simular» guarda el veredicto
+                  sin cambiar el estado de nada.
+                </span>
+              </label>
+              <label class="field">
+                <span class="field__label">Hallazgos por verificar</span>
+                <input
+                  v-model.number="policyVerifyMaxFindings"
+                  class="field__input"
+                  type="number"
+                  min="0"
+                  data-policy-verify-findings
+                />
+                <span class="field__hint">Máximo de hallazgos enviados a la verificación.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">Archivos por verificar</span>
+                <input
+                  v-model.number="policyVerifyMaxFiles"
+                  class="field__input"
+                  type="number"
+                  min="0"
+                  data-policy-verify-files
+                />
+                <span class="field__hint">Máximo de archivos distintos en la segunda pasada.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">% de tokens</span>
+                <input
+                  v-model.number="policyVerifyTokenShare"
+                  class="field__input"
+                  type="number"
+                  min="0"
+                  max="100"
+                  data-policy-verify-token-share
+                />
+                <span class="field__hint">
+                  Parte del presupuesto del run reservada a verificar, si hay tope de gasto.
+                </span>
+              </label>
+              <label class="field">
+                <span class="field__label">% de tiempo</span>
+                <input
+                  v-model.number="policyVerifyTimeShare"
+                  class="field__input"
+                  type="number"
+                  min="0"
+                  max="100"
+                  data-policy-verify-time-share
+                />
+                <span class="field__hint">Parte del tiempo restante del run.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">Tope de tokens</span>
+                <input
+                  v-model.number="policyVerifyTokenMax"
+                  class="field__input"
+                  type="number"
+                  min="10000"
+                  max="1000000000"
+                  data-policy-verify-token-max
+                />
+                <span class="field__hint">
+                  Se usa cuando no hay tope de gasto en el run. Mínimo 10.000.
+                </span>
+              </label>
+            </div>
+            <label class="policy-ci">
+              <input v-model="policyAutoWithdraw" type="checkbox" data-policy-auto-withdraw />
+              <span class="policy-ci__text">
+                <span class="field__label">Descartar automáticamente</span>
+                <span class="field__hint">
+                  Solo minor y nit, y solo con evidencia literal en el archivo. Nunca mayor ni
+                  bloqueante.
+                </span>
+              </span>
+            </label>
           </div>
 
           <div class="policy__extras">

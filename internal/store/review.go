@@ -29,6 +29,9 @@ var (
 	// ErrFindingResolved is returned when triaging a finding the code already
 	// fixed: confirming it would reopen it and re-block the gate.
 	ErrFindingResolved = errors.New("finding is resolved")
+	// ErrFindingHumanTriaged is returned when the verifier tries to change a
+	// finding a person already decided. A human never loses to the second pass.
+	ErrFindingHumanTriaged = errors.New("finding already triaged by a human")
 )
 
 // Defaults applied by SaveQAPolicy when an administrator leaves a field at its
@@ -39,7 +42,17 @@ const (
 	policyDefaultMaxDiffLines = 3000
 	policyDefaultMaxPasses    = 4
 	policyDefaultReviewEffort = ReviewEffortLow
+
+	DefaultVerifyMaxFindings = 50
+	DefaultVerifyMaxFiles    = 20
+	DefaultVerifyTokenShare  = 20
+	DefaultVerifyTimeShare   = 15
+	DefaultVerifyTokenMax    = 100000
 )
+
+// VerifyTokenMaxMin is the smallest per-run cap the second OCR pass accepts:
+// below it the scan cannot answer anything useful.
+const VerifyTokenMaxMin = 10000
 
 // Review effort values and policy bounds shared by validation and the API. The
 // context ceiling is the per-conversation input limit, not the run's total
@@ -59,6 +72,16 @@ const (
 func ValidReviewEffort(effort string) bool {
 	switch effort {
 	case ReviewEffortLow, ReviewEffortMedium, ReviewEffortHigh:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidAutoTriageMode reports whether mode is one the verifier understands.
+func ValidAutoTriageMode(mode string) bool {
+	switch mode {
+	case AutoTriageOff, AutoTriageDryRun, AutoTriageApply:
 		return true
 	default:
 		return false
@@ -393,6 +416,41 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid review token budget %d",
 			p.TeamID, p.ReviewTokenBudget)
 	}
+	if p.AutoTriageMode == "" {
+		p.AutoTriageMode = AutoTriageOff
+	}
+	if !ValidAutoTriageMode(p.AutoTriageMode) {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid auto-triage mode %q",
+			p.TeamID, p.AutoTriageMode)
+	}
+	if p.VerifyMaxFindings == 0 {
+		p.VerifyMaxFindings = DefaultVerifyMaxFindings
+	}
+	if p.VerifyMaxFiles == 0 {
+		p.VerifyMaxFiles = DefaultVerifyMaxFiles
+	}
+	if p.VerifyTokenShare == 0 {
+		p.VerifyTokenShare = DefaultVerifyTokenShare
+	}
+	if p.VerifyTimeShare == 0 {
+		p.VerifyTimeShare = DefaultVerifyTimeShare
+	}
+	if p.VerifyTokenMax == 0 {
+		p.VerifyTokenMax = DefaultVerifyTokenMax
+	}
+	if p.VerifyMaxFindings < 0 || p.VerifyMaxFiles < 0 {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid verify limits %d/%d",
+			p.TeamID, p.VerifyMaxFindings, p.VerifyMaxFiles)
+	}
+	if p.VerifyTokenShare < 0 || p.VerifyTokenShare > 100 ||
+		p.VerifyTimeShare < 0 || p.VerifyTimeShare > 100 {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid verify shares %d/%d",
+			p.TeamID, p.VerifyTokenShare, p.VerifyTimeShare)
+	}
+	if p.VerifyTokenMax < VerifyTokenMaxMin || p.VerifyTokenMax > ReviewTokenBudgetMax {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid verify token max %d",
+			p.TeamID, p.VerifyTokenMax)
+	}
 	globs := bytes.TrimSpace(p.ExcludeGlobs)
 	if len(globs) == 0 || bytes.Equal(globs, []byte("null")) {
 		p.ExcludeGlobs = datatypes.JSON([]byte(`[]`))
@@ -410,7 +468,9 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 			"llm_profile_id", "blocking_threshold", "extra_instructions", "exclude_globs",
 			"max_files_per_pass", "max_diff_lines_per_pass", "max_passes",
 			"require_green_ci", "review_context_ceiling", "review_effort",
-			"review_token_budget", "updated_at",
+			"review_token_budget", "auto_triage_mode", "auto_withdraw",
+			"verify_max_findings", "verify_max_files", "verify_token_share",
+			"verify_time_share", "verify_token_max", "updated_at",
 		}),
 	}).Create(&p).Error
 	if err != nil {
@@ -753,6 +813,10 @@ type RunCompletion struct {
 	// push can be reviewed incrementally. An empty value never overwrites the
 	// base a run already carried.
 	BaseSHA string
+	// VerifySessionID and VerifyUsage are the second OCR pass's session and
+	// consumption. Empty values mean no verification ran.
+	VerifySessionID string
+	VerifyUsage     []byte
 }
 
 // CompleteReviewRun stores a run's outcome in a single transaction: the run is
@@ -783,6 +847,10 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 		if c.TokensKnown && c.Tokens.MaxContext != nil {
 			maxContext = *c.Tokens.MaxContext
 		}
+		var verifyUsage any
+		if len(c.VerifyUsage) > 0 {
+			verifyUsage = datatypes.JSON(c.VerifyUsage)
+		}
 		updates := map[string]any{
 			"status":             c.Status,
 			"error_code":         c.ErrorCode,
@@ -797,6 +865,8 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 			"cache_write_tokens": cacheWrite,
 			"total_tokens":       total,
 			"max_context_tokens": maxContext,
+			"verify_session_id":  c.VerifySessionID,
+			"verify_usage":       verifyUsage,
 			"clone_token_enc":    "",
 			// A finished run has no phase: keeping the last one would make the
 			// panel show a step that is no longer running.
@@ -928,12 +998,31 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 }
 
 func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
+	// A verifier dismissal survives while the cited code and range stay the
+	// same; reopening it on every run would undo the second pass. A human
+	// verdict is never discarded here.
+	if err := db.Model(&Finding{}).
+		Where("pull_request_id = ? AND fingerprint = ? AND triage_source = ?",
+			f.PullRequestID, f.Fingerprint, TriageSourceVerifier).
+		Where("existing_code <> ? OR start_line <> ? OR end_line <> ?",
+			f.ExistingCode, f.StartLine, f.EndLine).
+		Updates(map[string]any{
+			"triage_verdict": "", "triaged_by": "", "triaged_at": nil, "triage_source": "",
+		}).Error; err != nil {
+		return Finding{}, fmt.Errorf("clear stale verifier triage for %q: %w", f.ID, err)
+	}
+
 	res := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "pull_request_id"}, {Name: "fingerprint"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"path", "start_line", "end_line", "severity", "category", "title",
-			"body", "suggestion", "confidence", "status", "last_seen_run_id", "updated_at",
+			"body", "suggestion", "confidence", "existing_code", "status",
+			"last_seen_run_id", "updated_at",
 		}),
+		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{
+			SQL: "findings.triage_verdict = '' OR findings.existing_code <> EXCLUDED.existing_code" +
+				" OR findings.start_line <> EXCLUDED.start_line OR findings.end_line <> EXCLUDED.end_line",
+		}}},
 	}).Create(&f)
 	if res.Error != nil {
 		return Finding{}, fmt.Errorf("upsert finding %q: %w", f.ID, res.Error)
@@ -946,6 +1035,24 @@ func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
 		return Finding{}, fmt.Errorf("reload finding %q: %w", f.ID, err)
 	}
 	return saved, nil
+}
+
+// RecordFindingVerification stores the verifier's answer for one finding
+// without touching its status. Every decision keeps its evidence, whether it
+// was applied or not.
+func (s *Store) RecordFindingVerification(ctx context.Context, findingID string, verification []byte) error {
+	res := s.DB.WithContext(ctx).Model(&Finding{}).Where("id = ?", findingID).
+		Updates(map[string]any{
+			"verification": datatypes.JSON(verification),
+			"updated_at":   time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return fmt.Errorf("record verification of finding %q: %w", findingID, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("record verification of finding %q: %w", findingID, ErrNotFound)
+	}
+	return nil
 }
 
 // FindingsForPR lists every finding of a pull request, oldest first.
@@ -1092,6 +1199,9 @@ type FindingAudit struct {
 	CommentID int64
 	Reason    string
 	ThreadID  string
+	// Source is who took the decision: TriageSourceHuman when empty, or
+	// TriageSourceVerifier when the second OCR pass triages.
+	Source string
 }
 
 // SetFindingStatusAudited transitions a finding and appends its audit row in a
@@ -1154,6 +1264,10 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 	if status == FindingWithdrawn {
 		verdict = VerdictFalsePositive
 	}
+	source := entry.Source
+	if source == "" {
+		source = TriageSourceHuman
+	}
 	err = s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var current Finding
 		err := quietDB(tx).Where("id = ?", id).
@@ -1168,7 +1282,11 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 		if current.Status == FindingResolved {
 			return fmt.Errorf("triage finding %q: %w", id, ErrFindingResolved)
 		}
-		if current.Status == status && current.TriageVerdict == verdict && current.TriagedBy == entry.Actor {
+		if current.TriageSource == TriageSourceHuman && source == TriageSourceVerifier {
+			return fmt.Errorf("triage finding %q: %w", id, ErrFindingHumanTriaged)
+		}
+		if current.Status == status && current.TriageVerdict == verdict &&
+			current.TriagedBy == entry.Actor && current.TriageSource == source {
 			return nil
 		}
 
@@ -1178,11 +1296,13 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 			"triage_verdict": verdict,
 			"triaged_by":     entry.Actor,
 			"triaged_at":     now,
+			"triage_source":  source,
 			"updated_at":     now,
 		}).Error
 		if err != nil {
 			return fmt.Errorf("triage finding %q: %w", id, err)
 		}
+		entry.Source = source
 		if err := writeFindingAudit(tx, id, entry); err != nil {
 			return err
 		}
@@ -1197,6 +1317,9 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 
 func writeFindingAudit(tx *gorm.DB, findingID string, entry FindingAudit) error {
 	data := map[string]any{"actor": entry.Actor}
+	if entry.Source != "" {
+		data["source"] = entry.Source
+	}
 	if entry.CommentID != 0 {
 		data["comment_id"] = entry.CommentID
 	}

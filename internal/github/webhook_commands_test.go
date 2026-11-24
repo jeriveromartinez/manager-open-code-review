@@ -57,8 +57,14 @@ func TestWebhookQADismiss(t *testing.T) {
 
 	assertStatus(t, f.deliver("issue_comment", "issue-comment-qa-dismiss.json"), http.StatusAccepted)
 
-	if got := f.finding("f1").Status; got != store.FindingWithdrawn {
-		t.Fatalf("finding status = %q, want %q", got, store.FindingWithdrawn)
+	got := f.finding("f1")
+	if got.Status != store.FindingWithdrawn {
+		t.Fatalf("finding status = %q, want %q", got.Status, store.FindingWithdrawn)
+	}
+	if got.TriageVerdict != store.VerdictFalsePositive ||
+		got.TriageSource != store.TriageSourceHuman || got.TriagedBy != "qa-lead" {
+		t.Errorf("finding triage = %q/%q by %q, want a human false positive",
+			got.TriageVerdict, got.TriageSource, got.TriagedBy)
 	}
 	rows := f.auditRows()
 	if len(rows) != 1 {
@@ -91,8 +97,14 @@ func TestWebhookQAConfirm(t *testing.T) {
 
 	assertStatus(t, f.deliver("issue_comment", "issue-comment-qa-confirm.json"), http.StatusAccepted)
 
-	if got := f.finding("f1").Status; got != store.FindingOpen {
-		t.Fatalf("finding status = %q, want %q", got, store.FindingOpen)
+	got := f.finding("f1")
+	if got.Status != store.FindingOpen {
+		t.Fatalf("finding status = %q, want %q", got.Status, store.FindingOpen)
+	}
+	if got.TriageVerdict != store.VerdictConfirmed ||
+		got.TriageSource != store.TriageSourceHuman || got.TriagedBy != "qa-lead" {
+		t.Errorf("finding triage = %q/%q by %q, want a human confirmation",
+			got.TriageVerdict, got.TriageSource, got.TriagedBy)
 	}
 	rows := f.auditRows()
 	if len(rows) != 1 || rows[0].Action != "finding.confirmed" {
@@ -100,6 +112,28 @@ func TestWebhookQAConfirm(t *testing.T) {
 	}
 	if got := f.findings.republishSnapshot(); len(got) != 1 || got[0] != pr.ID {
 		t.Fatalf("gate republishes = %+v, want one", got)
+	}
+}
+
+func TestWebhookQADismissOfAResolvedFindingDoesNothing(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+	pr := f.seedOpenPR()
+	f.seedQALead(f.repoTeam())
+	f.seedThreadFinding(pr.ID, "f1", store.FindingResolved)
+
+	body := []byte(`{"action":"created","issue":{"number":142,"pull_request":{"url":"https://api.github.com/repos/acme/backend-api/pulls/142"}},"comment":{"id":9400,"body":"/qa dismiss f1","user":{"id":8001,"login":"qa-lead","type":"User"}},"repository":{"id":501,"name":"backend-api","full_name":"acme/backend-api"},"sender":{"id":8001,"login":"qa-lead","type":"User"}}`)
+	assertStatus(t, f.deliverBody("issue_comment", body, signWebhook(body)), http.StatusAccepted)
+
+	if got := f.finding("f1").Status; got != store.FindingResolved {
+		t.Errorf("finding status = %q, want it untouched", got)
+	}
+	if got := f.auditRows(); len(got) != 0 {
+		t.Errorf("audit rows = %+v, want none", got)
+	}
+	if _, _, bodies := f.comments.snapshot(); len(bodies) != 1 ||
+		!strings.Contains(bodies[0], "No hay hallazgos") {
+		t.Errorf("reply = %q, want it to report that nothing matched", bodies)
 	}
 }
 

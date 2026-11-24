@@ -695,14 +695,15 @@ func nativeFindings(comments []nativeComment) []AgentFinding {
 			end = start
 		}
 		findings = append(findings, AgentFinding{
-			Path:       c.Path,
-			Severity:   mapNativeSeverity(c.Severity),
-			Category:   mapNativeCategory(c.Category),
-			Title:      nativeTitle(c.Content),
-			Body:       strings.TrimSpace(c.Content),
-			Suggestion: strings.TrimSpace(c.SuggestionCode),
-			StartLine:  start,
-			EndLine:    end,
+			Path:         c.Path,
+			Severity:     mapNativeSeverity(c.Severity),
+			Category:     mapNativeCategory(c.Category),
+			Title:        nativeTitle(c.Content),
+			Body:         strings.TrimSpace(c.Content),
+			Suggestion:   strings.TrimSpace(c.SuggestionCode),
+			ExistingCode: strings.TrimSpace(c.ExistingCode),
+			StartLine:    start,
+			EndLine:      end,
 		})
 	}
 	return findings

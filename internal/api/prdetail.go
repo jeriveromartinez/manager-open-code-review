@@ -86,8 +86,12 @@ type findingDTO struct {
 	TriageVerdict  string  `json:"triage_verdict"`
 	TriagedBy      string  `json:"triaged_by"`
 	TriagedAt      *string `json:"triaged_at"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
+	// TriageSource is who produced that verdict; Verification is the verifier's
+	// answer with its cited evidence, empty on findings it never looked at.
+	TriageSource string          `json:"triage_source"`
+	Verification json.RawMessage `json:"verification"`
+	CreatedAt    string          `json:"created_at"`
+	UpdatedAt    string          `json:"updated_at"`
 }
 
 func findingDTOOf(f store.Finding) findingDTO {
@@ -98,6 +102,7 @@ func findingDTOOf(f store.Finding) findingDTO {
 		Suggestion: f.Suggestion, Confidence: f.Confidence, Status: f.Status,
 		FirstSeenRunID: f.FirstSeenRunID, LastSeenRunID: f.LastSeenRunID,
 		TriageVerdict: f.TriageVerdict, TriagedBy: f.TriagedBy, TriagedAt: formatTimePtr(f.TriagedAt),
+		TriageSource: f.TriageSource, Verification: jsonObject(f.Verification),
 		CreatedAt: f.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt: f.UpdatedAt.UTC().Format(time.RFC3339),
 	}

@@ -111,6 +111,73 @@ func TestPRDetailIncludesRunsAndFindings(t *testing.T) {
 	assertStatus(t, rec, http.StatusNotFound)
 }
 
+func TestPRDetailShowsVerificationEvidence(t *testing.T) {
+	f := newSecureFixture(t)
+	inst := f.installation(1003)
+	team := f.team("detail-triage")
+	repo := f.repo(6003, inst.ID, "acme/verify", &team.ID, true)
+	pr := f.pr(repo.ID, 43, store.StatusReadyForHuman)
+	dev := f.user("dev", false)
+	f.member(team.ID, dev.ID, "developer")
+
+	verification := datatypes.JSON([]byte(`{"verdict":"refute","evidence":"if err != nil {","head_sha":"abc123","model":"nemotron","session_id":"verify-session","verified_at":"2026-11-23T10:00:00Z"}`))
+	if _, err := f.st.UpsertFinding(f.ctx, store.Finding{
+		ID: "finding-verified", PullRequestID: pr.ID, Fingerprint: "fp-verified",
+		Path: "main.go", StartLine: 4, EndLine: 4, Severity: "minor",
+		Category: "bug", Title: "error ignorado", Body: "se ignora el error",
+		Status: store.FindingWithdrawn, FirstSeenRunID: 1, LastSeenRunID: 1,
+		Verification: verification, TriageSource: store.TriageSourceVerifier,
+		TriageVerdict: store.VerdictFalsePositive, TriagedBy: "ocr-verify:nemotron",
+	}); err != nil {
+		t.Fatalf("UpsertFinding(verified): %v", err)
+	}
+	if _, err := f.st.UpsertFinding(f.ctx, store.Finding{
+		ID: "finding-plain", PullRequestID: pr.ID, Fingerprint: "fp-plain",
+		Path: "main.go", StartLine: 9, EndLine: 9, Severity: "major",
+		Category: "bug", Title: "nil deref", Status: store.FindingOpen,
+		FirstSeenRunID: 1, LastSeenRunID: 1,
+	}); err != nil {
+		t.Fatalf("UpsertFinding(plain): %v", err)
+	}
+
+	rec := f.request(http.MethodGet, fmt.Sprintf("/api/prs/%d", pr.ID), nil, f.session(dev))
+	assertStatus(t, rec, http.StatusOK)
+
+	var raw map[string]any
+	decodeJSON(t, rec, &raw)
+	byID := map[string]map[string]any{}
+	for _, item := range raw["findings"].([]any) {
+		finding := item.(map[string]any)
+		byID[finding["id"].(string)] = finding
+	}
+	verified, ok := byID["finding-verified"]
+	if !ok {
+		t.Fatalf("findings = %v, want finding-verified", raw["findings"])
+	}
+	if verified["triage_source"] != store.TriageSourceVerifier {
+		t.Errorf("triage_source = %v, want %q", verified["triage_source"], store.TriageSourceVerifier)
+	}
+	evidence, ok := verified["verification"].(map[string]any)
+	if !ok {
+		t.Fatalf("verification = %v, want the stored JSON object", verified["verification"])
+	}
+	if evidence["verdict"] != "refute" || evidence["evidence"] != "if err != nil {" ||
+		evidence["head_sha"] != "abc123" || evidence["model"] != "nemotron" {
+		t.Errorf("verification = %v, want the refutation with its cited evidence", evidence)
+	}
+
+	plain, ok := byID["finding-plain"]
+	if !ok {
+		t.Fatalf("findings = %v, want finding-plain", raw["findings"])
+	}
+	if plain["triage_source"] != "" {
+		t.Errorf("plain triage_source = %v, want empty", plain["triage_source"])
+	}
+	if empty, ok := plain["verification"].(map[string]any); !ok || len(empty) != 0 {
+		t.Errorf("plain verification = %v, want an empty object", plain["verification"])
+	}
+}
+
 func TestRetryCreatesRunAndEnqueues(t *testing.T) {
 	f := newSecureFixture(t)
 	inst := f.installation(1002)

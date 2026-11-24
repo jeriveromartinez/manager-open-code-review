@@ -34,6 +34,14 @@ type QASummary struct {
 	Untriaged     SeverityCounts
 	Confirmed     int
 	FalsePositive int
+	// AutoConfirmed and AutoDismissed count the findings the verifier decided,
+	// whatever their age and whatever became of them since: the audit figure
+	// for how much OCR resolved without a human.
+	AutoConfirmed int
+	AutoDismissed int
+	// Uncertain counts the open findings without a verdict in the queue that
+	// waits for a person: what is still left to review.
+	Uncertain int
 	Categories    []CategoryCount
 	// ConfirmedByRepo counts confirmed findings per repository inside
 	// CategoryWindow, most first: where a lead's team keeps shipping defects.
@@ -160,7 +168,33 @@ func (s *Store) QASummary(ctx context.Context, u User, now time.Time, f QAFilter
 		}
 	}
 
+	readyIDs := openPRs().Where("pr.qa_status = ?", StatusReadyForHuman).Select("pr.id")
+	var uncertain int64
+	err = s.DB.WithContext(ctx).Table("findings").
+		Where("status = ? AND triage_verdict = '' AND pull_request_id IN (?)", FindingOpen, readyIDs).
+		Count(&uncertain).Error
+	if err != nil {
+		return QASummary{}, fmt.Errorf("count findings without a verdict: %w", err)
+	}
+	out.Uncertain = int(uncertain)
+
 	scopedIDs := narrow(s.teamScopedPRs(ctx, u)).Select("pr.id")
+
+	var auto struct {
+		Confirmed int
+		Dismissed int
+	}
+	err = s.DB.WithContext(ctx).Table("findings").
+		Where("triage_source = ? AND triage_verdict IN ? AND pull_request_id IN (?)",
+			TriageSourceVerifier, []string{VerdictConfirmed, VerdictFalsePositive}, scopedIDs).
+		Select("COUNT(*) FILTER (WHERE triage_verdict = ?) AS confirmed, COUNT(*) FILTER (WHERE triage_verdict = ?) AS dismissed",
+			VerdictConfirmed, VerdictFalsePositive).
+		Scan(&auto).Error
+	if err != nil {
+		return QASummary{}, fmt.Errorf("count auto triage: %w", err)
+	}
+	out.AutoConfirmed = auto.Confirmed
+	out.AutoDismissed = auto.Dismissed
 
 	var precision struct {
 		Confirmed     int

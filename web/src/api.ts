@@ -168,6 +168,16 @@ export type ReviewRunLogPage = {
   has_more: boolean
 }
 
+/** Respuesta de la segunda pasada de OCR; `{}` cuando no verificó el hallazgo. */
+export type FindingVerification = {
+  verdict?: 'confirm' | 'refute' | 'uncertain'
+  evidence?: string
+  head_sha?: string
+  model?: string
+  session_id?: string
+  verified_at?: string
+}
+
 export type Finding = {
   id: string
   fingerprint: string
@@ -187,6 +197,9 @@ export type Finding = {
   triage_verdict: '' | 'confirmed' | 'false_positive'
   triaged_by: string
   triaged_at: string | null
+  /** Quién produjo el veredicto: una persona desde el panel o el verificador OCR. */
+  triage_source: '' | 'human' | 'verifier'
+  verification: FindingVerification
   created_at: string
   updated_at: string
 }
@@ -375,6 +388,8 @@ export type LLMModelsResponse = { models: LLMModelOption[] }
 
 export type ReviewEffort = 'low' | 'medium' | 'high'
 
+export type AutoTriageMode = 'off' | 'dry_run' | 'apply'
+
 export type QAPolicy = {
   id: number
   team_id: number
@@ -395,6 +410,14 @@ export type QAPolicy = {
   review_effort: ReviewEffort
   /** 0 disables the optional total-spend cap. */
   review_token_budget: number
+  /** Second OCR pass: off, dry_run (records only) or apply. */
+  auto_triage_mode: AutoTriageMode
+  auto_withdraw: boolean
+  verify_max_findings: number
+  verify_max_files: number
+  verify_token_share: number
+  verify_time_share: number
+  verify_token_max: number
   /** Read-only: whether the profile accepts an explicit prompt cache key. */
   prompt_cache: boolean
   updated_at: string
@@ -413,6 +436,13 @@ export type QAPolicyInput = Pick<
   | 'review_context_ceiling'
   | 'review_effort'
   | 'review_token_budget'
+  | 'auto_triage_mode'
+  | 'auto_withdraw'
+  | 'verify_max_findings'
+  | 'verify_max_files'
+  | 'verify_token_share'
+  | 'verify_time_share'
+  | 'verify_token_max'
 >
 
 export type ReviewEvent = {

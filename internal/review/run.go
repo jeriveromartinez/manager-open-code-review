@@ -163,6 +163,14 @@ type runOutcome struct {
 	// NULL instead of a fake zero (#129).
 	tokensKnown bool
 
+	// decisions is the verifier's answer per finding. verificationSkipped names
+	// why the second pass did not run, so the panel can explain the missing
+	// triage instead of showing it as an empty answer.
+	decisions           []Decision
+	verifyUsage         []byte
+	verifySessionID     string
+	verificationSkipped string
+
 	// Context needed to reconcile findings from passes that already completed
 	// when the run ends inconclusively.
 	merged AgentOutput
@@ -335,17 +343,19 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		outcome.usage = []byte(`{}`)
 	}
 	completion := store.RunCompletion{
-		Status:       outcome.status,
-		ErrorCode:    outcome.code,
-		ErrorMessage: truncateRunMessage(outcome.message),
-		Summary:      outcome.summary,
-		Coverage:     outcome.coverage,
-		Usage:        outcome.usage,
-		Tokens:       outcome.tokenTotals(),
-		TokensKnown:  outcome.tokensKnown,
-		Findings:     outcome.findings,
-		Resolved:     outcome.resolved,
-		BaseSHA:      outcome.baseSHA,
+		Status:          outcome.status,
+		ErrorCode:       outcome.code,
+		ErrorMessage:    truncateRunMessage(outcome.message),
+		Summary:         outcome.summary,
+		Coverage:        outcome.coverage,
+		Usage:           outcome.usage,
+		Tokens:          outcome.tokenTotals(),
+		TokensKnown:     outcome.tokensKnown,
+		Findings:        outcome.findings,
+		Resolved:        outcome.resolved,
+		BaseSHA:         outcome.baseSHA,
+		VerifySessionID: outcome.verifySessionID,
+		VerifyUsage:     outcome.verifyUsage,
 	}
 	if err := r.Store.CompleteReviewRun(persistCtx, runID, completion); err != nil {
 		if errors.Is(err, store.ErrRunNotActive) {
@@ -360,6 +370,10 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	}
 	log.Log(persistCtx, "worker", "", terminalLogLevel(outcome.status), logPhaseFinish,
 		fmt.Sprintf("run %s%s: %s", outcome.status, terminalCodeSuffix(outcome.code), outcome.message))
+
+	if outcome.status == store.RunSucceeded {
+		r.applyAutoTriage(persistCtx, run, cfg, outcome, log)
+	}
 
 	if outcome.status != store.RunSuperseded {
 		prStatus := store.StatusInconclusive
@@ -405,6 +419,73 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	return notifyErr
 }
 
+// applyAutoTriage records every verifier answer and applies the decisions the
+// policy accepted. It runs after the findings are durable, so a crash here
+// loses the triage but never the review. A pull request whose head moved while
+// the run was verifying keeps its findings untouched: the verdicts describe
+// code that is no longer there.
+func (r *Runner) applyAutoTriage(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig, out runOutcome, log *runLogSink) {
+	if len(out.decisions) == 0 {
+		if out.verificationSkipped != "" {
+			log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+				"verificación omitida: "+out.verificationSkipped)
+		}
+		return
+	}
+	current, err := r.Store.ReviewConfigForPR(ctx, run.PullRequestID)
+	if err != nil {
+		log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+			fmt.Sprintf("no se pudo recargar el PR; no se aplica el triage: %v", err))
+		return
+	}
+	if !strings.EqualFold(current.PR.HeadSHA, run.HeadSHA) {
+		log.Log(ctx, "worker", "verify", "warn", logPhaseOCR, fmt.Sprintf(
+			"el head del PR cambió de %s a %s; no se aplica el triage",
+			run.HeadSHA, current.PR.HeadSHA))
+		return
+	}
+
+	actor := "ocr-verify:" + cfg.Profile.Model
+	confirmed, withdrawn, skipped := 0, 0, 0
+	for _, decision := range out.decisions {
+		// A finding the verifier never answered has no verification: recording
+		// the zero value would erase the evidence a previous run stored.
+		if !decision.Verification.VerifiedAt.IsZero() {
+			raw, err := json.Marshal(decision.Verification)
+			if err != nil {
+				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+					fmt.Sprintf("no se pudo serializar la verificación de %s: %v", decision.FindingID, err))
+			} else if err := r.Store.RecordFindingVerification(ctx, decision.FindingID, raw); err != nil {
+				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+					fmt.Sprintf("no se pudo guardar la verificación de %s: %v", decision.FindingID, err))
+			}
+		}
+		if !decision.Apply {
+			continue
+		}
+		if _, err := r.Store.TriageFinding(ctx, decision.FindingID, decision.Status, store.FindingAudit{
+			Action: "finding.auto_triaged",
+			Actor:  actor,
+			Source: store.TriageSourceVerifier,
+			Reason: decision.Reason,
+		}); err != nil {
+			if !errors.Is(err, store.ErrFindingHumanTriaged) {
+				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
+					fmt.Sprintf("no se pudo aplicar el triage de %s: %v", decision.FindingID, err))
+			}
+			skipped++
+			continue
+		}
+		if decision.Status == store.FindingWithdrawn {
+			withdrawn++
+		} else {
+			confirmed++
+		}
+	}
+	log.Log(ctx, "worker", "verify", "info", logPhaseOCR, fmt.Sprintf(
+		"auto-triage: %d confirmados, %d descartados, %d omitidos", confirmed, withdrawn, skipped))
+}
+
 // requeueInterrupted returns a claimed run to the queue when River cancels the
 // job context on shutdown. The claim already stored the run as running, so
 // leaving it there would keep it stuck until the stale watchdog. The write runs
@@ -442,15 +523,18 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	log.Log(ctx, "worker", "", "info", logPhasePolicy, fmt.Sprintf(
 		"perfil %d (%s/%s), esfuerzo %s", cfg.Profile.ID, cfg.Profile.Provider, cfg.Profile.Model, cfg.Policy.ReviewEffort))
 
-	open, err := r.Store.OpenFindingsForPR(ctx, run.PullRequestID)
+	// Every known finding, not only the open ones: a withdrawn finding keeps its
+	// ID, triage and stored verdict across runs only if Reconcile can match it.
+	// Its absence from the review does not resolve it either.
+	known, err := r.Store.FindingsForPR(ctx, run.PullRequestID)
 	if err != nil {
 		log.Log(ctx, "worker", "", "error", logPhasePrepare,
-			fmt.Sprintf("no se pudieron listar los hallazgos abiertos: %v", err))
-		return out.failed(fmt.Errorf("listar hallazgos abiertos: %w", err), "config"), nil
+			fmt.Sprintf("no se pudieron listar los hallazgos conocidos: %v", err))
+		return out.failed(fmt.Errorf("listar hallazgos conocidos: %w", err), "config"), nil
 	}
-	out.open = open
+	out.open = known
 	log.Log(ctx, "worker", "", "info", logPhasePrepare,
-		fmt.Sprintf("hallazgos abiertos antes de revisar: %d", len(open)))
+		fmt.Sprintf("hallazgos conocidos antes de revisar: %d", len(known)))
 
 	token, err := r.boxOpen(run.CloneTokenEnc)
 	if err != nil || len(strings.TrimSpace(string(token))) == 0 {
@@ -713,6 +797,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		out.status = store.RunSucceeded
 		out.findings = upserts
 		out.resolved = resolved
+		// Verification runs against the checkout before it is deleted. It only
+		// annotates the findings; applying the decisions happens after they are
+		// persisted, so a crash here loses verdicts but never corrupts state.
+		r.verifyFindings(runCtx, run, cfg, key, workDir, headSHA, &out, log)
+		r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
 		return out, nil
 	case store.RunInconclusive:
 		return out.inconclusive(errors.New(chunkedInconclusiveMessage(res, code, reviewed, skipped)), code), nil
@@ -764,8 +853,13 @@ func (r *Runner) heartbeat(ctx context.Context, runID uint, log *runLogSink, abo
 	}
 }
 
+// nativeCaller is one OCR invocation: a review or a focused verification.
+type nativeCaller interface {
+	Review(ctx context.Context) (nativeReview, []byte, error)
+}
+
 // runNativeReview holds one profile slot for exactly one OCR invocation.
-func (r *Runner) runNativeReview(ctx context.Context, profileID uint, reviewer *NativeReviewer, log *runLogSink, invocation string) (nativeReview, []byte, error) {
+func (r *Runner) runNativeReview(ctx context.Context, profileID uint, reviewer nativeCaller, log *runLogSink, invocation string) (nativeReview, []byte, error) {
 	log.Log(ctx, "worker", invocation, "info", logPhaseOCR,
 		fmt.Sprintf("esperando un slot del perfil %d", profileID))
 	release, acquired, err := r.Store.AcquireProfileSlot(ctx, profileID)

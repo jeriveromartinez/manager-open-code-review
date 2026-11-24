@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -345,19 +346,132 @@ if [ -n "${RUN_FAKE_OCR_FAIL:-}" ]; then
     printf 'ocr no disponible\n' >&2
     exit 1
 fi
+case "$1" in
+    scan)
+        if [ -n "${RUN_FAKE_SCAN_SLEEP:-}" ]; then
+            sleep "$RUN_FAKE_SCAN_SLEEP"
+        fi
+        if [ -n "${RUN_FAKE_SCAN_FAIL:-}" ]; then
+            printf 'scan no disponible\n' >&2
+            exit 1
+        fi
+        cat "${RUN_FAKE_SCAN_OUTPUT:-%s}"
+        exit "${RUN_FAKE_SCAN_EXIT:-0}"
+        ;;
+esac
 cat "${RUN_FAKE_OCR_OUTPUT:-%s}"
 exit "${RUN_FAKE_OCR_EXIT:-0}"
-`, filepath.Join(dir, "output.json"))
+`, filepath.Join(dir, "scan-output.json"), filepath.Join(dir, "output.json"))
 	bin := filepath.Join(dir, "ocr.sh")
 	writeRunTestFile(t, bin, script)
 	if err := os.Chmod(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeRunTestFile(t, filepath.Join(dir, "output.json"), output)
+	writeRunTestFile(t, filepath.Join(dir, "scan-output.json"), runTestScanNoVerdicts())
 	f.ocrBin = bin
 	t.Setenv("RUN_FAKE_OCR_CALLS", f.ocrCallLog)
 	t.Setenv("RUN_FAKE_OCR_ARGV", f.ocrArgv)
 	t.Setenv("RUN_FAKE_OCR_BACKGROUND_OUT", f.ocrBack)
+}
+
+// setScan replaces the answer of the verification pass. The review output set
+// by setOCR is untouched.
+func (f *runTestFixture) setScan(t *testing.T, output string) {
+	t.Helper()
+	path := filepath.Join(f.root, "ocr", "scan-custom.json")
+	writeRunTestFile(t, path, output)
+	t.Setenv("RUN_FAKE_SCAN_OUTPUT", path)
+}
+
+// setAutoTriage enables the second pass in the team policy before the run.
+func (f *runTestFixture) setAutoTriage(t *testing.T, mode string, withdraw bool, extra map[string]any) {
+	t.Helper()
+	updates := map[string]any{
+		"auto_triage_mode": mode,
+		"auto_withdraw":    withdraw,
+	}
+	for key, value := range extra {
+		updates[key] = value
+	}
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("team_id = ?", f.policy.TeamID).Updates(updates).Error; err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+}
+
+// runTestScanNoVerdicts is a successful verification that answered nothing.
+func runTestScanNoVerdicts() string {
+	return `{
+  "status": "complete",
+  "summary": {"files_reviewed": 1, "comments": 0, "total_tokens": 0,
+    "input_tokens": 0, "output_tokens": 0, "elapsed": "1s"},
+  "comments": [],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
+    "operation": "scan",
+    "coverage": {
+      "selected": [{"path": "auth.go"}], "completed": [{"path": "auth.go"}],
+      "reused": [], "failed": [], "waived": [], "excluded": []
+    }
+  }
+}`
+}
+
+// findingIDFor mirrors Reconcile's deterministic ID for a review finding.
+func findingIDFor(path, category, title string) string {
+	fp := Fingerprint(AgentFinding{Path: path, Category: category, Title: title}, nil)
+	return "f_" + fp[:16]
+}
+
+// runTestScanAnswer builds a scan answer carrying one verdict per id.
+func runTestScanAnswer(t *testing.T, verdicts map[string]string) string {
+	t.Helper()
+	comments := make([]string, 0, len(verdicts))
+	for id, verdict := range verdicts {
+		comments = append(comments, fmt.Sprintf(
+			`{"path": "auth.go", "content": "QA-VERIFY %s %s\nEVIDENCE: package main", "start_line": 3, "end_line": 3, "category": "security", "severity": "medium"}`,
+			id, verdict))
+	}
+	return fmt.Sprintf(`{
+  "status": "complete",
+  "summary": {"files_reviewed": 1, "comments": %d, "total_tokens": 90,
+    "input_tokens": 60, "output_tokens": 30, "elapsed": "1s"},
+  "comments": [%s],
+  "session_id": "verify-session",
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
+    "operation": "scan",
+    "coverage": {
+      "selected": [{"path": "auth.go"}], "completed": [{"path": "auth.go"}],
+      "reused": [], "failed": [], "waived": [], "excluded": []
+    }
+  }
+}`, len(comments), strings.Join(comments, ","))
+}
+
+// runTestNativeTwoFindings is a complete review with one minor and one nit.
+func runTestNativeTwoFindings() string {
+	return `{
+  "status": "complete",
+  "llm": {"provider": "nvidia", "model": "nemotron"},
+  "summary": {"files_reviewed": 2, "comments": 2, "total_tokens": 150,
+    "input_tokens": 100, "output_tokens": 50, "elapsed": "1s"},
+  "comments": [
+    {"path": "auth.go", "content": "Comparación insegura\n\nusar hash seguro",
+     "start_line": 3, "end_line": 3, "category": "security", "severity": "medium"},
+    {"path": "auth.go", "content": "Nombre confuso\n\nrenombrar",
+     "start_line": 5, "end_line": 5, "category": "style", "severity": "low"}
+  ],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
+    "coverage": {
+      "selected": [{"path": "auth.go"}, {"path": "main.go"}],
+      "completed": [{"path": "auth.go"}, {"path": "main.go"}],
+      "reused": [], "failed": [], "waived": [], "excluded": []
+    }
+  }
+}`
 }
 
 func (f *runTestFixture) setAgent(t *testing.T, output string, fail bool) {
@@ -955,6 +1069,498 @@ func TestRunUsesSingleOCRReview(t *testing.T) {
 	}
 	if !f.hasOCRArg(t, "review") || !f.hasOCRArg(t, "--audience") {
 		t.Errorf("ocr argv = %v, want the native review command", f.ocrArgs(t))
+	}
+}
+
+// skipWithoutShellFake skips the run-level tests on Windows, where a shell
+// script cannot be exec'd as a binary. The verifier's unit tests run everywhere.
+func skipWithoutShellFake(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake OCR binary is a shell script; run this test on Linux")
+	}
+}
+
+// executeForTest runs the pipeline without claiming the run, so the test can
+// inspect the outcome (decisions included) before they are persisted.
+func (f *runTestFixture) executeForTest(t *testing.T, r *Runner) runOutcome {
+	t.Helper()
+	run := f.loadRun(t)
+	cfg, err := f.s.ReviewConfigForPR(f.ctx, run.PullRequestID)
+	if err != nil {
+		t.Fatalf("review config: %v", err)
+	}
+	log := newRunLogSink(f.s, f.events, run.ID, 0)
+	out, err := r.execute(f.ctx, run, cfg, log)
+	if err != nil {
+		t.Fatalf("execute() error = %v", err)
+	}
+	return out
+}
+
+func TestRunVerifiesAndProducesDecisions(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	f.setOCR(t, runTestNativeTwoFindings())
+	minorID := findingIDFor("auth.go", "security", "Comparación insegura")
+	nitID := findingIDFor("auth.go", "style", "Nombre confuso")
+	f.setScan(t, runTestScanAnswer(t, map[string]string{
+		minorID: "CONFIRM",
+		nitID:   "REFUTE",
+	}))
+	f.setAutoTriage(t, store.AutoTriageDryRun, true, nil)
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	out := f.executeForTest(t, runner)
+
+	if out.status != store.RunSucceeded {
+		t.Fatalf("status = %q, want succeeded", out.status)
+	}
+	byID := make(map[string]Decision, len(out.decisions))
+	for _, d := range out.decisions {
+		byID[d.FindingID] = d
+	}
+	if len(out.decisions) != 2 {
+		t.Fatalf("decisions = %+v, want one per finding", out.decisions)
+	}
+	if d := byID[minorID]; d.Verdict != VerdictConfirm || d.Status != store.FindingOpen {
+		t.Errorf("confirm decision = %+v, want an open confirmed finding", d)
+	}
+	if d := byID[nitID]; d.Verdict != VerdictRefute || d.Status != store.FindingWithdrawn {
+		t.Errorf("refute decision = %+v, want a withdrawn finding with the evidence in the file", d)
+	}
+	if len(out.verifyUsage) == 0 || out.verifySessionID != "verify-session" {
+		t.Errorf("verify usage/session = %q/%q, want the scan consumption recorded",
+			out.verifyUsage, out.verifySessionID)
+	}
+	if out.verificationSkipped != "" {
+		t.Errorf("verificationSkipped = %q, want empty", out.verificationSkipped)
+	}
+	if got := f.ocrCalls(t); got != 2 {
+		t.Errorf("ocr calls = %d, want review plus scan", got)
+	}
+}
+
+func TestRunSkipsVerificationWhenModeOff(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	out := f.executeForTest(t, runner)
+
+	if out.status != store.RunSucceeded {
+		t.Fatalf("status = %q, want succeeded", out.status)
+	}
+	if len(out.decisions) != 0 || out.verificationSkipped != "" {
+		t.Errorf("decisions/skipped = %+v/%q, want no verification at all",
+			out.decisions, out.verificationSkipped)
+	}
+	if got := f.ocrCalls(t); got != 1 {
+		t.Errorf("ocr calls = %d, want only the review", got)
+	}
+}
+
+func TestRunVerifierFailureLeavesFindingsUntriaged(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	f.setAutoTriage(t, store.AutoTriageDryRun, true, nil)
+	t.Setenv("RUN_FAKE_SCAN_FAIL", "1")
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	out := f.executeForTest(t, runner)
+
+	if out.status != store.RunSucceeded {
+		t.Fatalf("status = %q, want the review to survive a failed verifier", out.status)
+	}
+	if len(out.decisions) != 0 {
+		t.Errorf("decisions = %+v, want none", out.decisions)
+	}
+	if out.verificationSkipped != "verifier_error" {
+		t.Errorf("verificationSkipped = %q, want verifier_error", out.verificationSkipped)
+	}
+}
+
+func TestRunVerifierTokensAreAddedToRunUsage(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	id := findingIDFor("auth.go", "security", "Comparación insegura")
+	f.setScan(t, runTestScanAnswer(t, map[string]string{id: "CONFIRM"}))
+	f.setAutoTriage(t, store.AutoTriageDryRun, true, nil)
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+	// 150 from the review plus 90 from the scan.
+	if run.TotalTokens == nil || *run.TotalTokens != 240 {
+		t.Errorf("total tokens = %v, want 240", run.TotalTokens)
+	}
+	if len(run.VerifyUsage) == 0 || run.VerifySessionID != "verify-session" {
+		t.Errorf("verify usage/session = %q/%q, want the scan recorded",
+			run.VerifyUsage, run.VerifySessionID)
+	}
+	if !strings.Contains(string(run.VerifyUsage), `"total":90`) {
+		t.Errorf("verify usage = %s", run.VerifyUsage)
+	}
+}
+
+func TestRunSetsVerifyingPhase(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	f.setAutoTriage(t, store.AutoTriageDryRun, true, nil)
+	t.Setenv("RUN_FAKE_SCAN_SLEEP", "1")
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(f.ctx, f.runID) }()
+
+	f.waitPhase(t, store.RunPhaseVerifying)
+	if err := <-done; err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+	if run := f.loadRun(t); run.Phase != "" {
+		t.Errorf("finished run kept phase %q, want empty", run.Phase)
+	}
+}
+
+func TestRunVerifierRespectsMaxFindings(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	f.setOCR(t, runTestNativeTwoFindings())
+	minorID := findingIDFor("auth.go", "security", "Comparación insegura")
+	nitID := findingIDFor("auth.go", "style", "Nombre confuso")
+	f.setAutoTriage(t, store.AutoTriageDryRun, true, map[string]any{
+		"verify_max_findings": 1,
+	})
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	f.executeForTest(t, runner)
+
+	argv := ""
+	for _, arg := range f.ocrArgs(t) {
+		argv += arg + "\n"
+	}
+	if !strings.Contains(argv, minorID) {
+		t.Errorf("scan argv does not carry the minor finding:\n%s", argv)
+	}
+	if strings.Contains(argv, nitID) {
+		t.Errorf("scan argv carries a finding over the cap:\n%s", argv)
+	}
+}
+
+func TestRunReusesStoredVerdictsForSameHead(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
+	t.Setenv("RUN_FAKE_SCAN_FAIL", "1")
+
+	fp := Fingerprint(AgentFinding{
+		Path: "auth.go", Category: "security", Title: "Comparación insegura",
+	}, nil)
+	verification, err := json.Marshal(Verification{
+		Verdict: VerdictConfirm, Evidence: "package main", HeadSHA: f.headSHA,
+		Model: "nemotron", SessionID: "previous-session", VerifiedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal verification: %v", err)
+	}
+	seed := store.Finding{
+		ID: "f_storedverdict", PullRequestID: f.pr.ID, Fingerprint: fp,
+		Path: "auth.go", StartLine: 3, EndLine: 3, Severity: "major",
+		Category: "security", Title: "Comparación insegura", Body: "usar hash seguro",
+		Status: store.FindingOpen, TriageSource: "verifier",
+		Verification: datatypes.JSON(verification),
+	}
+	if err := f.s.DB.WithContext(f.ctx).Create(&seed).Error; err != nil {
+		t.Fatalf("seed finding: %v", err)
+	}
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	out := f.executeForTest(t, runner)
+
+	if out.verificationSkipped != "" {
+		t.Fatalf("verificationSkipped = %q, want empty (no call was needed)", out.verificationSkipped)
+	}
+	if got := f.ocrCalls(t); got != 1 {
+		t.Errorf("ocr calls = %d, want only the review; the stored verdict must be reused", got)
+	}
+	if len(out.decisions) != 1 || out.decisions[0].FindingID != seed.ID ||
+		out.decisions[0].Verdict != VerdictConfirm || !out.decisions[0].Apply {
+		t.Errorf("decisions = %+v, want the stored confirm applied to %s",
+			out.decisions, seed.ID)
+	}
+}
+
+func (f *runTestFixture) findingByCategoryAndTitle(t *testing.T, category, title string) store.Finding {
+	t.Helper()
+	var got store.Finding
+	err := f.s.DB.WithContext(f.ctx).
+		Where("pull_request_id = ? AND category = ? AND title = ?", f.pr.ID, category, title).
+		Take(&got).Error
+	if err != nil {
+		t.Fatalf("load finding %q/%q: %v", category, title, err)
+	}
+	return got
+}
+
+func (f *runTestFixture) runLogText(t *testing.T) string {
+	t.Helper()
+	var lines []string
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRunLog{}).
+		Where("run_id = ?", f.runID).Order("seq").Pluck("line", &lines).Error; err != nil {
+		t.Fatalf("load run log: %v", err)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (f *runTestFixture) auditCount(t *testing.T, findingID, action string) int64 {
+	t.Helper()
+	var n int64
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.AuditLog{}).
+		Where("target_type = 'finding' AND target_id = ? AND action = ?", findingID, action).
+		Count(&n).Error; err != nil {
+		t.Fatalf("count audit rows: %v", err)
+	}
+	return n
+}
+
+// runTwoFindingVerifyRun reviews two findings, verifies both and returns the
+// deterministic IDs the fake scan answers for.
+func (f *runTestFixture) runTwoFindingVerifyRun(t *testing.T, mode string) (minorID, nitID string) {
+	t.Helper()
+	f.setOCR(t, runTestNativeTwoFindings())
+	minorID = findingIDFor("auth.go", "security", "Comparación insegura")
+	nitID = findingIDFor("auth.go", "style", "Nombre confuso")
+	f.setScan(t, runTestScanAnswer(t, map[string]string{
+		minorID: "CONFIRM",
+		nitID:   "REFUTE",
+	}))
+	f.setAutoTriage(t, mode, true, nil)
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+	return minorID, nitID
+}
+
+func TestRunAppliesConfirmAndWithdrawDecisions(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	_, nitID := f.runTwoFindingVerifyRun(t, store.AutoTriageApply)
+
+	confirmed := f.findingByCategoryAndTitle(t, "security", "Comparación insegura")
+	if confirmed.Status != store.FindingOpen ||
+		confirmed.TriageVerdict != store.VerdictConfirmed ||
+		confirmed.TriageSource != store.TriageSourceVerifier ||
+		confirmed.TriagedBy != "ocr-verify:nemotron" {
+		t.Errorf("confirmed finding = %s/%s/%s by %q, want the verifier confirm applied",
+			confirmed.Status, confirmed.TriageVerdict, confirmed.TriageSource, confirmed.TriagedBy)
+	}
+	var verification Verification
+	if err := json.Unmarshal(confirmed.Verification, &verification); err != nil ||
+		verification.Verdict != VerdictConfirm {
+		t.Errorf("confirmed verification = %s (err=%v), want a stored confirm",
+			confirmed.Verification, err)
+	}
+
+	withdrawn := f.findingByCategoryAndTitle(t, "style", "Nombre confuso")
+	if withdrawn.ID != nitID {
+		t.Errorf("withdrawn finding ID = %q, want %q", withdrawn.ID, nitID)
+	}
+	if withdrawn.Status != store.FindingWithdrawn ||
+		withdrawn.TriageVerdict != store.VerdictFalsePositive ||
+		withdrawn.TriageSource != store.TriageSourceVerifier {
+		t.Errorf("withdrawn finding = %s/%s/%s, want the verifier refute applied",
+			withdrawn.Status, withdrawn.TriageVerdict, withdrawn.TriageSource)
+	}
+	if n := f.auditCount(t, withdrawn.ID, "finding.auto_triaged"); n != 1 {
+		t.Errorf("auto-triage audit rows = %d, want 1", n)
+	}
+}
+
+func TestRunSkipsDecisionWhenHumanTriagedMeanwhile(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	fp := Fingerprint(AgentFinding{
+		Path: "auth.go", Category: "security", Title: "Comparación insegura",
+	}, nil)
+	seed, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_human_pending", PullRequestID: f.pr.ID, Fingerprint: fp,
+		Path: "auth.go", StartLine: 3, EndLine: 3, Severity: "major",
+		Category: "security", Title: "Comparación insegura",
+		Status: store.FindingOpen, FirstSeenRunID: 1, LastSeenRunID: 1,
+	})
+	if err != nil {
+		t.Fatalf("seed finding: %v", err)
+	}
+	if _, err := f.s.TriageFinding(f.ctx, seed.ID, store.FindingWithdrawn, store.FindingAudit{
+		Action: "finding.withdrawn", Actor: "ana",
+	}); err != nil {
+		t.Fatalf("human triage: %v", err)
+	}
+	f.setScan(t, runTestScanAnswer(t, map[string]string{seed.ID: "CONFIRM"}))
+	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+
+	got, err := f.s.Finding(f.ctx, seed.ID)
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.Status != store.FindingWithdrawn || got.TriageSource != store.TriageSourceHuman ||
+		got.TriagedBy != "ana" {
+		t.Errorf("finding = %s/%s by %q, want the human dismissal kept",
+			got.Status, got.TriageSource, got.TriagedBy)
+	}
+	if n := f.auditCount(t, seed.ID, "finding.auto_triaged"); n != 0 {
+		t.Errorf("auto-triage audit rows = %d, want 0 for a human-triaged finding", n)
+	}
+}
+
+func TestRunDoesNotApplyDecisionsWhenHeadMoved(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	id := findingIDFor("auth.go", "security", "Comparación insegura")
+	f.setScan(t, runTestScanAnswer(t, map[string]string{id: "REFUTE"}))
+	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
+	if err := f.s.DB.WithContext(f.ctx).Exec(
+		"UPDATE pull_requests SET head_sha = 'moved-head' WHERE id = ?", f.pr.ID).Error; err != nil {
+		t.Fatalf("move PR head: %v", err)
+	}
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+
+	got := f.findingByCategoryAndTitle(t, "security", "Comparación insegura")
+	if got.Status != store.FindingOpen || got.TriageVerdict != "" {
+		t.Errorf("finding = %s/%q, want the verdict not applied to a moved head",
+			got.Status, got.TriageVerdict)
+	}
+	if len(got.Verification) != 0 {
+		t.Errorf("verification = %s, want nothing recorded for a moved head", got.Verification)
+	}
+	if log := f.runLogText(t); !strings.Contains(log, "no se aplica el triage") {
+		t.Errorf("run log does not explain the skipped triage:\n%s", log)
+	}
+}
+
+func TestRunLogsAutoTriageCounts(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	f.runTwoFindingVerifyRun(t, store.AutoTriageApply)
+
+	log := f.runLogText(t)
+	if !strings.Contains(log, "auto-triage: 1 confirmados, 1 descartados, 0 omitidos") {
+		t.Errorf("run log does not carry the auto-triage counts:\n%s", log)
+	}
+}
+
+func TestRunDryRunStoresVerificationWithoutChangingStatus(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	id := findingIDFor("auth.go", "security", "Comparación insegura")
+	f.setScan(t, runTestScanAnswer(t, map[string]string{id: "REFUTE"}))
+	f.setAutoTriage(t, store.AutoTriageDryRun, true, nil)
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+
+	got := f.findingByCategoryAndTitle(t, "security", "Comparación insegura")
+	if got.Status != store.FindingOpen || got.TriageVerdict != "" || got.TriageSource != "" {
+		t.Errorf("finding = %s/%q/%q, want a dry run to leave the triage untouched",
+			got.Status, got.TriageVerdict, got.TriageSource)
+	}
+	var verification Verification
+	if err := json.Unmarshal(got.Verification, &verification); err != nil ||
+		verification.Verdict != VerdictRefute || verification.Evidence != "package main" {
+		t.Errorf("verification = %s (err=%v), want the dry-run refute stored",
+			got.Verification, err)
+	}
+	if n := f.auditCount(t, got.ID, "finding.auto_triaged"); n != 0 {
+		t.Errorf("auto-triage audit rows = %d, want 0 in a dry run", n)
+	}
+}
+
+// TestAutoTriageKeepsStoredVerificationWhenUnanswered pins that a finding the
+// verifier did not answer keeps the evidence a previous run stored instead of
+// being overwritten with a zero-valued verification.
+func TestAutoTriageKeepsStoredVerificationWhenUnanswered(t *testing.T) {
+	f := newRunTestFixture(t)
+	stored := datatypes.JSON([]byte(`{"verdict":"refute","evidence":"guard()","head_sha":"old","verified_at":"2026-11-20T10:00:00Z"}`))
+	for _, finding := range []store.Finding{
+		{ID: "f_unanswered", PullRequestID: f.pr.ID, Fingerprint: "fp-unanswered",
+			Path: "auth.go", Severity: "minor", Category: "security", Title: "sin respuesta",
+			Status: store.FindingOpen, Verification: stored,
+			FirstSeenRunID: f.runID, LastSeenRunID: f.runID},
+		{ID: "f_answered", PullRequestID: f.pr.ID, Fingerprint: "fp-answered",
+			Path: "auth.go", Severity: "minor", Category: "style", Title: "respondido",
+			Status: store.FindingOpen,
+			FirstSeenRunID: f.runID, LastSeenRunID: f.runID},
+	} {
+		if _, err := f.s.UpsertFinding(f.ctx, finding); err != nil {
+			t.Fatalf("UpsertFinding(%s): %v", finding.ID, err)
+		}
+	}
+	cfg, err := f.s.ReviewConfigForPR(f.ctx, f.pr.ID)
+	if err != nil {
+		t.Fatalf("ReviewConfigForPR: %v", err)
+	}
+	out := runOutcome{decisions: []Decision{
+		{FindingID: "f_unanswered", Verdict: VerdictUncertain,
+			Verification: Verification{Verdict: VerdictUncertain}},
+		{FindingID: "f_answered", Verdict: VerdictConfirm,
+			Verification: Verification{
+				Verdict: VerdictConfirm, Evidence: "package main", HeadSHA: f.headSHA,
+				Model: "nemotron", VerifiedAt: time.Now().UTC(),
+			}},
+	}}
+
+	f.runner().applyAutoTriage(f.ctx, f.loadRun(t), cfg, out, nil)
+
+	var unanswered store.Finding
+	if err := f.s.DB.WithContext(f.ctx).Where("id = ?", "f_unanswered").Take(&unanswered).Error; err != nil {
+		t.Fatalf("reload unanswered finding: %v", err)
+	}
+	var kept Verification
+	if err := json.Unmarshal(unanswered.Verification, &kept); err != nil ||
+		kept.Verdict != VerdictRefute || kept.Evidence != "guard()" || kept.HeadSHA != "old" {
+		t.Errorf("unanswered verification = %s (err=%v), want the previous evidence preserved",
+			unanswered.Verification, err)
+	}
+
+	var answered store.Finding
+	if err := f.s.DB.WithContext(f.ctx).Where("id = ?", "f_answered").Take(&answered).Error; err != nil {
+		t.Fatalf("reload answered finding: %v", err)
+	}
+	var verification Verification
+	if err := json.Unmarshal(answered.Verification, &verification); err != nil ||
+		verification.Verdict != VerdictConfirm || verification.Evidence != "package main" {
+		t.Errorf("answered verification = %s (err=%v), want the stored confirm",
+			answered.Verification, err)
 	}
 }
 

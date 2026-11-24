@@ -3,6 +3,9 @@ package review
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"gorm.io/datatypes"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -71,6 +74,18 @@ func TestReconcileResolvesOnlyWhenComplete(t *testing.T) {
 	}
 }
 
+func TestReconcileDoesNotResolveClosedFindings(t *testing.T) {
+	known := []store.Finding{
+		{ID: "f_open", Fingerprint: "fp-open", Status: store.FindingOpen},
+		{ID: "f_withdrawn", Fingerprint: "fp-withdrawn", Status: store.FindingWithdrawn},
+		{ID: "f_resolved", Fingerprint: "fp-resolved", Status: store.FindingResolved},
+	}
+	_, resolved := Reconcile(known, AgentOutput{}, 9, true)
+	if len(resolved) != 1 || resolved[0] != "f_open" {
+		t.Fatalf("resolved = %v, want only the open finding", resolved)
+	}
+}
+
 func TestReconcileDeterministicIDs(t *testing.T) {
 	af := AgentFinding{Path: "src/b.go", Severity: "minor", Category: "style", Title: "Nuevo", StartLine: 2, EndLine: 2}
 	fp := Fingerprint(af, nil)
@@ -114,5 +129,45 @@ func TestReconcileKeepsExistingFields(t *testing.T) {
 	if got.Title != "Updated" || got.Severity != "blocker" || got.Body != "new body" ||
 		got.StartLine != 6 || got.EndLine != 8 || got.Fingerprint != fp {
 		t.Fatalf("content not updated: %+v", got)
+	}
+}
+
+func TestReconcileCarriesExistingCode(t *testing.T) {
+	af := AgentFinding{
+		Path: "src/c.go", Severity: "minor", Category: "correctness", Title: "Guard",
+		StartLine: 4, EndLine: 4, ExistingCode: "guard()",
+	}
+	upserts, _ := Reconcile(nil, AgentOutput{Findings: []AgentFinding{af}}, 1, true)
+	if len(upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(upserts))
+	}
+	if upserts[0].ExistingCode != "guard()" {
+		t.Errorf("ExistingCode = %q, want guard()", upserts[0].ExistingCode)
+	}
+}
+
+func TestReconcileCarriesTriageState(t *testing.T) {
+	af := AgentFinding{
+		Path: "src/c.go", Severity: "minor", Category: "correctness", Title: "Guard",
+		StartLine: 4, EndLine: 4, ExistingCode: "guard()",
+	}
+	fp := Fingerprint(af, nil)
+	triagedAt := time.Date(2026, 11, 23, 10, 0, 0, 0, time.UTC)
+	verification := datatypes.JSON(`{"verdict":"refute","evidence":"guard()"}`)
+	open := []store.Finding{{
+		ID: "f_triaged", Fingerprint: fp, PullRequestID: 9, Status: store.FindingOpen,
+		TriageVerdict: store.VerdictFalsePositive, TriageSource: "human",
+		TriagedBy: "qa-user", TriagedAt: &triagedAt, Verification: verification,
+	}}
+
+	upserts, _ := Reconcile(open, AgentOutput{Findings: []AgentFinding{af}}, 2, true)
+	if len(upserts) != 1 {
+		t.Fatalf("upserts = %d, want 1", len(upserts))
+	}
+	got := upserts[0]
+	if got.TriageVerdict != store.VerdictFalsePositive || got.TriageSource != "human" ||
+		got.TriagedBy != "qa-user" || got.TriagedAt == nil || !got.TriagedAt.Equal(triagedAt) ||
+		string(got.Verification) != string(verification) {
+		t.Errorf("triage state not carried: %+v", got)
 	}
 }

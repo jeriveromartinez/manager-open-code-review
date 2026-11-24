@@ -88,6 +88,8 @@ const detail: PRDetail = {
       triage_verdict: '',
       triaged_by: '',
       triaged_at: null,
+      triage_source: '',
+      verification: {},
       created_at: '2026-11-19T10:00:00Z',
       updated_at: '2026-11-19T10:00:00Z',
     },
@@ -109,6 +111,8 @@ const detail: PRDetail = {
       triage_verdict: '',
       triaged_by: '',
       triaged_at: null,
+      triage_source: '',
+      verification: {},
       created_at: '2026-11-19T10:00:00Z',
       updated_at: '2026-11-19T10:00:00Z',
     },
@@ -130,6 +134,8 @@ const detail: PRDetail = {
       triage_verdict: '',
       triaged_by: '',
       triaged_at: null,
+      triage_source: '',
+      verification: {},
       created_at: '2026-11-19T10:00:00Z',
       updated_at: '2026-11-19T10:00:00Z',
     },
@@ -704,6 +710,73 @@ describe('PrDetailView', () => {
     const major = wrapper.get('[data-severity="major"]')
     expect(major.get('[data-triage-note]').text()).toBe('Falso positivo según mvega')
     expect(major.find('[data-confirm]').exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+
+  it('shows the verifier verdict and the evidence it cited', async () => {
+    const confirmed = {
+      ...detail.findings[1],
+      triage_verdict: 'confirmed' as const,
+      triaged_by: 'ocr-verify:nemotron',
+      triaged_at: '2026-11-19T11:00:00Z',
+      triage_source: 'verifier' as const,
+      verification: { verdict: 'confirm' as const, evidence: 'if err != nil {' },
+    }
+    const dismissed = {
+      ...detail.findings[2],
+      status: 'withdrawn',
+      triage_verdict: 'false_positive' as const,
+      triaged_by: 'ocr-verify:nemotron',
+      triaged_at: '2026-11-19T11:00:00Z',
+      triage_source: 'verifier' as const,
+      verification: { verdict: 'refute' as const, evidence: 'return nil' },
+    }
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      findings: [detail.findings[0], confirmed, dismissed],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const major = wrapper.get('[data-severity="major"]')
+    expect(major.get('[data-verification-verdict]').text()).toBe('Confirmado')
+    expect(major.get('[data-verification-evidence]').text()).toBe('if err != nil {')
+    expect(major.get('[data-triage-note]').text()).toBe('Confirmado por la verificación automática')
+    expect(major.find('[data-confirm]').exists()).toBe(false)
+
+    const withdrawn = wrapper.get('[data-withdrawn]')
+    expect(withdrawn.get('[data-verification-verdict]').text()).toBe('Descartado')
+    expect(withdrawn.get('[data-verification-evidence]').text()).toBe('return nil')
+    expect(withdrawn.get('[data-triage-note]').text()).toBe(
+      'Descartado por la verificación automática',
+    )
+
+    // Un veredicto humano no deja bloque de verificación.
+    expect(wrapper.get('[data-severity="blocker"]').find('[data-verification]').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('shows a simulated verdict without touching the triage', async () => {
+    const simulated = {
+      ...detail.findings[1],
+      verification: { verdict: 'refute' as const, evidence: 'return nil' },
+    }
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      findings: [detail.findings[0], simulated, detail.findings[2]],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const major = wrapper.get('[data-severity="major"]')
+    expect(major.get('[data-verification-verdict]').text()).toBe('Descartado')
+    expect(major.get('[data-verification-evidence]').text()).toBe('return nil')
+    expect(major.get('[data-triage-note]').text()).toBe('Sin triar')
+    expect(major.find('[data-withdraw]').exists()).toBe(true)
 
     wrapper.unmount()
   })

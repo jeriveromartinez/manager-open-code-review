@@ -162,6 +162,13 @@ const policy: QAPolicy = {
   effective_context_ceiling: 270000,
   review_effort: 'low',
   review_token_budget: 0,
+  auto_triage_mode: 'off',
+  auto_withdraw: false,
+  verify_max_findings: 50,
+  verify_max_files: 20,
+  verify_token_share: 20,
+  verify_time_share: 15,
+  verify_token_max: 100000,
   prompt_cache: true,
   updated_at: '2026-11-19T10:00:00Z',
 }
@@ -360,6 +367,48 @@ describe('AgentsView', () => {
         review_context_ceiling: null,
         review_effort: 'low',
         review_token_budget: 0,
+      }),
+    )
+    wrapper.unmount()
+  })
+
+  it('renders auto-triage off by default', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    const mode = wrapper.get('[data-policy-auto-triage]').element as HTMLSelectElement
+    expect(mode.value).toBe('off')
+    const tokenMax = wrapper.get('[data-policy-verify-token-max]').element as HTMLInputElement
+    expect(tokenMax.value).toBe('100000')
+    const withdraw = wrapper.get('[data-policy-auto-withdraw]').element as HTMLInputElement
+    expect(withdraw.checked).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('saves auto-triage mode and verify limits', async () => {
+    const wrapper = mountAgents()
+    await flushPromises()
+
+    await wrapper.get('[data-policy-auto-triage]').setValue('apply')
+    await wrapper.get('[data-policy-auto-withdraw]').setValue(true)
+    await wrapper.get('[data-policy-verify-findings]').setValue('25')
+    await wrapper.get('[data-policy-verify-files]').setValue('8')
+    await wrapper.get('[data-policy-verify-token-share]').setValue('30')
+    await wrapper.get('[data-policy-verify-time-share]').setValue('10')
+    await wrapper.get('[data-policy-verify-token-max]').setValue('150000')
+    await wrapper.get('[data-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.savePolicy).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        auto_triage_mode: 'apply',
+        auto_withdraw: true,
+        verify_max_findings: 25,
+        verify_max_files: 8,
+        verify_token_share: 30,
+        verify_time_share: 10,
+        verify_token_max: 150000,
       }),
     )
     wrapper.unmount()

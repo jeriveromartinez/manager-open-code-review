@@ -3,15 +3,16 @@ package review
 // AgentFinding is a review finding in the panel's closed vocabulary. OCR
 // comments are converted into this shape before Reconcile.
 type AgentFinding struct {
-	Path       string `json:"path"`
-	Severity   string `json:"severity"`
-	Category   string `json:"category"`
-	Title      string `json:"title"`
-	Body       string `json:"body"`
-	Suggestion string `json:"suggestion"`
-	Confidence string `json:"confidence"`
-	StartLine  int    `json:"start_line"`
-	EndLine    int    `json:"end_line"`
+	Path         string `json:"path"`
+	Severity     string `json:"severity"`
+	Category     string `json:"category"`
+	Title        string `json:"title"`
+	Body         string `json:"body"`
+	Suggestion   string `json:"suggestion"`
+	Confidence   string `json:"confidence"`
+	ExistingCode string `json:"existing_code"`
+	StartLine    int    `json:"start_line"`
+	EndLine      int    `json:"end_line"`
 }
 
 // AgentOutput is the set of findings a review run produced.

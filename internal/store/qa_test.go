@@ -148,15 +148,17 @@ func TestTriageFindingRecordsWhoDecided(t *testing.T) {
 		t.Errorf("audit rows after withdraw = %d, want 2", n)
 	}
 
-	// A run reopening the false positive changes its status, not QA's verdict.
+	// A run re-observing the same cited code must not reopen QA's dismissal:
+	// only a change in the cited code or range does.
 	f.finding(pr, "b1", "blocker", "security", store.FindingOpen)
 	reopened, err := f.s.Finding(f.ctx, "b1")
 	if err != nil {
 		t.Fatalf("Finding(reopened): %v", err)
 	}
-	if reopened.Status != store.FindingOpen || reopened.TriageVerdict != store.VerdictFalsePositive {
-		t.Errorf("reopened finding: status %q verdict %q, want open with the false-positive verdict kept",
-			reopened.Status, reopened.TriageVerdict)
+	if reopened.Status != store.FindingWithdrawn ||
+		reopened.TriageVerdict != store.VerdictFalsePositive || reopened.TriagedBy != "mvega" {
+		t.Errorf("re-observed finding: status %q verdict %q by %q, want the dismissal kept",
+			reopened.Status, reopened.TriageVerdict, reopened.TriagedBy)
 	}
 
 	_, err = f.s.TriageFinding(f.ctx, "missing", store.FindingOpen, confirm)
@@ -259,6 +261,71 @@ func TestQASummary(t *testing.T) {
 	wantCategories := []store.CategoryCount{{Category: "tests", Count: 4}, {Category: "security", Count: 2}}
 	if fmt.Sprint(got.Categories) != fmt.Sprint(wantCategories) {
 		t.Errorf("Categories = %v, want %v", got.Categories, wantCategories)
+	}
+}
+
+func TestQASummaryCountsAutoTriage(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+
+	payments := f.team("Payments")
+	search := f.team("Search")
+	qa := f.user("mvega", false)
+	f.member(payments, qa, "qa")
+
+	repo := f.repo(installID, installID, "acme/payments", &payments.ID, true)
+	hidden := f.repo(f.nextID(), installID, "acme/search", &search.ID, true)
+
+	ready := f.openPR(repo.ID, 1, store.StatusReadyForHuman, false)
+	changes := f.openPR(repo.ID, 2, store.StatusChangesRequested, false)
+	other := f.openPR(hidden.ID, 3, store.StatusReadyForHuman, false)
+
+	now := time.Now().UTC()
+	triaged := func(pr store.PullRequest, id, status, source, verdict string) {
+		f.finding(pr, id, "minor", "style", status)
+		f.exec("UPDATE findings SET triage_source = ?, triage_verdict = ?, triaged_by = 'ocr-verify:nemotron', triaged_at = ? WHERE id = ?",
+			source, verdict, now.Add(-time.Hour), id)
+	}
+	verifier, human := store.TriageSourceVerifier, store.TriageSourceHuman
+	confirm, dismiss := store.VerdictConfirmed, store.VerdictFalsePositive
+
+	triaged(ready, "v-confirm", store.FindingOpen, verifier, confirm)
+	triaged(ready, "v-dismiss", store.FindingWithdrawn, verifier, dismiss)
+	triaged(ready, "h-confirm", store.FindingOpen, human, confirm)
+	// The verifier confirms outside the ready queue too: the audit counts what
+	// OCR decided, whatever the queue says afterwards.
+	triaged(changes, "v-changes", store.FindingOpen, verifier, confirm)
+	triaged(other, "v-hidden", store.FindingOpen, verifier, confirm)
+
+	// Uncertain is what the verifier left for a human: open findings without a
+	// verdict in the queue that needs a decision. One is in a blocked PR, so it
+	// is not waiting in that queue yet.
+	f.finding(ready, "u-unsure", "minor", "tests", store.FindingOpen)
+	f.finding(ready, "u-else", "nit", "docs", store.FindingOpen)
+	f.finding(changes, "u-blocked", "minor", "tests", store.FindingOpen)
+	f.finding(other, "u-hidden", "minor", "tests", store.FindingOpen)
+	f.finding(ready, "u-withdrawn", "minor", "tests", store.FindingWithdrawn)
+
+	got, err := f.s.QASummary(f.ctx, qa, now, store.QAFilter{})
+	if err != nil {
+		t.Fatalf("QASummary: %v", err)
+	}
+	if got.AutoConfirmed != 2 || got.AutoDismissed != 1 {
+		t.Errorf("auto triage = %d confirmed / %d dismissed, want 2 / 1",
+			got.AutoConfirmed, got.AutoDismissed)
+	}
+	if got.Uncertain != 2 {
+		t.Errorf("Uncertain = %d, want the 2 open findings without a verdict in the ready queue", got.Uncertain)
+	}
+
+	scoped, err := f.s.QASummary(f.ctx, qa, now, store.QAFilter{TeamID: &search.ID})
+	if err != nil {
+		t.Fatalf("QASummary(search): %v", err)
+	}
+	if scoped.AutoConfirmed != 0 || scoped.AutoDismissed != 0 || scoped.Uncertain != 0 {
+		t.Errorf("search summary = %+v, want no auto-triage figures outside the caller's teams",
+			scoped)
 	}
 }
 

@@ -958,3 +958,144 @@ func TestProfileUsageAggregatesRunsAndChecks(t *testing.T) {
 		t.Errorf("average_tokens = %v, want 155 (311/2)", entry["average_tokens"])
 	}
 }
+
+func autoTriageBody(profileID uint) map[string]any {
+	return map[string]any{
+		"llm_profile_id":      profileID,
+		"auto_triage_mode":    "apply",
+		"auto_withdraw":       true,
+		"verify_max_findings": 10,
+		"verify_max_files":    5,
+		"verify_token_share":  30,
+		"verify_time_share":   10,
+		"verify_token_max":    200000,
+	}
+}
+
+func TestPolicyAcceptsAutoTriageFields(t *testing.T) {
+	f := newSecureFixture(t)
+	profile := seedProfile(t, f, "triage", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	team := f.team("triage-team")
+	cookie := f.session(f.user("triage-admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	rec := f.request(http.MethodPut, path, autoTriageBody(profile.ID), cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var saved map[string]any
+	decodeJSON(t, rec, &saved)
+	if saved["auto_triage_mode"] != "apply" || saved["auto_withdraw"] != true ||
+		saved["verify_max_findings"] != float64(10) || saved["verify_max_files"] != float64(5) ||
+		saved["verify_token_share"] != float64(30) || saved["verify_time_share"] != float64(10) ||
+		saved["verify_token_max"] != float64(200000) {
+		t.Errorf("saved auto-triage = %v", saved)
+	}
+
+	stored, err := f.st.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if stored.AutoTriageMode != store.AutoTriageApply || !stored.AutoWithdraw ||
+		stored.VerifyMaxFindings != 10 || stored.VerifyMaxFiles != 5 ||
+		stored.VerifyTokenShare != 30 || stored.VerifyTimeShare != 10 ||
+		stored.VerifyTokenMax != 200000 {
+		t.Errorf("stored auto-triage = %+v", stored)
+	}
+
+	rec = f.request(http.MethodGet, path, nil, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &saved)
+	if saved["auto_triage_mode"] != "apply" || saved["verify_token_max"] != float64(200000) {
+		t.Errorf("GET auto-triage = %v", saved)
+	}
+}
+
+func TestPolicyRejectsInvalidAutoTriageMode(t *testing.T) {
+	f := newSecureFixture(t)
+	profile := seedProfile(t, f, "triage", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	team := f.team("triage-team")
+	cookie := f.session(f.user("triage-admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	body := autoTriageBody(profile.ID)
+	body["auto_triage_mode"] = "sometimes"
+	rec := f.request(http.MethodPut, path, body, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+	var apiErr map[string]string
+	decodeJSON(t, rec, &apiErr)
+	if apiErr["error"] != "invalid auto_triage_mode" {
+		t.Errorf("error = %q, want invalid auto_triage_mode", apiErr["error"])
+	}
+}
+
+func TestPolicyRejectsVerifySharesOutsideRange(t *testing.T) {
+	f := newSecureFixture(t)
+	profile := seedProfile(t, f, "triage", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	team := f.team("triage-team")
+	cookie := f.session(f.user("triage-admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	for _, tc := range []struct {
+		field string
+		value int
+	}{
+		{"verify_token_share", -1},
+		{"verify_token_share", 101},
+		{"verify_time_share", -1},
+		{"verify_time_share", 101},
+		{"verify_max_findings", -1},
+		{"verify_max_files", -1},
+	} {
+		t.Run(fmt.Sprintf("%s_%d", tc.field, tc.value), func(t *testing.T) {
+			body := autoTriageBody(profile.ID)
+			body[tc.field] = tc.value
+			rec := f.request(http.MethodPut, path, body, cookie)
+			assertStatus(t, rec, http.StatusBadRequest)
+			var apiErr map[string]string
+			decodeJSON(t, rec, &apiErr)
+			if want := "invalid " + tc.field; apiErr["error"] != want {
+				t.Errorf("error = %q, want %q", apiErr["error"], want)
+			}
+		})
+	}
+}
+
+func TestPolicyRejectsVerifyTokenMaxOutOfRange(t *testing.T) {
+	f := newSecureFixture(t)
+	profile := seedProfile(t, f, "triage", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	team := f.team("triage-team")
+	cookie := f.session(f.user("triage-admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	for _, value := range []int64{store.VerifyTokenMaxMin - 1, store.ReviewTokenBudgetMax + 1} {
+		body := autoTriageBody(profile.ID)
+		body["verify_token_max"] = value
+		rec := f.request(http.MethodPut, path, body, cookie)
+		assertStatus(t, rec, http.StatusBadRequest)
+		var apiErr map[string]string
+		decodeJSON(t, rec, &apiErr)
+		if apiErr["error"] != "invalid verify_token_max" {
+			t.Errorf("value %d: error = %q, want invalid verify_token_max", value, apiErr["error"])
+		}
+	}
+}
+
+func TestPolicyDefaultsAutoTriageOff(t *testing.T) {
+	f := newSecureFixture(t)
+	profile := seedProfile(t, f, "triage", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	team := f.team("triage-team")
+	cookie := f.session(f.user("triage-admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	rec := f.request(http.MethodPut, path, map[string]any{"llm_profile_id": profile.ID}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var saved map[string]any
+	decodeJSON(t, rec, &saved)
+	if saved["auto_triage_mode"] != "off" || saved["auto_withdraw"] != false ||
+		saved["verify_max_findings"] != float64(store.DefaultVerifyMaxFindings) ||
+		saved["verify_max_files"] != float64(store.DefaultVerifyMaxFiles) ||
+		saved["verify_token_share"] != float64(store.DefaultVerifyTokenShare) ||
+		saved["verify_time_share"] != float64(store.DefaultVerifyTimeShare) ||
+		saved["verify_token_max"] != float64(store.DefaultVerifyTokenMax) {
+		t.Errorf("default auto-triage = %v", saved)
+	}
+}

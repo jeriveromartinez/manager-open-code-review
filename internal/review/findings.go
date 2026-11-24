@@ -123,10 +123,11 @@ func findingsInPaths(open []store.Finding, paths map[string]bool) []store.Findin
 	return kept
 }
 
-// Reconcile concilia los hallazgos de una corrida con los abiertos. Los que
-// coinciden por huella se actualizan conservando su ID; los nuevos reciben un
-// ID determinista derivado de la huella. Solo con complete=true se devuelven
-// los IDs abiertos que ya no aparecen.
+// Reconcile concilia los hallazgos de una corrida con los conocidos del PR. Los
+// que coinciden por huella se actualizan conservando su ID; los nuevos reciben
+// un ID determinista derivado de la huella. Solo con complete=true se devuelven
+// los IDs abiertos que ya no aparecen; un hallazgo descartado o resuelto antes
+// nunca se resuelve por ausencia.
 func Reconcile(open []store.Finding, out AgentOutput, runID uint, complete bool) (upserts []store.Finding, resolvedIDs []string) {
 	byFingerprint := make(map[string]store.Finding, len(open))
 	var pullRequestID uint
@@ -157,12 +158,18 @@ func Reconcile(open []store.Finding, out AgentOutput, runID uint, complete bool)
 			Body:                af.Body,
 			Suggestion:          af.Suggestion,
 			Confidence:          af.Confidence,
+			ExistingCode:        af.ExistingCode,
 			Status:              store.FindingOpen,
 			FirstSeenRunID:      prev.FirstSeenRunID,
 			LastSeenRunID:       runID,
 			GithubCommentID:     prev.GithubCommentID,
 			GithubCommentNodeID: prev.GithubCommentNodeID,
 			GithubThreadID:      prev.GithubThreadID,
+			TriageVerdict:       prev.TriageVerdict,
+			TriageSource:        prev.TriageSource,
+			TriagedBy:           prev.TriagedBy,
+			TriagedAt:           prev.TriagedAt,
+			Verification:        prev.Verification,
 		}
 		if !exists {
 			nf.ID = "f_" + fp[:16]
@@ -174,7 +181,9 @@ func Reconcile(open []store.Finding, out AgentOutput, runID uint, complete bool)
 
 	if complete {
 		for _, f := range open {
-			if !seen[f.Fingerprint] {
+			// Only an open finding can be resolved by its absence: withdrawn and
+			// resolved rows are not part of the review's open set.
+			if f.Status == store.FindingOpen && !seen[f.Fingerprint] {
 				resolvedIDs = append(resolvedIDs, f.ID)
 			}
 		}

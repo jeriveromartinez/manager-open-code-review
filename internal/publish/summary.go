@@ -119,6 +119,8 @@ func (p *publishContext) buildSummary(findings []store.Finding, resolvedSincePre
 	b.WriteString("\n\n")
 	fmt.Fprintf(&b, "**Resueltos desde la revisión anterior:** %d\n\n", resolvedSincePrevious)
 
+	b.WriteString(p.buildVerificationBlock())
+
 	var coverage reviewCoverage
 	if len(p.run.Coverage) > 0 {
 		_ = json.Unmarshal(p.run.Coverage, &coverage)
@@ -144,11 +146,143 @@ func (p *publishContext) buildSummary(findings []store.Finding, resolvedSincePre
 		}
 	}
 
-	if p.w.PublicURL != "" {
-		link := strings.TrimRight(p.w.PublicURL, "/") + "/prs/" + strconv.FormatUint(uint64(p.pr.ID), 10)
+	if link := p.panelLink(); link != "" {
 		fmt.Fprintf(&b, "\n[Ver en el panel](%s)\n", link)
 	}
 	return b.String()
+}
+
+// verificationApplied reports whether the second OCR pass changed findings.
+// It ran in this run when the session is recorded, and its triage can also be
+// reused from a previous run on the same head, where no new scan runs. Only
+// then are inline comments limited to the confirmed ones; a dry run or a
+// skipped verification keeps today's behaviour.
+func (p *publishContext) verificationApplied() bool {
+	return p.policy.AutoTriageMode == store.AutoTriageApply &&
+		(p.run.VerifySessionID != "" || p.hasVerifierTriage())
+}
+
+// inlineAllowed is the single predicate the summary and the inline review share:
+// once the verifier's decisions are applied, only a confirmed finding may be
+// published inline.
+func (p *publishContext) inlineAllowed(f store.Finding) bool {
+	return !p.verificationApplied() || f.TriageVerdict == store.VerdictConfirmed
+}
+
+func (p *publishContext) hasVerifierTriage() bool {
+	for _, f := range p.findingSnapshot {
+		if f.TriageSource == store.TriageSourceVerifier {
+			return true
+		}
+	}
+	return false
+}
+
+// buildVerificationBlock renders the curated summary of the second OCR pass.
+// With auto-triage off since before the run and no stored verifier decision,
+// the summary stays exactly as it was.
+func (p *publishContext) buildVerificationBlock() string {
+	if p.policy.AutoTriageMode == store.AutoTriageOff &&
+		p.run.VerifySessionID == "" && !p.hasVerifierTriage() {
+		return ""
+	}
+
+	var validated, uncertain []store.Finding
+	dismissed := 0
+	for _, f := range p.findingSnapshot {
+		if f.TriageSource == store.TriageSourceHuman {
+			continue
+		}
+		switch p.findingVerdict(f) {
+		case "confirm":
+			if f.Status == store.FindingOpen {
+				validated = append(validated, f)
+			}
+		case "refute":
+			// Only a withdrawal the policy applied counts as dismissed; a
+			// refutation it degraded (blocking severity, auto-withdraw off or
+			// evidence missing) is still the human's call.
+			switch f.Status {
+			case store.FindingWithdrawn:
+				dismissed++
+			case store.FindingOpen:
+				uncertain = append(uncertain, f)
+			}
+		default:
+			if f.Status == store.FindingOpen {
+				uncertain = append(uncertain, f)
+			}
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "**Verificación automática:** %d validados · %d para tu criterio · %d descartados\n",
+		len(validated), len(uncertain), dismissed)
+	if p.policy.AutoTriageMode == store.AutoTriageDryRun {
+		b.WriteString("\n_(simulación: no se cambió el estado de ningún hallazgo)_\n")
+	}
+	if len(validated) > 0 {
+		b.WriteString("\n**Validado por la verificación:**\n")
+		for _, f := range validated {
+			b.WriteString(p.findingBullet(f))
+		}
+	}
+	if len(uncertain) > 0 {
+		fmt.Fprintf(&b, "\n<details><summary>Necesita tu criterio (%d)</summary>\n\n", len(uncertain))
+		for _, f := range uncertain {
+			b.WriteString(p.findingBullet(f))
+		}
+		b.WriteString("\n</details>\n")
+	}
+	if dismissed > 0 {
+		fmt.Fprintf(&b, "\n%d descartados automáticamente", dismissed)
+		if link := p.panelLink(); link != "" {
+			fmt.Fprintf(&b, " · [ver en el panel](%s)", link)
+		}
+		b.WriteString("\n")
+	}
+	if p.policy.AutoTriageMode != store.AutoTriageOff &&
+		p.run.VerifySessionID == "" && !p.hasVerifierTriage() {
+		b.WriteString("\n> La verificación automática no se ejecutó; estos hallazgos no están confirmados.\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+// findingVerdict is the verifier's answer for a finding: the applied triage
+// wins, and a dry run or an unapplied answer falls back to the stored evidence.
+func (p *publishContext) findingVerdict(f store.Finding) string {
+	if f.TriageSource == store.TriageSourceVerifier {
+		switch f.TriageVerdict {
+		case store.VerdictConfirmed:
+			return "confirm"
+		case store.VerdictFalsePositive:
+			return "refute"
+		}
+	}
+	var verification struct {
+		Verdict string `json:"verdict"`
+	}
+	if len(f.Verification) > 0 {
+		_ = json.Unmarshal(f.Verification, &verification)
+	}
+	return verification.Verdict
+}
+
+func (p *publishContext) findingBullet(f store.Finding) string {
+	severity := f.Severity
+	if severity == "" {
+		severity = "sin severidad"
+	}
+	return fmt.Sprintf("- **%s** · `%s` — %s\n",
+		p.sanitize(severity), p.findingLocation(f), p.sanitize(f.Title))
+}
+
+func (p *publishContext) panelLink() string {
+	if p.w.PublicURL == "" {
+		return ""
+	}
+	return strings.TrimRight(p.w.PublicURL, "/") + "/prs/" + strconv.FormatUint(uint64(p.pr.ID), 10)
 }
 
 // findingsWithoutInlineComment selects the open findings that have no inline
@@ -157,7 +291,7 @@ func (p *publishContext) buildSummary(findings []store.Finding, resolvedSincePre
 func (p *publishContext) findingsWithoutInlineComment(findings []store.Finding) []store.Finding {
 	missing := make([]store.Finding, 0)
 	for _, f := range findings {
-		if f.Status != store.FindingOpen || f.GithubCommentID != 0 {
+		if f.Status != store.FindingOpen || f.GithubCommentID != 0 || !p.inlineAllowed(f) {
 			continue
 		}
 		missing = append(missing, f)

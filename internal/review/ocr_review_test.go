@@ -740,3 +740,16 @@ func TestParseNativeReviewDetectsSummary(t *testing.T) {
 		t.Error("hasSummary = true, want false when OCR omitted the summary")
 	}
 }
+
+func TestNativeFindingsKeepsExistingCode(t *testing.T) {
+	findings := nativeFindings([]nativeComment{{
+		Path: "a.go", Content: "finding", ExistingCode: "  if err != nil {  ",
+		StartLine: 3, EndLine: 3, Severity: "medium",
+	}})
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	if got := findings[0].ExistingCode; got != "if err != nil {" {
+		t.Errorf("ExistingCode = %q, want the trimmed cited code", got)
+	}
+}

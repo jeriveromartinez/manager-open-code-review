@@ -1960,3 +1960,460 @@ func TestArtifactIdempotency(t *testing.T) {
 		return err
 	}())
 }
+
+func TestFindingVerificationFieldsRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/verify", nil, true)
+	pr := f.openPR(repo.ID, 11, store.StatusPending, false)
+
+	evidence := datatypes.JSON(`{"verdict":"confirm","evidence":"if err != nil {"}`)
+	saved, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_verify_fields", PullRequestID: pr.ID, Fingerprint: "fp-verify-fields",
+		Path: "main.go", Severity: "minor", Category: "correctness", Status: store.FindingOpen,
+		ExistingCode: "if err != nil {", Verification: evidence, TriageSource: "verifier",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if saved.ExistingCode != "if err != nil {" || saved.TriageSource != "verifier" ||
+		!sameJSON(t, saved.Verification, string(evidence)) {
+		t.Errorf("verification fields = %q/%q/%s, want the persisted values",
+			saved.ExistingCode, saved.TriageSource, saved.Verification)
+	}
+
+	var reloaded store.Finding
+	if err := f.s.DB.WithContext(f.ctx).First(&reloaded, "id = ?", saved.ID).Error; err != nil {
+		t.Fatalf("reload finding: %v", err)
+	}
+	if reloaded.ExistingCode != saved.ExistingCode || reloaded.TriageSource != saved.TriageSource ||
+		!sameJSON(t, reloaded.Verification, string(saved.Verification)) {
+		t.Errorf("reloaded verification fields = %+v, want %+v", reloaded, saved)
+	}
+}
+
+func TestReviewRunVerifyFieldsRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/verify-run", nil, true)
+	pr := f.openPR(repo.ID, 12, store.StatusPending, false)
+	run := f.run(pr, store.RunRunning)
+
+	usage := datatypes.JSON(`{"total_tokens":42}`)
+	f.exec(`UPDATE review_runs SET verify_session_id = 'verify-session', verify_usage = ? WHERE id = ?`,
+		usage, run.ID)
+
+	got, err := f.s.ReviewRun(f.ctx, run.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun: %v", err)
+	}
+	if got.VerifySessionID != "verify-session" || !sameJSON(t, got.VerifyUsage, string(usage)) {
+		t.Errorf("verify fields = %q/%s, want verify-session/%s",
+			got.VerifySessionID, got.VerifyUsage, usage)
+	}
+}
+
+// sameJSON compares two JSON documents by value: jsonb normalizes whitespace
+// and key order, so raw string comparison is wrong.
+func sameJSON(t *testing.T, got datatypes.JSON, want string) bool {
+	t.Helper()
+	var a, b any
+	if err := json.Unmarshal(got, &a); err != nil {
+		t.Fatalf("unmarshal got JSON %s: %v", got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &b); err != nil {
+		t.Fatalf("unmarshal want JSON %s: %v", want, err)
+	}
+	return reflect.DeepEqual(a, b)
+}
+
+func TestTriageSourceBackfillMarksExistingTriagesAsHuman(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/backfill", nil, true)
+	pr := f.openPR(repo.ID, 13, store.StatusPending, false)
+	finding := f.finding(pr, "f_backfill", "minor", "correctness", store.FindingWithdrawn)
+
+	f.exec(`UPDATE findings SET triaged_by = 'qa-user', triage_verdict = 'false_positive' WHERE id = ?`,
+		finding.ID)
+	f.exec(`UPDATE findings SET triage_source = 'human' WHERE triaged_by <> '' AND triage_source = ''`)
+
+	var got store.Finding
+	if err := f.s.DB.WithContext(f.ctx).First(&got, "id = ?", finding.ID).Error; err != nil {
+		t.Fatalf("reload finding: %v", err)
+	}
+	if got.TriageSource != "human" {
+		t.Errorf("triage_source = %q, want human for a pre-existing triage", got.TriageSource)
+	}
+}
+
+func TestQAPolicyAutoTriageFieldsRoundTrip(t *testing.T) {
+	f := newFixture(t)
+	team := f.team("auto-triage")
+	profile := f.llmProfile("auto-triage-profile", true)
+
+	saved, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID,
+		AutoTriageMode: store.AutoTriageApply, AutoWithdraw: true,
+		VerifyMaxFindings: 25, VerifyMaxFiles: 7, VerifyTokenShare: 30,
+		VerifyTimeShare: 10, VerifyTokenMax: 150000,
+	})
+	if err != nil {
+		t.Fatalf("SaveQAPolicy: %v", err)
+	}
+
+	loaded, err := f.s.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if loaded.AutoTriageMode != store.AutoTriageApply || !loaded.AutoWithdraw ||
+		loaded.VerifyMaxFindings != 25 || loaded.VerifyMaxFiles != 7 ||
+		loaded.VerifyTokenShare != 30 || loaded.VerifyTimeShare != 10 ||
+		loaded.VerifyTokenMax != 150000 {
+		t.Errorf("auto-triage policy = %+v, want the saved values", loaded)
+	}
+	if loaded.ID != saved.ID {
+		t.Errorf("policy ID = %d, want %d", loaded.ID, saved.ID)
+	}
+}
+
+func TestUpsertFindingStoresExistingCode(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/cited-code", nil, true)
+	pr := f.openPR(repo.ID, 14, store.StatusPending, false)
+
+	first, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_cited", PullRequestID: pr.ID, Fingerprint: "fp-cited",
+		Path: "main.go", Severity: "minor", Category: "correctness",
+		Status: store.FindingOpen, ExistingCode: "guard()",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if first.ExistingCode != "guard()" {
+		t.Errorf("ExistingCode = %q, want guard()", first.ExistingCode)
+	}
+
+	updated, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_cited", PullRequestID: pr.ID, Fingerprint: "fp-cited",
+		Path: "main.go", Severity: "minor", Category: "correctness",
+		Status: store.FindingOpen, ExistingCode: "other guard()",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding(update): %v", err)
+	}
+	if updated.ExistingCode != "other guard()" {
+		t.Errorf("ExistingCode after upsert = %q, want the updated cited code", updated.ExistingCode)
+	}
+}
+
+func TestTriageFindingVerifierCannotOverrideHuman(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/human-guard", nil, true)
+	pr := f.openPR(repo.ID, 21, store.StatusChangesRequested, false)
+	f.finding(pr, "f_human", "minor", "style", store.FindingOpen)
+
+	if _, err := f.s.TriageFinding(f.ctx, "f_human", store.FindingWithdrawn, store.FindingAudit{
+		Action: "finding.withdrawn", Actor: "ana",
+	}); err != nil {
+		t.Fatalf("human triage: %v", err)
+	}
+
+	_, err := f.s.TriageFinding(f.ctx, "f_human", store.FindingOpen, store.FindingAudit{
+		Action: "finding.auto_triaged", Actor: "ocr", Source: store.TriageSourceVerifier,
+	})
+	if !errors.Is(err, store.ErrFindingHumanTriaged) {
+		t.Fatalf("verifier triage = %v, want ErrFindingHumanTriaged", err)
+	}
+
+	got, err := f.s.Finding(f.ctx, "f_human")
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.Status != store.FindingWithdrawn || got.TriageSource != store.TriageSourceHuman ||
+		got.TriagedBy != "ana" {
+		t.Errorf("finding = %s/%s/%s, want the human decision untouched",
+			got.Status, got.TriageSource, got.TriagedBy)
+	}
+}
+
+func TestTriageFindingVerifierWritesSourceAndIsIdempotent(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/verifier-source", nil, true)
+	pr := f.openPR(repo.ID, 22, store.StatusChangesRequested, false)
+	f.finding(pr, "f_verifier", "minor", "style", store.FindingOpen)
+
+	entry := store.FindingAudit{Action: "finding.auto_triaged", Actor: "ocr", Source: store.TriageSourceVerifier}
+	if _, err := f.s.TriageFinding(f.ctx, "f_verifier", store.FindingWithdrawn, entry); err != nil {
+		t.Fatalf("verifier triage: %v", err)
+	}
+	got, err := f.s.Finding(f.ctx, "f_verifier")
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.TriageSource != store.TriageSourceVerifier || got.TriageVerdict != store.VerdictFalsePositive {
+		t.Errorf("finding = %s/%s, want a verifier false positive",
+			got.TriageSource, got.TriageVerdict)
+	}
+	if rows := f.auditRows("f_verifier"); rows != 1 {
+		t.Fatalf("audit rows = %d, want 1", rows)
+	}
+
+	changed, err := f.s.TriageFinding(f.ctx, "f_verifier", store.FindingWithdrawn, entry)
+	if err != nil {
+		t.Fatalf("repeated verifier triage: %v", err)
+	}
+	if changed {
+		t.Error("repeating the same decision reported a status change")
+	}
+	if rows := f.auditRows("f_verifier"); rows != 1 {
+		t.Errorf("audit rows after a repeat = %d, want 1", rows)
+	}
+}
+
+func TestUpsertFindingKeepsDismissedWhenCodeUnchanged(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/keep-dismissed", nil, true)
+	pr := f.openPR(repo.ID, 23, store.StatusPending, false)
+
+	seed, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_dismissed", PullRequestID: pr.ID, Fingerprint: "fp-dismissed",
+		Path: "main.go", StartLine: 10, EndLine: 12, Severity: "minor",
+		Category: "style", Title: "Nombre largo", Status: store.FindingOpen,
+		ExistingCode: "old code()",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if _, err := f.s.TriageFinding(f.ctx, seed.ID, store.FindingWithdrawn, store.FindingAudit{
+		Action: "finding.auto_triaged", Actor: "ocr", Source: store.TriageSourceVerifier,
+	}); err != nil {
+		t.Fatalf("verifier triage: %v", err)
+	}
+
+	if _, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_dismissed", PullRequestID: pr.ID, Fingerprint: "fp-dismissed",
+		Path: "main.go", StartLine: 10, EndLine: 12, Severity: "minor",
+		Category: "style", Title: "Otro título", Status: store.FindingOpen,
+		ExistingCode: "old code()",
+	}); err != nil {
+		t.Fatalf("UpsertFinding(same code): %v", err)
+	}
+
+	got, err := f.s.Finding(f.ctx, seed.ID)
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.Status != store.FindingWithdrawn || got.TriageSource != store.TriageSourceVerifier {
+		t.Errorf("finding = %s/%s, want the verifier dismissal preserved",
+			got.Status, got.TriageSource)
+	}
+	if got.Title != "Nombre largo" {
+		t.Errorf("title = %q, want the row untouched", got.Title)
+	}
+}
+
+func TestUpsertFindingReopensDismissedWhenCodeChanged(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/reopen-changed", nil, true)
+	pr := f.openPR(repo.ID, 24, store.StatusPending, false)
+
+	seed, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_reopen", PullRequestID: pr.ID, Fingerprint: "fp-reopen",
+		Path: "main.go", StartLine: 10, EndLine: 12, Severity: "minor",
+		Category: "style", Title: "Nombre largo", Status: store.FindingOpen,
+		ExistingCode: "old code()",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if _, err := f.s.TriageFinding(f.ctx, seed.ID, store.FindingWithdrawn, store.FindingAudit{
+		Action: "finding.auto_triaged", Actor: "ocr", Source: store.TriageSourceVerifier,
+	}); err != nil {
+		t.Fatalf("verifier triage: %v", err)
+	}
+
+	if _, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_reopen", PullRequestID: pr.ID, Fingerprint: "fp-reopen",
+		Path: "main.go", StartLine: 10, EndLine: 12, Severity: "minor",
+		Category: "style", Title: "Nombre nuevo", Status: store.FindingOpen,
+		ExistingCode: "new code()",
+	}); err != nil {
+		t.Fatalf("UpsertFinding(changed code): %v", err)
+	}
+
+	got, err := f.s.Finding(f.ctx, seed.ID)
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.Status != store.FindingOpen {
+		t.Errorf("status = %q, want the changed code to reopen the finding", got.Status)
+	}
+	if got.Title != "Nombre nuevo" || got.ExistingCode != "new code()" {
+		t.Errorf("finding = %q/%q, want the refreshed code", got.Title, got.ExistingCode)
+	}
+}
+
+func TestUpsertFindingClearsStaleVerifierTriage(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/clear-stale", nil, true)
+	pr := f.openPR(repo.ID, 25, store.StatusPending, false)
+
+	seed, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_stale", PullRequestID: pr.ID, Fingerprint: "fp-stale",
+		Path: "main.go", StartLine: 10, EndLine: 12, Severity: "minor",
+		Category: "style", Title: "Nombre largo", Status: store.FindingOpen,
+		ExistingCode: "old code()",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if _, err := f.s.TriageFinding(f.ctx, seed.ID, store.FindingWithdrawn, store.FindingAudit{
+		Action: "finding.auto_triaged", Actor: "ocr", Source: store.TriageSourceVerifier,
+	}); err != nil {
+		t.Fatalf("verifier triage: %v", err)
+	}
+
+	if _, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_stale", PullRequestID: pr.ID, Fingerprint: "fp-stale",
+		Path: "main.go", StartLine: 20, EndLine: 22, Severity: "minor",
+		Category: "style", Title: "Nombre largo", Status: store.FindingOpen,
+		ExistingCode: "old code()",
+	}); err != nil {
+		t.Fatalf("UpsertFinding(moved range): %v", err)
+	}
+
+	got, err := f.s.Finding(f.ctx, seed.ID)
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.TriageVerdict != "" || got.TriageSource != "" || got.TriagedBy != "" || got.TriagedAt != nil {
+		t.Errorf("triage = %q/%q/%q/%v, want the stale verifier verdict cleared",
+			got.TriageVerdict, got.TriageSource, got.TriagedBy, got.TriagedAt)
+	}
+}
+
+func TestUpsertFindingKeepsHumanTriageOnCodeChange(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/keep-human", nil, true)
+	pr := f.openPR(repo.ID, 26, store.StatusPending, false)
+
+	seed, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_human_keep", PullRequestID: pr.ID, Fingerprint: "fp-human-keep",
+		Path: "main.go", StartLine: 10, EndLine: 12, Severity: "minor",
+		Category: "style", Title: "Nombre largo", Status: store.FindingOpen,
+		ExistingCode: "old code()",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+	if _, err := f.s.TriageFinding(f.ctx, seed.ID, store.FindingWithdrawn, store.FindingAudit{
+		Action: "finding.withdrawn", Actor: "ana",
+	}); err != nil {
+		t.Fatalf("human triage: %v", err)
+	}
+
+	if _, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_human_keep", PullRequestID: pr.ID, Fingerprint: "fp-human-keep",
+		Path: "main.go", StartLine: 10, EndLine: 12, Severity: "minor",
+		Category: "style", Title: "Nombre nuevo", Status: store.FindingOpen,
+		ExistingCode: "new code()",
+	}); err != nil {
+		t.Fatalf("UpsertFinding(changed code): %v", err)
+	}
+
+	got, err := f.s.Finding(f.ctx, seed.ID)
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	if got.Status != store.FindingOpen {
+		t.Errorf("status = %q, want the changed code to reopen it", got.Status)
+	}
+	if got.TriageVerdict != store.VerdictFalsePositive ||
+		got.TriageSource != store.TriageSourceHuman || got.TriagedBy != "ana" {
+		t.Errorf("triage = %q/%q/%q, want the human decision preserved",
+			got.TriageVerdict, got.TriageSource, got.TriagedBy)
+	}
+}
+
+func TestUpsertFindingStillUpdatesUntriaged(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/untriaged", nil, true)
+	pr := f.openPR(repo.ID, 27, store.StatusPending, false)
+
+	if _, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_untriaged", PullRequestID: pr.ID, Fingerprint: "fp-untriaged",
+		Path: "main.go", StartLine: 10, EndLine: 12, Severity: "minor",
+		Category: "style", Title: "Nombre largo", Status: store.FindingOpen,
+		ExistingCode: "old code()",
+	}); err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+
+	updated, err := f.s.UpsertFinding(f.ctx, store.Finding{
+		ID: "f_untriaged", PullRequestID: pr.ID, Fingerprint: "fp-untriaged",
+		Path: "main.go", StartLine: 10, EndLine: 12, Severity: "major",
+		Category: "style", Title: "Nombre nuevo", Status: store.FindingOpen,
+		ExistingCode: "old code()",
+	})
+	if err != nil {
+		t.Fatalf("UpsertFinding(update): %v", err)
+	}
+	if updated.Title != "Nombre nuevo" || updated.Severity != "major" {
+		t.Errorf("finding = %q/%q, want the untriaged row refreshed",
+			updated.Title, updated.Severity)
+	}
+}
+
+func TestRecordFindingVerificationStoresJSON(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/verification", nil, true)
+	pr := f.openPR(repo.ID, 28, store.StatusPending, false)
+	f.finding(pr, "f_verify", "minor", "style", store.FindingOpen)
+
+	payload := []byte(`{"verdict":"confirm","evidence":"guard()","head_sha":"abc"}`)
+	if err := f.s.RecordFindingVerification(f.ctx, "f_verify", payload); err != nil {
+		t.Fatalf("RecordFindingVerification: %v", err)
+	}
+	got, err := f.s.Finding(f.ctx, "f_verify")
+	if err != nil {
+		t.Fatalf("Finding: %v", err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(got.Verification, &stored); err != nil {
+		t.Fatalf("stored verification is not JSON: %v", err)
+	}
+	if stored["verdict"] != "confirm" || stored["evidence"] != "guard()" {
+		t.Errorf("verification = %v, want the stored payload", stored)
+	}
+	if got.Status != store.FindingOpen || got.TriageVerdict != "" {
+		t.Errorf("finding = %s/%q, want the status and triage untouched",
+			got.Status, got.TriageVerdict)
+	}
+
+	err = f.s.RecordFindingVerification(f.ctx, "missing", payload)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("RecordFindingVerification(missing) = %v, want ErrNotFound", err)
+	}
+}
