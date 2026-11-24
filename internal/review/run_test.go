@@ -3073,8 +3073,9 @@ func TestRunHeartbeatOutlivesReviewTimeout(t *testing.T) {
 
 	// runCtx is built before OCR starts, so its deadline is at ocrStart+Cfg.Timeout
 	// at the latest: a beat later than this one is a beat past the deadline.
+	// Anchor to ocrStart: slow pre-OCR work eats the headroom WaitDelay leaves.
 	ocrStart := f.waitPhase(t, store.RunPhaseReviewing)
-	waitHeartbeatAfter(t, f.s, f.ctx, f.runID, ocrStart.Add(3*runner.Cfg.Timeout/2))
+	waitHeartbeatAfter(t, f.s, f.ctx, f.runID, ocrStart.Add(runner.Cfg.Timeout+100*time.Millisecond))
 
 	w := &Watchdog{Store: f.s, Events: f.events, Jobs: f.jobs, StaleAfter: 100 * time.Millisecond}
 	if err := w.Sweep(f.ctx); err != nil {
