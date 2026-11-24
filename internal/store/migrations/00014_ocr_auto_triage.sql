@@ -3,6 +3,9 @@ ALTER TABLE findings ADD COLUMN existing_code text NOT NULL DEFAULT '';
 ALTER TABLE findings ADD COLUMN verification jsonb;
 ALTER TABLE findings ADD COLUMN triage_source text NOT NULL DEFAULT '';
 UPDATE findings SET triage_source = 'human' WHERE triaged_by <> '' AND triage_source = '';
+-- Every finding withdrawn before the verifier existed was a person's decision,
+-- including the /qa dismissals that never recorded triaged_by.
+UPDATE findings SET triage_source = 'human' WHERE status = 'withdrawn' AND triage_source = '';
 CREATE INDEX idx_findings_triage_source ON findings (triage_source);
 
 ALTER TABLE review_runs ADD COLUMN verify_session_id text;

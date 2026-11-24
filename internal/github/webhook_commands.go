@@ -154,12 +154,15 @@ func (h *WebhookHandler) commandSetFindings(ctx context.Context, w http.Response
 	}
 	audited := 0
 	for _, finding := range targets {
-		changed, err := h.Store.SetFindingStatusAudited(ctx, finding.ID, status, store.FindingAudit{
+		// /qa is a human triage like the panel: it records who decided and marks
+		// the source, so the verifier never overrides it on the next run.
+		changed, err := h.Store.TriageFinding(ctx, finding.ID, status, store.FindingAudit{
 			Action:    action,
 			Actor:     actor.Login,
 			ActorID:   actorID(actor),
 			CommentID: commentID,
 			Reason:    cmd.args,
+			Source:    store.TriageSourceHuman,
 		})
 		if err != nil {
 			h.serverError(w)
@@ -209,7 +212,10 @@ func (h *WebhookHandler) commandTargets(ctx context.Context, prID uint, args, st
 		finding, err := h.Store.Finding(ctx, fields[0])
 		switch {
 		case err == nil:
-			if finding.PullRequestID != prID || finding.Status == status {
+			// A resolved finding is no longer anyone's call: the panel refuses
+			// it too, so the command reports nothing to do instead of failing.
+			if finding.PullRequestID != prID || finding.Status == status ||
+				finding.Status == store.FindingResolved {
 				return nil, nil
 			}
 			return []store.Finding{finding}, nil
