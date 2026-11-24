@@ -1233,6 +1233,66 @@ func TestInlineOnlyForConfirmedWhenVerificationRan(t *testing.T) {
 	}
 }
 
+func TestSummaryKeepsDegradedRefutationsForTheHuman(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	seedFinding(t, st, pr.ID, run.ID, "rejected", 2, "major", store.FindingOpen)
+	markVerified(t, st, "rejected", "refute", "")
+	// La política no aplicó el descarte (severidad bloqueante): el hallazgo
+	// sigue abierto y sin triage, así que la decisión es del humano.
+	if err := st.DB.Exec("UPDATE findings SET triage_source = '' WHERE id = ?", "rejected").Error; err != nil {
+		t.Fatalf("clear triage source: %v", err)
+	}
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	body := publishedSummary(t, gh)
+	if !strings.Contains(body, "**Verificación automática:** 0 validados · 1 para tu criterio · 0 descartados") {
+		t.Errorf("summary counts a refutation the policy never applied:\n%s", body)
+	}
+	if !strings.Contains(body, "Necesita tu criterio (1)") || !strings.Contains(body, "Título rejected") {
+		t.Errorf("summary hides a degraded refutation from the human:\n%s", body)
+	}
+	if strings.Contains(body, "descartados automáticamente") {
+		t.Errorf("summary reports a dismissal that never happened:\n%s", body)
+	}
+}
+
+func TestInlineFiltersReusedTriageWithoutANewScan(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	// Sin sesión nueva: el veredicto se reutilizó de una pasada anterior.
+	seedFinding(t, st, pr.ID, run.ID, "confirmed", 2, "minor", store.FindingOpen)
+	markVerified(t, st, "confirmed", "confirm", store.VerdictConfirmed)
+	seedFinding(t, st, pr.ID, run.ID, "pending", 3, "minor", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	reviews := append([]fakeReview(nil), gh.reviews...)
+	gh.mu.Unlock()
+	if len(reviews) != 1 || len(reviews[0].Comments) != 1 {
+		t.Fatalf("reviews = %+v, want one review with only the confirmed finding", reviews)
+	}
+	if body := reviews[0].Comments[0].Body; !strings.Contains(body, "Título confirmed") ||
+		strings.Contains(body, "Título pending") {
+		t.Errorf("inline comment = %q, want the confirmed finding only", body)
+	}
+}
+
 func TestInlineFallsBackWhenVerificationDisabled(t *testing.T) {
 	st := testutil.NewStore(t)
 	ctx := context.Background()

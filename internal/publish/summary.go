@@ -152,11 +152,14 @@ func (p *publishContext) buildSummary(findings []store.Finding, resolvedSincePre
 	return b.String()
 }
 
-// verificationApplied reports whether the second OCR pass ran and the policy
-// let it change findings. Only then are inline comments limited to the
-// confirmed ones; a dry run or a skipped verification keeps today's behaviour.
+// verificationApplied reports whether the second OCR pass changed findings.
+// It ran in this run when the session is recorded, and its triage can also be
+// reused from a previous run on the same head, where no new scan runs. Only
+// then are inline comments limited to the confirmed ones; a dry run or a
+// skipped verification keeps today's behaviour.
 func (p *publishContext) verificationApplied() bool {
-	return p.run.VerifySessionID != "" && p.policy.AutoTriageMode == store.AutoTriageApply
+	return p.policy.AutoTriageMode == store.AutoTriageApply &&
+		(p.run.VerifySessionID != "" || p.hasVerifierTriage())
 }
 
 // inlineAllowed is the single predicate the summary and the inline review share:
@@ -196,7 +199,15 @@ func (p *publishContext) buildVerificationBlock() string {
 				validated = append(validated, f)
 			}
 		case "refute":
-			dismissed++
+			// Only a withdrawal the policy applied counts as dismissed; a
+			// refutation it degraded (blocking severity, auto-withdraw off or
+			// evidence missing) is still the human's call.
+			switch f.Status {
+			case store.FindingWithdrawn:
+				dismissed++
+			case store.FindingOpen:
+				uncertain = append(uncertain, f)
+			}
 		default:
 			if f.Status == store.FindingOpen {
 				uncertain = append(uncertain, f)
