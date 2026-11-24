@@ -78,6 +78,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 	}
 
 	selected, paths := selectVerifyFindings(pending, policy)
+	attempted := false
 	if len(paths) > 0 {
 		timeout, budget := verifyBudget(ctx, cfg.Policy, policy, int64(out.tokens.Total))
 		switch {
@@ -112,6 +113,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
 					fmt.Sprintf("la verificación falló; los hallazgos quedan sin triage: %v", err))
 			} else {
+				attempted = true
 				now := time.Now().UTC()
 				for id, v := range ParseVerdicts(res.Comments) {
 					if _, seen := verdicts[id]; seen {
@@ -137,7 +139,10 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 		}
 	}
 
-	if len(verdicts) == 0 {
+	// A verifier that ran and answered nothing still leaves an explicit
+	// uncertainty per finding, so stale evidence is not reused. A pass that
+	// never ran keeps whatever the previous run stored.
+	if len(verdicts) == 0 && !attempted {
 		return
 	}
 	if out.verificationSkipped != "" {
@@ -145,7 +150,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 			"verificación omitida ("+out.verificationSkipped+"); se reutilizan los veredictos guardados")
 	}
 	files := readCitedFiles(workDir, out.findings)
-	out.decisions = Decide(out.findings, verdicts, files, policy)
+	out.decisions = Decide(out.findings, verdicts, files, headSHA, policy)
 }
 
 // reusedVerdict returns the stored verdict when it still refers to the same

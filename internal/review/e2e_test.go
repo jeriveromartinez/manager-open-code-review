@@ -1195,9 +1195,9 @@ func testE2EAutoTriagePublishesCuratedSummary(t *testing.T) {
 
 	minorID := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
 	nitID := findingIDFor(f.pr.ID, "auth.go", "style", "Nombre confuso", 5, 5)
-	f.setScan(t, runTestScanAnswer(t, map[string]string{
-		minorID: "REFUTE",
-		nitID:   "CONFIRM",
+	f.setScan(t, runTestScanAnswer(t, map[string]runTestAnswer{
+		minorID: {Verdict: "REFUTE", Evidence: "var insecure = true", Line: 3},
+		nitID:   {Verdict: "CONFIRM", Evidence: "var last = 2", Line: 5},
 	}))
 
 	runID := f.enqueue(t, false)
@@ -1227,7 +1227,7 @@ func testE2EAutoTriagePublishesCuratedSummary(t *testing.T) {
 	if err := json.Unmarshal(refuted.Verification, &evidence); err != nil {
 		t.Fatalf("decode verification of %s: %v (%s)", minorID, err, refuted.Verification)
 	}
-	if evidence.Verdict != VerdictRefute || evidence.Evidence != "package main" ||
+	if evidence.Verdict != VerdictRefute || evidence.Evidence != "var insecure = true" ||
 		evidence.HeadSHA != f.headSHA || evidence.SessionID != "verify-session" {
 		t.Errorf("verification = %+v, want the refutation with the cited evidence", evidence)
 	}

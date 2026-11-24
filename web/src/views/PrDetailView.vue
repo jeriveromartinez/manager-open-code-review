@@ -112,9 +112,10 @@ const runStatusLabels: Record<string, string> = {
 function triageNote(finding: Finding): string {
   if (finding.status === 'resolved') return 'Resuelto en el código'
   if (finding.triage_source === 'verifier') {
-    return finding.triage_verdict === 'confirmed'
-      ? 'Confirmado por la verificación automática'
-      : 'Descartado por la verificación automática'
+    const verdict = verificationMatchesRun(finding) ? finding.verification.verdict : undefined
+    if (verdict === 'confirm') return 'Confirmado por la verificación automática'
+    if (verdict === 'refute') return 'Descartado por la verificación automática'
+    return 'Sin triar'
   }
   switch (finding.triage_verdict) {
     case 'confirmed':
@@ -134,13 +135,30 @@ const verificationLabels: Record<string, string> = {
 
 // La segunda pasada deja su veredicto aunque la política no lo aplique (una
 // simulación), así que el bloque sigue al veredicto guardado y no al triage.
+// Una verificación de otro commit no es evidencia de este.
+function verificationMatchesRun(finding: Finding): boolean {
+  const head = latestRun.value?.head_sha
+  const verified = finding.verification.head_sha
+  if (!head || !verified) return false
+  return head.toLowerCase() === verified.toLowerCase()
+}
+
 function verificationLabel(finding: Finding): string {
   if (!finding.verification.verdict) return ''
+  if (!verificationMatchesRun(finding)) return verificationLabels['uncertain'] ?? 'Sin confirmar'
   return verificationLabels[finding.verification.verdict] ?? 'Sin confirmar'
 }
 
 function verificationEvidence(finding: Finding): string {
+  if (!verificationMatchesRun(finding)) return ''
   return (finding.verification.evidence ?? '').trim()
+}
+
+function verificationReason(finding: Finding): string {
+  if (finding.verification.verdict && !verificationMatchesRun(finding)) {
+    return 'La verificación corresponde a otro commit'
+  }
+  return (finding.verification.reason ?? '').trim()
 }
 
 function coverageCount(key: string): number {
@@ -564,6 +582,10 @@ onBeforeUnmount(() => {
                     <span class="finding__label">Evidencia</span>
                     <code data-verification-evidence>{{ verificationEvidence(finding) }}</code>
                   </template>
+                  <template v-if="verificationReason(finding)">
+                    <span class="finding__label">Motivo</span>
+                    <span data-verification-reason>{{ verificationReason(finding) }}</span>
+                  </template>
                 </p>
                 <div class="finding__actions">
                   <span
@@ -625,6 +647,10 @@ onBeforeUnmount(() => {
                 <template v-if="verificationEvidence(finding)">
                   <span class="finding__label">Evidencia</span>
                   <code data-verification-evidence>{{ verificationEvidence(finding) }}</code>
+                </template>
+                <template v-if="verificationReason(finding)">
+                  <span class="finding__label">Motivo</span>
+                  <span data-verification-reason>{{ verificationReason(finding) }}</span>
                 </template>
               </p>
               <div class="finding__actions">

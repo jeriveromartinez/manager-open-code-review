@@ -221,10 +221,10 @@ func (p *publishContext) verificationApplied() bool {
 }
 
 // inlineAllowed is the single predicate the summary and the inline review share:
-// once the verifier's decisions are applied, only a confirmed finding may be
-// published inline.
+// once the verifier's decisions are applied, only a finding confirmed with
+// evidence that still matches this head may be published inline.
 func (p *publishContext) inlineAllowed(f store.Finding) bool {
-	return !p.verificationApplied() || f.TriageVerdict == store.VerdictConfirmed
+	return !p.verificationApplied() || p.findingVerdict(f) == "confirm"
 }
 
 func (p *publishContext) hasVerifierTriage() bool {
@@ -267,9 +267,9 @@ func (p *publishContext) buildVerificationBlock() string {
 				uncertain = append(uncertain, f)
 			}
 		default:
-			if f.Status == store.FindingOpen {
-				uncertain = append(uncertain, f)
-			}
+			// Uncertainty is the human's call even when the row still looks
+			// withdrawn: new evidence may have invalidated that dismissal.
+			uncertain = append(uncertain, f)
 		}
 	}
 
@@ -307,24 +307,16 @@ func (p *publishContext) buildVerificationBlock() string {
 	return b.String()
 }
 
-// findingVerdict is the verifier's answer for a finding: the applied triage
-// wins, and a dry run or an unapplied answer falls back to the stored evidence.
+// findingVerdict is the verifier's answer for a finding. The stored record is
+// authoritative because it is rewritten every run, including the uncertain
+// answer that degrades a stale or invalid confirmation; a verdict retained from
+// another commit is not trusted at all.
 func (p *publishContext) findingVerdict(f store.Finding) string {
-	if f.TriageSource == store.TriageSourceVerifier {
-		switch f.TriageVerdict {
-		case store.VerdictConfirmed:
-			return "confirm"
-		case store.VerdictFalsePositive:
-			return "refute"
-		}
+	v, trusted := p.verificationAtHead(f)
+	if !trusted {
+		return ""
 	}
-	var verification struct {
-		Verdict string `json:"verdict"`
-	}
-	if len(f.Verification) > 0 {
-		_ = json.Unmarshal(f.Verification, &verification)
-	}
-	return verification.Verdict
+	return v.Verdict
 }
 
 func (p *publishContext) findingBullet(f store.Finding) string {
@@ -332,8 +324,24 @@ func (p *publishContext) findingBullet(f store.Finding) string {
 	if severity == "" {
 		severity = "sin severidad"
 	}
-	return fmt.Sprintf("- **%s** · `%s` — %s\n",
+	bullet := fmt.Sprintf("- **%s** · `%s` — %s\n",
 		p.sanitize(severity), p.findingLocation(f), p.sanitize(f.Title))
+	if reason := strings.TrimSpace(p.findingReason(f)); reason != "" {
+		bullet += fmt.Sprintf("  _%s_\n", p.sanitize(reason))
+	}
+	return bullet
+}
+
+// findingReason explains why the verifier's answer could not be used, so the
+// summary does not leave an uncertainty without its cause.
+func (p *publishContext) findingReason(f store.Finding) string {
+	if v, trusted := p.verificationAtHead(f); trusted {
+		return v.Reason
+	}
+	if v := parseVerification(f); v.Verdict != "" {
+		return "la verificación corresponde a otro commit"
+	}
+	return ""
 }
 
 func (p *publishContext) panelLink() string {

@@ -146,6 +146,14 @@ func writeRunTestFile(t *testing.T, path, content string) {
 	}
 }
 
+// runTestAuthFile is the auth.go checkout of the run fixture. Its lines 3 and 5
+// are the ones the fixture findings cite, so the verifier can quote them.
+const runTestAuthFile = "package main\n\nvar insecure = true\n\nvar last = 2\n"
+
+func runTestAuthLines() []string {
+	return strings.Split(runTestAuthFile, "\n")
+}
+
 // newRunTestFixture crea un repo bare con refs/pull/1/head, la configuración en
 // Postgres y los dobles de ocr/opencode. El nombre del repo es "acme/origin"
 // para que GitBaseURL + "/" + FullName + ".git" apunte al bare local y la
@@ -165,7 +173,7 @@ func newRunTestFixture(t *testing.T) *runTestFixture {
 	baseSHA := runGit(t, work, "rev-parse", "HEAD")
 
 	runGit(t, work, "checkout", "-qb", "feature")
-	writeRunTestFile(t, filepath.Join(work, "auth.go"), "package main\n")
+	writeRunTestFile(t, filepath.Join(work, "auth.go"), runTestAuthFile)
 	runGit(t, work, "add", "-A")
 	runGit(t, work, "commit", "-qm", "feature")
 	headSHA := runGit(t, work, "rev-parse", "HEAD")
@@ -469,22 +477,30 @@ func runTestScanNoVerdicts() string {
 }
 
 // findingIDFor mirrors Reconcile's deterministic ID for a review finding on
-// the run fixture's auth.go checkout (one line: "package main").
+// the run fixture's auth.go checkout.
 func findingIDFor(prID uint, path, category, title string, start, end int) string {
 	fp := Fingerprint(prID, AgentFinding{
 		Path: path, Category: category, Title: title, StartLine: start, EndLine: end,
-	}, []string{"package main"}, 0)
+	}, runTestAuthLines(), 0)
 	return FindingID(prID, fp)
 }
 
+// runTestAnswer is one verifier answer: the verdict, the line quoted verbatim
+// and the line the finding cites.
+type runTestAnswer struct {
+	Verdict  string
+	Evidence string
+	Line     int
+}
+
 // runTestScanAnswer builds a scan answer carrying one verdict per id.
-func runTestScanAnswer(t *testing.T, verdicts map[string]string) string {
+func runTestScanAnswer(t *testing.T, answers map[string]runTestAnswer) string {
 	t.Helper()
-	comments := make([]string, 0, len(verdicts))
-	for id, verdict := range verdicts {
+	comments := make([]string, 0, len(answers))
+	for id, answer := range answers {
 		comments = append(comments, fmt.Sprintf(
-			`{"path": "auth.go", "content": "QA-VERIFY %s %s\nEVIDENCE: package main", "start_line": 3, "end_line": 3, "category": "security", "severity": "medium"}`,
-			id, verdict))
+			`{"path": "auth.go", "content": "QA-VERIFY %s %s\nEVIDENCE: %s", "start_line": %d, "end_line": %d, "category": "security", "severity": "medium"}`,
+			id, answer.Verdict, answer.Evidence, answer.Line, answer.Line))
 	}
 	return fmt.Sprintf(`{
   "status": "complete",
@@ -1033,19 +1049,41 @@ func TestRunCanceledContextRequeuesRun(t *testing.T) {
 }
 
 func TestRunBlockingThreshold(t *testing.T) {
+	const head = "head-1"
 	findings := []store.Finding{
 		{Status: store.FindingOpen, Severity: "minor"},
 		{Status: store.FindingResolved, Severity: "blocker"},
 	}
-	if hasBlockingFinding(findings, "major") {
+	if hasBlockingFinding(findings, "major", head) {
 		t.Error("minor open finding should not block at major threshold")
 	}
 	findings[0].Severity = "major"
-	if !hasBlockingFinding(findings, "major") {
+	if !hasBlockingFinding(findings, "major", head) {
 		t.Error("major open finding should block at major threshold")
 	}
-	if hasBlockingFinding(findings, "blocker") {
+	if hasBlockingFinding(findings, "blocker", head) {
 		t.Error("resolved blocker should never block")
+	}
+
+	findings[0].Verification = datatypes.JSON([]byte(`{"verdict":"uncertain","head_sha":"head-1"}`))
+	if hasBlockingFinding(findings, "major", head) {
+		t.Error("an uncertainty must not block")
+	}
+	findings[0].Verification = datatypes.JSON([]byte(`{"verdict":"confirm","evidence":"if x {","head_sha":"head-0"}`))
+	if hasBlockingFinding(findings, "major", head) {
+		t.Error("a confirmation from another head must not block")
+	}
+	findings[0].Verification = datatypes.JSON([]byte(`{"verdict":"confirm","head_sha":"head-1"}`))
+	if hasBlockingFinding(findings, "major", head) {
+		t.Error("a confirmation without evidence must not block")
+	}
+	findings[0].Verification = datatypes.JSON([]byte(`{"verdict":"confirm","evidence":"if x {","head_sha":"head-1"}`))
+	if !hasBlockingFinding(findings, "major", head) {
+		t.Error("a validated confirmation should block")
+	}
+	findings[0].Verification = nil
+	if !hasBlockingFinding(findings, "major", head) {
+		t.Error("an unverified major finding keeps blocking")
 	}
 }
 
@@ -1074,7 +1112,7 @@ func TestRunPipelineSucceeds(t *testing.T) {
 	wantFP := Fingerprint(f.pr.ID, AgentFinding{
 		Path: "auth.go", Category: "security", Title: "Comparación insegura",
 		StartLine: 3, EndLine: 3,
-	}, []string{"package main"}, 0)
+	}, runTestAuthLines(), 0)
 	if got.Fingerprint != wantFP {
 		t.Errorf("fingerprint = %q, want %q", got.Fingerprint, wantFP)
 	}
@@ -1159,9 +1197,9 @@ func TestRunVerifiesAndProducesDecisions(t *testing.T) {
 	f.setOCR(t, runTestNativeTwoFindings())
 	minorID := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
 	nitID := findingIDFor(f.pr.ID, "auth.go", "style", "Nombre confuso", 5, 5)
-	f.setScan(t, runTestScanAnswer(t, map[string]string{
-		minorID: "CONFIRM",
-		nitID:   "REFUTE",
+	f.setScan(t, runTestScanAnswer(t, map[string]runTestAnswer{
+		minorID: {Verdict: "CONFIRM", Evidence: "var insecure = true", Line: 3},
+		nitID:   {Verdict: "REFUTE", Evidence: "var last = 2", Line: 5},
 	}))
 	f.setAutoTriage(t, store.AutoTriageDryRun, true, nil)
 
@@ -1242,7 +1280,9 @@ func TestRunVerifierTokensAreAddedToRunUsage(t *testing.T) {
 	skipWithoutShellFake(t)
 	f := newRunTestFixture(t)
 	id := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
-	f.setScan(t, runTestScanAnswer(t, map[string]string{id: "CONFIRM"}))
+	f.setScan(t, runTestScanAnswer(t, map[string]runTestAnswer{
+		id: {Verdict: "CONFIRM", Evidence: "var insecure = true", Line: 3},
+	}))
 	f.setAutoTriage(t, store.AutoTriageDryRun, true, nil)
 
 	runner := f.runner()
@@ -1329,9 +1369,10 @@ func TestRunReusesStoredVerdictsForSameHead(t *testing.T) {
 
 	fp := Fingerprint(f.pr.ID, AgentFinding{
 		Path: "auth.go", Category: "security", Title: "Comparación insegura",
-	}, []string{"package main"}, 0)
+		StartLine: 3, EndLine: 3,
+	}, runTestAuthLines(), 0)
 	verification, err := json.Marshal(Verification{
-		Verdict: VerdictConfirm, Evidence: "package main", HeadSHA: f.headSHA,
+		Verdict: VerdictConfirm, Evidence: "var insecure = true", HeadSHA: f.headSHA,
 		Model: "nemotron", SessionID: "previous-session", VerifiedAt: time.Now().UTC(),
 	})
 	if err != nil {
@@ -1405,9 +1446,9 @@ func (f *runTestFixture) runTwoFindingVerifyRun(t *testing.T, mode string) (mino
 	f.setOCR(t, runTestNativeTwoFindings())
 	minorID = findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
 	nitID = findingIDFor(f.pr.ID, "auth.go", "style", "Nombre confuso", 5, 5)
-	f.setScan(t, runTestScanAnswer(t, map[string]string{
-		minorID: "CONFIRM",
-		nitID:   "REFUTE",
+	f.setScan(t, runTestScanAnswer(t, map[string]runTestAnswer{
+		minorID: {Verdict: "CONFIRM", Evidence: "var insecure = true", Line: 3},
+		nitID:   {Verdict: "REFUTE", Evidence: "var last = 2", Line: 5},
 	}))
 	f.setAutoTriage(t, mode, true, nil)
 	runner := f.runner()
@@ -1459,7 +1500,8 @@ func TestRunSkipsDecisionWhenHumanTriagedMeanwhile(t *testing.T) {
 	f := newRunTestFixture(t)
 	fp := Fingerprint(f.pr.ID, AgentFinding{
 		Path: "auth.go", Category: "security", Title: "Comparación insegura",
-	}, []string{"package main"}, 0)
+		StartLine: 3, EndLine: 3,
+	}, runTestAuthLines(), 0)
 	seed, err := f.s.UpsertFinding(f.ctx, store.Finding{
 		ID: "f_human_pending", PullRequestID: f.pr.ID, Fingerprint: fp,
 		Path: "auth.go", StartLine: 3, EndLine: 3, Severity: "major",
@@ -1474,7 +1516,9 @@ func TestRunSkipsDecisionWhenHumanTriagedMeanwhile(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("human triage: %v", err)
 	}
-	f.setScan(t, runTestScanAnswer(t, map[string]string{seed.ID: "CONFIRM"}))
+	f.setScan(t, runTestScanAnswer(t, map[string]runTestAnswer{
+		seed.ID: {Verdict: "CONFIRM", Evidence: "var insecure = true", Line: 3},
+	}))
 	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
 
 	runner := f.runner()
@@ -1502,7 +1546,9 @@ func TestRunDoesNotApplyDecisionsWhenHeadMoved(t *testing.T) {
 	skipWithoutShellFake(t)
 	f := newRunTestFixture(t)
 	id := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
-	f.setScan(t, runTestScanAnswer(t, map[string]string{id: "REFUTE"}))
+	f.setScan(t, runTestScanAnswer(t, map[string]runTestAnswer{
+		id: {Verdict: "REFUTE", Evidence: "var insecure = true", Line: 3},
+	}))
 	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
 	if err := f.s.DB.WithContext(f.ctx).Exec(
 		"UPDATE pull_requests SET head_sha = 'moved-head' WHERE id = ?", f.pr.ID).Error; err != nil {
@@ -1728,7 +1774,9 @@ func TestRunDryRunStoresVerificationWithoutChangingStatus(t *testing.T) {
 	skipWithoutShellFake(t)
 	f := newRunTestFixture(t)
 	id := findingIDFor(f.pr.ID, "auth.go", "security", "Comparación insegura", 3, 3)
-	f.setScan(t, runTestScanAnswer(t, map[string]string{id: "REFUTE"}))
+	f.setScan(t, runTestScanAnswer(t, map[string]runTestAnswer{
+		id: {Verdict: "REFUTE", Evidence: "var insecure = true", Line: 3},
+	}))
 	f.setAutoTriage(t, store.AutoTriageDryRun, true, nil)
 
 	runner := f.runner()
@@ -1745,7 +1793,7 @@ func TestRunDryRunStoresVerificationWithoutChangingStatus(t *testing.T) {
 	}
 	var verification Verification
 	if err := json.Unmarshal(got.Verification, &verification); err != nil ||
-		verification.Verdict != VerdictRefute || verification.Evidence != "package main" {
+		verification.Verdict != VerdictRefute || verification.Evidence != "var insecure = true" {
 		t.Errorf("verification = %s (err=%v), want the dry-run refute stored",
 			got.Verification, err)
 	}
@@ -1754,10 +1802,10 @@ func TestRunDryRunStoresVerificationWithoutChangingStatus(t *testing.T) {
 	}
 }
 
-// TestAutoTriageKeepsStoredVerificationWhenUnanswered pins that a finding the
-// verifier did not answer keeps the evidence a previous run stored instead of
-// being overwritten with a zero-valued verification.
-func TestAutoTriageKeepsStoredVerificationWhenUnanswered(t *testing.T) {
+// TestAutoTriageRecordsUnansweredUncertainty pins that a finding the verifier
+// did not answer gets an explicit uncertainty for this head instead of keeping
+// evidence from a previous one.
+func TestAutoTriageRecordsUnansweredUncertainty(t *testing.T) {
 	f := newRunTestFixture(t)
 	stored := datatypes.JSON([]byte(`{"verdict":"refute","evidence":"guard()","head_sha":"old","verified_at":"2026-11-20T10:00:00Z"}`))
 	for _, finding := range []store.Finding{
@@ -1780,7 +1828,10 @@ func TestAutoTriageKeepsStoredVerificationWhenUnanswered(t *testing.T) {
 	}
 	out := runOutcome{decisions: []Decision{
 		{FindingID: "f_unanswered", Verdict: VerdictUncertain,
-			Verification: Verification{Verdict: VerdictUncertain}},
+			Verification: Verification{
+				Verdict: VerdictUncertain, HeadSHA: f.headSHA,
+				Reason: "OCR no respondió por este hallazgo",
+			}},
 		{FindingID: "f_answered", Verdict: VerdictConfirm,
 			Verification: Verification{
 				Verdict: VerdictConfirm, Evidence: "package main", HeadSHA: f.headSHA,
@@ -1794,10 +1845,11 @@ func TestAutoTriageKeepsStoredVerificationWhenUnanswered(t *testing.T) {
 	if err := f.s.DB.WithContext(f.ctx).Where("id = ?", "f_unanswered").Take(&unanswered).Error; err != nil {
 		t.Fatalf("reload unanswered finding: %v", err)
 	}
-	var kept Verification
-	if err := json.Unmarshal(unanswered.Verification, &kept); err != nil ||
-		kept.Verdict != VerdictRefute || kept.Evidence != "guard()" || kept.HeadSHA != "old" {
-		t.Errorf("unanswered verification = %s (err=%v), want the previous evidence preserved",
+	var replaced Verification
+	if err := json.Unmarshal(unanswered.Verification, &replaced); err != nil ||
+		replaced.Verdict != VerdictUncertain || replaced.HeadSHA != f.headSHA ||
+		replaced.Reason == "" {
+		t.Errorf("unanswered verification = %s (err=%v), want an explicit uncertainty at this head",
 			unanswered.Verification, err)
 	}
 
@@ -1974,7 +2026,7 @@ func TestRunBudgetPartialPublishesFindings(t *testing.T) {
 	wantFP := Fingerprint(f.pr.ID, AgentFinding{
 		Path: "auth.go", Category: "security", Title: "Comparación insegura",
 		StartLine: 3, EndLine: 3,
-	}, []string{"package main"}, 0)
+	}, runTestAuthLines(), 0)
 	if partial.Fingerprint != wantFP {
 		t.Errorf("partial finding fingerprint = %q, want %q", partial.Fingerprint, wantFP)
 	}
