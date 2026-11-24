@@ -284,8 +284,8 @@ func TestRunChunkFailureKeepsRestOfRun(t *testing.T) {
 		t.Errorf("coverage counters = %+v, want 1 reviewed / 1 skipped / 0 excluded", coverage)
 	}
 	big := coverageFileAt(t, coverage, "big.go")
-	if big.Status != coverageNotReviewed || big.Reason != "provider" {
-		t.Errorf("big.go coverage = %+v, want not_reviewed/provider", big)
+	if big.Status != coveragePending || big.Reason != "provider" {
+		t.Errorf("big.go coverage = %+v, want pending/provider", big)
 	}
 	if got := f.ocrCalls(t); got != 3 {
 		t.Errorf("ocr calls = %d, want 3", got)
@@ -309,7 +309,7 @@ func TestRunDoesNotChunkOtherExclusionReasons(t *testing.T) {
 	if err := f.chunkRunner().Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+	run := assertRunTerminal(t, f, store.RunInconclusive, "coverage_incomplete")
 	if got := f.ocrCalls(t); got != 1 {
 		t.Fatalf("ocr calls = %d, want only the main invocation", got)
 	}
@@ -320,8 +320,8 @@ func TestRunDoesNotChunkOtherExclusionReasons(t *testing.T) {
 	}
 	coverage := decodeChunkCoverage(t, run)
 	big := coverageFileAt(t, coverage, "big.go")
-	if big.Status != coverageExcluded || big.Reason != "unsupported_ext" {
-		t.Errorf("big.go coverage = %+v, want excluded/unsupported_ext", big)
+	if big.Status != coveragePending || big.Reason != "unsupported_ext" {
+		t.Errorf("big.go coverage = %+v, want pending/unsupported_ext", big)
 	}
 }
 
@@ -346,8 +346,8 @@ func TestRunChunkStopsWhenTokenBudgetExhausted(t *testing.T) {
 	}
 	coverage := decodeChunkCoverage(t, run)
 	big := coverageFileAt(t, coverage, "big.go")
-	if big.Status != coverageNotReviewed || big.Reason != "token_budget" {
-		t.Errorf("big.go coverage = %+v, want not_reviewed/token_budget", big)
+	if big.Status != coveragePending || big.Reason != "token_budget" {
+		t.Errorf("big.go coverage = %+v, want pending/token_budget", big)
 	}
 	if got := len(findingsForPath(t, f, "big.go")); got != 1 {
 		t.Errorf("big.go findings = %d, want the first chunk finding", got)
@@ -441,7 +441,7 @@ func TestNativeCoverageFilesAndCounts(t *testing.T) {
 		"a.go": {Path: "a.go", Status: coverageReviewed},
 		"b.go": {Path: "b.go", Status: coverageReviewed},
 		"c.go": {Path: "c.go", Status: coverageNotReviewed, Reason: "provider"},
-		"d.go": {Path: "d.go", Status: coverageNotReviewed},
+		"d.go": {Path: "d.go", Status: coverageNotReviewed, Reason: "failed"},
 		"e.go": {Path: "e.go", Status: coverageNotReviewed, Reason: "policy"},
 		"f.go": {Path: "f.go", Status: coverageExcluded, Reason: "too_large"},
 		"g.go": {Path: "g.go", Status: coverageExcluded, Reason: "user_exclude"},

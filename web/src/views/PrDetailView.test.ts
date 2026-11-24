@@ -52,7 +52,7 @@ const detail: PRDetail = {
       phase: '',
       phase_started_at: null,
       summary: 'falló la revisión',
-      coverage: { reviewed_files: 2, skipped_files: 1, excluded_files: 4 },
+      coverage: { reviewed_files: 2, skipped_files: 1, excluded_files: 4, not_required_files: 3 },
       usage: { input_tokens: 100 },
       error_code: 'LLM_TIMEOUT',
       error_message: 'timeout contacting provider',
@@ -341,6 +341,39 @@ describe('PrDetailView', () => {
     wrapper.unmount()
   })
 
+  it('marks pending changed files and non-text entries in the coverage list', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [
+        {
+          ...detail.runs[0],
+          coverage: {
+            reviewed_files: 0,
+            skipped_files: 1,
+            files: [
+              { path: 'notes.md', status: 'pending', reason: 'unsupported_ext' },
+              { path: 'old.go', status: 'deleted' },
+              { path: 'logo.png', status: 'binary' },
+              { path: 'vendor/lib', status: 'submodule' },
+            ],
+          },
+        },
+      ],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const rows = wrapper.findAll('[data-coverage-file]')
+    expect(rows).toHaveLength(4)
+    expect(rows[0].get('[data-coverage-file-status]').text()).toBe('Pendiente: unsupported_ext')
+    expect(rows[1].get('[data-coverage-file-status]').text()).toBe('Eliminado')
+    expect(rows[2].get('[data-coverage-file-status]').text()).toBe('Binario')
+    expect(rows[3].get('[data-coverage-file-status]').text()).toBe('Submódulo')
+
+    wrapper.unmount()
+  })
+
   it('shows an unknown coverage status verbatim', async () => {
     mocks.api.prDetail.mockResolvedValue({
       ...detail,
@@ -402,6 +435,7 @@ describe('PrDetailView', () => {
     expect(wrapper.get('[data-coverage-reviewed]').text()).toContain('2')
     expect(wrapper.get('[data-coverage-skipped]').text()).toContain('1')
     expect(wrapper.get('[data-coverage-excluded]').text()).toContain('4')
+    expect(wrapper.get('[data-coverage-not-required]').text()).toContain('3')
 
     const tokens = wrapper.get('[data-run-tokens]').text()
     expect(tokens).toContain('100.0k')

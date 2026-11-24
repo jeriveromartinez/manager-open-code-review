@@ -628,6 +628,50 @@ func TestPublishInconclusiveDoesNotResolve(t *testing.T) {
 	_ = pub
 }
 
+// TestPublishMixedPRSurfacesPendingCoverage pins #135 on the publishing side:
+// a required changed file left out of coverage must appear in the summary and
+// check output, and the check must stay action_required.
+func TestPublishMixedPRSurfacesPendingCoverage(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunInconclusive, "major")
+	if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).Updates(map[string]any{
+		"error_message": "cobertura incompleta: 1 archivo sin revisar",
+		"coverage": datatypes.JSON([]byte(`{"reviewed_files":1,"skipped_files":1,"files":[
+			{"path":"auth.go","status":"reviewed"},
+			{"path":"notes.md","status":"pending","reason":"unsupported_ext"}]}`)),
+	}).Error; err != nil {
+		t.Fatalf("set coverage: %v", err)
+	}
+	seedFinding(t, st, pr.ID, run.ID, "notes-finding", 4, "major", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	bodies := summaryBodies(t, gh)
+	if len(bodies) != 1 {
+		t.Fatalf("summary comments = %d, want 1", len(bodies))
+	}
+	for _, want := range []string{"Archivos pendientes de revisión", "`notes.md`", "unsupported_ext"} {
+		if !strings.Contains(bodies[0], want) {
+			t.Errorf("summary %q does not contain %q", bodies[0], want)
+		}
+	}
+
+	gh.mu.Lock()
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	gh.mu.Unlock()
+	if len(patches) == 0 || patches[0].Conclusion != "action_required" {
+		t.Fatalf("check conclusion = %+v, want action_required", patches)
+	}
+	if !strings.Contains(patches[0].Output.Text, "notes.md") {
+		t.Errorf("check output %q does not list the pending file", patches[0].Output.Text)
+	}
+}
+
 func TestPublishCheckConclusions(t *testing.T) {
 	cases := []struct {
 		name       string

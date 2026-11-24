@@ -471,6 +471,15 @@ func findingsInPaths(open []store.Finding, paths map[string]bool) []store.Findin
 // buscan por su huella antigua y, cuando coinciden, se migran en sitio.
 // Solo con complete=true se devuelven los IDs abiertos que ya no aparecen.
 func Reconcile(open []store.Finding, out AgentOutput, runID uint, complete bool, prID uint, anchors AnchorProvider) (upserts []store.Finding, resolvedIDs []string) {
+	return ReconcileScoped(open, out, runID, complete, prID, anchors, nil)
+}
+
+// ReconcileScoped is Reconcile with an explicit resolution scope. The full
+// known list is still used to match identities, so a re-reported finding keeps
+// its ID and triage even on a path this run did not cover; only open findings
+// whose path is in resolvable may be resolved. A nil map resolves every
+// candidate, which is the behaviour of Reconcile.
+func ReconcileScoped(open []store.Finding, out AgentOutput, runID uint, complete bool, prID uint, anchors AnchorProvider, resolvable map[string]bool) (upserts []store.Finding, resolvedIDs []string) {
 	byFingerprint := make(map[string]store.Finding, len(open))
 	legacyByFingerprint := make(map[string]store.Finding, len(open))
 	for _, f := range open {
@@ -537,7 +546,11 @@ func Reconcile(open []store.Finding, out AgentOutput, runID uint, complete bool,
 	}
 
 	if complete {
-		for _, f := range open {
+		candidates := open
+		if resolvable != nil {
+			candidates = findingsInPaths(open, resolvable)
+		}
+		for _, f := range candidates {
 			// Only an open finding can be resolved by its absence: withdrawn and
 			// resolved rows are not part of the review's open set.
 			if f.Status == store.FindingOpen && !seen[f.ID] {

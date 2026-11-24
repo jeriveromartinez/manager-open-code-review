@@ -414,6 +414,13 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 			text = p.run.ErrorCode
 		}
 	}
+	if pending := p.pendingCoverageLine(); pending != "" {
+		text = strings.TrimSpace(text)
+		if text != "" {
+			text += "\n\n"
+		}
+		text += pending
+	}
 	output := map[string]any{
 		"title":   title,
 		"summary": summary,

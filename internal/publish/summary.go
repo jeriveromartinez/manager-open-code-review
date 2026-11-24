@@ -14,8 +14,55 @@ import (
 const summaryMarker = "<!-- qa-control-center:summary -->"
 
 type reviewCoverage struct {
-	ReviewedFiles int `json:"reviewed_files"`
-	SkippedFiles  int `json:"skipped_files"`
+	ReviewedFiles    int            `json:"reviewed_files"`
+	SkippedFiles     int            `json:"skipped_files"`
+	NotRequiredFiles int            `json:"not_required_files"`
+	Files            []coverageFile `json:"files"`
+}
+
+// coverageFile mirrors the per-file coverage the review worker stores.
+type coverageFile struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
+	Reason string `json:"reason"`
+}
+
+// pendingFiles returns the changed files the review still owes. They are not
+// policy exclusions and were not covered by any pass.
+func (c reviewCoverage) pendingFiles() []coverageFile {
+	var pending []coverageFile
+	for _, file := range c.Files {
+		if file.Status == "pending" {
+			pending = append(pending, file)
+		}
+	}
+	return pending
+}
+
+func decodeReviewCoverage(raw []byte) reviewCoverage {
+	var coverage reviewCoverage
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &coverage)
+	}
+	return coverage
+}
+
+// pendingCoverageLine renders the pending files as one line for the check run
+// output. Empty when every required file was covered.
+func (p *publishContext) pendingCoverageLine() string {
+	pending := decodeReviewCoverage(p.run.Coverage).pendingFiles()
+	if len(pending) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(pending))
+	for _, file := range pending {
+		if file.Reason != "" {
+			parts = append(parts, fmt.Sprintf("%s (%s)", p.sanitize(file.Path), p.sanitize(file.Reason)))
+			continue
+		}
+		parts = append(parts, p.sanitize(file.Path))
+	}
+	return "Archivos pendientes: " + strings.Join(parts, ", ")
 }
 
 // publishSummary creates the single summary comment of the pull request or
@@ -121,12 +168,23 @@ func (p *publishContext) buildSummary(findings []store.Finding, resolvedSincePre
 
 	b.WriteString(p.buildVerificationBlock())
 
-	var coverage reviewCoverage
-	if len(p.run.Coverage) > 0 {
-		_ = json.Unmarshal(p.run.Coverage, &coverage)
+	coverage := decodeReviewCoverage(p.run.Coverage)
+	fmt.Fprintf(&b, "**Cobertura:** %d/%d (revisados/omitidos)", coverage.ReviewedFiles, coverage.SkippedFiles)
+	if coverage.NotRequiredFiles > 0 {
+		fmt.Fprintf(&b, " · %d no requeridos (eliminados, binarios o submódulos)", coverage.NotRequiredFiles)
 	}
-	fmt.Fprintf(&b, "**Cobertura:** %d/%d (revisados/omitidos)\n\n",
-		coverage.ReviewedFiles, coverage.SkippedFiles)
+	b.WriteString("\n\n")
+	if pending := coverage.pendingFiles(); len(pending) > 0 {
+		fmt.Fprintf(&b, "**Archivos pendientes de revisión (%d):**\n", len(pending))
+		for _, file := range pending {
+			reason := file.Reason
+			if reason == "" {
+				reason = "sin cobertura"
+			}
+			fmt.Fprintf(&b, "\n- `%s` — %s\n", p.sanitize(file.Path), p.sanitize(reason))
+		}
+		b.WriteString("\n")
+	}
 
 	b.WriteString(p.sanitize(p.run.Summary))
 	b.WriteString("\n")
