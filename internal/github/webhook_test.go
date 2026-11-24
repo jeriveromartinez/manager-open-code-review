@@ -236,19 +236,39 @@ func signWebhook(body []byte) string {
 func (f *webhookFixture) deliver(eventType, fixture string) *httptest.ResponseRecorder {
 	f.t.Helper()
 
-	body, err := os.ReadFile(filepath.Join("testdata", fixture))
-	if err != nil {
-		f.t.Fatalf("read fixture %q: %v", fixture, err)
-	}
+	body := f.fixture(fixture)
 	return f.deliverBody(eventType, body, signWebhook(body))
+}
+
+// fixture reads a webhook body and lets a test alter the delivery before
+// signing it.
+func (f *webhookFixture) fixture(name string) []byte {
+	f.t.Helper()
+
+	body, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		f.t.Fatalf("read fixture %q: %v", name, err)
+	}
+	return body
 }
 
 func (f *webhookFixture) deliverBody(eventType string, body []byte, signature string) *httptest.ResponseRecorder {
 	f.t.Helper()
 
+	return f.deliverBodyWithDelivery(eventType, body, signature, "")
+}
+
+// deliverBodyWithDelivery adds the X-GitHub-Delivery header, which the thread
+// handler uses to ignore a redelivered event.
+func (f *webhookFixture) deliverBodyWithDelivery(eventType string, body []byte, signature, delivery string) *httptest.ResponseRecorder {
+	f.t.Helper()
+
 	req := httptest.NewRequest(http.MethodPost, "/webhooks/github", bytes.NewReader(body))
 	req.Header.Set("X-GitHub-Event", eventType)
 	req.Header.Set("X-Hub-Signature-256", signature)
+	if delivery != "" {
+		req.Header.Set("X-GitHub-Delivery", delivery)
+	}
 	rec := httptest.NewRecorder()
 	f.handler.ServeHTTP(rec, req)
 	return rec

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
+	"time"
 
 	gh "github.com/google/go-github/v93/github"
 	"gorm.io/gorm"
@@ -11,17 +13,19 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
-// handleReviewThread applies a pull_request_review_thread delivery: a person
-// resolved or reopened a review thread, so the finding published in it must
-// follow and the gate must be recomputed. GitHub already holds the new thread
-// state, so only our side is written here.
-func (h *WebhookHandler) handleReviewThread(ctx context.Context, w http.ResponseWriter, e *gh.PullRequestReviewThreadEvent) {
-	desired := ""
+// handleReviewThread records a pull_request_review_thread delivery. GitHub's
+// thread state is not a QA verdict: it is stored apart from the triage columns.
+// Only an authorized sender may turn the event into a finding transition, and a
+// person's existing triage always wins. App echoes are recorded as thread state
+// only, and repeated, delayed or out-of-order deliveries never flip the state
+// back.
+func (h *WebhookHandler) handleReviewThread(ctx context.Context, w http.ResponseWriter,
+	e *gh.PullRequestReviewThreadEvent, deliveryID string, eventAt time.Time) {
+	resolved := false
 	switch e.GetAction() {
 	case "resolved":
-		desired = store.FindingResolved
+		resolved = true
 	case "unresolved":
-		desired = store.FindingOpen
 	default:
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -47,7 +51,7 @@ func (h *WebhookHandler) handleReviewThread(ctx context.Context, w http.Response
 		}
 	}
 	finding, err := h.Store.FindingForThread(ctx, row.ID, thread.GetNodeID(), commentIDs)
-	if errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrFindingThreadAmbiguous) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -56,15 +60,30 @@ func (h *WebhookHandler) handleReviewThread(ctx context.Context, w http.Response
 		return
 	}
 
-	action := "finding.reopened"
-	if desired == store.FindingResolved {
-		action = "finding.resolved"
+	actor := h.resolveActor(ctx, e.GetSender().GetLogin(), e.GetSender().GetID())
+	// The App resolves threads itself; its echo reconciles the thread state if
+	// the local write after the mutation failed, but it is never a QA decision.
+	applyStatus := !isBotSender(e.GetSender()) && h.canTriage(ctx, actor, row)
+	status := store.FindingOpen
+	action, reason := "finding.reopened", "review thread reopened on GitHub"
+	if resolved {
+		status = store.FindingResolved
+		action, reason = "finding.resolved", "review thread resolved on GitHub"
 	}
-	changed, err := h.Store.SetFindingStatusAudited(ctx, finding.ID, desired, store.FindingAudit{
-		Action:   action,
-		Actor:    e.GetSender().GetLogin(),
-		ActorID:  h.actorID(ctx, e.GetSender().GetID()),
-		ThreadID: thread.GetNodeID(),
+
+	changed, statusChanged, err := h.Store.SyncFindingThread(ctx, finding.ID, store.ThreadSync{
+		Resolved:    resolved,
+		Status:      status,
+		ApplyStatus: applyStatus,
+		EventAt:     eventAt,
+		Audit: store.FindingAudit{
+			Action:     action,
+			Actor:      actor.Login,
+			ActorID:    actorID(actor),
+			Reason:     reason,
+			ThreadID:   thread.GetNodeID(),
+			DeliveryID: deliveryID,
+		},
 	})
 	if err != nil {
 		h.serverError(w)
@@ -75,13 +94,19 @@ func (h *WebhookHandler) handleReviewThread(ctx context.Context, w http.Response
 		return
 	}
 
-	if h.Findings != nil {
+	if statusChanged && h.Findings != nil {
 		if err := h.Findings.Republish(ctx, row.ID); err != nil {
 			h.serverError(w)
 			return
 		}
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// isBotSender reports whether a delivery was produced by an App rather than a
+// person. Those are echoes of our own mutations.
+func isBotSender(user *gh.User) bool {
+	return user.GetType() == "Bot" || strings.HasSuffix(user.GetLogin(), "[bot]")
 }
 
 // enabledPullRequest resolves the stored pull request a delivery refers to. It

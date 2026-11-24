@@ -18,9 +18,7 @@ func TestRepublishRecomputesGateFromOpenFindings(t *testing.T) {
 	f1 := seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
 	f2 := seedFinding(t, st, pr.ID, run.ID, "f2", 2, "blocker", store.FindingOpen)
 	for _, f := range []store.Finding{f1, f2} {
-		if _, err := st.SetFindingStatusAudited(ctx, f.ID, store.FindingResolved, store.FindingAudit{
-			Action: "finding.resolved", Actor: "reviewer",
-		}); err != nil {
+		if err := st.UpdateFindingStatus(ctx, f.ID, store.FindingResolved, run.ID); err != nil {
 			t.Fatalf("resolve %s: %v", f.ID, err)
 		}
 	}

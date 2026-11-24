@@ -2,9 +2,11 @@ package github_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -281,6 +283,172 @@ func TestWebhookQAUnknownUserIgnored(t *testing.T) {
 	}
 	if _, _, bodies := f.comments.snapshot(); len(bodies) != 1 {
 		t.Errorf("replies = %q, want one polite refusal", bodies)
+	}
+}
+
+// qaCommandBody builds an authorized /qa comment on the fixture pull request.
+func qaCommandBody(t *testing.T, commentID int64, body string) []byte {
+	t.Helper()
+	user := map[string]any{"id": 8001, "login": "qa-lead", "type": "User"}
+	payload := map[string]any{
+		"action": "created",
+		"issue": map[string]any{
+			"number": 142,
+			"pull_request": map[string]any{
+				"url": "https://api.github.com/repos/acme/backend-api/pulls/142",
+			},
+		},
+		"comment": map[string]any{
+			"id": commentID, "body": body, "user": user,
+		},
+		"repository": map[string]any{"id": 501, "full_name": "acme/backend-api"},
+		"sender":     user,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal command body: %v", err)
+	}
+	return raw
+}
+
+// seedFindingInOtherPR stores a finding of a different pull request of the same
+// repository, which a command must never touch.
+func seedFindingInOtherPR(t *testing.T, f *webhookFixture) store.Finding {
+	t.Helper()
+
+	pr := store.PullRequest{
+		RepositoryID: 501, Number: 143, Title: "Otro cambio", HeadSHA: "bbb222",
+		State: "open", QAStatus: store.StatusPending, GitHubUpdatedAt: time.Now().UTC(),
+	}
+	if err := f.st.DB.WithContext(f.ctx).Create(&pr).Error; err != nil {
+		t.Fatalf("seed other pull request: %v", err)
+	}
+	finding, err := f.st.UpsertFinding(f.ctx, store.Finding{
+		ID: "foreign", PullRequestID: pr.ID, Fingerprint: "fp-foreign",
+		Title: "Ajeno", Status: store.FindingOpen,
+	})
+	if err != nil {
+		t.Fatalf("seed foreign finding: %v", err)
+	}
+	return finding
+}
+
+// A command that names an unknown finding or one of another pull request is
+// rejected instead of falling back to every open finding.
+func TestWebhookQARejectsForeignAndUnknownFindingIDs(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+	pr := f.seedOpenPR()
+	f.seedQALead(f.repoTeam())
+	f.seedThreadFinding(pr.ID, "f1", store.FindingOpen)
+	f.seedThreadFinding(pr.ID, "f2", store.FindingOpen)
+	foreign := seedFindingInOtherPR(t, f)
+
+	for i, args := range []string{"f_0000000000000000 motivo", "foreign motivo"} {
+		body := qaCommandBody(t, int64(9500+i), "/qa dismiss "+args)
+		assertStatus(t, f.deliverBody("issue_comment", body, signWebhook(body)), http.StatusAccepted)
+
+		for _, id := range []string{"f1", "f2", foreign.ID} {
+			if got := f.finding(id).Status; got != store.FindingOpen {
+				t.Errorf("%s status after %q = %q, want %q", id, args, got, store.FindingOpen)
+			}
+		}
+		if rows := f.auditRows(); len(rows) != 0 {
+			t.Errorf("audit rows after %q = %+v, want none", args, rows)
+		}
+		if got := f.findings.republishSnapshot(); len(got) != 0 {
+			t.Errorf("gate republishes after %q = %+v, want none", args, got)
+		}
+	}
+
+	_, _, bodies := f.comments.snapshot()
+	if len(bodies) != 2 {
+		t.Fatalf("replies = %q, want two refusals", bodies)
+	}
+	for _, reply := range bodies {
+		if !strings.Contains(reply, "no existe") {
+			t.Errorf("reply = %q, want the rejected selection", reply)
+		}
+	}
+}
+
+// A bare reason is not a selection: with several open findings, bulk requires
+// --all.
+func TestWebhookQABulkRequiresExplicitSelection(t *testing.T) {
+	f := newWebhookFixture(t)
+	f.seedRepoWithTeam()
+	pr := f.seedOpenPR()
+	f.seedQALead(f.repoTeam())
+	f.seedThreadFinding(pr.ID, "f1", store.FindingOpen)
+	f.seedThreadFinding(pr.ID, "f2", store.FindingOpen)
+
+	body := qaCommandBody(t, 9600, "/qa dismiss")
+	assertStatus(t, f.deliverBody("issue_comment", body, signWebhook(body)), http.StatusAccepted)
+
+	for _, id := range []string{"f1", "f2"} {
+		if got := f.finding(id).Status; got != store.FindingOpen {
+			t.Errorf("%s status = %q, want %q without an explicit selection", id, got, store.FindingOpen)
+		}
+	}
+	if rows := f.auditRows(); len(rows) != 0 {
+		t.Errorf("audit rows = %+v, want none", rows)
+	}
+	if _, _, bodies := f.comments.snapshot(); len(bodies) != 1 || !strings.Contains(bodies[0], "--all") {
+		t.Errorf("reply = %q, want it to ask for an explicit selection", bodies)
+	}
+
+	body = qaCommandBody(t, 9601, "/qa dismiss --all lo cubre el test")
+	assertStatus(t, f.deliverBody("issue_comment", body, signWebhook(body)), http.StatusAccepted)
+
+	for _, id := range []string{"f1", "f2"} {
+		if got := f.finding(id).Status; got != store.FindingWithdrawn {
+			t.Errorf("%s status = %q, want %q with --all", id, got, store.FindingWithdrawn)
+		}
+	}
+	if rows := f.auditRows(); len(rows) != 2 {
+		t.Errorf("audit rows after --all = %+v, want two", rows)
+	}
+	if got := f.findings.republishSnapshot(); len(got) != 1 || got[0] != pr.ID {
+		t.Errorf("gate republishes = %+v, want one for the explicit bulk action", got)
+	}
+}
+
+// Admin, team lead and QA all share the panel's triage permission.
+func TestWebhookQAAllTriageRolesCanAct(t *testing.T) {
+	for _, role := range []string{"admin", "lead", "qa"} {
+		t.Run(role, func(t *testing.T) {
+			f := newWebhookFixture(t)
+			f.seedRepoWithTeam()
+			pr := f.seedOpenPR()
+			switch role {
+			case "admin":
+				if err := f.st.DB.WithContext(f.ctx).Create(
+					&store.User{GitHubID: 8001, Login: "qa-lead", IsAdmin: true}).Error; err != nil {
+					t.Fatalf("seed admin: %v", err)
+				}
+			case "lead":
+				f.seedQALead(f.repoTeam())
+			case "qa":
+				user := store.User{GitHubID: 8001, Login: "qa-lead"}
+				if err := f.st.DB.WithContext(f.ctx).Create(&user).Error; err != nil {
+					t.Fatalf("seed qa user: %v", err)
+				}
+				if err := f.st.SetTeamMember(f.ctx, f.repoTeam(), user.ID, "qa"); err != nil {
+					t.Fatalf("assign qa role: %v", err)
+				}
+			}
+			f.seedThreadFinding(pr.ID, "f1", store.FindingOpen)
+
+			body := qaCommandBody(t, 9700, "/qa dismiss --all motivo")
+			assertStatus(t, f.deliverBody("issue_comment", body, signWebhook(body)), http.StatusAccepted)
+
+			if got := f.finding("f1").Status; got != store.FindingWithdrawn {
+				t.Errorf("status = %q, want %q for a %s", got, store.FindingWithdrawn, role)
+			}
+			if rows := f.auditRows(); len(rows) != 1 {
+				t.Errorf("audit rows = %+v, want one", rows)
+			}
+		})
 	}
 }
 

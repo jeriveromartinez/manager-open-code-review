@@ -73,7 +73,7 @@ La App creada desde el manifiesto se suscribe a estos eventos. Sin webhooks solo
 | --- | --- | --- |
 | `installation`, `installation_repositories` | Alta, baja, suspensión y repositorios de la instalación | Sí: la reconciliación descubre instalaciones y repositorios nuevos en cada ciclo. |
 | `pull_request` | Sincronizar el PR y lanzar la revisión de `opened`, `synchronize`, `reopened` y `ready_for_review` | Sí: la reconciliación encola los PRs abiertos sin run para su SHA. |
-| `pull_request_review_thread` | Resolver o reabrir un hallazgo cuando alguien marca el hilo como resuelto o sin resolver en GitHub | No. En polling el hallazgo conserva el estado del último run. |
+| `pull_request_review_thread` | Registrar el estado del hilo y, si quien lo resuelve o reabre es admin, lead o QA del equipo, mover el hallazgo | No. En polling el hallazgo conserva el estado del último run. |
 | `issue_comment` | Comandos `/qa retry`, `/qa dismiss` y `/qa confirm` en el PR | No. En polling, los descartes y las confirmaciones se hacen desde el panel. |
 | `check_suite`, `check_run`, `status` | Reevaluar el gate cuando termina el CI: releer las validaciones del SHA y lanzar la revisión si la política exige CI en verde | Sí: la reconciliación refresca las validaciones y el encolado vuelve a evaluar el gate. |
 
@@ -81,15 +81,18 @@ La App necesita además la suscripción a `pull_request_review_thread`: una App 
 
 ## Disputas en hilos y comandos `/qa`
 
-Cuando alguien marca un hilo de revisión como **resuelto** en GitHub, el hallazgo correspondiente pasa a `resolved` y su check se recalcula; si alguien lo **vuelve a abrir**, el hallazgo vuelve a `open`. El enlace se hace por el comentario en línea publicado, así que solo aplica a hallazgos que llegaron a GitHub.
+El estado del hilo en GitHub se guarda aparte del veredicto QA. Cuando un **admin**, el **lead** o **QA** del equipo al que pertenece el repositorio marca un hilo como **resuelto**, el hallazgo pasa a `resolved` y su check se recalcula; si lo **vuelve a abrir**, vuelve a `open`. Si quien lo hace no tiene ese permiso, solo se registra el estado del hilo: el hallazgo, su veredicto y el check no cambian. Una decisión ya tomada por una persona (desde el panel, `/qa` o un hilo autorizado) no se sobrescribe por ecos de la App, entregas repetidas, tardías o fuera de orden. El enlace se hace por el comentario en línea publicado, así que solo aplica a hallazgos que llegaron a GitHub.
 
 En un PR puedes escribir un comentario cuyo **primer** renglón sea un comando:
 
 - `/qa retry`: encola una revisión nueva de este PR. Útil cuando el run anterior quedó `inconclusive` o `failed`.
-- `/qa dismiss <motivo>`: marca los hallazgos abiertos como `withdrawn` y cierra sus hilos en GitHub. El motivo queda en la auditoría.
-- `/qa confirm`: devuelve a `open` los hallazgos descartados y recalcula el check; úsalo cuando un descarte fue un error.
+- `/qa dismiss <id> [motivo]`: descarta ese hallazgo y cierra su hilo en GitHub. El motivo queda en la auditoría.
+- `/qa dismiss --all [motivo]`: descarta todos los hallazgos abiertos. La acción masiva exige `--all`; un motivo suelto no selecciona hallazgos.
+- `/qa confirm <id> [motivo]` o `/qa confirm --all [motivo]`: devuelve a `open` los hallazgos descartados indicados (o todos) y recalcula el check; úsalo cuando un descarte fue un error.
 
-Solo un **admin** o el **lead del equipo** al que pertenece el repositorio pueden ejecutar comandos. El rol se resuelve con el usuario que envió el comentario contra los datos de la instalación; el comando se ignora con una respuesta corta cuando el autor no tiene permiso. Cada cambio queda en la auditoría con el login del autor.
+Un id que no existe o pertenece a otro PR se rechaza sin tocar ningún hallazgo.
+
+Solo un **admin**, el **lead** o **QA del equipo** al que pertenece el repositorio pueden ejecutar comandos. El rol se resuelve con el usuario que envió el comentario contra los datos de la instalación; el comando se ignora con una respuesta corta cuando el autor no tiene permiso. Cada cambio queda en la auditoría con el login del autor y el motivo.
 
 ## Descartar y confirmar hallazgos desde el panel
 
@@ -100,7 +103,7 @@ El detalle del PR permite **descartar** un hallazgo abierto (con un motivo opcio
 - Se recalcula `qa_status` y se republica el check del SHA actual.
 - Se escribe una fila en la auditoría con el login del autor y el motivo.
 
-Solo un **admin** o el **lead del equipo** pueden usar estas acciones; el panel muestra el error y restaura la lista si la llamada falla.
+Solo un **admin**, el **lead** o **QA del equipo** pueden usar estas acciones; el panel muestra el error y restaura la lista si la llamada falla.
 
 ## Revisión de un pull request
 

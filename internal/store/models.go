@@ -418,15 +418,26 @@ type Finding struct {
 	ExistingCode string         `gorm:"column:existing_code"`
 	Verification datatypes.JSON `gorm:"column:verification"`
 	// TriageSource is who produced the last triage: human or verifier.
-	TriageSource        string    `gorm:"column:triage_source"`
-	Status              string    `gorm:"column:status"`
-	FirstSeenRunID      uint      `gorm:"column:first_seen_run_id"`
-	LastSeenRunID       uint      `gorm:"column:last_seen_run_id"`
-	GithubCommentID     int64     `gorm:"column:github_comment_id"`
-	GithubCommentNodeID string    `gorm:"column:github_comment_node_id"`
-	GithubThreadID      string    `gorm:"column:github_thread_id"`
-	CreatedAt           time.Time `gorm:"column:created_at"`
-	UpdatedAt           time.Time `gorm:"column:updated_at"`
+	TriageSource        string `gorm:"column:triage_source"`
+	Status              string `gorm:"column:status"`
+	FirstSeenRunID      uint   `gorm:"column:first_seen_run_id"`
+	LastSeenRunID       uint   `gorm:"column:last_seen_run_id"`
+	GithubCommentID     int64  `gorm:"column:github_comment_id"`
+	GithubCommentNodeID string `gorm:"column:github_comment_node_id"`
+	GithubThreadID      string `gorm:"column:github_thread_id"`
+	// GithubThreadResolved is the state GitHub reports for the review thread.
+	// It is not a QA verdict: resolving or reopening a thread updates it without
+	// rewriting the triage columns, and the gate ignores it.
+	GithubThreadResolved bool `gorm:"column:github_thread_resolved"`
+	// GithubThreadEventAt is the payload timestamp of the last thread event
+	// applied. An older delivery is ignored so a late event cannot flip the
+	// state back.
+	GithubThreadEventAt *time.Time `gorm:"column:github_thread_event_at"`
+	// GithubThreadDecisionAt is when an authorized thread event last changed
+	// the finding status. A review finishing later must not overwrite it.
+	GithubThreadDecisionAt *time.Time `gorm:"column:github_thread_decision_at"`
+	CreatedAt              time.Time  `gorm:"column:created_at"`
+	UpdatedAt              time.Time  `gorm:"column:updated_at"`
 	// TriageVerdict, TriagedBy and TriagedAt record the last panel decision on
 	// the finding. Only TriageFinding writes them: a review run or a /qa command
 	// changes Status but leaves QA's verdict as it was.
