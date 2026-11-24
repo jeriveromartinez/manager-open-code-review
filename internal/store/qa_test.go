@@ -148,15 +148,17 @@ func TestTriageFindingRecordsWhoDecided(t *testing.T) {
 		t.Errorf("audit rows after withdraw = %d, want 2", n)
 	}
 
-	// A run reopening the false positive changes its status, not QA's verdict.
+	// A run re-observing the same cited code must not reopen QA's dismissal:
+	// only a change in the cited code or range does.
 	f.finding(pr, "b1", "blocker", "security", store.FindingOpen)
 	reopened, err := f.s.Finding(f.ctx, "b1")
 	if err != nil {
 		t.Fatalf("Finding(reopened): %v", err)
 	}
-	if reopened.Status != store.FindingOpen || reopened.TriageVerdict != store.VerdictFalsePositive {
-		t.Errorf("reopened finding: status %q verdict %q, want open with the false-positive verdict kept",
-			reopened.Status, reopened.TriageVerdict)
+	if reopened.Status != store.FindingWithdrawn ||
+		reopened.TriageVerdict != store.VerdictFalsePositive || reopened.TriagedBy != "mvega" {
+		t.Errorf("re-observed finding: status %q verdict %q by %q, want the dismissal kept",
+			reopened.Status, reopened.TriageVerdict, reopened.TriagedBy)
 	}
 
 	_, err = f.s.TriageFinding(f.ctx, "missing", store.FindingOpen, confirm)

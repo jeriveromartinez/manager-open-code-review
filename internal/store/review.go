@@ -29,6 +29,9 @@ var (
 	// ErrFindingResolved is returned when triaging a finding the code already
 	// fixed: confirming it would reopen it and re-block the gate.
 	ErrFindingResolved = errors.New("finding is resolved")
+	// ErrFindingHumanTriaged is returned when the verifier tries to change a
+	// finding a person already decided. A human never loses to the second pass.
+	ErrFindingHumanTriaged = errors.New("finding already triaged by a human")
 )
 
 // Defaults applied by SaveQAPolicy when an administrator leaves a field at its
@@ -948,6 +951,20 @@ func (s *Store) UpsertFinding(ctx context.Context, f Finding) (Finding, error) {
 }
 
 func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
+	// A verifier dismissal survives while the cited code and range stay the
+	// same; reopening it on every run would undo the second pass. A human
+	// verdict is never discarded here.
+	if err := db.Model(&Finding{}).
+		Where("pull_request_id = ? AND fingerprint = ? AND triage_source = ?",
+			f.PullRequestID, f.Fingerprint, TriageSourceVerifier).
+		Where("existing_code <> ? OR start_line <> ? OR end_line <> ?",
+			f.ExistingCode, f.StartLine, f.EndLine).
+		Updates(map[string]any{
+			"triage_verdict": "", "triaged_by": "", "triaged_at": nil, "triage_source": "",
+		}).Error; err != nil {
+		return Finding{}, fmt.Errorf("clear stale verifier triage for %q: %w", f.ID, err)
+	}
+
 	res := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "pull_request_id"}, {Name: "fingerprint"}},
 		DoUpdates: clause.AssignmentColumns([]string{
@@ -955,6 +972,10 @@ func upsertFinding(db *gorm.DB, f Finding) (Finding, error) {
 			"body", "suggestion", "confidence", "existing_code", "status",
 			"last_seen_run_id", "updated_at",
 		}),
+		Where: clause.Where{Exprs: []clause.Expression{clause.Expr{
+			SQL: "findings.triage_verdict = '' OR findings.existing_code <> EXCLUDED.existing_code" +
+				" OR findings.start_line <> EXCLUDED.start_line OR findings.end_line <> EXCLUDED.end_line",
+		}}},
 	}).Create(&f)
 	if res.Error != nil {
 		return Finding{}, fmt.Errorf("upsert finding %q: %w", f.ID, res.Error)
@@ -1113,6 +1134,9 @@ type FindingAudit struct {
 	CommentID int64
 	Reason    string
 	ThreadID  string
+	// Source is who took the decision: TriageSourceHuman when empty, or
+	// TriageSourceVerifier when the second OCR pass triages.
+	Source string
 }
 
 // SetFindingStatusAudited transitions a finding and appends its audit row in a
@@ -1175,6 +1199,10 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 	if status == FindingWithdrawn {
 		verdict = VerdictFalsePositive
 	}
+	source := entry.Source
+	if source == "" {
+		source = TriageSourceHuman
+	}
 	err = s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var current Finding
 		err := quietDB(tx).Where("id = ?", id).
@@ -1189,7 +1217,11 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 		if current.Status == FindingResolved {
 			return fmt.Errorf("triage finding %q: %w", id, ErrFindingResolved)
 		}
-		if current.Status == status && current.TriageVerdict == verdict && current.TriagedBy == entry.Actor {
+		if current.TriageSource == TriageSourceHuman && source == TriageSourceVerifier {
+			return fmt.Errorf("triage finding %q: %w", id, ErrFindingHumanTriaged)
+		}
+		if current.Status == status && current.TriageVerdict == verdict &&
+			current.TriagedBy == entry.Actor && current.TriageSource == source {
 			return nil
 		}
 
@@ -1199,11 +1231,13 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 			"triage_verdict": verdict,
 			"triaged_by":     entry.Actor,
 			"triaged_at":     now,
+			"triage_source":  source,
 			"updated_at":     now,
 		}).Error
 		if err != nil {
 			return fmt.Errorf("triage finding %q: %w", id, err)
 		}
+		entry.Source = source
 		if err := writeFindingAudit(tx, id, entry); err != nil {
 			return err
 		}
@@ -1218,6 +1252,9 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 
 func writeFindingAudit(tx *gorm.DB, findingID string, entry FindingAudit) error {
 	data := map[string]any{"actor": entry.Actor}
+	if entry.Source != "" {
+		data["source"] = entry.Source
+	}
 	if entry.CommentID != 0 {
 		data["comment_id"] = entry.CommentID
 	}

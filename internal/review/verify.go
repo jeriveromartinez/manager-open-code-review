@@ -120,7 +120,7 @@ func EvidenceInFile(v Verification, content []byte) bool {
 func Decide(findings []store.Finding, verdicts map[string]Verification, files map[string][]byte, p VerifyPolicy) []Decision {
 	decisions := make([]Decision, 0, len(findings))
 	for _, f := range findings {
-		if f.TriageSource == "human" {
+		if f.TriageSource == store.TriageSourceHuman {
 			continue
 		}
 		verdict, answered := verdicts[f.ID]

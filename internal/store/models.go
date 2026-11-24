@@ -46,6 +46,10 @@ const (
 	AutoTriageDryRun = "dry_run"
 	AutoTriageApply  = "apply"
 
+	// TriageSource records who produced the last triage of a finding.
+	TriageSourceHuman    = "human"
+	TriageSourceVerifier = "verifier"
+
 	ArtifactSummary = "summary_comment"
 	ArtifactReview  = "review"
 	ArtifactCheck   = "check_run"
