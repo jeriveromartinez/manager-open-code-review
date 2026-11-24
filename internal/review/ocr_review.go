@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -654,7 +655,7 @@ func mapNativeCategory(category string) string {
 }
 
 // nativeTitle derives a deterministic title from the comment. OCR does not send
-// one, and Fingerprint hashes path+category+normalized title, so the derivation
+// one, and the finding identity hashes the normalized title, so the derivation
 // must not depend on anything but the comment itself.
 func nativeTitle(content string) string {
 	for _, line := range strings.Split(content, "\n") {
@@ -665,23 +666,44 @@ func nativeTitle(content string) string {
 	return "Hallazgo de OCR"
 }
 
-// mergeNativeFindings deduplicates comments by fingerprint, keeping the stable
-// position of the first occurrence and letting the last duplicate win. Before
-// hashing, adjacent chunks may report the same finding with a slightly shifted
-// range; the fuzzy pass merges those and keeps the earliest range and body.
-func mergeNativeFindings(comments []nativeComment) AgentOutput {
-	var out AgentOutput
-	seen := make(map[string]int)
-	for _, finding := range dedupeNearbyFindings(nativeFindings(comments)) {
-		fp := Fingerprint(finding, nil)
-		if i, ok := seen[fp]; ok {
-			out.Findings[i] = finding
+// mergeNativeFindings deduplicates comments by their new identity, keeping the
+// stable position of the first occurrence and letting the last duplicate of the
+// same occurrence win. Before identifying, adjacent chunks may report the same
+// finding with a slightly shifted range; the fuzzy pass merges nearby ranges and
+// only rejects them when both cite different code.
+func mergeNativeFindings(prID uint, comments []nativeComment, anchors AnchorProvider) AgentOutput {
+	findings := dedupeNearbyFindings(nativeFindings(comments))
+	return AgentOutput{Findings: dedupeOccurrences(prID, findings, anchors)}
+}
+
+// dedupeOccurrences collapses repeats of the same occurrence: same identity
+// fields and same range. Two occurrences of the same title and anchor at
+// different lines stay apart, because Reconcile gives them different ordinals.
+func dedupeOccurrences(prID uint, findings []AgentFinding, anchors AnchorProvider) []AgentFinding {
+	seen := make(map[string]int, len(findings))
+	kept := make([]AgentFinding, 0, len(findings))
+	for _, finding := range findings {
+		key := occurrenceKey(prID, finding, anchors)
+		if i, ok := seen[key]; ok {
+			kept[i] = finding
 			continue
 		}
-		seen[fp] = len(out.Findings)
-		out.Findings = append(out.Findings, finding)
+		seen[key] = len(kept)
+		kept = append(kept, finding)
 	}
-	return out
+	return kept
+}
+
+func occurrenceKey(prID uint, f AgentFinding, anchors AnchorProvider) string {
+	return strings.Join([]string{
+		strconv.FormatUint(uint64(prID), 10),
+		normalizeCoveragePath(f.Path),
+		strings.TrimSpace(f.Category),
+		normalizeTitle(f.Title),
+		findingAnchor(f, anchors),
+		strconv.Itoa(f.StartLine),
+		strconv.Itoa(f.EndLine),
+	}, "\x00")
 }
 
 func nativeFindings(comments []nativeComment) []AgentFinding {
