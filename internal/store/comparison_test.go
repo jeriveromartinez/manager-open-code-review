@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -173,6 +174,71 @@ func TestPendingReviewPRsComparesComparisonIdentity(t *testing.T) {
 		if hasID(ids, pr.ID) {
 			t.Errorf("PR #%d should be covered; got IDs %v", pr.Number, ids)
 		}
+	}
+}
+
+// The required-check verdict is applied before the batch limit: a required
+// green with an optional red is eligible, while an all-green head missing the
+// required check must not consume a slot.
+func TestPendingReviewPRsAppliesRequiredChecksBeforeLimit(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	team := f.team("ci")
+	profile := f.llmProfile("ci-profile", true)
+	required, err := store.NormalizeRequiredChecks([]store.RequiredCheck{{Name: "build", Origin: "app:7"}})
+	if err != nil {
+		t.Fatalf("NormalizeRequiredChecks: %v", err)
+	}
+	if _, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID,
+		RequireGreenCI: true, RequiredChecks: required,
+	}); err != nil {
+		t.Fatalf("SaveQAPolicy: %v", err)
+	}
+	repo := f.repo(installID, installID, "acme/ci", &team.ID, true)
+
+	requiredGreen := f.openPR(repo.ID, 1, store.StatusPending, false)
+	requiredAbsent := f.openPR(repo.ID, 2, store.StatusPending, false)
+	requiredPending := f.openPR(repo.ID, 3, store.StatusPending, false)
+
+	setObservation := func(pr store.PullRequest, legacy store.PRValidations, checks ...store.CheckObservation) {
+		t.Helper()
+		if _, err := f.s.SetPRValidationObservation(f.ctx, pr.ID, pr.HeadSHA, legacy,
+			store.ValidationObservation{Result: store.ObservationOK, Checks: checks}); err != nil {
+			t.Fatalf("SetPRValidationObservation(#%d): %v", pr.Number, err)
+		}
+	}
+	setObservation(requiredGreen, store.PRValidations{Passed: 1, Failed: 1, Total: 2},
+		store.CheckObservation{Name: "build", Origin: "app:7", State: store.CheckPassed},
+		store.CheckObservation{Name: "optional", Origin: "app:9", State: store.CheckFailed})
+	setObservation(requiredAbsent, store.PRValidations{Passed: 1, Total: 1},
+		store.CheckObservation{Name: "optional", Origin: "app:9", State: store.CheckPassed})
+	setObservation(requiredPending, store.PRValidations{Total: 1},
+		store.CheckObservation{Name: "build", Origin: "app:7", State: store.CheckPending})
+
+	// The ineligible heads are newer, so a counter prefilter would let them
+	// consume the only slot before the required-green candidate is reached.
+	newer := time.Now().UTC().Add(time.Hour)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).
+		Where("id IN ?", []uint{requiredAbsent.ID, requiredPending.ID}).
+		Update("updated_at", newer).Error; err != nil {
+		t.Fatalf("age the ineligible pull requests: %v", err)
+	}
+
+	got, err := f.s.PendingReviewPRs(f.ctx, 1)
+	if err != nil {
+		t.Fatalf("PendingReviewPRs(limit 1): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != requiredGreen.ID {
+		t.Fatalf("PendingReviewPRs(limit 1) = %v, want only PR #%d", prIDs(got), requiredGreen.Number)
+	}
+	got, err = f.s.PendingReviewPRs(f.ctx, 10)
+	if err != nil {
+		t.Fatalf("PendingReviewPRs(limit 10): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != requiredGreen.ID {
+		t.Errorf("PendingReviewPRs(limit 10) = %v, want only PR #%d", prIDs(got), requiredGreen.Number)
 	}
 }
 

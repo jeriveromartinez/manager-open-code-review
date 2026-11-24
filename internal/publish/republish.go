@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -42,14 +43,24 @@ func (w *Worker) Republish(ctx context.Context, prID uint) error {
 		}
 	}
 
+	ci, ciErr := p.ciVerdict(ctx)
+	if ciErr != nil {
+		slog.Warn("read CI gate at republish", "pull_request_id", prID, "run_id", run.ID, "error", ciErr)
+	}
 	conclusion := "action_required"
 	status := store.StatusInconclusive
 	if run.Status == store.RunSucceeded {
-		conclusion = "success"
-		status = store.StatusReadyForHuman
-		if p.hasBlocking(open) {
+		switch {
+		case p.hasBlocking(open):
 			conclusion = "failure"
 			status = store.StatusChangesRequested
+		case ci.Green():
+			conclusion = "success"
+			status = store.StatusReadyForHuman
+		default:
+			// The current review concluded but CI is not acceptable. Clearing a
+			// published success is exactly the point of re-evaluating the gate.
+			status = store.StatusWaitingCI
 		}
 	}
 

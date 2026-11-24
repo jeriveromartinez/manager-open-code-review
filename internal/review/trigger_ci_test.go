@@ -1,7 +1,9 @@
 package review
 
 import (
+	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -190,5 +192,155 @@ func TestEnqueuePendingDoesNotLetCIWaitersConsumeBatch(t *testing.T) {
 	}
 	if runs := f.runsOf(eligible); len(runs) != 1 {
 		t.Errorf("eligible runs = %+v, want one", runs)
+	}
+}
+
+// triggerTestRepublish records the verdicts the trigger asks to recompute.
+type triggerTestRepublish struct {
+	mu  sync.Mutex
+	ids []uint
+	err error
+}
+
+func (r *triggerTestRepublish) Republish(_ context.Context, prID uint) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ids = append(r.ids, prID)
+	return r.err
+}
+
+func (r *triggerTestRepublish) snapshot() []uint {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]uint(nil), r.ids...)
+}
+
+func (f *triggerFixture) setRequiredChecks(pr store.PullRequest, checks ...store.RequiredCheck) {
+	f.t.Helper()
+	var repo store.Repository
+	if err := f.st.DB.WithContext(f.ctx).Take(&repo, pr.RepositoryID).Error; err != nil {
+		f.t.Fatalf("load repository: %v", err)
+	}
+	policy, err := f.st.QAPolicyForTeam(f.ctx, *repo.TeamID)
+	if err != nil {
+		f.t.Fatalf("load policy: %v", err)
+	}
+	encoded, err := store.NormalizeRequiredChecks(checks)
+	if err != nil {
+		f.t.Fatalf("normalize required checks: %v", err)
+	}
+	policy.RequiredChecks = encoded
+	if _, err := f.st.SaveQAPolicy(f.ctx, policy); err != nil {
+		f.t.Fatalf("save policy: %v", err)
+	}
+}
+
+func (f *triggerFixture) setObservation(pr store.PullRequest, checks ...store.CheckObservation) {
+	f.t.Helper()
+	observation := store.ValidationObservation{Result: store.ObservationOK, Checks: checks}
+	counters := store.PRValidations{}
+	for _, check := range checks {
+		counters.Total++
+		switch check.State {
+		case store.CheckPassed:
+			counters.Passed++
+		case store.CheckFailed:
+			counters.Failed++
+		}
+	}
+	if _, err := f.st.SetPRValidationObservation(f.ctx, pr.ID, pr.HeadSHA, counters, observation); err != nil {
+		f.t.Fatalf("SetPRValidationObservation: %v", err)
+	}
+}
+
+func TestTriggerCIGateSelectsRequiredCheckByNameAndOrigin(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("gated-required", gatedOpts())
+	f.setRequiredChecks(pr, store.RequiredCheck{Name: "build", Origin: "app:7"})
+
+	f.setObservation(pr,
+		store.CheckObservation{Name: "build", Origin: "app:8", State: store.CheckPassed},
+		store.CheckObservation{Name: "other", Origin: "app:7", State: store.CheckFailed},
+	)
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	if runs := f.runsOf(pr); len(runs) != 0 {
+		t.Fatalf("runs = %+v, want none for a required check from another origin", runs)
+	}
+
+	f.setObservation(pr,
+		store.CheckObservation{Name: "build", Origin: "app:7", State: store.CheckPending},
+	)
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	if runs := f.runsOf(pr); len(runs) != 0 {
+		t.Fatalf("runs = %+v, want none while the required check is pending", runs)
+	}
+
+	f.setObservation(pr,
+		store.CheckObservation{Name: "build", Origin: "app:7", State: store.CheckPassed},
+		store.CheckObservation{Name: "optional", Origin: "app:8", State: store.CheckFailed},
+	)
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	if runs := f.runsOf(pr); len(runs) != 1 {
+		t.Fatalf("runs = %+v, want one once the required check passed", runs)
+	}
+}
+
+func TestTriggerCILookupFailureNeverOpensTheGate(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("gated-lookup", gatedOpts())
+	if _, err := f.st.SetPRValidationLookupFailure(f.ctx, pr.ID, pr.HeadSHA); err != nil {
+		t.Fatalf("SetPRValidationLookupFailure: %v", err)
+	}
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	if runs := f.runsOf(pr); len(runs) != 0 {
+		t.Fatalf("runs = %+v, want none after a failed lookup", runs)
+	}
+	if len(f.checks.started) != 0 || len(f.jobs.reviews) != 0 {
+		t.Errorf("unexpected enqueues/checks: %v / %v", f.jobs.reviews, f.checks.started)
+	}
+}
+
+// A check delivery must recompute the published verdict even when the current
+// review is reused, so red -> green -> red converges without a second analysis.
+func TestTriggerChecksUpdatedConvergesWithoutNewRun(t *testing.T) {
+	f := newTriggerFixture(t)
+	republish := &triggerTestRepublish{}
+	f.trigger.Republish = republish
+	pr := f.seed("gated-converge", gatedOpts())
+	f.setObservation(pr, store.CheckObservation{Name: "build", Origin: "app:7", State: store.CheckPassed})
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	runs := f.runsOf(pr)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want 1", len(runs))
+	}
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).Where("id = ?", runs[0].ID).
+		Update("status", store.RunSucceeded).Error; err != nil {
+		t.Fatalf("finish run: %v", err)
+	}
+
+	for _, state := range []string{store.CheckFailed, store.CheckPassed, store.CheckFailed} {
+		f.setObservation(pr, store.CheckObservation{Name: "build", Origin: "app:7", State: state})
+		if err := f.trigger.OnChecksUpdated(f.ctx, pr.ID); err != nil {
+			t.Fatalf("OnChecksUpdated(%s) error = %v", state, err)
+		}
+	}
+
+	if got := len(f.runsOf(pr)); got != 1 {
+		t.Errorf("runs = %d, want the finished analysis reused", got)
+	}
+	if got := republish.snapshot(); len(got) != 3 {
+		t.Errorf("Republish calls = %v, want one per check delivery", got)
 	}
 }

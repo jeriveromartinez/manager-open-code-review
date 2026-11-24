@@ -9,6 +9,7 @@ import {
   type LLMProfileUsage,
   type QAPolicy,
   type QAPolicyInput,
+  type RequiredCheck,
   type ReviewEffort,
   type AutoTriageMode,
   type ReviewEvent,
@@ -99,6 +100,8 @@ const selectedTeamId = ref<number | null>(null)
 const policy = ref<QAPolicy | null>(null)
 const policyProfileId = ref<number | null>(null)
 const policyRequireGreenCI = ref(false)
+// One check per line: "name" or "name | origin".
+const policyRequiredChecks = ref('')
 const policyExtraInstructions = ref('')
 // One glob per line: a comma inside a pattern must survive editing.
 const policyExcludeGlobs = ref('')
@@ -168,6 +171,7 @@ function applyPolicy(saved: QAPolicy): void {
   policy.value = saved
   policyProfileId.value = saved.llm_profile_id || null
   policyRequireGreenCI.value = saved.require_green_ci
+  policyRequiredChecks.value = formatRequiredChecks(saved.required_checks ?? [])
   policyExtraInstructions.value = saved.extra_instructions
   policyExcludeGlobs.value = saved.exclude_globs.join('\n')
   policyContextCeiling.value = saved.review_context_ceiling ?? ''
@@ -190,6 +194,22 @@ function parseGlobs(raw: string): string[] {
     .filter((line) => line !== '')
 }
 
+function formatRequiredChecks(checks: RequiredCheck[]): string {
+  return checks
+    .map((check) => (check.origin ? `${check.name} | ${check.origin}` : check.name))
+    .join('\n')
+}
+
+function parseRequiredChecks(raw: string): RequiredCheck[] {
+  const checks: RequiredCheck[] = []
+  for (const line of raw.split('\n')) {
+    const [name, origin] = line.split('|').map((part) => part.trim())
+    if (!name) continue
+    checks.push(origin ? { name, origin } : { name })
+  }
+  return checks
+}
+
 async function loadPolicy(): Promise<void> {
   if (selectedTeamId.value === null) return
   policyError.value = null
@@ -206,6 +226,7 @@ const policyDirty = computed(
     policy.value !== null &&
     (policyProfileId.value !== (policy.value.llm_profile_id || null) ||
       policyRequireGreenCI.value !== policy.value.require_green_ci ||
+      policyRequiredChecks.value !== formatRequiredChecks(policy.value.required_checks ?? []) ||
       policyExtraInstructions.value !== policy.value.extra_instructions ||
       policyExcludeGlobs.value !== policy.value.exclude_globs.join('\n') ||
       policyContextCeiling.value !== (policy.value.review_context_ceiling ?? '') ||
@@ -560,6 +581,7 @@ async function savePolicy(): Promise<void> {
     max_diff_lines: policy.value?.max_diff_lines ?? 3000,
     max_passes: policy.value?.max_passes ?? 4,
     require_green_ci: policyRequireGreenCI.value,
+    required_checks: parseRequiredChecks(policyRequiredChecks.value),
     review_context_ceiling: ceiling === '' ? null : ceiling,
     review_effort: policyReviewEffort.value,
     review_token_budget: Number(policyReviewTokenBudget.value) || 0,
@@ -778,6 +800,21 @@ onMounted(() => {
               <span class="field__hint">
                 Ninguna revisión empieza hasta que el último commit tenga checks y ninguno haya fallado.
               </span>
+            </span>
+          </label>
+
+          <label class="field" data-policy-required-checks>
+            <span class="field__label">Checks requeridos</span>
+            <textarea
+              v-model="policyRequiredChecks"
+              class="field__input"
+              rows="3"
+              placeholder="build | app:12345&#10;ci/test | status"
+            ></textarea>
+            <span class="field__hint">
+              Uno por línea: <code>nombre</code> o <code>nombre | origen</code> (<code>app:&lt;id&gt;</code>
+              o <code>status</code>). Vacío exige todos los checks reportados. Si no se envía al
+              guardar, se conserva la lista almacenada.
             </span>
           </label>
 

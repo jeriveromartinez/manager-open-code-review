@@ -392,6 +392,12 @@ export type ReviewEffort = 'low' | 'medium' | 'high'
 
 export type AutoTriageMode = 'off' | 'dry_run' | 'apply'
 
+/** One check the gate needs. origin is app:<id>, status, or omitted for any. */
+export type RequiredCheck = {
+  name: string
+  origin?: string
+}
+
 export type QAPolicy = {
   id: number
   team_id: number
@@ -403,6 +409,8 @@ export type QAPolicy = {
   max_diff_lines: number
   max_passes: number
   require_green_ci: boolean
+  /** Empty requires every reported check to be green. */
+  required_checks: RequiredCheck[]
   /** Null inherits the global review_context_ceiling. */
   review_context_ceiling: number | null
   /** Read-only: the stored global review_context_ceiling setting. */
@@ -435,6 +443,7 @@ export type QAPolicyInput = Pick<
   | 'max_diff_lines'
   | 'max_passes'
   | 'require_green_ci'
+  | 'required_checks'
   | 'review_context_ceiling'
   | 'review_effort'
   | 'review_token_budget'

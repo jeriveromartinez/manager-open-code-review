@@ -385,39 +385,41 @@ func (h *WebhookHandler) handleCheckEvent(ctx context.Context, w http.ResponseWr
 		return
 	}
 
-	var pr store.PullRequest
-	err = h.Store.DB.WithContext(ctx).
-		Where("repository_id = ? AND head_sha = ? AND state = ?", row.ID, headSHA, stateOpenPR).
-		Take(&pr).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	// Several pull requests can point at the same commit (for example a branch
+	// and a backport PR), so the delivery re-evaluates every one of them instead
+	// of only the first row GitHub's query happens to return.
+	prs, err := h.Store.OpenPRsForHeadSHA(ctx, row.ID, headSHA)
+	if err != nil {
+		h.serverError(w)
+		return
+	}
+	if len(prs) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if err != nil {
-		h.serverError(w)
-		return
-	}
 
-	_, changed, err := h.Checks.RefreshPR(ctx, pr.ID)
-	if err != nil {
-		h.serverError(w)
-		return
-	}
-
-	// The gate is re-evaluated even when the counters did not move: a review
-	// blocked on a red head must be released by the delivery that completes the
-	// checks, and OnChecksUpdated is what deduplicates it against existing runs.
-	if changed && !pr.IsFork {
-		ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)}
-		if err := h.Events.Publish(ctx, ev); err != nil {
+	for _, pr := range prs {
+		_, changed, err := h.Checks.RefreshPR(ctx, pr.ID)
+		if err != nil {
 			h.serverError(w)
 			return
 		}
-	}
-	if !pr.Draft && !pr.IsFork && h.Reviews != nil {
-		if err := h.Reviews.OnChecksUpdated(ctx, pr.ID); err != nil {
-			h.serverError(w)
-			return
+
+		// The gate is re-evaluated even when the counters did not move: a review
+		// blocked on a red head must be released by the delivery that completes the
+		// checks, and OnChecksUpdated is what deduplicates it against existing runs.
+		if changed && !pr.IsFork {
+			ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)}
+			if err := h.Events.Publish(ctx, ev); err != nil {
+				h.serverError(w)
+				return
+			}
+		}
+		if !pr.Draft && !pr.IsFork && h.Reviews != nil {
+			if err := h.Reviews.OnChecksUpdated(ctx, pr.ID); err != nil {
+				h.serverError(w)
+				return
+			}
 		}
 	}
 	w.WriteHeader(http.StatusAccepted)
