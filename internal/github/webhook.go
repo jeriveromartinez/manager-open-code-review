@@ -41,11 +41,13 @@ func VerifySignature(secret, body []byte, header string) bool {
 	return hmac.Equal(got, mac.Sum(nil))
 }
 
-// ReviewStarter is notified when a non-draft, non-fork pull request should be
-// considered for an automated review. Implementations decide whether to enqueue
-// work; the webhook boundary only applies the exclusion rules.
+// ReviewStarter is notified when a pull request should be considered for an
+// automated review, when it stops being eligible (closed, merged, draft) and
+// when its checks change. Implementations decide whether to enqueue work; the
+// webhook boundary only applies the exclusion rules.
 type ReviewStarter interface {
 	OnPullRequest(ctx context.Context, prID uint) error
+	OnPullRequestIneligible(ctx context.Context, prID uint) error
 	OnChecksUpdated(ctx context.Context, prID uint) error
 	Retry(ctx context.Context, prID uint) error
 }
@@ -297,11 +299,28 @@ func (h *WebhookHandler) handlePullRequest(ctx context.Context, w http.ResponseW
 				return
 			}
 		}
-		trigger := isReviewTriggerAction(e.GetAction())
-		if e.GetAction() == "edited" {
-			trigger = !prevKnown || store.ComparisonMoved(prev, row)
-		}
-		if trigger && !row.Draft && !row.IsFork && h.Reviews != nil {
+	}
+
+	trigger := isReviewTriggerAction(e.GetAction())
+	if e.GetAction() == "edited" {
+		trigger = !prevKnown || store.ComparisonMoved(prev, row)
+	}
+	if h.Reviews != nil {
+		switch {
+		case !row.IsOpen() || row.Draft || row.IsFork:
+			// A closed, merged, draft or fork pull request can still carry live
+			// work from an earlier delivery. Reconciling on every delivery, not
+			// only when the sync changed something, lets an identical
+			// redelivery discard a run whose first cancellation failed.
+			if err := h.Reviews.OnPullRequestIneligible(ctx, row.ID); err != nil {
+				h.serverError(w)
+				return
+			}
+		case trigger:
+			// The trigger deduplicates by comparison and repairs a queued run
+			// that lost its job or check, so reasserting it is idempotent.
+			// Gating this on `changed` let an identical redelivery skip the
+			// work the previous delivery failed to finish.
 			if err := h.Reviews.OnPullRequest(ctx, row.ID); err != nil {
 				h.serverError(w)
 				return

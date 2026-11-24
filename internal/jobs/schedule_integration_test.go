@@ -26,6 +26,8 @@ func (c *countingTrigger) EnqueuePending(context.Context, int) (int, error) {
 	return 0, nil
 }
 
+func (c *countingTrigger) ReconcileQueuedRuns(context.Context, int) (int, error) { return 0, nil }
+
 func (c *countingTrigger) FireDebounced(context.Context, uint, string) error { return nil }
 
 type unavailableAppProvider struct{}
