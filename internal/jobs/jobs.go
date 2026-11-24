@@ -5,6 +5,7 @@ package jobs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -143,6 +144,52 @@ func (LLMHealthArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{Queue: llmHealthQueue, MaxAttempts: 1}
 }
 
+// ObjectionRunArgs evaluates one queued objection with the worker's OCR.
+type ObjectionRunArgs struct {
+	ObjectionID uint `json:"objection_id"`
+}
+
+func (ObjectionRunArgs) Kind() string { return "objection_run" }
+
+func (ObjectionRunArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue:       reviewQueue,
+		MaxAttempts: 3,
+		UniqueOpts:  objectionUniqueOpts(),
+	}
+}
+
+// ObjectionPublishArgs posts the decision on GitHub and republishes the gate.
+// It runs in the control process, which holds the App credentials.
+type ObjectionPublishArgs struct {
+	ObjectionID uint `json:"objection_id"`
+}
+
+func (ObjectionPublishArgs) Kind() string { return "objection_publish" }
+
+func (ObjectionPublishArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue:       publishQueue,
+		MaxAttempts: 5,
+		UniqueOpts:  objectionUniqueOpts(),
+	}
+}
+
+// objectionUniqueOpts keeps one live job per intent while allowing a healed
+// intent to be scheduled again after its job finished or was discarded.
+func objectionUniqueOpts() river.UniqueOpts {
+	return river.UniqueOpts{
+		ByArgs: true,
+		ByState: []rivertype.JobState{
+			rivertype.JobStateAvailable,
+			rivertype.JobStatePending,
+			rivertype.JobStateRunning,
+			rivertype.JobStateScheduled,
+			rivertype.JobStateRetryable,
+		},
+	}
+}
+
 type syncInstallationWorker struct {
 	river.WorkerDefaults[SyncInstallationArgs]
 	syncer *syncer.Syncer
@@ -178,9 +225,16 @@ type PublishReconciler interface {
 // health workers belong to the review process; the control process only
 // enqueues their jobs and runs publication itself.
 type ControlDeps struct {
-	Trigger   ReviewTrigger
-	Publisher *publish.Worker
-	Tokens    CloneTokenRefresher
+	Trigger    ReviewTrigger
+	Publisher  *publish.Worker
+	Tokens     CloneTokenRefresher
+	Objections ObjectionQueueHealer
+}
+
+// ObjectionQueueHealer re-enqueues objection intents whose worker or publish job
+// was lost, so a crash cannot strand a decision or its reply.
+type ObjectionQueueHealer interface {
+	EnqueuePendingObjections(ctx context.Context, limit int) (int, error)
 }
 
 type reviewTriggerWorker struct {
@@ -194,15 +248,23 @@ func (w *reviewTriggerWorker) Work(ctx context.Context, job *river.Job[ReviewTri
 
 type reconcileWorker struct {
 	river.WorkerDefaults[ReconcileArgs]
-	syncer    *syncer.Syncer
-	trigger   ReviewTrigger
-	tokens    CloneTokenRefresher
-	publishes PublishReconciler
+	syncer     *syncer.Syncer
+	trigger    ReviewTrigger
+	tokens     CloneTokenRefresher
+	publishes  PublishReconciler
+	objections ObjectionQueueHealer
 }
 
 func (w *reconcileWorker) Work(ctx context.Context, _ *river.Job[ReconcileArgs]) error {
 	if err := w.syncer.ReconcileAll(ctx); err != nil {
 		return err
+	}
+	if w.objections != nil {
+		if healed, err := w.objections.EnqueuePendingObjections(ctx, pendingBatchSize); err != nil {
+			slog.Error("heal objection queue", "error", err)
+		} else if healed > 0 {
+			slog.Info("healed objection queue", "count", healed)
+		}
 	}
 	if w.tokens != nil {
 		refreshed, err := w.tokens.RefreshQueuedTokens(ctx, pendingBatchSize)
@@ -257,6 +319,26 @@ func (w *publishReviewWorker) Work(ctx context.Context, job *river.Job[PublishRe
 	return w.publisher.Publish(ctx, job.Args.RunID)
 }
 
+type objectionPublishWorker struct {
+	river.WorkerDefaults[ObjectionPublishArgs]
+	publisher *publish.Worker
+}
+
+func (w *objectionPublishWorker) Work(ctx context.Context, job *river.Job[ObjectionPublishArgs]) error {
+	err := w.publisher.PublishObjection(ctx, job.Args.ObjectionID)
+	if err == nil {
+		return nil
+	}
+	// A permanent failure (deleted thread, 404) must not be re-enqueued forever.
+	if job.Attempt >= job.MaxAttempts {
+		if failErr := w.publisher.FailObjectionPublication(ctx, job.Args.ObjectionID, err.Error()); failErr != nil {
+			return errors.Join(err, failErr)
+		}
+		return nil
+	}
+	return err
+}
+
 // Enqueuer schedules installation syncs. It has the same method as
 // github.SyncEnqueuer so webhook and API handlers can depend on either.
 type Enqueuer interface {
@@ -271,6 +353,8 @@ type FullEnqueuer interface {
 	EnqueueReview(ctx context.Context, runID uint) error
 	EnqueueReviewTrigger(ctx context.Context, prID uint, headSHA string, delay time.Duration) error
 	EnqueuePublish(ctx context.Context, runID uint) error
+	EnqueueObjection(ctx context.Context, objectionID uint) error
+	EnqueueObjectionPublish(ctx context.Context, objectionID uint) error
 	EnqueueLLMHealth(ctx context.Context, profileID uint) error
 	EnqueueReconcile(ctx context.Context) error
 	EnqueueWatchdog(ctx context.Context) error
@@ -309,6 +393,20 @@ func (e clientEnqueuer) EnqueueReviewTrigger(ctx context.Context, prID uint, hea
 func (e clientEnqueuer) EnqueuePublish(ctx context.Context, runID uint) error {
 	if _, err := e.client.Insert(ctx, PublishReviewArgs{RunID: runID}, nil); err != nil {
 		return fmt.Errorf("enqueue publish of review run %d: %w", runID, err)
+	}
+	return nil
+}
+
+func (e clientEnqueuer) EnqueueObjection(ctx context.Context, objectionID uint) error {
+	if _, err := e.client.Insert(ctx, ObjectionRunArgs{ObjectionID: objectionID}, nil); err != nil {
+		return fmt.Errorf("enqueue objection %d: %w", objectionID, err)
+	}
+	return nil
+}
+
+func (e clientEnqueuer) EnqueueObjectionPublish(ctx context.Context, objectionID uint) error {
+	if _, err := e.client.Insert(ctx, ObjectionPublishArgs{ObjectionID: objectionID}, nil); err != nil {
+		return fmt.Errorf("enqueue objection %d publish: %w", objectionID, err)
 	}
 	return nil
 }
@@ -362,7 +460,10 @@ func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, deps ...ControlDeps)
 	if d.Publisher != nil {
 		publishes = d.Publisher
 	}
-	river.AddWorker[ReconcileArgs](workers, &reconcileWorker{syncer: s, trigger: d.Trigger, tokens: d.Tokens, publishes: publishes})
+	river.AddWorker[ReconcileArgs](workers, &reconcileWorker{
+		syncer: s, trigger: d.Trigger, tokens: d.Tokens,
+		publishes: publishes, objections: d.Objections,
+	})
 	if d.Trigger != nil {
 		river.AddWorker[ReviewTriggerArgs](workers, &reviewTriggerWorker{trigger: d.Trigger})
 	}
@@ -371,6 +472,7 @@ func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, deps ...ControlDeps)
 	}
 	if d.Publisher != nil {
 		river.AddWorker[PublishReviewArgs](workers, &publishReviewWorker{publisher: d.Publisher})
+		river.AddWorker[ObjectionPublishArgs](workers, &objectionPublishWorker{publisher: d.Publisher})
 		queues[publishQueue] = river.QueueConfig{MaxWorkers: publishWorkers}
 	}
 

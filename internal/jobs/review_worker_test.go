@@ -125,3 +125,51 @@ func TestReviewWorkerPropagatesOtherErrors(t *testing.T) {
 		t.Fatalf("Work() error = %v, want %v", err, boom)
 	}
 }
+
+type stubObjectionRunner struct {
+	err       error
+	calls     int
+	abandoned []uint
+	causes    []string
+}
+
+func (r *stubObjectionRunner) ReevaluateObjection(context.Context, uint) error {
+	r.calls++
+	return r.err
+}
+
+func (r *stubObjectionRunner) AbandonObjection(_ context.Context, objectionID uint, cause string) error {
+	r.abandoned = append(r.abandoned, objectionID)
+	r.causes = append(r.causes, cause)
+	return nil
+}
+
+// A transient verifier error must retry until the budget is spent; the final
+// attempt records the escalation instead of failing the job forever.
+func TestObjectionWorkerAbandonsOnFinalAttempt(t *testing.T) {
+	boom := errors.New("ocr temporarily unavailable")
+	runner := &stubObjectionRunner{err: boom}
+	w := &objectionRunWorker{runner: runner}
+
+	retry := &river.Job[ObjectionRunArgs]{
+		JobRow: &rivertype.JobRow{Attempt: 1, MaxAttempts: 3},
+		Args:   ObjectionRunArgs{ObjectionID: 7},
+	}
+	if err := w.Work(context.Background(), retry); !errors.Is(err, boom) {
+		t.Fatalf("Work(retry) error = %v, want the transient error", err)
+	}
+	if len(runner.abandoned) != 0 {
+		t.Fatalf("abandoned = %v, want none before the final attempt", runner.abandoned)
+	}
+
+	final := &river.Job[ObjectionRunArgs]{
+		JobRow: &rivertype.JobRow{Attempt: 3, MaxAttempts: 3},
+		Args:   ObjectionRunArgs{ObjectionID: 7},
+	}
+	if err := w.Work(context.Background(), final); err != nil {
+		t.Fatalf("Work(final) error = %v, want nil after recording the escalation", err)
+	}
+	if len(runner.abandoned) != 1 || runner.abandoned[0] != 7 || runner.causes[0] == "" {
+		t.Errorf("abandoned = %v causes = %v, want objection 7 with its cause", runner.abandoned, runner.causes)
+	}
+}

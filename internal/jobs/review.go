@@ -41,6 +41,12 @@ type ReviewRunner interface {
 	Run(ctx context.Context, runID uint) error
 }
 
+// ObjectionRunner evaluates one queued objection with the worker's OCR.
+type ObjectionRunner interface {
+	ReevaluateObjection(ctx context.Context, objectionID uint) error
+	AbandonObjection(ctx context.Context, objectionID uint, cause string) error
+}
+
 // HealthChecker verifies an LLM profile for the llm_health queue.
 type HealthChecker interface {
 	Check(ctx context.Context, profileID uint) error
@@ -89,6 +95,27 @@ type llmHealthWorker struct {
 
 func (w *llmHealthWorker) Work(ctx context.Context, job *river.Job[LLMHealthArgs]) error {
 	return w.checker.Check(ctx, job.Args.ProfileID)
+}
+
+type objectionRunWorker struct {
+	river.WorkerDefaults[ObjectionRunArgs]
+	runner ObjectionRunner
+}
+
+func (w *objectionRunWorker) Work(ctx context.Context, job *river.Job[ObjectionRunArgs]) error {
+	err := w.runner.ReevaluateObjection(ctx, job.Args.ObjectionID)
+	if err == nil {
+		return nil
+	}
+	// A transient fetch/verifier failure is retried. Only the final attempt
+	// converts it into an escalation a human will see.
+	if job.Attempt >= job.MaxAttempts {
+		if abandonErr := w.runner.AbandonObjection(ctx, job.Args.ObjectionID, err.Error()); abandonErr != nil {
+			return errors.Join(err, abandonErr)
+		}
+		return nil
+	}
+	return err
 }
 
 // InterruptStaleRunsArgs asks the watchdog to fail the runs nobody is
@@ -151,6 +178,7 @@ func NewReviewClient(pool *pgxpool.Pool, runner *review.Runner, checker *review.
 
 	workers := river.NewWorkers()
 	river.AddWorker[ReviewRunArgs](workers, &reviewRunWorker{runner: runner})
+	river.AddWorker[ObjectionRunArgs](workers, &objectionRunWorker{runner: runner})
 	river.AddWorker[LLMHealthArgs](workers, &llmHealthWorker{checker: checker})
 	queues := map[string]river.QueueConfig{
 		reviewQueue:    {MaxWorkers: concurrency},

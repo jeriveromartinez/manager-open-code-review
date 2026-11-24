@@ -118,7 +118,10 @@ func (e *CloneTokenStaleError) Error() string {
 // RunnerConfig holds the worker-side settings of the review pipeline.
 type RunnerConfig struct {
 	WorkspaceDir, OCRBin, GitBaseURL string
-	FetchDepthMax                    int
+	// GitHubAPIURL is the REST endpoint the worker uses to fetch a cited file for
+	// an objection. Empty disables the fetch and escalates the objection.
+	GitHubAPIURL  string
+	FetchDepthMax int
 	// ContextCeiling is the global review_context_ceiling. A team policy can
 	// override it per run.
 	ContextCeiling int
@@ -144,6 +147,10 @@ type Runner struct {
 	Events events.Publisher
 	Jobs   Enqueuer
 	Cfg    RunnerConfig
+
+	// ObjectionVerifier overrides the bounded verifier used to reevaluate a
+	// reply on a finding's thread. Nil builds the native OCR verifier.
+	ObjectionVerifier ObjectionVerifier
 
 	// heartbeatEvery overrides heartbeatInterval in tests. Zero uses the
 	// production interval.

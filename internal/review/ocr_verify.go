@@ -100,6 +100,9 @@ lines. The first non-empty line MUST be:
 QA-VERIFY <finding_id> <CONFIRM|REFUTE|UNCERTAIN>
 The second line MUST be:
 EVIDENCE: <one line copied verbatim from the file at the reported revision>
+If the finding's correct severity is lower than the reported one, add another
+line:
+SEVERITY: <blocker|major|minor|nit>
 If no such line proves the verdict, answer UNCERTAIN. Do not report new
 findings. Do not report style, naming, or test suggestions. Never REFUTE
 without evidence that contradicts the claim.`,

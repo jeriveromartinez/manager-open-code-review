@@ -83,6 +83,8 @@ type fakeGitHub struct {
 	reviews            []fakeReview
 	reviewIDs          []int64
 	replies            []string
+	threadCommentBody  string
+	markerOnPage       int
 	checkPatches       []checkPatch
 	checkRuns          []map[string]any
 	commitStatuses     []map[string]any
@@ -285,6 +287,25 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(body, &in)
 		g.reviewRequests = append(g.reviewRequests, in)
 		writeJSON(map[string]any{"number": 7}, http.StatusCreated)
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/7/comments":
+		page := 1
+		if raw := r.URL.Query().Get("page"); raw != "" {
+			page, _ = strconv.Atoi(raw)
+		}
+		comments := []map[string]any{}
+		if page == 1 {
+			for i := 0; i < 99; i++ {
+				comments = append(comments, map[string]any{"id": i + 1, "body": "chatter"})
+			}
+			body := ""
+			if g.markerOnPage <= 1 {
+				body = g.threadCommentBody
+			}
+			comments = append(comments, map[string]any{"id": 100, "body": body})
+		} else if page == 2 && g.markerOnPage == 2 {
+			comments = append(comments, map[string]any{"id": 101, "body": g.threadCommentBody})
+		}
+		writeJSON(comments, http.StatusOK)
 
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/pulls/7/reviews":
 		var review fakeReview
