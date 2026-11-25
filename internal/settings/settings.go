@@ -125,7 +125,7 @@ func Fields() []Field {
 		{
 			Key: KeyReviewTimeout, Group: GroupReview,
 			Label: "Tiempo máximo por revisión",
-			Help:  "Presupuesto de la revisión. OCR lo reparte entre sus tareas y entrega lo revisado antes de agotarlo; depende del modelo y del tamaño del PR.",
+			Help:  "Plazo total y finito de la revisión. OCR comparte ese tiempo entre sus grupos; al acercarse el final, el worker pide a OCR que cierre y entregue lo revisado antes de la parada dura. Depende del modelo y del tamaño del PR.",
 			Kind:  "duration", Unit: "m", Default: "45m", Restart: "worker",
 		},
 		{

@@ -979,7 +979,7 @@ func testE2ETimeout(t *testing.T) {
 	}
 
 	run := f.loadRun(t, runID)
-	assertE2ERun(t, run, store.RunInconclusive, "timeout")
+	assertE2ERun(t, run, store.RunInconclusive, "timeout_global")
 	if !strings.Contains(run.ErrorMessage, "deadline exceeded") {
 		t.Errorf("error_message = %q, want the agent deadline", run.ErrorMessage)
 	}
