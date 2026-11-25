@@ -422,6 +422,272 @@ func TestListRepositoriesWithPolicy(t *testing.T) {
 	}
 }
 
+// TestRenameTeam guards the rename contract: the slug follows the new name,
+// renaming a team to its current name is a no-op, another team's name or slug
+// is rejected and a missing team is ErrNotFound.
+func TestRenameTeam(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+
+	team, err := s.CreateTeam(ctx, "Original Name")
+	if err != nil {
+		t.Fatalf("create team: %v", err)
+	}
+	other, err := s.CreateTeam(ctx, "Alpha Beta")
+	if err != nil {
+		t.Fatalf("create other team: %v", err)
+	}
+
+	renamed, err := s.RenameTeam(ctx, team.ID, "Renamed Equipo")
+	if err != nil {
+		t.Fatalf("RenameTeam: %v", err)
+	}
+	if renamed.Name != "Renamed Equipo" || renamed.Slug != "renamed-equipo" {
+		t.Errorf("renamed team = %+v, want name=Renamed Equipo slug=renamed-equipo", renamed)
+	}
+	var stored store.Team
+	if err := s.DB.WithContext(ctx).Take(&stored, team.ID).Error; err != nil {
+		t.Fatalf("reload renamed team: %v", err)
+	}
+	if stored.Name != "Renamed Equipo" || stored.Slug != "renamed-equipo" {
+		t.Errorf("stored team = %+v, want the new name and slug", stored)
+	}
+
+	same, err := s.RenameTeam(ctx, team.ID, renamed.Name)
+	if err != nil {
+		t.Fatalf("RenameTeam with the same name: %v", err)
+	}
+	if !same.UpdatedAt.Equal(stored.UpdatedAt) {
+		t.Errorf("same-name rename updated_at = %v, want unchanged %v", same.UpdatedAt, stored.UpdatedAt)
+	}
+
+	if _, err := s.RenameTeam(ctx, team.ID, other.Name); !errors.Is(err, store.ErrTeamNameTaken) {
+		t.Errorf("rename to another team's name error = %v, want ErrTeamNameTaken", err)
+	}
+	if _, err := s.RenameTeam(ctx, team.ID, "Alpha  BETA!"); !errors.Is(err, store.ErrTeamNameTaken) {
+		t.Errorf("rename to another team's slug error = %v, want ErrTeamNameTaken", err)
+	}
+
+	if err := s.DB.WithContext(ctx).Take(&stored, team.ID).Error; err != nil {
+		t.Fatalf("reload team after rejected renames: %v", err)
+	}
+	if stored.Name != "Renamed Equipo" || stored.Slug != "renamed-equipo" {
+		t.Errorf("team after rejected renames = %+v, want unchanged name and slug", stored)
+	}
+
+	if _, err := s.RenameTeam(ctx, 999999, "Ghost Team"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("rename missing team error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDeleteTeamGuardsRepositories guards the deletion contract: a team with
+// repositories cannot be deleted, and a free team is removed together with its
+// members and QA policy.
+func TestDeleteTeamGuardsRepositories(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+
+	memberA, err := s.UpsertUserFromGitHub(ctx, 9101, "member-a", "")
+	if err != nil {
+		t.Fatalf("create member a: %v", err)
+	}
+	memberB, err := s.UpsertUserFromGitHub(ctx, 9102, "member-b", "")
+	if err != nil {
+		t.Fatalf("create member b: %v", err)
+	}
+	team, err := s.CreateTeam(ctx, "Doomed Team")
+	if err != nil {
+		t.Fatalf("create team: %v", err)
+	}
+	if err := s.SetTeamMember(ctx, team.ID, memberA.ID, "lead"); err != nil {
+		t.Fatalf("add member a: %v", err)
+	}
+	if err := s.SetTeamMember(ctx, team.ID, memberB.ID, "qa"); err != nil {
+		t.Fatalf("add member b: %v", err)
+	}
+	profile, err := s.CreateLLMProfile(ctx, store.LLMProfile{Name: "doomed-profile", Provider: "anthropic", Model: "claude"})
+	if err != nil {
+		t.Fatalf("create llm profile: %v", err)
+	}
+	if _, err := s.SaveQAPolicy(ctx, store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID}); err != nil {
+		t.Fatalf("save qa policy: %v", err)
+	}
+
+	if err := s.UpsertInstallation(ctx, store.Installation{ID: 91, AccountLogin: "acme", AccountType: "Organization"}); err != nil {
+		t.Fatalf("create installation: %v", err)
+	}
+	repo := store.Repository{ID: 9101, InstallationID: 91, FullName: "acme/blocker", DefaultBranch: "main"}
+	if err := s.UpsertRepository(ctx, repo); err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+	if err := s.AssignRepositoryTeam(ctx, repo.ID, &team.ID); err != nil {
+		t.Fatalf("assign repository: %v", err)
+	}
+
+	if _, err := s.DeleteTeam(ctx, team.ID); !errors.Is(err, store.ErrTeamInUse) {
+		t.Errorf("DeleteTeam with an assigned repository error = %v, want ErrTeamInUse", err)
+	}
+	teamCount := func() int64 {
+		var n int64
+		if err := s.DB.WithContext(ctx).Model(&store.Team{}).Where("id = ?", team.ID).Count(&n).Error; err != nil {
+			t.Fatalf("count teams: %v", err)
+		}
+		return n
+	}
+	memberCount := func() int64 {
+		var n int64
+		if err := s.DB.WithContext(ctx).Model(&store.TeamMember{}).Where("team_id = ?", team.ID).Count(&n).Error; err != nil {
+			t.Fatalf("count team members: %v", err)
+		}
+		return n
+	}
+	policyCount := func() int64 {
+		var n int64
+		if err := s.DB.WithContext(ctx).Model(&store.QAPolicy{}).Where("team_id = ?", team.ID).Count(&n).Error; err != nil {
+			t.Fatalf("count qa policies: %v", err)
+		}
+		return n
+	}
+	if teamCount() != 1 || memberCount() != 2 || policyCount() != 1 {
+		t.Fatalf("after blocked delete teams=%d members=%d policies=%d, want 1/2/1",
+			teamCount(), memberCount(), policyCount())
+	}
+
+	if err := s.AssignRepositoryTeam(ctx, repo.ID, nil); err != nil {
+		t.Fatalf("clear repository team: %v", err)
+	}
+	deleted, err := s.DeleteTeam(ctx, team.ID)
+	if err != nil {
+		t.Fatalf("DeleteTeam: %v", err)
+	}
+	if deleted != 2 {
+		t.Errorf("DeleteTeam returned %d members, want 2", deleted)
+	}
+	if teamCount() != 0 || memberCount() != 0 || policyCount() != 0 {
+		t.Errorf("after delete teams=%d members=%d policies=%d, want 0/0/0",
+			teamCount(), memberCount(), policyCount())
+	}
+	var storedRepo store.Repository
+	if err := s.DB.WithContext(ctx).Take(&storedRepo, repo.ID).Error; err != nil {
+		t.Fatalf("repository after team delete: %v", err)
+	}
+	if storedRepo.TeamID != nil {
+		t.Errorf("repository team after delete = %v, want nil", *storedRepo.TeamID)
+	}
+
+	if _, err := s.DeleteTeam(ctx, team.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("DeleteTeam of a missing team error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDeleteTeamRechecksInsideTheTransaction guards that DeleteTeam rechecks
+// the repository assignment itself instead of trusting the caller's pre-check.
+func TestDeleteTeamRechecksInsideTheTransaction(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+
+	team, err := s.CreateTeam(ctx, "Race Team")
+	if err != nil {
+		t.Fatalf("create team: %v", err)
+	}
+	repos, err := s.TeamRepositories(ctx, team.ID)
+	if err != nil {
+		t.Fatalf("TeamRepositories: %v", err)
+	}
+	if len(repos) != 0 {
+		t.Fatalf("TeamRepositories = %+v, want none", repos)
+	}
+
+	if err := s.UpsertInstallation(ctx, store.Installation{ID: 92, AccountLogin: "acme", AccountType: "Organization"}); err != nil {
+		t.Fatalf("create installation: %v", err)
+	}
+	for _, repo := range []store.Repository{
+		{ID: 9201, InstallationID: 92, FullName: "acme/zeta", DefaultBranch: "main"},
+		{ID: 9202, InstallationID: 92, FullName: "acme/alpha", DefaultBranch: "main"},
+	} {
+		if err := s.UpsertRepository(ctx, repo); err != nil {
+			t.Fatalf("create repository %d: %v", repo.ID, err)
+		}
+		if err := s.AssignRepositoryTeam(ctx, repo.ID, &team.ID); err != nil {
+			t.Fatalf("assign repository %d: %v", repo.ID, err)
+		}
+	}
+
+	repos, err = s.TeamRepositories(ctx, team.ID)
+	if err != nil {
+		t.Fatalf("TeamRepositories after assignment: %v", err)
+	}
+	if len(repos) != 2 || repos[0].FullName != "acme/alpha" || repos[1].FullName != "acme/zeta" {
+		t.Errorf("TeamRepositories = %+v, want acme/alpha then acme/zeta", repos)
+	}
+	if repos[0].ID != 9202 || repos[1].ID != 9201 {
+		t.Errorf("TeamRepositories ids = %d, %d; want 9202, 9201", repos[0].ID, repos[1].ID)
+	}
+
+	if _, err := s.DeleteTeam(ctx, team.ID); !errors.Is(err, store.ErrTeamInUse) {
+		t.Errorf("DeleteTeam after a late assignment error = %v, want ErrTeamInUse", err)
+	}
+	var count int64
+	if err := s.DB.WithContext(ctx).Model(&store.Team{}).Where("id = ?", team.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count teams: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("team count after blocked delete = %d, want 1", count)
+	}
+}
+
+// TestListTeamsCountsRepositories guards the per-team repository count added to
+// the listing.
+func TestListTeamsCountsRepositories(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+
+	busy, err := s.CreateTeam(ctx, "Busy Team")
+	if err != nil {
+		t.Fatalf("create busy team: %v", err)
+	}
+	idle, err := s.CreateTeam(ctx, "Idle Team")
+	if err != nil {
+		t.Fatalf("create idle team: %v", err)
+	}
+	if err := s.UpsertInstallation(ctx, store.Installation{ID: 93, AccountLogin: "acme", AccountType: "Organization"}); err != nil {
+		t.Fatalf("create installation: %v", err)
+	}
+	for _, repo := range []store.Repository{
+		{ID: 9301, InstallationID: 93, FullName: "acme/one", DefaultBranch: "main"},
+		{ID: 9302, InstallationID: 93, FullName: "acme/two", DefaultBranch: "main"},
+		{ID: 9303, InstallationID: 93, FullName: "acme/unassigned", DefaultBranch: "main"},
+	} {
+		if err := s.UpsertRepository(ctx, repo); err != nil {
+			t.Fatalf("create repository %d: %v", repo.ID, err)
+		}
+	}
+	if err := s.AssignRepositoryTeam(ctx, 9301, &busy.ID); err != nil {
+		t.Fatalf("assign repository 9301: %v", err)
+	}
+	if err := s.AssignRepositoryTeam(ctx, 9302, &busy.ID); err != nil {
+		t.Fatalf("assign repository 9302: %v", err)
+	}
+
+	teams, err := s.ListTeams(ctx)
+	if err != nil {
+		t.Fatalf("ListTeams: %v", err)
+	}
+	if len(teams) != 2 {
+		t.Fatalf("ListTeams returned %d teams, want 2", len(teams))
+	}
+	counts := make(map[uint]int, len(teams))
+	for _, team := range teams {
+		counts[team.Team.ID] = team.RepositoryCount
+	}
+	if counts[busy.ID] != 2 {
+		t.Errorf("busy team RepositoryCount = %d, want 2", counts[busy.ID])
+	}
+	if counts[idle.ID] != 0 {
+		t.Errorf("idle team RepositoryCount = %d, want 0", counts[idle.ID])
+	}
+}
+
 // TestAppConfigNotConfigured guards the bootstrap error and the single-row
 // upsert of the GitHub App configuration.
 func TestAppConfigNotConfigured(t *testing.T) {
