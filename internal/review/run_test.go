@@ -1361,6 +1361,75 @@ func TestRunVerifierRespectsMaxFindings(t *testing.T) {
 	}
 }
 
+func TestRunReservesVerifierShareFromTheMainBudget(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	f.setAutoTriage(t, store.AutoTriageDryRun, true, map[string]any{
+		"review_token_budget": int64(100000),
+	})
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	out := f.executeForTest(t, runner)
+
+	if out.status != store.RunSucceeded {
+		t.Fatalf("status = %q, want succeeded", out.status)
+	}
+	if out.verificationSkipped != "" {
+		t.Errorf("verificationSkipped = %q, want the reserved pass to run", out.verificationSkipped)
+	}
+	if got := f.ocrCalls(t); got != 2 {
+		t.Fatalf("ocr calls = %d, want review plus scan", got)
+	}
+	lines := f.ocrArgs(t)
+	if got := ocrArgInLine(lines[0], "--max-tokens-budget"); got != "80000" {
+		t.Errorf("main --max-tokens-budget = %q, want the 80%% left after the reservation", got)
+	}
+	// The scan carries the findings inline, so its recorded argv spans several
+	// physical lines; the flag lives in the tail of the last invocation.
+	if got := f.lastOCRArgValue(t, "--max-tokens-budget"); got != "20000" {
+		t.Errorf("verify --max-tokens-budget = %q, want the reserved 20%%; scan argv = %q",
+			got, f.ocrArgs(t))
+	}
+}
+
+func TestRunSkipsVerificationWhenReserveIsBelowTheMinimum(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	f.setAutoTriage(t, store.AutoTriageApply, true, map[string]any{
+		"review_token_budget": int64(40000),
+	})
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	out := f.executeForTest(t, runner)
+
+	if out.status != store.RunSucceeded {
+		t.Fatalf("status = %q, want succeeded", out.status)
+	}
+	if out.verificationSkipped != "insufficient_budget" {
+		t.Fatalf("verificationSkipped = %q, want insufficient_budget (20%% of 40000 < %d)",
+			out.verificationSkipped, verifyMinBudget)
+	}
+	if got := f.ocrCalls(t); got != 1 {
+		t.Errorf("ocr calls = %d, want only the review", got)
+	}
+	if got := ocrArgInLine(f.ocrArgs(t)[0], "--max-tokens-budget"); got != "40000" {
+		t.Errorf("main --max-tokens-budget = %q, want the unusable reserve returned to the main pass", got)
+	}
+	if len(out.decisions) == 0 {
+		t.Fatal("decisions = none, want the skip reason recorded on the findings")
+	}
+	for _, d := range out.decisions {
+		if d.Apply || d.Status != store.FindingOpen {
+			t.Errorf("decision = %+v, want the confirmed work kept as open", d)
+		}
+		if d.Verification.Reason != "verificación omitida: presupuesto insuficiente" {
+			t.Errorf("reason = %q, want the skip recorded on the finding", d.Verification.Reason)
+		}
+	}
+}
+
 func TestRunReusesStoredVerdictsForSameHead(t *testing.T) {
 	skipWithoutShellFake(t)
 	f := newRunTestFixture(t)

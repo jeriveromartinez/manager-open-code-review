@@ -447,8 +447,8 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid verify limits %d/%d",
 			p.TeamID, p.VerifyMaxFindings, p.VerifyMaxFiles)
 	}
-	if p.VerifyTokenShare < 0 || p.VerifyTokenShare > 100 ||
-		p.VerifyTimeShare < 0 || p.VerifyTimeShare > 100 {
+	if p.VerifyTokenShare < 0 || p.VerifyTokenShare >= 100 ||
+		p.VerifyTimeShare < 0 || p.VerifyTimeShare >= 100 {
 		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid verify shares %d/%d",
 			p.TeamID, p.VerifyTokenShare, p.VerifyTimeShare)
 	}

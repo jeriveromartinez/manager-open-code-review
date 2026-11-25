@@ -43,10 +43,14 @@ type chunkSummary struct {
 	statuses map[string]coverageFile
 	comments []nativeComment
 	tokens   tokenUsage
+	// usageKnown is false once a chunk ran without reporting usage, or failed
+	// after possibly spending tokens. The run total is then unknown and the
+	// following steps must not assume the missing spend was zero.
+	usageKnown bool
 }
 
 func newChunkSummary() chunkSummary {
-	return chunkSummary{statuses: make(map[string]coverageFile)}
+	return chunkSummary{statuses: make(map[string]coverageFile), usageKnown: true}
 }
 
 func (s *chunkSummary) markNotReviewed(path, reason string) {
@@ -232,10 +236,24 @@ func chunkByteBudget(maxTokens int) int {
 	return maxTokens * bytesPerToken * chunkBudgetPercent / 100
 }
 
+// chunkAllowance is what the chunked retries may still spend. Their budget
+// belongs to the main pass, so an unknown main usage counts as the whole
+// allowance: without evidence of what it spent, no budget is assumed left.
+func chunkAllowance(mainBudget, used int64, usageKnown bool) int64 {
+	if mainBudget <= 0 || !usageKnown {
+		return 0
+	}
+	remaining := mainBudget - used
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
 // reviewTooLargeFiles reviews each path by synthetic chunks sequentially. A
 // failing chunk is recorded and the loop continues: the rest of the PR and the
 // chunks that did succeed keep their findings.
-func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint, reviewer *NativeReviewer, headSHA string, paths []string, budget int64, mainUsage tokenUsage, log *runLogSink) chunkSummary {
+func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint, reviewer *NativeReviewer, headSHA string, paths []string, budget int64, mainUsage tokenUsage, usageKnown bool, log *runLogSink) chunkSummary {
 	summary := newChunkSummary()
 	maxBytes := chunkByteBudget(reviewer.MaxTokens)
 	stopBudget := false
@@ -294,7 +312,7 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 			chunkReviewer.Commit = ch.Commit
 			chunkReviewer.OnLog = log.OCRLogger(ctx, invocation)
 			if budget > 0 {
-				remaining := budget - int64(mainUsage.Total) - int64(summary.tokens.Total)
+				remaining := chunkAllowance(budget, int64(mainUsage.Total)+int64(summary.tokens.Total), usageKnown && summary.usageKnown)
 				if remaining <= 0 {
 					failures++
 					if reason == "" {
@@ -372,6 +390,8 @@ func chunkLogLine(path string, index, total int, res nativeReview, reviewErr err
 // contributes its comments, and a failed one only marks the file as incomplete.
 func finishChunk(ctx context.Context, summary *chunkSummary, path string, res nativeReview, err error, failures *int, reason *string) {
 	if err != nil {
+		// A failed chunk may have spent tokens before failing.
+		summary.usageKnown = false
 		*failures = *failures + 1
 		if *reason == "" {
 			*reason = chunkErrorReason(ctx, err)
@@ -379,6 +399,9 @@ func finishChunk(ctx context.Context, summary *chunkSummary, path string, res na
 		return
 	}
 	summary.tokens.add(nativeTokenUsage(res))
+	if !res.hasSummary {
+		summary.usageKnown = false
+	}
 	tooLarge := chunkExcludedTooLarge(res, path)
 	status, code := nativeOutcome(res)
 	if status == store.RunSucceeded && !tooLarge {

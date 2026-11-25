@@ -45,8 +45,17 @@ func verifyPolicy(p store.QAPolicy) VerifyPolicy {
 	if policy.TokenShare <= 0 {
 		policy.TokenShare = store.DefaultVerifyTokenShare
 	}
+	if policy.TokenShare >= 100 {
+		// 100% would leave the main pass with no budget, which OCR reads as
+		// "uncapped" and the verifier could then overspend the run.
+		policy.TokenShare = 99
+	}
 	if policy.TimeShare <= 0 {
 		policy.TimeShare = store.DefaultVerifyTimeShare
+	}
+	if policy.TimeShare >= 100 {
+		// Likewise, a 100% share would leave the main pass without a timeout.
+		policy.TimeShare = 99
 	}
 	if policy.TokenMax <= 0 {
 		policy.TokenMax = store.DefaultVerifyTokenMax
@@ -54,10 +63,139 @@ func verifyPolicy(p store.QAPolicy) VerifyPolicy {
 	return policy
 }
 
+// verifyReservation is the slice of the run's configured limits held back for
+// the second pass before the first one starts, so the aggregate of the main
+// pass, its chunks and the verifier cannot exceed them. A share too small to
+// start a verification stays with the main pass under mainTokens/mainTime.
+type verifyReservation struct {
+	enabled    bool
+	mainTokens int64
+	mainTime   time.Duration
+	tokens     int64
+	timeout    time.Duration
+}
+
+// reserveVerification splits the run limits when auto-triage may need a second
+// pass. The main pass, and the chunked retries that belong to it, may spend
+// mainTokens; the verifier gets what was held back. A disabled run token budget
+// leaves the main pass uncapped but still holds VerifyTokenMax for the verifier.
+func reserveVerification(p store.QAPolicy, policy VerifyPolicy, timeout time.Duration) verifyReservation {
+	if policy.Mode == store.AutoTriageOff {
+		return verifyReservation{}
+	}
+	mainTokens, tokens := verifyAllowance(p, policy)
+	reserved := verifyReservation{
+		enabled:    true,
+		mainTokens: mainTokens,
+		mainTime:   timeout,
+		tokens:     tokens,
+	}
+	if timeout > 0 {
+		reserved.timeout = timeout * time.Duration(policy.TimeShare) / 100
+	}
+	// A share that cannot start the second pass is dead weight: holding it
+	// back would only weaken the main pass, so both quotas stay available to
+	// it. The verifier still reports insufficient_budget or insufficient_time.
+	if !reservationViable(reserved.tokens, reserved.timeout) {
+		if p.ReviewTokenBudget > 0 {
+			reserved.mainTokens = p.ReviewTokenBudget
+		}
+		reserved.mainTime = timeout
+	} else if timeout > 0 {
+		reserved.mainTime = timeout - reserved.timeout
+	}
+	return reserved
+}
+
+// reservationViable reports whether the held-back quotas can actually start a
+// verification: the token share must reach the minimum budget and the time
+// share the minimum timeout (or there must be no deadline to cut).
+func reservationViable(tokens int64, timeout time.Duration) bool {
+	return tokens >= verifyMinBudget && (timeout <= 0 || timeout >= verifyMinTimeout)
+}
+
+// verifyAllowance returns the token cap the main pass may use and the share held
+// back for verification. Without a run budget the main pass stays uncapped and
+// verification keeps the fixed cap, the documented behaviour for teams that
+// disabled the aggregate budget.
+func verifyAllowance(p store.QAPolicy, policy VerifyPolicy) (mainTokens, verifyTokens int64) {
+	if p.ReviewTokenBudget <= 0 {
+		return 0, policy.TokenMax
+	}
+	verifyTokens = p.ReviewTokenBudget * int64(policy.TokenShare) / 100
+	if verifyTokens > p.ReviewTokenBudget {
+		verifyTokens = p.ReviewTokenBudget
+	}
+	mainTokens = p.ReviewTokenBudget - verifyTokens
+	return mainTokens, verifyTokens
+}
+
+// verifyBudgetFrom returns what the verifier may spend: the share reserved
+// before the first pass, shrunk only when a known main usage already consumed
+// the configured cap. Unknown usage never expands it, so the aggregate cannot
+// exceed the budget.
+func verifyBudgetFrom(totalBudget, reserved, used int64, usageKnown bool) int64 {
+	if totalBudget <= 0 || !usageKnown {
+		return reserved
+	}
+	if remaining := totalBudget - used; remaining < reserved {
+		reserved = remaining
+	}
+	if reserved < 0 {
+		return 0
+	}
+	return reserved
+}
+
+// verificationSkip names why the second pass cannot start. A zero timeout means
+// the run has no configured deadline, which is not a reason to skip.
+func verificationSkip(timeout time.Duration, budget int64) string {
+	switch {
+	case timeout > 0 && timeout < verifyMinTimeout:
+		return "insufficient_time"
+	case budget < verifyMinBudget:
+		return "insufficient_budget"
+	}
+	return ""
+}
+
+// unverifiedReason explains on the finding itself why the verifier could not
+// check it, so the panel does not show an empty answer.
+func unverifiedReason(code string) string {
+	switch code {
+	case "insufficient_time":
+		return "verificación omitida: tiempo insuficiente"
+	case "insufficient_budget":
+		return "verificación omitida: presupuesto insuficiente"
+	default:
+		return "verificación omitida: " + code
+	}
+}
+
+// markUnverified records the skip reason on every finding the second pass did
+// not check. Their status is left untouched: only the evidence is missing.
+func markUnverified(verdicts map[string]Verification, findings []store.Finding, headSHA, reason string) {
+	for _, f := range findings {
+		if _, seen := verdicts[f.ID]; seen {
+			continue
+		}
+		verdicts[f.ID] = Verification{Verdict: VerdictUncertain, HeadSHA: headSHA, Reason: reason}
+	}
+}
+
+// verifyContext gives the verifier its own deadline so the OCR flags are not
+// the only bound on the process. A zero timeout leaves the parent unchanged.
+func verifyContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
 // verifyFindings runs the second OCR pass over the run's findings and fills
 // out.decisions. It never fails the run: a verifier error or an exhausted
 // budget leaves the findings untriaged.
-func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig, apiKey []byte, workDir, headSHA string, out *runOutcome, log *runLogSink) {
+func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig, apiKey []byte, workDir, headSHA string, out *runOutcome, reservation verifyReservation, log *runLogSink) {
 	policy := verifyPolicy(cfg.Policy)
 	if policy.Mode == store.AutoTriageOff || len(out.findings) == 0 {
 		return
@@ -80,16 +218,28 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 	selected, paths := selectVerifyFindings(pending, policy)
 	attempted := false
 	if len(paths) > 0 {
-		timeout, budget := verifyBudget(ctx, cfg.Policy, policy, int64(out.tokens.Total))
-		switch {
-		case timeout > 0 && timeout < verifyMinTimeout:
-			out.verificationSkipped = "insufficient_time"
-		case budget < verifyMinBudget:
-			out.verificationSkipped = "insufficient_budget"
-		default:
+		// The verifier spends the share reserved before the main pass, not a
+		// fresh estimate: that is what keeps the aggregate inside the budget.
+		budget := verifyBudgetFrom(cfg.Policy.ReviewTokenBudget, reservation.tokens, int64(out.tokens.Total), out.tokensKnown)
+		timeout := reservation.timeout
+		if deadline, ok := ctx.Deadline(); ok {
+			if left := time.Until(deadline); left < timeout {
+				timeout = left
+			}
+		}
+		if code := verificationSkip(timeout, budget); code != "" {
+			out.verificationSkipped = code
+			markUnverified(verdicts, pending, headSHA, unverifiedReason(code))
+			log.Log(ctx, "worker", "", "warn", logPhaseOCR, fmt.Sprintf(
+				"verificación omitida (%s); %d hallazgo(s) conservan su estado", code, len(pending)))
+		} else {
 			r.setPhase(ctx, run.ID, store.RunPhaseVerifying, log)
 			log.Log(ctx, "worker", "verify", "info", logPhaseOCR, fmt.Sprintf(
 				"verificando %d hallazgo(s) en %d archivo(s)", len(selected), len(paths)))
+			verifyCtx, cancel := verifyContext(ctx, timeout)
+			// The OCR flags are not a process deadline: the verifier gets its own
+			// context so a stalled scan cannot outlive the reserved time.
+			defer cancel()
 			verifier := &NativeVerifier{
 				Bin:         r.Cfg.OCRBin,
 				RepoDir:     workDir,
@@ -107,7 +257,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 				verifier.MaxTokens = reviewContextCeiling
 			}
 			started := time.Now()
-			res, _, err := r.runNativeReview(ctx, cfg.Profile.ID, verifier, log, "verify")
+			res, _, err := r.runNativeReview(verifyCtx, cfg.Profile.ID, verifier, log, "verify")
 			if err != nil {
 				out.verificationSkipped = "verifier_error"
 				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
@@ -141,13 +291,10 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 
 	// A verifier that ran and answered nothing still leaves an explicit
 	// uncertainty per finding, so stale evidence is not reused. A pass that
-	// never ran keeps whatever the previous run stored.
+	// never ran keeps whatever the previous run stored, except for a skipped
+	// one, which already recorded the reason on every pending finding.
 	if len(verdicts) == 0 && !attempted {
 		return
-	}
-	if out.verificationSkipped != "" {
-		log.Log(ctx, "worker", "", "warn", logPhaseOCR,
-			"verificación omitida ("+out.verificationSkipped+"); se reutilizan los veredictos guardados")
 	}
 	files := readCitedFiles(workDir, out.findings)
 	out.decisions = Decide(out.findings, verdicts, files, headSHA, policy)
@@ -212,28 +359,6 @@ func verifyPriority(severity string) int {
 	default:
 		return 2
 	}
-}
-
-// verifyBudget slices the run's remaining time and token budget for the second
-// pass. The share is a reservation, never extra: it cannot exceed what the main
-// pass left of the configured cap. Without a run budget it uses the fixed cap,
-// so teams that disabled the budget still get verification.
-func verifyBudget(ctx context.Context, p store.QAPolicy, policy VerifyPolicy, used int64) (time.Duration, int64) {
-	var timeout time.Duration
-	if deadline, ok := ctx.Deadline(); ok {
-		timeout = time.Until(deadline) * time.Duration(policy.TimeShare) / 100
-	}
-	if p.ReviewTokenBudget == 0 {
-		return timeout, policy.TokenMax
-	}
-	budget := p.ReviewTokenBudget * int64(policy.TokenShare) / 100
-	if remaining := p.ReviewTokenBudget - used; remaining < budget {
-		if remaining < 0 {
-			remaining = 0
-		}
-		budget = remaining
-	}
-	return timeout, budget
 }
 
 // readCitedFiles loads the files the findings point at. An invalid or oversized
