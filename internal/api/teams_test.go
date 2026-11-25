@@ -32,6 +32,13 @@ func TestPatchTeamRenamesAsAdmin(t *testing.T) {
 	if body.RepositoryCount != 0 {
 		t.Errorf("repository_count = %d, want 0", body.RepositoryCount)
 	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw response %q: %v", rec.Body.String(), err)
+	}
+	if _, ok := raw["members"]; ok {
+		t.Error("rename response includes members; it must be a summary without them")
+	}
 
 	var got store.Team
 	if err := f.st.DB.WithContext(f.ctx).Take(&got, team.ID).Error; err != nil {
@@ -62,10 +69,51 @@ func TestPatchTeamRenamesAsAdmin(t *testing.T) {
 	assertEvents(t, f.pub.snapshot(), events.Event{Type: "team.updated", ID: idString(team.ID)})
 }
 
+func TestPatchTeamSameNameIsIdempotent(t *testing.T) {
+	f := newAPIFixture(t)
+	admin := f.user("admin", true)
+	team := f.team("qa-pilot")
+	cookie := f.session(admin)
+
+	rec := f.request(http.MethodPatch, fmt.Sprintf("/api/teams/%d", team.ID), map[string]any{"name": "qa-pilot"}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+
+	var body struct {
+		Name string `json:"name"`
+		Slug string `json:"slug"`
+	}
+	decodeJSON(t, rec, &body)
+	if body.Name != "qa-pilot" || body.Slug != "qa-pilot" {
+		t.Errorf("response = %+v, want the unchanged qa-pilot name and slug", body)
+	}
+
+	var got store.Team
+	if err := f.st.DB.WithContext(f.ctx).Take(&got, team.ID).Error; err != nil {
+		t.Fatalf("reload team: %v", err)
+	}
+	if got.Name != "qa-pilot" || got.Slug != "qa-pilot" {
+		t.Errorf("stored team = %+v, want the unchanged qa-pilot name and slug", got)
+	}
+
+	rows := auditRows(t, f, "team.updated")
+	if len(rows) != 1 {
+		t.Fatalf("audit rows = %d, want 1", len(rows))
+	}
+	var data map[string]string
+	if err := json.Unmarshal(rows[0].Data, &data); err != nil {
+		t.Fatalf("decode audit data %s: %v", rows[0].Data, err)
+	}
+	if data["from"] != "qa-pilot" || data["to"] != "qa-pilot" {
+		t.Errorf("audit data = %v, want from and to qa-pilot", data)
+	}
+}
+
 func TestPatchTeamRejectsNonAdmin(t *testing.T) {
 	f := newAPIFixture(t)
 	team := f.team("qa-pilot")
-	cookie := f.session(f.user("developer", false))
+	lead := f.user("lead", false)
+	f.member(team.ID, lead.ID, "lead")
+	cookie := f.session(lead)
 
 	rec := f.request(http.MethodPatch, fmt.Sprintf("/api/teams/%d", team.ID), map[string]any{"name": "renamed"}, cookie)
 	assertStatus(t, rec, http.StatusForbidden)
@@ -85,6 +133,9 @@ func TestPatchTeamRejectsEmptyNameAndMissingTeam(t *testing.T) {
 	cookie := f.session(f.user("admin", true))
 
 	rec := f.request(http.MethodPatch, fmt.Sprintf("/api/teams/%d", team.ID), map[string]any{"name": "   "}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+
+	rec = f.request(http.MethodPatch, "/api/teams/not-a-number", map[string]any{"name": "renamed"}, cookie)
 	assertStatus(t, rec, http.StatusBadRequest)
 
 	rec = f.request(http.MethodPatch, "/api/teams/999999", map[string]any{"name": "renamed"}, cookie)
@@ -111,6 +162,25 @@ func TestPatchTeamReportsNameCollision(t *testing.T) {
 	}
 	if got.Name != "alpha" || got.Slug != "alpha" {
 		t.Errorf("team = %+v, want the original alpha name and slug", got)
+	}
+}
+
+func TestPatchTeamReportsSlugCollision(t *testing.T) {
+	f := newAPIFixture(t)
+	f.team("platform")
+	team := f.team("qa team")
+	cookie := f.session(f.user("admin", true))
+
+	// The new name differs from the existing team's, but derives the same slug.
+	rec := f.request(http.MethodPatch, fmt.Sprintf("/api/teams/%d", team.ID), map[string]any{"name": "Platform!"}, cookie)
+	assertStatus(t, rec, http.StatusConflict)
+
+	var got store.Team
+	if err := f.st.DB.WithContext(f.ctx).Take(&got, team.ID).Error; err != nil {
+		t.Fatalf("reload team: %v", err)
+	}
+	if got.Name != "qa team" || got.Slug != "qa team" {
+		t.Errorf("team = %+v, want the original qa team name and slug", got)
 	}
 }
 
@@ -195,7 +265,9 @@ func TestDeleteTeamRemovesTeamAndAudits(t *testing.T) {
 func TestDeleteTeamRejectsNonAdmin(t *testing.T) {
 	f := newAPIFixture(t)
 	team := f.team("temporary")
-	cookie := f.session(f.user("developer", false))
+	lead := f.user("lead", false)
+	f.member(team.ID, lead.ID, "lead")
+	cookie := f.session(lead)
 
 	rec := f.request(http.MethodDelete, fmt.Sprintf("/api/teams/%d", team.ID), nil, cookie)
 	assertStatus(t, rec, http.StatusForbidden)
@@ -207,6 +279,20 @@ func TestDeleteTeamRejectsNonAdmin(t *testing.T) {
 	if count != 1 {
 		t.Errorf("team rows = %d, want the team to remain", count)
 	}
+}
+
+func TestDeleteTeamRejectsInvalidIDAndMissingTeam(t *testing.T) {
+	f := newAPIFixture(t)
+	cookie := f.session(f.user("admin", true))
+
+	rec := f.request(http.MethodDelete, "/api/teams/not-a-number", nil, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+
+	rec = f.request(http.MethodDelete, "/api/teams/0", nil, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+
+	rec = f.request(http.MethodDelete, "/api/teams/999999", nil, cookie)
+	assertStatus(t, rec, http.StatusNotFound)
 }
 
 func TestTeamsReportRepositoryCount(t *testing.T) {

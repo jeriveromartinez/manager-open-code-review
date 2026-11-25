@@ -220,6 +220,15 @@ func teamDTO(t store.TeamWithMembers) teamResponse {
 	return teamResponse{ID: t.ID, Name: t.Name, Slug: t.Slug, Members: members, RepositoryCount: t.RepositoryCount}
 }
 
+// teamSummaryResponse is the rename result: the panel refetches the full team
+// list, so the response omits members rather than claiming an empty list.
+type teamSummaryResponse struct {
+	ID              uint   `json:"id"`
+	Name            string `json:"name"`
+	Slug            string `json:"slug"`
+	RepositoryCount int    `json:"repository_count"`
+}
+
 type userResponse struct {
 	ID        uint   `json:"id"`
 	Login     string `json:"login"`
@@ -649,6 +658,12 @@ func (s *server) patchTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	repositories, err := s.Store.TeamRepositories(r.Context(), uint(teamID))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "count team repositories")
+		return
+	}
+
 	renamed, err := s.Store.RenameTeam(r.Context(), uint(teamID), name)
 	if err != nil {
 		switch {
@@ -662,12 +677,6 @@ func (s *server) patchTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	repositories, err := s.Store.TeamRepositories(r.Context(), uint(teamID))
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "count team repositories")
-		return
-	}
-
 	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(teamID, 10)})
 	actor, _ := auth.UserFrom(r.Context())
 	data := map[string]string{"from": previous.Name, "to": renamed.Name}
@@ -676,11 +685,10 @@ func (s *server) patchTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, teamResponse{
+	writeJSON(w, http.StatusOK, teamSummaryResponse{
 		ID:              renamed.ID,
 		Name:            renamed.Name,
 		Slug:            renamed.Slug,
-		Members:         []teamMemberResponse{},
 		RepositoryCount: len(repositories),
 	})
 }
