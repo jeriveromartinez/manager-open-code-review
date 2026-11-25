@@ -1070,6 +1070,7 @@ func dedupeOccurrences(prID uint, findings []AgentFinding, anchors AnchorProvide
 }
 
 func occurrenceKey(prID uint, f AgentFinding, anchors AnchorProvider) string {
+	citations := identityCitations(f)
 	return strings.Join([]string{
 		strconv.FormatUint(uint64(prID), 10),
 		normalizeCoveragePath(f.Path),
@@ -1078,6 +1079,8 @@ func occurrenceKey(prID uint, f AgentFinding, anchors AnchorProvider) string {
 		findingAnchor(f, anchors),
 		strconv.Itoa(f.StartLine),
 		strconv.Itoa(f.EndLine),
+		store.NormalizeFindingScope(f.Scope, citations),
+		store.FindingCitationIdentity(citations),
 	}, "\x00")
 }
 
@@ -1091,7 +1094,7 @@ func nativeFindings(comments []nativeComment) []AgentFinding {
 		if end < start {
 			end = start
 		}
-		findings = append(findings, AgentFinding{
+		finding := AgentFinding{
 			Path:         c.Path,
 			Severity:     mapNativeSeverity(c.Severity),
 			Category:     mapNativeCategory(c.Category),
@@ -1101,7 +1104,16 @@ func nativeFindings(comments []nativeComment) []AgentFinding {
 			ExistingCode: strings.TrimSpace(c.ExistingCode),
 			StartLine:    start,
 			EndLine:      end,
-		})
+			Scope:        store.FindingScopeFile,
+		}
+		// Every regular finding carries its head-side citation. A comment with
+		// no usable range keeps the legacy path-only representation.
+		if path := normalizeCoveragePath(c.Path); path != "" && start > 0 {
+			finding.Citations = []store.FindingCitation{{
+				Path: path, StartLine: start, EndLine: end, Side: store.FindingCitationHead,
+			}}
+		}
+		findings = append(findings, finding)
 	}
 	return findings
 }

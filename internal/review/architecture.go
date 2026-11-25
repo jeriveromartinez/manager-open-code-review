@@ -687,8 +687,221 @@ func containsAny(value string, needles []string) bool {
 	return false
 }
 
-// gitArchitectureStats reads the numstat totals of the reviewed range. A binary
-// file contributes no line counts, matching git's "-" markers.
+// architectureCitationPattern finds the path:line references the analysis
+// report already writes in its evidence. Only paths with a source or document
+// extension match, and the prefix keeps URLs and prose like "note:3" out.
+var architectureCitationPattern = regexp.MustCompile(
+	`(?:^|[\s(\x60"'\[])([A-Za-z0-9_./-]+\.(?:go|ts|tsx|js|jsx|mjs|cjs|vue|svelte|py|rs|java|kt|kts|rb|php|cs|c|cc|cpp|h|hpp|swift|scala|ex|exs|dart|sql|yaml|yml|json|toml|mod|sum|proto|graphql|gql|md|sh)):(\d+)(?:-(\d+))?`)
+
+// architectureEvidenceCitations extracts every path:line reference from the
+// accepted report. The analysis has no structured citation field, so the
+// report's own wording is the source; findings whose evidence spans files get
+// scope files and no single-path assumption.
+func architectureEvidenceCitations(verdict store.ArchitectureVerdict) []store.FindingCitation {
+	var text strings.Builder
+	text.WriteString(verdict.Evidence.Markdown)
+	for _, dimension := range verdict.Dimensions {
+		text.WriteString("\n")
+		text.WriteString(dimension.Name)
+		text.WriteString("\n")
+		text.WriteString(dimension.Content)
+	}
+	for _, items := range [][]string{
+		verdict.BehaviorChanges, verdict.Risks, verdict.Alternatives,
+		verdict.AcceptanceConditions, verdict.Uncertainties,
+	} {
+		for _, item := range items {
+			text.WriteString("\n")
+			text.WriteString(item)
+		}
+	}
+
+	matches := architectureCitationPattern.FindAllStringSubmatch(text.String(), -1)
+	sides := architectureCitationSides(verdict)
+	citations := make([]store.FindingCitation, 0, len(matches))
+	for _, match := range matches {
+		start, err := strconv.Atoi(match[2])
+		if err != nil || start <= 0 {
+			continue
+		}
+		// A citation is only anchored to the current comparison when the path
+		// belongs to the analysed scope. Without scope evidence there is no
+		// reliable side to publish.
+		path := normalizeCoveragePath(match[1])
+		side, ok := sides[path]
+		if !ok {
+			continue
+		}
+		end := start
+		if match[3] != "" {
+			if parsed, parseErr := strconv.Atoi(match[3]); parseErr == nil {
+				end = parsed
+			}
+		}
+		citations = append(citations, store.FindingCitation{
+			Path: path, StartLine: start, EndLine: end, Side: side,
+		})
+	}
+	return store.NormalizeFindingCitations(citations)
+}
+
+// architectureCitationSides maps every comparable path of the verdict to the
+// side its lines belong to. A deleted file exists only in the base, so its
+// evidence is a LEFT citation; binary, submodule and policy exclusions are not
+// current code and are left out entirely.
+func architectureCitationSides(verdict store.ArchitectureVerdict) map[string]string {
+	sides := make(map[string]string)
+	add := func(file store.ArchitectureScopeFile, includeHead bool) {
+		path := normalizeCoveragePath(file.Path)
+		if path == "" {
+			return
+		}
+		if isBaseOnlyScopeFile(file) {
+			sides[path] = store.FindingCitationBase
+			return
+		}
+		if includeHead {
+			sides[path] = store.FindingCitationHead
+		}
+	}
+	for _, file := range verdict.Scope.Included {
+		add(file, true)
+	}
+	for _, file := range verdict.Scope.Excluded {
+		add(file, false)
+	}
+	for _, file := range verdict.Evidence.EngineScope {
+		add(file, file.Reason == "")
+	}
+	return sides
+}
+
+func isBaseOnlyScopeFile(file store.ArchitectureScopeFile) bool {
+	return strings.EqualFold(file.Kind, "deleted") || strings.EqualFold(file.Reason, "deleted")
+}
+
+// ArchitectureFindings turns the accepted architectural verdict into at most
+// one advisory design finding (#162). It is a producer only: the finding goes
+// through the normal identity and publication path, but its advisory flag
+// keeps it out of the check, the inline comments and the verifier decisions.
+func ArchitectureFindings(verdict store.ArchitectureVerdict) []AgentFinding {
+	if !verdict.Requested ||
+		(verdict.Status != store.ArchitectureComplete && verdict.Status != store.ArchitecturePartial) {
+		return nil
+	}
+	title := architectureFindingTitle(verdict)
+	if title == "" {
+		return nil
+	}
+	citations := architectureEvidenceCitations(verdict)
+
+	finding := AgentFinding{
+		Title:     title,
+		Body:      architectureFindingBody(verdict),
+		Severity:  "minor",
+		Category:  "design",
+		Scope:     store.FindingScopePR,
+		Citations: citations,
+		Advisory:  true,
+	}
+	if len(citations) > 0 {
+		first := citations[0]
+		finding.Path = first.Path
+		finding.StartLine, finding.EndLine = first.StartLine, first.EndLine
+		finding.Scope = store.NormalizeFindingScope("", citations)
+	}
+	return []AgentFinding{finding}
+}
+
+func architectureFindingTitle(verdict store.ArchitectureVerdict) string {
+	items := []string{}
+	for _, group := range [][]string{
+		verdict.Risks, verdict.AcceptanceConditions, verdict.BehaviorChanges,
+		verdict.Uncertainties,
+	} {
+		items = append(items, group...)
+	}
+	if len(items) == 0 && strings.TrimSpace(verdict.Recommendation) != "" {
+		items = strings.Split(verdict.Recommendation, "\n")
+	}
+	for _, item := range items {
+		if title := strings.TrimSpace(cleanArchitectureItem(item)); title != "" {
+			return "Arquitectura: " + truncateArchitectureTitle(title)
+		}
+	}
+	return ""
+}
+
+func truncateArchitectureTitle(title string) string {
+	const limit = 110
+	if len([]rune(title)) <= limit {
+		return title
+	}
+	return string([]rune(title)[:limit-1]) + "…"
+}
+
+func architectureFindingBody(verdict store.ArchitectureVerdict) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Análisis arquitectónico %s en %s.",
+		architectureFindingStatus(verdict.Status), architectureFindingMode(verdict.Mode))
+	if len(verdict.Signals) > 0 {
+		fmt.Fprintf(&b, " Señales: %s.", strings.Join(verdict.Signals, ", "))
+	}
+	if len(verdict.Dimensions) > 0 {
+		names := make([]string, 0, len(verdict.Dimensions))
+		for _, dimension := range verdict.Dimensions {
+			names = append(names, dimension.Name)
+		}
+		fmt.Fprintf(&b, "\n\nDimensiones: %s.", strings.Join(names, " · "))
+	}
+	for _, group := range []struct {
+		label string
+		items []string
+	}{
+		{"Comportamiento antes/después", verdict.BehaviorChanges},
+		{"Riesgos", verdict.Risks},
+		{"Alternativas", verdict.Alternatives},
+		{"Condiciones de aceptación", verdict.AcceptanceConditions},
+		{"Incertidumbres", verdict.Uncertainties},
+	} {
+		writeArchitectureFindingItems(&b, group.label, group.items)
+	}
+	if recommendation := strings.TrimSpace(verdict.Recommendation); recommendation != "" {
+		fmt.Fprintf(&b, "\n\nRecomendación: %s", recommendation)
+	}
+	return b.String()
+}
+
+func writeArchitectureFindingItems(b *strings.Builder, label string, items []string) {
+	if len(items) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n\n%s:\n", label)
+	for _, item := range items {
+		fmt.Fprintf(b, "- %s\n", item)
+	}
+}
+
+func architectureFindingStatus(status string) string {
+	switch status {
+	case store.ArchitectureComplete:
+		return "completo"
+	case store.ArchitecturePartial:
+		return "parcial"
+	case store.ArchitectureInconclusive:
+		return "inconcluso"
+	default:
+		return status
+	}
+}
+
+func architectureFindingMode(mode string) string {
+	if mode == store.ArchitectureAnalysisObservation {
+		return "modo observación"
+	}
+	return mode
+}
+
 func gitArchitectureStats(ctx context.Context, dir, baseRef, headRef string) (architectureChangeStats, error) {
 	raw, err := git(ctx, dir, "diff --numstat", "--no-pager", "diff", "--numstat", "-z", baseRef, headRef)
 	if err != nil {

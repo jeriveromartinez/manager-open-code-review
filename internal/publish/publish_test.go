@@ -22,6 +22,7 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	ghapp "github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/publish"
+	"github.com/jeriveromartinez/qa-control-center/internal/review"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
 )
@@ -96,13 +97,16 @@ type fakeGitHub struct {
 	// reviewCommentsWithoutLine mimics GitHub returning a just-created review's
 	// comments with no line fields, only their position.
 	reviewCommentsWithoutLine bool
-	failResolveOnce           bool
-	failCheckOnce             bool
-	failReviewCommentsOnce    bool
-	reviewRequests            []reviewRequestCall
-	reviewRequestAttempts     int
-	reviewRequestStatus       int
-	reviewRequestFailures     int
+	// reviewCreateStatus makes POST /reviews fail with that status, as GitHub
+	// does when a comment cannot be anchored to the diff.
+	reviewCreateStatus     int
+	failResolveOnce        bool
+	failCheckOnce          bool
+	failReviewCommentsOnce bool
+	reviewRequests         []reviewRequestCall
+	reviewRequestAttempts  int
+	reviewRequestStatus    int
+	reviewRequestFailures  int
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -308,6 +312,10 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(comments, http.StatusOK)
 
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/pulls/7/reviews":
+		if g.reviewCreateStatus != 0 {
+			http.Error(w, "review rejected", g.reviewCreateStatus)
+			return
+		}
 		var review fakeReview
 		_ = json.Unmarshal(body, &review)
 		g.nextReviewID++
@@ -2838,5 +2846,354 @@ func TestPublishReviewRequestWithoutTargetIsRecorded(t *testing.T) {
 	}
 	if saved.Status != store.ReviewRequestRejected || !strings.Contains(saved.LastError, "no reviewer") {
 		t.Errorf("request = %+v, want a rejected row that names the missing target", saved)
+	}
+}
+
+func setFindingEvidence(t *testing.T, st *store.Store, f store.Finding, scope string, citations []store.FindingCitation) store.Finding {
+	t.Helper()
+	f.Scope = scope
+	f.Citations = store.EncodeFindingCitations(citations)
+	saved, err := st.UpsertFinding(context.Background(), f)
+	if err != nil {
+		t.Fatalf("set evidence of finding %s: %v", f.ID, err)
+	}
+	return saved
+}
+
+func TestPublishCrossFileFindingOnceInSummary(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	design := seedFinding(t, st, pr.ID, run.ID, "diseno", 2, "major", store.FindingOpen)
+	design.Title = "Límite entre módulos"
+	design = setFindingEvidence(t, st, design, store.FindingScopeFiles, []store.FindingCitation{
+		{Path: "src/a.go", StartLine: 2, EndLine: 2},
+		{Path: "src/b.go", StartLine: 10, EndLine: 12},
+	})
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	for i := 0; i < 2; i++ {
+		if err := w.Publish(ctx, run.ID); err != nil {
+			t.Fatalf("Publish() #%d error = %v", i+1, err)
+		}
+	}
+
+	gh.mu.Lock()
+	reviews := len(gh.reviews)
+	gh.mu.Unlock()
+	if reviews != 0 {
+		t.Fatalf("reviews = %d, want 0: a finding that spans files has no single inline anchor", reviews)
+	}
+	bodies := summaryBodies(t, gh)
+	if len(bodies) != 1 {
+		t.Fatalf("summary comments = %d, want 1", len(bodies))
+	}
+	section := summaryFindingsSection(t, bodies[0])
+	if got := strings.Count(section, "Límite entre módulos"); got != 1 {
+		t.Errorf("finding appears %d times in the summary, want once: %q", got, section)
+	}
+	for _, want := range []string{"src/a.go:2", "src/b.go:10-12"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("summary section %q does not cite %q", section, want)
+		}
+	}
+	saved, err := st.Finding(ctx, design.ID)
+	if err != nil {
+		t.Fatalf("Finding() error = %v", err)
+	}
+	if saved.GithubCommentID != 0 {
+		t.Errorf("github comment id = %d, want no inline comment", saved.GithubCommentID)
+	}
+	gh.mu.Lock()
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	gh.mu.Unlock()
+	for _, patch := range patches {
+		if len(patch.Output.Annotations) != 0 {
+			t.Errorf("check annotations = %+v, want none for a cross-file finding", patch.Output.Annotations)
+		}
+	}
+}
+
+func TestPublishDeletionOnlyFindingInSummary(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	deletion := seedFinding(t, st, pr.ID, run.ID, "eliminacion", 2, "major", store.FindingOpen)
+	deletion.Title = "Se perdió la validación"
+	deletion = setFindingEvidence(t, st, deletion, store.FindingScopeFile, []store.FindingCitation{
+		{Path: "src/a.go", StartLine: 2, EndLine: 2, Side: store.FindingCitationBase},
+	})
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	reviews := len(gh.reviews)
+	gh.mu.Unlock()
+	if reviews != 0 {
+		t.Fatalf("reviews = %d, want 0: removed code cannot be anchored inline", reviews)
+	}
+	bodies := summaryBodies(t, gh)
+	if len(bodies) != 1 {
+		t.Fatalf("summary comments = %d, want 1", len(bodies))
+	}
+	section := summaryFindingsSection(t, bodies[0])
+	if !strings.Contains(section, "src/a.go:2 (código anterior)") {
+		t.Errorf("summary section %q does not keep the previous-code citation", section)
+	}
+	if got := strings.Count(section, "Se perdió la validación"); got != 1 {
+		t.Errorf("finding appears %d times in the summary, want once", got)
+	}
+	gh.mu.Lock()
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	gh.mu.Unlock()
+	for _, patch := range patches {
+		if len(patch.Output.Annotations) != 0 {
+			t.Errorf("check annotations = %+v, want none for a deletion-only finding", patch.Output.Annotations)
+		}
+	}
+}
+
+func TestPublishInlineRejectionFallsBackToSummary(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	finding := seedFinding(t, st, pr.ID, run.ID, "rechazado", 2, "major", store.FindingOpen)
+	finding.Title = "Comentario rechazado"
+	finding = setFindingEvidence(t, st, finding, store.FindingScopeFile, []store.FindingCitation{
+		{Path: "src/a.go", StartLine: 2, EndLine: 2},
+	})
+	if err := st.DB.WithContext(ctx).Model(&store.Finding{}).Where("id = ?", finding.ID).
+		Updates(map[string]any{
+			"status": store.FindingOpen, "triage_verdict": store.VerdictConfirmed,
+			"triaged_by": "alice", "triage_source": store.TriageSourceHuman,
+		}).Error; err != nil {
+		t.Fatalf("record human decision: %v", err)
+	}
+	gh := newFakeGitHub(t)
+	gh.reviewCreateStatus = http.StatusUnprocessableEntity
+	w, _ := newPublishWorker(t, st, gh)
+
+	for i := 0; i < 2; i++ {
+		if err := w.Publish(ctx, run.ID); err != nil {
+			t.Fatalf("Publish() #%d error = %v", i+1, err)
+		}
+	}
+
+	gh.mu.Lock()
+	reviews, comments := len(gh.reviews), len(gh.comments)
+	gh.mu.Unlock()
+	if reviews != 0 {
+		t.Fatalf("reviews = %d, want 0 after GitHub rejected the review", reviews)
+	}
+	if comments != 1 {
+		t.Fatalf("summary comments = %d, want one edited summary", comments)
+	}
+	bodies := summaryBodies(t, gh)
+	section := summaryFindingsSection(t, bodies[0])
+	if got := strings.Count(section, "Comentario rechazado"); got != 1 {
+		t.Errorf("finding appears %d times in the summary, want once: %q", got, section)
+	}
+	saved, err := st.Finding(ctx, finding.ID)
+	if err != nil {
+		t.Fatalf("Finding() error = %v", err)
+	}
+	if saved.GithubCommentID != 0 {
+		t.Errorf("github comment id = %d, want no inline comment after rejection", saved.GithubCommentID)
+	}
+	if saved.Status != store.FindingOpen || saved.TriageVerdict != store.VerdictConfirmed ||
+		saved.TriagedBy != "alice" {
+		t.Errorf("human verdict was lost after rejection: %+v", saved)
+	}
+}
+
+func TestPublishRegularFindingWithCitationInlineOnce(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	finding := seedFinding(t, st, pr.ID, run.ID, "cita", 2, "major", store.FindingOpen)
+	finding = setFindingEvidence(t, st, finding, store.FindingScopeFile, []store.FindingCitation{
+		{Path: "src/a.go", StartLine: 2, EndLine: 2, Side: store.FindingCitationHead},
+	})
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	reviews := len(gh.reviews)
+	gh.mu.Unlock()
+	if reviews != 1 || len(gh.reviews[0].Comments) != 1 {
+		t.Fatalf("reviews = %+v, want one inline comment", gh.reviews)
+	}
+	if !strings.Contains(gh.reviews[0].Comments[0].Body, "Citas: src/a.go:2") {
+		t.Errorf("inline body = %q, want the citation", gh.reviews[0].Comments[0].Body)
+	}
+	bodies := summaryBodies(t, gh)
+	if section := summaryFindingsSection(t, bodies[0]); strings.Contains(section, "Título cita") {
+		t.Errorf("summary duplicates an inline finding: %q", section)
+	}
+}
+
+func TestPublishArchitectureFindingOnceInSummary(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "nit")
+	verdict := store.ArchitectureVerdict{
+		Requested: true, Status: store.ArchitectureComplete, Mode: store.ArchitectureAnalysisObservation,
+		Signals: []string{"module_boundary"},
+		Scope: store.ArchitectureScope{Included: []store.ArchitectureScopeFile{
+			{Path: "src/a.go"}, {Path: "src/b.go"},
+		}},
+		Risks: []string{
+			"El contrato cambia en `src/a.go:2` y `src/b.go:10-12`",
+		},
+		Recommendation: "Separar el límite entre los módulos",
+	}
+	if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+		Update("architecture_analysis", datatypes.JSON(store.ArchitectureVerdictJSON(verdict))).Error; err != nil {
+		t.Fatalf("seed architecture analysis: %v", err)
+	}
+	produced := review.ArchitectureFindings(verdict)
+	if len(produced) != 1 {
+		t.Fatalf("producer findings = %d, want 1", len(produced))
+	}
+	first, _ := review.Reconcile(nil, review.AgentOutput{Findings: produced}, run.ID, true, pr.ID, nil)
+	if len(first) != 1 {
+		t.Fatalf("reconciled findings = %d, want 1", len(first))
+	}
+	if _, err := st.UpsertFinding(ctx, first[0]); err != nil {
+		t.Fatalf("persist produced finding: %v", err)
+	}
+	second, _ := review.Reconcile(first, review.AgentOutput{Findings: produced}, run.ID+1, true, pr.ID, nil)
+	if len(second) != 1 || second[0].ID != first[0].ID {
+		t.Fatalf("identity changed across runs: %+v", second)
+	}
+
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+	for i := 0; i < 2; i++ {
+		if err := w.Publish(ctx, run.ID); err != nil {
+			t.Fatalf("Publish() #%d error = %v", i+1, err)
+		}
+	}
+
+	gh.mu.Lock()
+	reviews := len(gh.reviews)
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	gh.mu.Unlock()
+	if reviews != 0 {
+		t.Fatalf("reviews = %d, want no inline comment for an advisory design finding", reviews)
+	}
+	for _, patch := range patches {
+		if patch.Conclusion == "failure" {
+			t.Error("advisory finding blocked the check")
+		}
+		if len(patch.Output.Annotations) != 0 {
+			t.Errorf("annotations = %+v, want none", patch.Output.Annotations)
+		}
+	}
+	bodies := summaryBodies(t, gh)
+	if len(bodies) != 1 {
+		t.Fatalf("summary comments = %d, want 1", len(bodies))
+	}
+	section := summaryFindingsSection(t, bodies[0])
+	if got := strings.Count(section, produced[0].Title); got != 1 {
+		t.Errorf("advisory finding appears %d times, want once: %q", got, section)
+	}
+	for _, want := range []string{"src/a.go:2", "src/b.go:10-12", "observación"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("summary section %q does not contain %q", section, want)
+		}
+	}
+	if got := strings.Count(section, "- "+verdict.Risks[0]); got != 1 {
+		t.Errorf("risk bullet appears %d times in the advisory finding, want once", got)
+	}
+	if strings.Contains(bodies[0], "**Riesgos y compatibilidad:**") {
+		t.Error("the architecture block repeats the risk list already carried by the advisory finding")
+	}
+	saved, err := st.Finding(ctx, first[0].ID)
+	if err != nil {
+		t.Fatalf("Finding() error = %v", err)
+	}
+	if !saved.Advisory || saved.GithubCommentID != 0 {
+		t.Errorf("saved advisory/comment = %v/%d, want true/0", saved.Advisory, saved.GithubCommentID)
+	}
+	if len(saved.Verification) != 0 {
+		t.Errorf("advisory verification = %s, want no automatic verdict", saved.Verification)
+	}
+}
+
+func TestPublishCombinedDesignFindingInlineRejection(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+
+	design := seedFinding(t, st, pr.ID, run.ID, "combinado", 2, "major", store.FindingOpen)
+	design.Title = "Diseño combinado"
+	design = setFindingEvidence(t, st, design, store.FindingScopeFiles, []store.FindingCitation{
+		{Path: "src/a.go", StartLine: 2, EndLine: 2, Side: store.FindingCitationHead},
+		{Path: "src/b.go", StartLine: 10, EndLine: 10, Side: store.FindingCitationBase},
+	})
+	seedFinding(t, st, pr.ID, run.ID, "normal", 2, "major", store.FindingOpen)
+
+	advisory := store.Finding{
+		ID: "observacion", PullRequestID: pr.ID, Fingerprint: "fp-observacion",
+		Severity: "minor", Category: "design", Title: "Observación arquitectónica",
+		Status: store.FindingOpen, Scope: store.FindingScopePR, Advisory: true,
+		FirstSeenRunID: run.ID, LastSeenRunID: run.ID,
+	}
+	if _, err := st.UpsertFinding(ctx, advisory); err != nil {
+		t.Fatalf("persist advisory finding: %v", err)
+	}
+
+	gh := newFakeGitHub(t)
+	gh.reviewCreateStatus = http.StatusUnprocessableEntity
+	w, _ := newPublishWorker(t, st, gh)
+	for i := 0; i < 2; i++ {
+		if err := w.Publish(ctx, run.ID); err != nil {
+			t.Fatalf("Publish() #%d error = %v", i+1, err)
+		}
+	}
+
+	gh.mu.Lock()
+	reviews, comments := len(gh.reviews), len(gh.comments)
+	gh.mu.Unlock()
+	if reviews != 0 {
+		t.Fatalf("reviews = %d, want the rejected inline review not to exist", reviews)
+	}
+	if comments != 1 {
+		t.Fatalf("summary comments = %d, want one edited summary", comments)
+	}
+	bodies := summaryBodies(t, gh)
+	section := summaryFindingsSection(t, bodies[0])
+	for _, want := range []string{
+		"Diseño combinado", "src/a.go:2, src/b.go:10 (código anterior)",
+		"Título normal", "Observación arquitectónica",
+	} {
+		if got := strings.Count(section, want); got != 1 {
+			t.Errorf("%q appears %d times in the summary, want once: %q", want, got, section)
+		}
+	}
+	savedAdvisory, err := st.Finding(ctx, advisory.ID)
+	if err != nil {
+		t.Fatalf("Finding(advisory) error = %v", err)
+	}
+	if savedAdvisory.GithubCommentID != 0 || len(savedAdvisory.Verification) != 0 {
+		t.Errorf("advisory = comment %d / verification %s, want no inline comment and no verdict",
+			savedAdvisory.GithubCommentID, savedAdvisory.Verification)
+	}
+	savedDesign, err := st.Finding(ctx, design.ID)
+	if err != nil {
+		t.Fatalf("Finding(design) error = %v", err)
+	}
+	if savedDesign.GithubCommentID != 0 {
+		t.Errorf("design finding comment = %d, want summary-only", savedDesign.GithubCommentID)
 	}
 }

@@ -178,6 +178,27 @@ function verificationReason(finding: Finding): string {
   return (finding.verification.reason ?? '').trim()
 }
 
+// Un hallazgo de diseño muestra todas sus citas; sin citas conserva la
+// ubicación histórica path:start–end.
+function findingLocation(finding: Finding): string {
+  const citations = finding.citations ?? []
+  if (citations.length > 0) {
+    return citations
+      .map((citation) => {
+        const range = `${citation.path}:${citation.start_line}–${citation.end_line}`
+        return citation.side === 'LEFT' ? `${range} (código anterior)` : range
+      })
+      .join(' · ')
+  }
+  if (!finding.path) {
+    return finding.scope === 'pr' ? 'todo el PR' : 'sin ruta'
+  }
+  if (finding.start_line <= 0) {
+    return finding.path
+  }
+  return `${finding.path}:${finding.start_line}–${finding.end_line}`
+}
+
 function coverageCount(key: string): number {
   const value = latestRun.value?.coverage?.[key]
   return typeof value === 'number' ? value : 0
@@ -761,7 +782,8 @@ onBeforeUnmount(() => {
                 <div class="finding__meta">
                   <h4 class="finding__title">{{ finding.title }}</h4>
                   <p class="finding__location">
-                    <code>{{ finding.path }}:{{ finding.start_line }}–{{ finding.end_line }}</code>
+                    <code>{{ findingLocation(finding) }}</code>
+                    <span v-if="finding.advisory" class="finding__label">observación</span>
                   </p>
                 </div>
                 <p class="finding__body">{{ finding.body }}</p>
@@ -832,7 +854,7 @@ onBeforeUnmount(() => {
               <div class="finding__meta">
                 <h4 class="finding__title">{{ finding.title }}</h4>
                 <p class="finding__location">
-                  <code>{{ finding.path }}:{{ finding.start_line }}–{{ finding.end_line }}</code>
+                  <code>{{ findingLocation(finding) }}</code>
                 </p>
               </div>
               <p v-if="verificationLabel(finding)" class="finding__verification" data-verification>
@@ -874,7 +896,7 @@ onBeforeUnmount(() => {
         <p class="dialog__text">
           <strong>{{ confirming.finding.title }}</strong>
           <br />
-          <code>{{ confirming.finding.path }}:{{ confirming.finding.start_line }}–{{ confirming.finding.end_line }}</code>
+          <code>{{ findingLocation(confirming.finding) }}</code>
         </p>
         <label v-if="confirming.action === 'withdraw'" class="field dialog__field">
           <span class="field__label">Motivo (queda en la auditoría)</span>

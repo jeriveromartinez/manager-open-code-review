@@ -179,7 +179,7 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 	counts := map[string]int{"blocker": 0, "major": 0, "minor": 0, "nit": 0}
 	// Severity counts describe the current open findings of the PR.
 	for _, f := range p.findingSnapshot {
-		if f.Status != store.FindingOpen {
+		if f.Status != store.FindingOpen || f.Advisory {
 			continue
 		}
 		if _, ok := counts[f.Severity]; ok {
@@ -226,7 +226,10 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 	b.WriteString(p.sanitize(p.run.Summary))
 	b.WriteString("\n")
 
-	b.WriteString(p.buildArchitectureBlock())
+	// When the advisory design finding carries the verdict's items, the block
+	// only renders the surrounding evidence so the summary does not repeat
+	// the same risks and conditions twice.
+	b.WriteString(p.buildArchitectureBlock(p.hasAdvisoryFindings()))
 
 	if missing := p.findingsWithoutInlineComment(findings); len(missing) > 0 {
 		b.WriteString(fmt.Sprintf("\n**Hallazgos sin comentario inline (%d):**\n", len(missing)))
@@ -234,6 +237,9 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 			severity := f.Severity
 			if severity == "" {
 				severity = "sin severidad"
+			}
+			if f.Advisory {
+				severity += " · observación"
 			}
 			fmt.Fprintf(&b, "\n- **%s** · `%s` — %s\n",
 				p.sanitize(severity), p.findingLocation(f), p.sanitize(f.Title))
@@ -252,7 +258,7 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 // buildArchitectureBlock renders the observational architectural verdict of
 // the comparison. It is evidence only: no check, status or inline decision
 // reads it. A run that did not ask for the analysis renders nothing.
-func (p *publishContext) buildArchitectureBlock() string {
+func (p *publishContext) buildArchitectureBlock(itemsRendered bool) string {
 	verdict := store.DecodeArchitectureVerdict(p.run.ArchitectureAnalysis)
 	// The trusted baseline runs even when the OCR report was not requested, so
 	// its evidence is shown on its own.
@@ -286,12 +292,14 @@ func (p *publishContext) buildArchitectureBlock() string {
 		fmt.Fprintf(&b, "\n**Dimensiones evaluadas:** %s\n", strings.Join(names, " · "))
 	}
 	writeArchitectureBaseline(&b, verdict.Baseline, p.sanitize)
-	writeArchitectureItems(&b, "Comportamiento antes/después", verdict.BehaviorChanges, p.sanitize)
-	writeArchitectureItems(&b, "Riesgos y compatibilidad", verdict.Risks, p.sanitize)
-	writeArchitectureItems(&b, "Alternativas", verdict.Alternatives, p.sanitize)
-	writeArchitectureItems(&b, "Condiciones de aceptación", verdict.AcceptanceConditions, p.sanitize)
-	writeArchitectureItems(&b, "Incertidumbres", verdict.Uncertainties, p.sanitize)
-	if recommendation := strings.TrimSpace(verdict.Recommendation); recommendation != "" {
+	if !itemsRendered {
+		writeArchitectureItems(&b, "Comportamiento antes/después", verdict.BehaviorChanges, p.sanitize)
+		writeArchitectureItems(&b, "Riesgos y compatibilidad", verdict.Risks, p.sanitize)
+		writeArchitectureItems(&b, "Alternativas", verdict.Alternatives, p.sanitize)
+		writeArchitectureItems(&b, "Condiciones de aceptación", verdict.AcceptanceConditions, p.sanitize)
+		writeArchitectureItems(&b, "Incertidumbres", verdict.Uncertainties, p.sanitize)
+	}
+	if recommendation := strings.TrimSpace(verdict.Recommendation); recommendation != "" && !itemsRendered {
 		fmt.Fprintf(&b, "\n**Recomendación original:** %s\n", p.sanitize(recommendation))
 	}
 	if verdict.Evidence.SchemaVersion != "" || len(verdict.Evidence.CitedObservationIDs) > 0 {
@@ -426,6 +434,15 @@ func (p *publishContext) verificationApplied() bool {
 		(p.run.VerifySessionID != "" || p.hasVerifierTriage())
 }
 
+func (p *publishContext) hasAdvisoryFindings() bool {
+	for _, f := range p.findingSnapshot {
+		if f.Advisory && f.Status == store.FindingOpen {
+			return true
+		}
+	}
+	return false
+}
+
 // inlineAllowed is the single predicate the summary and the inline review share:
 // once the verifier's decisions are applied, only a finding confirmed with
 // evidence that still matches this head may be published inline.
@@ -454,7 +471,7 @@ func (p *publishContext) buildVerificationBlock() string {
 	var validated, uncertain []store.Finding
 	dismissed := 0
 	for _, f := range p.findingSnapshot {
-		if f.TriageSource == store.TriageSourceHuman {
+		if f.TriageSource == store.TriageSourceHuman || f.Advisory {
 			continue
 		}
 		switch p.findingVerdict(f) {
@@ -563,7 +580,12 @@ func (p *publishContext) panelLink() string {
 func (p *publishContext) findingsWithoutInlineComment(findings []store.Finding) []store.Finding {
 	missing := make([]store.Finding, 0)
 	for _, f := range findings {
-		if f.Status != store.FindingOpen || f.GithubCommentID != 0 || !p.inlineAllowed(f) {
+		if f.Status != store.FindingOpen || f.GithubCommentID != 0 {
+			continue
+		}
+		// Advisory evidence is never posted inline, so the summary is its one
+		// GitHub surface regardless of the verifier's inline gate.
+		if !f.Advisory && !p.inlineAllowed(f) {
 			continue
 		}
 		missing = append(missing, f)
@@ -583,14 +605,34 @@ func (p *publishContext) findingsWithoutInlineComment(findings []store.Finding) 
 	return missing
 }
 
-// findingLocation renders path:start-end, path:start or the bare path.
+// findingLocation renders every citation of the finding. A design finding that
+// spans files lists all of them; a single path keeps the historical
+// path:start-end form. Citations from the base side are marked as previous
+// code because their line numbers belong to the removed version.
 func (p *publishContext) findingLocation(f store.Finding) string {
-	path := p.sanitize(f.Path)
+	if citations := store.DecodeFindingCitations(f.Citations); len(citations) > 0 {
+		return p.citationLocations(citations)
+	}
+	return p.pathRange(f.Path, f.StartLine, f.EndLine)
+}
+
+func (p *publishContext) citationLocations(citations []store.FindingCitation) string {
+	parts := make([]string, 0, len(citations))
+	for _, citation := range citations {
+		location := p.pathRange(citation.Path, citation.StartLine, citation.EndLine)
+		if citation.Side == store.FindingCitationBase {
+			location += " (código anterior)"
+		}
+		parts = append(parts, location)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (p *publishContext) pathRange(rawPath string, start, end int) string {
+	path := p.sanitize(rawPath)
 	if path == "" {
 		return "sin ruta"
 	}
-	start := f.StartLine
-	end := f.EndLine
 	if start <= 0 {
 		return path
 	}

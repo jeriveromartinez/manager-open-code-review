@@ -615,3 +615,244 @@ func equalSets(a, b map[string]bool) bool {
 	}
 	return true
 }
+
+func TestFingerprintUsesCitationsWithoutCitationLines(t *testing.T) {
+	base := AgentFinding{
+		Path: "src/a.go", Category: "design", Title: "Boundary", StartLine: 10, EndLine: 10,
+		Scope: store.FindingScopeFiles,
+		Citations: []store.FindingCitation{
+			{Path: "src/a.go", StartLine: 10, EndLine: 10},
+			{Path: "src/b.go", StartLine: 20, EndLine: 20},
+		},
+	}
+	single := base
+	single.Scope = store.FindingScopeFile
+	single.Citations = base.Citations[:1]
+
+	if Fingerprint(9, base, nil, 0) == Fingerprint(9, single, nil, 0) {
+		t.Fatal("a finding that spans files shares the identity of a single-file finding")
+	}
+
+	reordered := base
+	reordered.Citations = []store.FindingCitation{base.Citations[1], base.Citations[0]}
+	if Fingerprint(9, base, nil, 0) != Fingerprint(9, reordered, nil, 0) {
+		t.Fatal("fingerprint depends on citation order")
+	}
+
+	// A push shifts every cited line; the finding keeps its identity so its
+	// comment, thread and audit follow it.
+	shifted := base
+	shifted.StartLine, shifted.EndLine = 14, 14
+	shifted.Citations = []store.FindingCitation{
+		{Path: "src/a.go", StartLine: 14, EndLine: 14},
+		{Path: "src/b.go", StartLine: 26, EndLine: 26},
+	}
+	if Fingerprint(9, base, nil, 0) != Fingerprint(9, shifted, nil, 0) {
+		t.Fatal("fingerprint changed when only citation lines moved")
+	}
+}
+
+func TestReconcileKeepsMultiFileFindingIdentityAndAudit(t *testing.T) {
+	firstFinding := AgentFinding{
+		Path: "internal/a.go", Severity: "major", Category: "design", Title: "Divide el límite",
+		StartLine: 10, EndLine: 10, Scope: store.FindingScopeFiles,
+		Citations: []store.FindingCitation{
+			{Path: "internal/a.go", StartLine: 10, EndLine: 10},
+			{Path: "internal/b.go", StartLine: 20, EndLine: 20, Side: store.FindingCitationHead},
+		},
+	}
+	first, _ := Reconcile(nil, AgentOutput{Findings: []AgentFinding{firstFinding}}, 1, true, 9, nil)
+	if len(first) != 1 {
+		t.Fatalf("first upserts = %d, want 1", len(first))
+	}
+	first[0].TriageVerdict = store.VerdictConfirmed
+	first[0].TriagedBy = "alice"
+	first[0].TriageSource = store.TriageSourceHuman
+
+	shifted := firstFinding
+	shifted.StartLine, shifted.EndLine = 14, 14
+	shifted.Citations = []store.FindingCitation{
+		{Path: "internal/a.go", StartLine: 14, EndLine: 14},
+		{Path: "internal/b.go", StartLine: 26, EndLine: 26},
+	}
+	second, _ := Reconcile(first, AgentOutput{Findings: []AgentFinding{shifted}}, 2, true, 9, nil)
+	if len(second) != 1 {
+		t.Fatalf("second upserts = %d, want 1", len(second))
+	}
+	if second[0].ID != first[0].ID {
+		t.Fatalf("identity changed across runs: %s != %s", second[0].ID, first[0].ID)
+	}
+	if second[0].FirstSeenRunID != 1 || second[0].LastSeenRunID != 2 {
+		t.Errorf("run traceability = %d/%d, want 1/2", second[0].FirstSeenRunID, second[0].LastSeenRunID)
+	}
+	if second[0].TriageVerdict != store.VerdictConfirmed || second[0].TriagedBy != "alice" ||
+		second[0].TriageSource != store.TriageSourceHuman {
+		t.Errorf("human audit was lost: %+v", second[0])
+	}
+	if second[0].Scope != store.FindingScopeFiles {
+		t.Errorf("scope = %q, want files", second[0].Scope)
+	}
+	citations := store.DecodeFindingCitations(second[0].Citations)
+	if len(citations) != 2 || citations[0].StartLine != 14 || citations[1].StartLine != 26 {
+		t.Errorf("citations = %+v, want the shifted evidence", citations)
+	}
+}
+
+func TestReconcileKeepsMultiFileIdentityThroughDisputeAndResolution(t *testing.T) {
+	reported := AgentFinding{
+		Path: "internal/a.go", Severity: "major", Category: "design", Title: "Acopla dos módulos",
+		StartLine: 10, EndLine: 10, Scope: store.FindingScopeFiles,
+		Citations: []store.FindingCitation{
+			{Path: "internal/a.go", StartLine: 10, EndLine: 10},
+			{Path: "internal/b.go", StartLine: 20, EndLine: 20},
+		},
+	}
+	first, _ := Reconcile(nil, AgentOutput{Findings: []AgentFinding{reported}}, 1, true, 9, nil)
+	if len(first) != 1 {
+		t.Fatalf("first upserts = %d, want 1", len(first))
+	}
+	disputedAt := time.Unix(1700000000, 0).UTC()
+	first[0].TriageVerdict = store.VerdictFalsePositive
+	first[0].TriagedBy = "bob"
+	first[0].TriagedAt = &disputedAt
+	first[0].TriageSource = store.TriageSourceHuman
+
+	shifted := reported
+	shifted.StartLine, shifted.EndLine = 12, 12
+	shifted.Citations = []store.FindingCitation{
+		{Path: "internal/a.go", StartLine: 12, EndLine: 12},
+		{Path: "internal/b.go", StartLine: 22, EndLine: 22},
+	}
+	second, resolved := Reconcile(first, AgentOutput{Findings: []AgentFinding{shifted}}, 2, true, 9, nil)
+	if len(second) != 1 || len(resolved) != 0 {
+		t.Fatalf("upserts/resolved = %d/%v, want 1/none", len(second), resolved)
+	}
+	if second[0].ID != first[0].ID {
+		t.Fatalf("identity changed across the dispute: %s != %s", second[0].ID, first[0].ID)
+	}
+	if second[0].TriageVerdict != store.VerdictFalsePositive || second[0].TriagedBy != "bob" ||
+		second[0].TriageSource != store.TriageSourceHuman ||
+		second[0].TriagedAt == nil || !second[0].TriagedAt.Equal(disputedAt) {
+		t.Errorf("dispute audit was lost: %+v", second[0])
+	}
+
+	// A complete run that no longer reports it resolves the same row, not a
+	// duplicate keyed by the shifted lines.
+	third, resolvedIDs := Reconcile(second, AgentOutput{}, 3, true, 9, nil)
+	if len(third) != 0 || len(resolvedIDs) != 1 || resolvedIDs[0] != second[0].ID {
+		t.Fatalf("upserts/resolved = %d/%v, want none/[%s]", len(third), resolvedIDs, second[0].ID)
+	}
+}
+
+func TestNativeFindingsCarryHeadCitation(t *testing.T) {
+	findings := nativeFindings([]nativeComment{{
+		Path: "src/a.go", Content: "finding", StartLine: 5, EndLine: 7,
+	}})
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	f := findings[0]
+	if f.Scope != store.FindingScopeFile {
+		t.Errorf("scope = %q, want file", f.Scope)
+	}
+	if len(f.Citations) != 1 {
+		t.Fatalf("citations = %+v, want one head-side citation", f.Citations)
+	}
+	c := f.Citations[0]
+	if c.Path != "src/a.go" || c.StartLine != 5 || c.EndLine != 7 || c.Side != store.FindingCitationHead {
+		t.Errorf("citation = %+v, want src/a.go:5-7 on the head", c)
+	}
+}
+
+func TestReconcileKeepsIdentityWhenCitationRestatesAnchor(t *testing.T) {
+	legacy := AgentFinding{
+		Path: "src/a.go", Severity: "major", Category: "bug", Title: "Mismo",
+		StartLine: 3, EndLine: 3,
+	}
+	withCitation := legacy
+	withCitation.Scope = store.FindingScopeFile
+	withCitation.Citations = []store.FindingCitation{{
+		Path: "src/a.go", StartLine: 3, EndLine: 3, Side: store.FindingCitationHead,
+	}}
+
+	first, _ := Reconcile(nil, AgentOutput{Findings: []AgentFinding{legacy}}, 1, true, 9, nil)
+	second, _ := Reconcile(first, AgentOutput{Findings: []AgentFinding{withCitation}}, 2, true, 9, nil)
+	if len(first) != 1 || len(second) != 1 {
+		t.Fatalf("upserts = %d/%d, want 1/1", len(first), len(second))
+	}
+	if first[0].ID != second[0].ID {
+		t.Fatalf("adding the canonical citation re-keyed the finding: %s != %s", second[0].ID, first[0].ID)
+	}
+	if citations := store.DecodeFindingCitations(second[0].Citations); len(citations) != 1 {
+		t.Errorf("citations = %+v, want the canonical citation persisted", citations)
+	}
+}
+
+func TestDedupeNearbyFindingsResyncsCanonicalCitation(t *testing.T) {
+	first := AgentFinding{
+		Path: "big.go", Category: "bug", Title: "Mismo problema", Body: "primer cuerpo",
+		StartLine: 10, EndLine: 10, Scope: store.FindingScopeFile,
+		Citations: []store.FindingCitation{{Path: "big.go", StartLine: 10, EndLine: 10, Side: store.FindingCitationHead}},
+	}
+	second := AgentFinding{
+		Path: "big.go", Category: "bug", Title: "Mismo problema", Body: "primer cuerpo",
+		StartLine: 9, EndLine: 12, Scope: store.FindingScopeFile,
+		Citations: []store.FindingCitation{{Path: "big.go", StartLine: 9, EndLine: 12, Side: store.FindingCitationHead}},
+	}
+	got := dedupeNearbyFindings([]AgentFinding{first, second})
+	if len(got) != 1 {
+		t.Fatalf("findings = %d, want the merged occurrence", len(got))
+	}
+	citations := got[0].Citations
+	if len(citations) != 1 || citations[0].StartLine != 9 || citations[0].EndLine != 12 {
+		t.Errorf("citations = %+v, want the canonical citation on the merged range", citations)
+	}
+	if evidence := identityCitations(got[0]); len(evidence) != 0 {
+		t.Errorf("identity evidence = %+v, a merged canonical citation must not extend identity", evidence)
+	}
+}
+
+func TestDedupeNearbyFindingsKeepsRicherCitations(t *testing.T) {
+	canonical := AgentFinding{
+		Path: "big.go", Category: "design", Title: "Límite compartido", Body: "cuerpo",
+		StartLine: 10, EndLine: 10, Scope: store.FindingScopeFile,
+		Citations: []store.FindingCitation{{Path: "big.go", StartLine: 10, EndLine: 10, Side: store.FindingCitationHead}},
+	}
+	richer := AgentFinding{
+		Path: "big.go", Category: "design", Title: "Límite compartido", Body: "cuerpo",
+		StartLine: 10, EndLine: 10, Scope: store.FindingScopeFiles,
+		Citations: []store.FindingCitation{
+			{Path: "big.go", StartLine: 10, EndLine: 10, Side: store.FindingCitationHead},
+			{Path: "other.go", StartLine: 20, EndLine: 20, Side: store.FindingCitationHead},
+		},
+	}
+	got := dedupeNearbyFindings([]AgentFinding{canonical, richer})
+	if len(got) != 1 {
+		t.Fatalf("findings = %d, want the merged occurrence", len(got))
+	}
+	if len(got[0].Citations) != 2 || got[0].Scope != store.FindingScopeFiles {
+		t.Errorf("merged finding = %+v, want both citations and files scope", got[0])
+	}
+}
+
+func TestDedupeNearbyFindingsKeepsEarliestRange(t *testing.T) {
+	makeFinding := func(start int) AgentFinding {
+		return AgentFinding{
+			Path: "big.go", Category: "bug", Title: "Mismo problema", Body: "cuerpo",
+			StartLine: start, EndLine: start, Scope: store.FindingScopeFile,
+			Citations: []store.FindingCitation{{
+				Path: "big.go", StartLine: start, EndLine: start, Side: store.FindingCitationHead,
+			}},
+		}
+	}
+	got := dedupeNearbyFindings([]AgentFinding{makeFinding(20), makeFinding(21)})
+	if len(got) != 1 {
+		t.Fatalf("findings = %d, want the merged occurrence", len(got))
+	}
+	if got[0].StartLine != 20 || got[0].EndLine != 20 {
+		t.Errorf("range = %d-%d, want the earliest range 20-20", got[0].StartLine, got[0].EndLine)
+	}
+	if len(got[0].Citations) != 1 || got[0].Citations[0].StartLine != 20 || got[0].Citations[0].EndLine != 20 {
+		t.Errorf("citations = %+v, want the canonical citation on 20-20", got[0].Citations)
+	}
+}

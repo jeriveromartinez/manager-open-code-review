@@ -420,3 +420,154 @@ func containsString(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestArchitectureFindingsUseEvidenceCitations(t *testing.T) {
+	verdict := store.ArchitectureVerdict{
+		Requested: true, Status: store.ArchitectureComplete, Mode: store.ArchitectureAnalysisObservation,
+		Signals: []string{"module_boundary"},
+		Scope: store.ArchitectureScope{Included: []store.ArchitectureScopeFile{
+			{Path: "internal/review/run.go"}, {Path: "internal/store/review.go"},
+		}},
+		Risks: []string{
+			"El contrato cambia en `internal/review/run.go:10` y `internal/store/review.go:20-22`",
+		},
+		Recommendation: "Separar el límite entre los módulos",
+	}
+
+	findings := ArchitectureFindings(verdict)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want one design finding", len(findings))
+	}
+	f := findings[0]
+	if !f.Advisory {
+		t.Error("architecture finding is not advisory; the verdict must stay observational")
+	}
+	if f.Scope != store.FindingScopeFiles {
+		t.Errorf("scope = %q, want files", f.Scope)
+	}
+	if len(f.Citations) != 2 {
+		t.Fatalf("citations = %+v, want both cited files", f.Citations)
+	}
+	if f.Path != "internal/review/run.go" || f.StartLine != 10 || f.EndLine != 10 {
+		t.Errorf("primary anchor = %s:%d-%d, want the first citation", f.Path, f.StartLine, f.EndLine)
+	}
+	if !strings.Contains(f.Title, "Arquitectura:") || !strings.Contains(f.Body, "internal/review/run.go:10") {
+		t.Errorf("finding = %+v, want the evidence in title/body", f)
+	}
+}
+
+func TestArchitectureFindingsWithoutCitationsArePRScoped(t *testing.T) {
+	verdict := store.ArchitectureVerdict{
+		Requested: true, Status: store.ArchitecturePartial, Mode: store.ArchitectureAnalysisObservation,
+		Risks: []string{"El contrato nuevo no tiene consumidores ejercitados"},
+	}
+	findings := ArchitectureFindings(verdict)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want one design finding", len(findings))
+	}
+	f := findings[0]
+	if f.Scope != store.FindingScopePR || f.Path != "" || f.StartLine != 0 {
+		t.Errorf("finding = %+v, want a PR-scope finding with no anchor", f)
+	}
+	if len(f.Citations) != 0 {
+		t.Errorf("citations = %+v, want none", f.Citations)
+	}
+}
+
+func TestArchitectureFindingsSkipUnrequestedOrInconclusive(t *testing.T) {
+	cases := []store.ArchitectureVerdict{
+		{Requested: false, Status: store.ArchitectureNotRequested, Risks: []string{"r"}},
+		{Requested: true, Status: store.ArchitectureInconclusive, Risks: []string{"r"}},
+		{Requested: true, Status: store.ArchitectureComplete},
+	}
+	for _, verdict := range cases {
+		if findings := ArchitectureFindings(verdict); len(findings) != 0 {
+			t.Errorf("findings = %+v, want none for %+v", findings, verdict)
+		}
+	}
+}
+
+func TestReconcileResolvesAdvisoryFindingOutsideReviewScope(t *testing.T) {
+	advisory := AgentFinding{
+		Title: "Arquitectura: límite nuevo", Severity: "minor", Category: "design",
+		Scope: store.FindingScopePR, Advisory: true,
+	}
+	first, _ := Reconcile(nil, AgentOutput{Findings: []AgentFinding{advisory}}, 1, true, 9, nil)
+	if len(first) != 1 || !first[0].Advisory {
+		t.Fatalf("first upserts = %+v, want one advisory finding", first)
+	}
+	_, resolved := ReconcileScoped(first, AgentOutput{}, 2, true, 9, nil, map[string]bool{})
+	if len(resolved) != 1 || resolved[0] != first[0].ID {
+		t.Fatalf("resolved = %v, want the advisory finding", resolved)
+	}
+}
+
+func TestArchitectureFindingsOnlyCiteTheComparedScope(t *testing.T) {
+	verdict := store.ArchitectureVerdict{
+		Requested: true, Status: store.ArchitectureComplete, Mode: store.ArchitectureAnalysisObservation,
+		Scope: store.ArchitectureScope{Included: []store.ArchitectureScopeFile{{Path: "internal/review/run.go"}}},
+		Risks: []string{
+			"El contrato cambia en `internal/review/run.go:10` y `internal/store/other.go:20`",
+		},
+	}
+	findings := ArchitectureFindings(verdict)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	citations := findings[0].Citations
+	if len(citations) != 1 || citations[0].Path != "internal/review/run.go" {
+		t.Errorf("citations = %+v, want only the compared path", citations)
+	}
+}
+
+func TestArchitectureFindingsMapDeletedEvidenceToBase(t *testing.T) {
+	verdict := store.ArchitectureVerdict{
+		Requested: true, Status: store.ArchitectureComplete, Mode: store.ArchitectureAnalysisObservation,
+		Scope: store.ArchitectureScope{
+			Included: []store.ArchitectureScopeFile{{Path: "internal/review/run.go"}},
+			Excluded: []store.ArchitectureScopeFile{
+				{Path: "internal/review/old.go", Kind: "deleted"},
+				{Path: "internal/review/asset.bin", Kind: "binary"},
+			},
+		},
+		Risks: []string{
+			"Antes `internal/review/old.go:5`, ahora `internal/review/run.go:10`; " +
+				"el binario `internal/review/asset.bin:2` no aplica",
+		},
+	}
+	findings := ArchitectureFindings(verdict)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	citations := findings[0].Citations
+	if len(citations) != 2 {
+		t.Fatalf("citations = %+v, want the head and base citations", citations)
+	}
+	byPath := make(map[string]store.FindingCitation, len(citations))
+	for _, citation := range citations {
+		byPath[citation.Path] = citation
+	}
+	if got := byPath["internal/review/run.go"]; got.Side != store.FindingCitationHead {
+		t.Errorf("run.go side = %q, want RIGHT", got.Side)
+	}
+	if got := byPath["internal/review/old.go"]; got.Side != store.FindingCitationBase {
+		t.Errorf("old.go side = %q, want LEFT", got.Side)
+	}
+	if _, ok := byPath["internal/review/asset.bin"]; ok {
+		t.Error("a binary exclusion was cited as code")
+	}
+}
+
+func TestArchitectureFindingsRequireKnownScope(t *testing.T) {
+	verdict := store.ArchitectureVerdict{
+		Requested: true, Status: store.ArchitectureComplete, Mode: store.ArchitectureAnalysisObservation,
+		Risks: []string{"El contrato cambia en `internal/review/run.go:10`"},
+	}
+	findings := ArchitectureFindings(verdict)
+	if len(findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(findings))
+	}
+	if len(findings[0].Citations) != 0 || findings[0].Scope != store.FindingScopePR {
+		t.Errorf("finding = %+v, want a PR-scope finding without citations", findings[0])
+	}
+}

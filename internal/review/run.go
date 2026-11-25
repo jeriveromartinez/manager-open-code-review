@@ -1378,6 +1378,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		}
 	}
 
+	// The architectural verdict is evidence, but it still travels through the
+	// same identity and publication path as any other finding (#162). Its
+	// advisory flag keeps it out of the check and the inline comments.
+	out.merged.Findings = append(out.merged.Findings, ArchitectureFindings(architectureVerdict)...)
+
 	if invErr != nil {
 		if status == store.RunSucceeded {
 			status, code = store.RunInconclusive, "coverage_incomplete"
@@ -1388,13 +1393,14 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	reviewed, skipped, excluded = coverageCountsFromFiles(files)
 	notRequired := coverageNotRequiredFromFiles(files)
 	status, code = settledRunStatus(status, code, pending, routed, invErr == nil)
-	out.summary = coverageSummaryText(status, reviewed, len(out.merged.Findings))
+	reviewFindings := countReviewFindings(out.merged.Findings)
+	out.summary = coverageSummaryText(status, reviewed, reviewFindings)
 
 	out.coverage = coverageJSONWithFiles(reviewed, skipped, excluded, notRequired, files)
 	r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
 	log.Log(runCtx, "worker", "", "info", logPhaseFinish, fmt.Sprintf(
 		"cobertura final: %d revisados, %d omitidos, %d excluidos; %d hallazgo(s) tras deduplicar",
-		reviewed, skipped, excluded, len(out.merged.Findings)))
+		reviewed, skipped, excluded, reviewFindings))
 
 	switch status {
 	case store.RunSucceeded:

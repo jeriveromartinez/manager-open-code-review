@@ -1764,6 +1764,9 @@ func upsertFinding(db *gorm.DB, f Finding, runStarted time.Time) (Finding, error
 	if f.IdentityVersion == 0 {
 		f.IdentityVersion = IdentityVersionCurrent
 	}
+	citations := DecodeFindingCitations(f.Citations)
+	f.Scope = NormalizeFindingScope(f.Scope, citations)
+	f.Citations = EncodeFindingCitations(citations)
 
 	// A row written before #144 keeps its ID and references, but its fingerprint
 	// belongs to the old scheme. Migrating it in place is the only way the next
@@ -1805,7 +1808,7 @@ func upsertFinding(db *gorm.DB, f Finding, runStarted time.Time) (Finding, error
 		Columns: []clause.Column{{Name: "pull_request_id"}, {Name: "fingerprint"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"path", "start_line", "end_line", "severity", "category", "title",
-			"body", "suggestion", "confidence", "existing_code", "status",
+			"body", "suggestion", "confidence", "existing_code", "scope", "citations", "advisory", "status",
 			"identity_version", "last_seen_run_id", "updated_at",
 		}),
 		Where: clause.Where{Exprs: []clause.Expression{conflictWhere}},
@@ -1885,8 +1888,9 @@ func migrateLegacyFinding(db *gorm.DB, legacy, f Finding, runStarted time.Time) 
 		"path": f.Path, "start_line": f.StartLine, "end_line": f.EndLine,
 		"severity": f.Severity, "category": f.Category, "title": f.Title,
 		"body": f.Body, "suggestion": f.Suggestion, "confidence": f.Confidence,
-		"existing_code": f.ExistingCode, "status": f.Status,
-		"last_seen_run_id": f.LastSeenRunID, "updated_at": now,
+		"existing_code": f.ExistingCode, "scope": f.Scope, "citations": f.Citations,
+		"advisory": f.Advisory, "status": f.Status, "last_seen_run_id": f.LastSeenRunID,
+		"updated_at": now,
 	})
 	if res.Error != nil {
 		return Finding{}, fmt.Errorf("migrate finding %q contents: %w", f.ID, res.Error)

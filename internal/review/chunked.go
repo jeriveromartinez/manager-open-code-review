@@ -543,6 +543,19 @@ func chunkedRunStatus(mainStatus, mainCode string, summary chunkSummary) (string
 
 // coverageSummaryText renders the run summary from the final coverage counters
 // instead of the engine's headline, which cannot see chunk results.
+// countReviewFindings counts the findings the review itself produced.
+// Advisory architectural evidence belongs to the verdict block, not to the
+// review's finding count.
+func countReviewFindings(findings []AgentFinding) int {
+	count := 0
+	for _, finding := range findings {
+		if !finding.Advisory {
+			count++
+		}
+	}
+	return count
+}
+
 func coverageSummaryText(status string, reviewed, comments int) string {
 	prefix := "Revisión completada"
 	switch status {

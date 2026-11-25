@@ -166,7 +166,9 @@ func validateEvidence(f store.Finding, v Verification, files map[string][]byte, 
 func Decide(findings []store.Finding, verdicts map[string]Verification, files map[string][]byte, headSHA string, p VerifyPolicy) []Decision {
 	decisions := make([]Decision, 0, len(findings))
 	for _, f := range findings {
-		if f.TriageSource == store.TriageSourceHuman {
+		// Advisory evidence has no QA verdict to confirm or refute; recording an
+		// automatic uncertainty on it would contradict observation mode.
+		if f.TriageSource == store.TriageSourceHuman || f.Advisory {
 			continue
 		}
 		verdict, answered := verdicts[f.ID]
