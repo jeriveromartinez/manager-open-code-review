@@ -33,13 +33,21 @@ const ReviewRequestClaimLease = 5 * time.Minute
 const (
 	ReviewRequestCauseInconclusive = "inconclusive"
 	ReviewRequestCauseFailed       = "failed"
-	ReviewRequestCauseFork         = "fork"
+	// ReviewRequestCauseFork is the generic external escalation: the team did
+	// not enable external reviews, the configuration does not resolve, or the
+	// origin could not be determined.
+	ReviewRequestCauseFork              = "fork"
+	ReviewRequestCauseForkUnauthorized  = "fork_unauthorized"
+	ReviewRequestCauseForkTooLarge      = "fork_too_large"
+	ReviewRequestCauseForkRateLimited   = "fork_rate_limited"
+	ReviewRequestCauseForkBudget        = "fork_budget_exhausted"
+	ReviewRequestCauseForkOriginUnknown = "fork_origin_unknown"
 )
 
 // ReviewRequestConfig is the configuration a review request needs for a pull
-// request. Unlike ReviewConfig it also resolves forks and does not require an
-// enabled LLM profile: a fork is requested for a human precisely because the
-// engine never reviews it.
+// request. Unlike ReviewConfig it also resolves external contributions and does
+// not require an enabled LLM profile: an external request is made when the
+// engine may not review the contribution.
 type ReviewRequestConfig struct {
 	PR           PullRequest
 	Repo         Repository

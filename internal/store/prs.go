@@ -225,7 +225,11 @@ func syncExisting(tx *gorm.DB, prev *PullRequest, in PullRequest, out *PullReque
 		"qa_status":           status,
 		"github_updated_at":   in.GitHubUpdatedAt,
 		"is_fork":             in.IsFork,
+		"origin":              in.Origin,
 		"head_repo_full_name": in.HeadRepoFullName,
+		"additions":           in.Additions,
+		"deletions":           in.Deletions,
+		"changed_files":       in.ChangedFiles,
 		"updated_at":          time.Now().UTC(),
 	}
 	if prev.HeadSHA != in.HeadSHA {
@@ -272,7 +276,11 @@ func pullRequestPayloadEqual(prev, in PullRequest, status string) bool {
 		prev.QAStatus == status &&
 		prev.GitHubUpdatedAt.Equal(in.GitHubUpdatedAt) &&
 		prev.IsFork == in.IsFork &&
-		prev.HeadRepoFullName == in.HeadRepoFullName
+		prev.Origin == in.Origin &&
+		prev.HeadRepoFullName == in.HeadRepoFullName &&
+		prev.Additions == in.Additions &&
+		prev.Deletions == in.Deletions &&
+		prev.ChangedFiles == in.ChangedFiles
 }
 
 // CloseMissingPullRequests closes open pull requests of a repository that are
@@ -361,6 +369,8 @@ type prViewRow struct {
 	TeamID                     *uint
 	Draft                      bool
 	IsFork                     bool
+	Origin                     string
+	ExternalAllowed            *bool
 	PolicyID                   *uint
 	ProfileID                  *uint
 	ProfileEnabled             *bool
@@ -393,14 +403,31 @@ const (
 
 // ReviewSignals are the facts that decide whether a pull request can be
 // reviewed. ActiveRun means the current head already has a queued or running
-// run.
+// run. Origin and ExternalAllowed describe the external-contribution policy;
+// Fork stays for rows written before the origin column existed.
 type ReviewSignals struct {
-	ActiveRun      bool
-	Draft          bool
-	Fork           bool
-	TeamAssigned   bool
-	HasPolicy      bool
-	ProfileEnabled bool
+	ActiveRun       bool
+	Draft           bool
+	Fork            bool
+	Origin          string
+	ExternalAllowed bool
+	TeamAssigned    bool
+	HasPolicy       bool
+	ProfileEnabled  bool
+}
+
+// external reports whether the pull request crosses repositories or its origin
+// is indeterminate. The origin column is authoritative; the legacy fork flag
+// covers rows written before it existed.
+func (s ReviewSignals) external() bool {
+	switch s.Origin {
+	case OriginInternal:
+		return false
+	case OriginCrossRepo, OriginUnknown:
+		return true
+	default:
+		return s.Fork
+	}
 }
 
 // ReviewStateFor mirrors the eligibility rules of ReviewConfigForPR, which are
@@ -415,8 +442,10 @@ func ReviewStateFor(s ReviewSignals) (state, reason string) {
 	switch {
 	case s.Draft:
 		return ReviewStateBlocked, "Borrador: se revisará cuando pase a listo"
-	case s.Fork:
-		return ReviewStateBlocked, "PR de fork: no se revisa en esta fase"
+	case s.Origin == OriginUnknown:
+		return ReviewStateBlocked, "Origen del PR indeterminado: requiere revisión humana"
+	case s.external() && !s.ExternalAllowed:
+		return ReviewStateBlocked, "PR externo: el equipo no permite aportes externos"
 	case !s.TeamAssigned:
 		return ReviewStateBlocked, "Repositorio sin equipo asignado"
 	case !s.HasPolicy:
@@ -500,6 +529,8 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 			"r.team_id AS team_id",
 			"pr.draft AS draft",
 			"pr.is_fork AS is_fork",
+			"pr.origin AS origin",
+			"pol.allow_external_reviews AS external_allowed",
 			"pol.id AS policy_id",
 			"prof.id AS profile_id",
 			"prof.enabled AS profile_enabled",
@@ -531,12 +562,14 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 	views := make([]PRView, len(rows))
 	for i, row := range rows {
 		state, reason := ReviewStateFor(ReviewSignals{
-			ActiveRun:      row.ActiveRun != "",
-			Draft:          row.Draft,
-			Fork:           row.IsFork,
-			TeamAssigned:   row.TeamID != nil,
-			HasPolicy:      row.PolicyID != nil,
-			ProfileEnabled: row.ProfileID != nil && row.ProfileEnabled != nil && *row.ProfileEnabled,
+			ActiveRun:       row.ActiveRun != "",
+			Draft:           row.Draft,
+			Fork:            row.IsFork,
+			Origin:          row.Origin,
+			ExternalAllowed: row.ExternalAllowed != nil && *row.ExternalAllowed,
+			TeamAssigned:    row.TeamID != nil,
+			HasPolicy:       row.PolicyID != nil,
+			ProfileEnabled:  row.ProfileID != nil && row.ProfileEnabled != nil && *row.ProfileEnabled,
 		})
 		views[i] = PRView{
 			ID:           row.ID,

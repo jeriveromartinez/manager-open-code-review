@@ -82,11 +82,15 @@ func newTestPR(state string, mergedAt, updatedAt time.Time, draft bool) *gh.Pull
 		State:             prString(state),
 		User:              &gh.User{Login: prString("octocat")},
 		AuthorAssociation: prString("CONTRIBUTOR"),
-		Head:              &gh.PullRequestBranch{SHA: prString("headsha"), Ref: prString("feature/qa")},
-		Base:              &gh.PullRequestBranch{Ref: prString("main"), SHA: prString("basesha")},
-		HTMLURL:           prString("https://github.com/acme/repo/pull/42"),
-		Draft:             prBool(draft),
-		UpdatedAt:         &gh.Timestamp{Time: updatedAt},
+		Head: &gh.PullRequestBranch{
+			SHA:  prString("headsha"),
+			Ref:  prString("feature/qa"),
+			Repo: &gh.Repository{FullName: prString("acme/repo")},
+		},
+		Base:      &gh.PullRequestBranch{Ref: prString("main"), SHA: prString("basesha")},
+		HTMLURL:   prString("https://github.com/acme/repo/pull/42"),
+		Draft:     prBool(draft),
+		UpdatedAt: &gh.Timestamp{Time: updatedAt},
 	}
 	if !mergedAt.IsZero() {
 		p.MergedAt = &gh.Timestamp{Time: mergedAt}
@@ -130,7 +134,7 @@ func TestPRFromGitHub(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ghapp.PRFromGitHub(repoID, tt.pr)
+			got := ghapp.PRFromGitHub(repoID, "acme/repo", tt.pr)
 			want := store.PullRequest{
 				RepositoryID:      repoID,
 				Number:            42,
@@ -147,6 +151,8 @@ func TestPRFromGitHub(t *testing.T) {
 				State:             tt.wantState,
 				QAStatus:          "",
 				GitHubUpdatedAt:   updated,
+				Origin:            store.OriginInternal,
+				HeadRepoFullName:  "acme/repo",
 			}
 			// PullRequest now carries a JSON observation, so it is no longer
 			// comparable with ==.
@@ -158,7 +164,7 @@ func TestPRFromGitHub(t *testing.T) {
 }
 
 func TestPRFromGitHubFork(t *testing.T) {
-	pr := ghapp.PRFromGitHub(7, &gh.PullRequest{
+	pr := ghapp.PRFromGitHub(7, "acme/repo", &gh.PullRequest{
 		Head: &gh.PullRequestBranch{
 			Repo: &gh.Repository{
 				ID:       gh.Ptr[int64](99),
@@ -167,7 +173,33 @@ func TestPRFromGitHubFork(t *testing.T) {
 			},
 		},
 	})
-	if !pr.IsFork || pr.HeadRepoFullName != "ext/repo" {
-		t.Fatalf("PRFromGitHub() = %+v, want IsFork=true, HeadRepoFullName=%q", pr, "ext/repo")
+	if !pr.IsFork || pr.Origin != store.OriginCrossRepo || pr.HeadRepoFullName != "ext/repo" {
+		t.Fatalf("PRFromGitHub() = %+v, want origin=%q, IsFork=true, HeadRepoFullName=%q",
+			pr, store.OriginCrossRepo, "ext/repo")
+	}
+}
+
+// A repository that is itself a fork still owns its branches: a pull request
+// whose head repository is the base repository is internal, whatever the
+// repository's `fork` flag says (#148).
+func TestPRFromGitHubInternalBranchOfForkOwnedRepo(t *testing.T) {
+	pr := ghapp.PRFromGitHub(7, "acme/fork", &gh.PullRequest{
+		Head: &gh.PullRequestBranch{
+			Repo: &gh.Repository{Fork: gh.Ptr(true), FullName: gh.Ptr("acme/fork")},
+		},
+	})
+	if pr.IsFork || pr.Origin != store.OriginInternal {
+		t.Fatalf("PRFromGitHub() = %+v, want an internal pull request", pr)
+	}
+}
+
+// A deleted or unreadable head repository leaves the origin indeterminate. It
+// must be recorded explicitly so the policy can escalate instead of reviewing.
+func TestPRFromGitHubUnknownOrigin(t *testing.T) {
+	pr := ghapp.PRFromGitHub(7, "acme/repo", &gh.PullRequest{
+		Head: &gh.PullRequestBranch{SHA: gh.Ptr("headsha")},
+	})
+	if !pr.IsFork || pr.Origin != store.OriginUnknown {
+		t.Fatalf("PRFromGitHub() = %+v, want origin=%q and IsFork=true", pr, store.OriginUnknown)
 	}
 }

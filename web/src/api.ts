@@ -505,6 +505,13 @@ export type QAPolicy = {
   verify_token_share: number
   verify_time_share: number
   verify_token_max: number
+  /** Review external (cross-repository) contributions when the author is trusted. */
+  allow_external_reviews: boolean
+  external_trusted_associations: string[]
+  max_external_diff_lines: number
+  max_external_runs_per_day: number
+  /** Daily external token budget; 0 disables it. */
+  external_daily_token_budget: number
   /** Read-only: whether the profile accepts an explicit prompt cache key. */
   prompt_cache: boolean
   /** Identifica el contenido de la política; se registra en cada revisión (#153). */
@@ -533,6 +540,11 @@ export type QAPolicyInput = Pick<
   | 'verify_token_share'
   | 'verify_time_share'
   | 'verify_token_max'
+  | 'allow_external_reviews'
+  | 'external_trusted_associations'
+  | 'max_external_diff_lines'
+  | 'max_external_runs_per_day'
+  | 'external_daily_token_budget'
 >
 
 /**

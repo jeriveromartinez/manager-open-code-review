@@ -77,8 +77,16 @@ func (t *Trigger) OnPullRequest(ctx context.Context, prID uint) error {
 	if err != nil || cfg == nil {
 		return err
 	}
-	if !cfg.PR.IsOpen() || cfg.PR.Draft || cfg.PR.IsFork {
+	if !cfg.PR.IsOpen() || cfg.PR.Draft {
 		return nil
+	}
+	allowed, err := t.gateExternal(ctx, prID)
+	if err != nil || !allowed {
+		return err
+	}
+	cfg, err = t.reviewConfig(ctx, prID)
+	if err != nil || cfg == nil || !cfg.PR.IsOpen() || cfg.PR.Draft {
+		return err
 	}
 	if t.Jobs == nil {
 		return errors.New("review: trigger has no enqueuer")
@@ -109,13 +117,12 @@ func (t *Trigger) OnPullRequestIneligible(ctx context.Context, prID uint) error 
 	return t.requestForkReview(ctx, prID)
 }
 
-// requestForkReview asks for a human review of an open fork pull request the
-// engine never reviews. The request is deduplicated by pull request and head,
-// and a closed, draft or ordinary pull request is left alone.
+// requestForkReview asks for a human review of an external pull request the
+// engine will not review: disabled external reviews, an indeterminate origin,
+// an untrusted author or a contribution outside the limits. Authorized external
+// pull requests are left to the normal review path. The request is deduplicated
+// by pull request and head.
 func (t *Trigger) requestForkReview(ctx context.Context, prID uint) error {
-	if t.Apps == nil {
-		return nil
-	}
 	pr, err := t.Store.PullRequest(ctx, prID)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
@@ -123,7 +130,7 @@ func (t *Trigger) requestForkReview(ctx context.Context, prID uint) error {
 	if err != nil {
 		return err
 	}
-	if !pr.IsOpen() || !pr.IsFork || pr.Draft {
+	if !pr.IsOpen() || !pr.External() || pr.Draft {
 		return nil
 	}
 	cfg, err := t.Store.ReviewRequestConfigForPR(ctx, prID)
@@ -133,10 +140,83 @@ func (t *Trigger) requestForkReview(ctx context.Context, prID uint) error {
 	if err != nil {
 		return err
 	}
+	usage, err := t.Store.ExternalReviewUsage(ctx, pr, *cfg.Repo.TeamID)
+	if err != nil {
+		return err
+	}
+	decision := store.DecideExternalReview(pr, cfg.Policy, usage)
+	if decision.Allow {
+		return nil
+	}
+	return t.requestReview(ctx, cfg, decision.Cause)
+}
+
+// gateExternal applies the external-contribution policy before any automatic
+// entry point queues work. It reports whether the pull request may be reviewed
+// and, when it may not, records the reason as a human review request. Internal
+// pull requests always pass.
+func (t *Trigger) gateExternal(ctx context.Context, prID uint) (bool, error) {
+	pr, err := t.Store.PullRequest(ctx, prID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !pr.External() {
+		return true, nil
+	}
+	if !pr.IsOpen() || pr.Draft {
+		return false, nil
+	}
+	// A redelivery of a comparison that already owns a run must reach the
+	// dedupe/repair path instead of charging the contribution budget again.
+	runs, err := t.Store.ListReviewRuns(ctx, prID)
+	if err != nil {
+		return false, err
+	}
+	for i := range runs {
+		if blocksSameSHA(runs[i].Status) && pr.CoveredBy(runs[i]) {
+			return true, nil
+		}
+	}
+	cfg, err := t.Store.ReviewRequestConfigForPR(ctx, prID)
+	if errors.Is(err, store.ErrNoReviewConfig) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	usage, err := t.Store.ExternalReviewUsage(ctx, pr, *cfg.Repo.TeamID)
+	if err != nil {
+		return false, err
+	}
+	decision := store.DecideExternalReview(pr, cfg.Policy, usage)
+	if decision.Allow {
+		slog.Info("external pull request authorized",
+			"pull_request_id", pr.ID, "head_sha", pr.HeadSHA,
+			"origin", pr.Origin, "association", pr.AuthorAssociation)
+		return true, nil
+	}
+	slog.Info("external pull request escalated",
+		"pull_request_id", pr.ID, "head_sha", pr.HeadSHA,
+		"origin", pr.Origin, "cause", decision.Cause, "reason", decision.Reason)
+	return false, t.requestReview(ctx, cfg, decision.Cause)
+}
+
+// requestReview records and delivers a human review request. Without a GitHub
+// App there is no channel to reach a person, so the escalation is a documented
+// no-op (nothing is persisted) and it is logged.
+func (t *Trigger) requestReview(ctx context.Context, cfg store.ReviewRequestConfig, cause string) error {
+	if t.Apps == nil {
+		slog.Warn("review request skipped: trigger has no GitHub App",
+			"pull_request_id", cfg.PR.ID, "cause", cause)
+		return nil
+	}
 	service := &github.ReviewRequestService{
 		Store: t.Store, Apps: t.Apps, RetryDelay: github.ReviewRequestRetryDelay,
 	}
-	_, err = service.Request(ctx, cfg, store.ReviewRequestCauseFork)
+	_, err := service.Request(ctx, cfg, cause)
 	return err
 }
 
@@ -149,7 +229,7 @@ func (t *Trigger) FireDebounced(ctx context.Context, prID uint, headSHA string) 
 	if err != nil || cfg == nil {
 		return err
 	}
-	if cfg.PR.HeadSHA != headSHA || !cfg.PR.IsOpen() || cfg.PR.Draft || cfg.PR.IsFork {
+	if cfg.PR.HeadSHA != headSHA || !cfg.PR.IsOpen() || cfg.PR.Draft {
 		return nil
 	}
 	hint := t.comparisonHint(ctx, prID)
@@ -158,9 +238,9 @@ func (t *Trigger) FireDebounced(ctx context.Context, prID uint, headSHA string) 
 }
 
 // reviewConfig loads the configuration that applies to a pull request. A nil
-// config without an error means the PR is not reviewable (draft, fork,
-// disabled repository or missing policy); that is an expected outcome, not a
-// failure that should retry the job.
+// config without an error means the PR is not reviewable (draft, disabled
+// repository or missing policy); external origin is decided by gateExternal.
+// That is an expected outcome, not a failure that should retry the job.
 func (t *Trigger) reviewConfig(ctx context.Context, prID uint) (*store.ReviewConfig, error) {
 	if t.Store == nil {
 		return nil, errors.New("review: trigger has no store")
@@ -396,6 +476,29 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 	if t.Store == nil {
 		return false, errors.New("review: trigger has no store")
 	}
+	// The external policy is decided before any work is queued. Denying here
+	// records a human request and returns, so no run, check or clone token is
+	// ever created for a contribution outside the policy. The author lock makes
+	// the usage check and the insert atomic per author, so concurrent
+	// deliveries cannot both pass the daily limit.
+	pr, err := t.Store.PullRequest(ctx, prID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+	if err == nil && pr.External() {
+		unlockAuthor, lockErr := t.Store.LockExternalAuthor(ctx, pr.AuthorLogin)
+		if lockErr != nil {
+			return false, lockErr
+		}
+		defer unlockAuthor()
+	}
+	allowed, err := t.gateExternal(ctx, prID)
+	if err != nil {
+		return false, err
+	}
+	if !allowed {
+		return false, nil
+	}
 	unlock, err := t.Store.LockPR(ctx, prID)
 	if err != nil {
 		return false, fmt.Errorf("lock pull request %d: %w", prID, err)
@@ -559,6 +662,12 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 	if err != nil {
 		return false, fmt.Errorf("encode linked issue context: %w", err)
 	}
+	// An external run reserves spend at enqueue so concurrent contributions
+	// see the in-flight cost instead of an under-counted daily total.
+	reserved := int64(0)
+	if cfg.PR.External() {
+		reserved = store.ExternalRunTokenReserve(cfg.Policy)
+	}
 	run, err := t.Store.CreateReviewRun(ctx, store.ReviewRun{
 		PullRequestID:       prID,
 		ProfileID:           cfg.Profile.ID,
@@ -573,6 +682,7 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 		PolicyRevision:      cfg.PolicyRevision,
 		PolicyObservation:   cfg.PolicyObservation,
 		LinkedIssues:        datatypes.JSON(linkedIssues),
+		ReservedTokens:      reserved,
 	})
 	if err != nil {
 		// The partial unique index allows only one active run per PR. If a
@@ -697,10 +807,11 @@ func (t *Trigger) discardActiveLocked(ctx context.Context, prID uint) error {
 }
 
 // reviewConfigLocked resolves the configuration of a reviewable pull request.
-// A nil result means it must not be reviewed: closed or merged, draft, fork, a
+// A nil result means it must not be reviewed: closed or merged, draft, a
 // missing row, or configuration that no longer resolves (disabled repository,
-// removed policy or profile, missing installation). The caller must hold the
-// pull request lock.
+// removed policy or profile, missing installation). External origin is not a
+// reason by itself: gateExternal decides whether it may be reviewed. The caller
+// must hold the pull request lock.
 func (t *Trigger) reviewConfigLocked(ctx context.Context, prID uint) (*store.ReviewConfig, error) {
 	pr, err := t.Store.PullRequest(ctx, prID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -709,7 +820,7 @@ func (t *Trigger) reviewConfigLocked(ctx context.Context, prID uint) (*store.Rev
 	if err != nil {
 		return nil, err
 	}
-	if !pr.IsOpen() || pr.Draft || pr.IsFork {
+	if !pr.IsOpen() || pr.Draft {
 		return nil, nil
 	}
 	cfg, err := t.Store.ReviewConfigForPR(ctx, prID)

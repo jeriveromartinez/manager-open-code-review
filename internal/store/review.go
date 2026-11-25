@@ -599,9 +599,28 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 	if !ValidReviewRecipient(p.ReviewerLogin) {
 		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid reviewer login %q", p.TeamID, p.ReviewerLogin)
 	}
-	if !ValidReviewRecipient(p.ReviewerTeam) {
+	if p.ReviewerTeam != "" && !ValidReviewRecipient(p.ReviewerTeam) {
 		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid reviewer team %q", p.TeamID, p.ReviewerTeam)
 	}
+	if p.MaxExternalDiffLines == 0 {
+		p.MaxExternalDiffLines = DefaultExternalDiffLines
+	}
+	if p.MaxExternalRunsPerDay == 0 {
+		p.MaxExternalRunsPerDay = DefaultExternalRunsPerDay
+	}
+	if p.MaxExternalDiffLines < 0 || p.MaxExternalRunsPerDay < 0 ||
+		p.ExternalDailyTokenBudget < 0 || p.ExternalDailyTokenBudget > ReviewTokenBudgetMax {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid external limits", p.TeamID)
+	}
+	associations, associationsErr := normalizeExternalAssociations(p.ExternalTrustedAssociations)
+	if associationsErr != nil {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: %w", p.TeamID, associationsErr)
+	}
+	encodedAssociations, err := json.Marshal(associations)
+	if err != nil {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: encode trusted associations: %w", p.TeamID, err)
+	}
+	p.ExternalTrustedAssociations = datatypes.JSON(encodedAssociations)
 	var configured []RequiredCheck
 	if raw := bytes.TrimSpace(p.RequiredChecks); len(raw) > 0 && !bytes.Equal(raw, []byte("null")) {
 		if err := json.Unmarshal(raw, &configured); err != nil {
@@ -628,7 +647,10 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 			"require_green_ci", "required_checks", "review_context_ceiling", "review_effort",
 			"review_token_budget", "auto_triage_mode", "auto_withdraw",
 			"verify_max_findings", "verify_max_files", "verify_token_share",
-			"verify_time_share", "verify_token_max", "reviewer_login", "reviewer_team", "updated_at",
+			"verify_time_share", "verify_token_max", "reviewer_login", "reviewer_team",
+			"allow_external_reviews", "external_trusted_associations",
+			"max_external_diff_lines", "max_external_runs_per_day",
+			"external_daily_token_budget", "updated_at",
 		}),
 	}).Create(&p).Error
 	if err != nil {
@@ -650,7 +672,7 @@ func (s *Store) ReviewConfigForPR(ctx context.Context, prID uint) (ReviewConfig,
 		}
 		return ReviewConfig{}, fmt.Errorf("find pull request %d: %w", prID, err)
 	}
-	if pr.Draft || pr.IsFork {
+	if pr.Draft {
 		return ReviewConfig{}, fmt.Errorf("pull request %d: %w", prID, ErrNoReviewConfig)
 	}
 
@@ -703,15 +725,18 @@ func (s *Store) ReviewConfigForPR(ctx context.Context, prID uint) (ReviewConfig,
 	}, nil
 }
 
-// PendingReviewPRs lists open, non-draft, non-fork PRs of enabled repositories
-// with a team, a policy and an enabled profile, whose current comparison has no
-// run in an active or terminal state. A run covers the pull request only when
-// its head, base branch and resolved merge base match the current ones; legacy
-// runs without a key still cover it once. Superseded runs never suppress a PR.
-// Teams that gate reviews on CI only return a PR once its configured gate is
-// green. That verdict is applied to the ordered candidates before the limit, so
-// a crowded batch of PRs still waiting for checks (or missing a required one)
-// cannot push an eligible candidate past it.
+// PendingReviewPRs lists open, non-draft PRs of enabled repositories with a
+// team, a policy and an enabled profile, whose current comparison has no run in
+// an active or terminal state. External pull requests are included so the
+// trigger can apply the external policy: an authorized contribution is
+// reviewed, and one outside the policy is escalated to a person. A run covers
+// the pull request only when its head, base branch and resolved merge base
+// match the current ones; legacy runs without a key still cover it once.
+// Superseded runs never suppress a PR. Teams that gate reviews on CI only
+// return a PR once its configured gate is green. That verdict is applied to the
+// ordered candidates before the limit, so a crowded batch of PRs still waiting
+// for checks (or missing a required one) cannot push an eligible candidate past
+// it.
 func (s *Store) PendingReviewPRs(ctx context.Context, limit int) ([]PullRequest, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -728,7 +753,7 @@ JOIN repositories r ON r.id = pr.repository_id
 JOIN qa_policies q ON q.team_id = r.team_id
 JOIN llm_profiles p ON p.id = q.llm_profile_id AND p.enabled = true
 LEFT JOIN repository_policies rp ON rp.repository_id = r.id
-WHERE pr.state = 'open' AND pr.draft = false AND pr.is_fork = false
+WHERE pr.state = 'open' AND pr.draft = false
   AND r.enabled = true AND r.team_id IS NOT NULL
   AND NOT EXISTS (
     SELECT 1 FROM review_runs rr

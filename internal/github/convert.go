@@ -54,7 +54,12 @@ func ConvertManifest(ctx context.Context, httpc *http.Client, apiURL, code strin
 
 // PRFromGitHub maps a GitHub pull request to the QA Control Center model. The
 // QA workflow status is intentionally left empty: SyncPullRequest computes it.
-func PRFromGitHub(repoID int64, p *gh.PullRequest) store.PullRequest {
+//
+// baseFullName is the repository the pull request targets. Cross-repository
+// origin is decided from the head and base identities, never from the head
+// repository's `fork` flag: an internal branch of a repository that is itself a
+// fork stays internal, and a missing head repository is indeterminate (#148).
+func PRFromGitHub(repoID int64, baseFullName string, p *gh.PullRequest) store.PullRequest {
 	state := "open"
 	switch {
 	case p.MergedAt != nil:
@@ -62,6 +67,12 @@ func PRFromGitHub(repoID int64, p *gh.PullRequest) store.PullRequest {
 	case p.GetState() == "closed":
 		state = "closed"
 	}
+
+	if baseFullName == "" {
+		baseFullName = p.GetBase().GetRepo().GetFullName()
+	}
+	headFullName := p.GetHead().GetRepo().GetFullName()
+	origin := store.ClassifyOrigin(baseFullName, headFullName)
 
 	return store.PullRequest{
 		RepositoryID:      repoID,
@@ -78,7 +89,11 @@ func PRFromGitHub(repoID int64, p *gh.PullRequest) store.PullRequest {
 		Draft:             p.GetDraft(),
 		State:             state,
 		GitHubUpdatedAt:   p.GetUpdatedAt().Time,
-		IsFork:            p.GetHead().GetRepo().GetFork(),
-		HeadRepoFullName:  p.GetHead().GetRepo().GetFullName(),
+		IsFork:            origin != store.OriginInternal,
+		Origin:            origin,
+		HeadRepoFullName:  headFullName,
+		Additions:         p.GetAdditions(),
+		Deletions:         p.GetDeletions(),
+		ChangedFiles:      p.GetChangedFiles(),
 	}
 }

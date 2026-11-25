@@ -29,9 +29,9 @@ type Syncer struct {
 	Apps   github.AppProvider
 	Events events.Publisher
 	Checks ChecksRefresher
-	// ReviewRequests handles forks, which the engine never reviews. Polling
-	// mode has no webhook delivery, so the syncer is the only path that can
-	// hand those pull requests to a person.
+	// ReviewRequests handles external contributions the engine may not review.
+	// Polling mode has no webhook delivery, so the syncer is the only path that
+	// can hand those pull requests to a person.
 	ReviewRequests *github.ReviewRequestService
 }
 
@@ -358,9 +358,14 @@ func (s *Syncer) syncPullRequests(ctx context.Context, client *gh.Client, instal
 				continue
 			}
 			openNumbers = append(openNumbers, pull.GetNumber())
-			pr, changed, err := s.Store.SyncPullRequest(ctx, github.PRFromGitHub(repo.ID, pull))
+			pr, changed, err := s.Store.SyncPullRequest(ctx, github.PRFromGitHub(repo.ID, repo.FullName, pull))
 			if err != nil {
 				return fmt.Errorf("sync pull request #%d of %s: %w", pull.GetNumber(), repo.FullName, err)
+			}
+			if pr.Origin == store.OriginUnknown {
+				slog.Warn("pull request origin could not be determined",
+					"repository", repo.FullName, "pull_request", pr.Number,
+					"head_repository", pr.HeadRepoFullName)
 			}
 			if changed {
 				if err := s.publish(ctx, events.Event{
@@ -389,7 +394,7 @@ func (s *Syncer) syncPullRequests(ctx context.Context, client *gh.Client, instal
 // Drafts are measured too, so a PR that becomes ready for review is gated on a
 // verdict that already exists instead of waiting for the next pass.
 func (s *Syncer) refreshChecks(ctx context.Context, client *gh.Client, pr store.PullRequest) error {
-	if s.Checks == nil || pr.HeadSHA == "" || pr.IsFork {
+	if s.Checks == nil || pr.HeadSHA == "" {
 		return nil
 	}
 	_, changed, err := s.Checks.RefreshPRWith(ctx, client, pr)
@@ -405,12 +410,14 @@ func (s *Syncer) refreshChecks(ctx context.Context, client *gh.Client, pr store.
 	return nil
 }
 
-// requestForkReview hands an open, non-draft fork to a person. The request is
-// deduplicated by pull request and head, so walking the open pull requests on
-// every poll is cheap and never asks GitHub twice. A failure is logged and does
-// not abort the rest of the installation.
+// requestForkReview hands an external contribution the engine may not review
+// to a person. Authorized contributions are left to the pending-review poller,
+// which applies size, rate and spend limits again before queueing. The request
+// is deduplicated by pull request and head, so walking the open pull requests
+// on every poll is cheap and never asks GitHub twice. A failure is logged and
+// does not abort the rest of the installation.
 func (s *Syncer) requestForkReview(ctx context.Context, pr store.PullRequest) {
-	if s.ReviewRequests == nil || !pr.IsFork || !pr.IsOpen() || pr.Draft || pr.HeadSHA == "" {
+	if s.ReviewRequests == nil || !pr.External() || !pr.IsOpen() || pr.Draft || pr.HeadSHA == "" {
 		return
 	}
 	cfg, err := s.Store.ReviewRequestConfigForPR(ctx, pr.ID)
@@ -418,13 +425,23 @@ func (s *Syncer) requestForkReview(ctx context.Context, pr store.PullRequest) {
 		return
 	}
 	if err != nil {
-		slog.Error("load fork review request config failed",
+		slog.Error("load external review request config failed",
 			"pull_request_id", pr.ID, "error", err)
 		return
 	}
-	if _, err := s.ReviewRequests.Request(ctx, cfg, store.ReviewRequestCauseFork); err != nil {
-		slog.Error("request human review of fork failed",
-			"pull_request_id", pr.ID, "head_sha", pr.HeadSHA, "error", err)
+	usage, err := s.Store.ExternalReviewUsage(ctx, pr, *cfg.Repo.TeamID)
+	if err != nil {
+		slog.Error("measure external contribution failed",
+			"pull_request_id", pr.ID, "error", err)
+		return
+	}
+	decision := store.DecideExternalReview(pr, cfg.Policy, usage)
+	if decision.Allow {
+		return
+	}
+	if _, err := s.ReviewRequests.Request(ctx, cfg, decision.Cause); err != nil {
+		slog.Error("request human review of external contribution failed",
+			"pull_request_id", pr.ID, "head_sha", pr.HeadSHA, "cause", decision.Cause, "error", err)
 	}
 }
 

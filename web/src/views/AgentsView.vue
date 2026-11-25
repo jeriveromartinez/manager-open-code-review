@@ -116,6 +116,11 @@ const policyVerifyMaxFiles = ref(20)
 const policyVerifyTokenShare = ref(20)
 const policyVerifyTimeShare = ref(15)
 const policyVerifyTokenMax = ref(100000)
+const policyAllowExternalReviews = ref(false)
+const policyExternalTrustedAssociations = ref('OWNER, MEMBER, COLLABORATOR')
+const policyMaxExternalDiffLines = ref(3000)
+const policyMaxExternalRunsPerDay = ref(10)
+const policyExternalDailyTokenBudget = ref(0)
 const policyError = ref<string | null>(null)
 const policyMessage = ref<string | null>(null)
 // Set when someone else changed what is on screen while it had unsaved edits.
@@ -184,6 +189,12 @@ function applyPolicy(saved: QAPolicy): void {
   policyVerifyTokenShare.value = saved.verify_token_share || 20
   policyVerifyTimeShare.value = saved.verify_time_share || 15
   policyVerifyTokenMax.value = saved.verify_token_max || 100000
+  policyAllowExternalReviews.value = saved.allow_external_reviews ?? false
+  policyExternalTrustedAssociations.value =
+    (saved.external_trusted_associations ?? []).join(', ') || 'OWNER, MEMBER, COLLABORATOR'
+  policyMaxExternalDiffLines.value = saved.max_external_diff_lines || 3000
+  policyMaxExternalRunsPerDay.value = saved.max_external_runs_per_day || 10
+  policyExternalDailyTokenBudget.value = saved.external_daily_token_budget ?? 0
   stalePolicy.value = false
 }
 
@@ -238,7 +249,13 @@ const policyDirty = computed(
       policyVerifyMaxFiles.value !== (policy.value.verify_max_files || 20) ||
       policyVerifyTokenShare.value !== (policy.value.verify_token_share || 20) ||
       policyVerifyTimeShare.value !== (policy.value.verify_time_share || 15) ||
-      policyVerifyTokenMax.value !== (policy.value.verify_token_max || 100000)),
+      policyVerifyTokenMax.value !== (policy.value.verify_token_max || 100000) ||
+      policyAllowExternalReviews.value !== (policy.value.allow_external_reviews ?? false) ||
+      policyExternalTrustedAssociations.value !==
+        (policy.value.external_trusted_associations ?? []).join(', ') ||
+      policyMaxExternalDiffLines.value !== (policy.value.max_external_diff_lines || 3000) ||
+      policyMaxExternalRunsPerDay.value !== (policy.value.max_external_runs_per_day || 10) ||
+      policyExternalDailyTokenBudget.value !== (policy.value.external_daily_token_budget ?? 0)),
 )
 
 // Health checks also announce a profile; only these fields are someone's edit.
@@ -592,6 +609,14 @@ async function savePolicy(): Promise<void> {
     verify_token_share: Number(policyVerifyTokenShare.value) || 0,
     verify_time_share: Number(policyVerifyTimeShare.value) || 0,
     verify_token_max: Number(policyVerifyTokenMax.value) || 0,
+    allow_external_reviews: policyAllowExternalReviews.value,
+    external_trusted_associations: policyExternalTrustedAssociations.value
+      .split(',')
+      .map((value) => value.trim())
+      .filter((value) => value !== ''),
+    max_external_diff_lines: Number(policyMaxExternalDiffLines.value) || 3000,
+    max_external_runs_per_day: Number(policyMaxExternalRunsPerDay.value) || 10,
+    external_daily_token_budget: Number(policyExternalDailyTokenBudget.value) || 0,
   }
   try {
     applyPolicy(await api.savePolicy(selectedTeamId.value, body))
@@ -866,6 +891,71 @@ onMounted(() => {
                 <span class="field__hint">
                   0 = sin tope. Un corte deja el run inconcluso con los hallazgos parciales
                   publicados.
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <div class="policy__cost" data-policy-external>
+            <h3 class="policy__section-title">Aportes externos (forks)</h3>
+            <div class="policy__cost-fields">
+              <label class="field">
+                <span class="field__label">Revisar aportes externos</span>
+                <input
+                  v-model="policyAllowExternalReviews"
+                  type="checkbox"
+                  data-policy-allow-external
+                />
+                <span class="field__hint">
+                  Solo autores con una asociación autorizada. El aporte se lee desde la ref del PR
+                  en el repositorio base, nunca desde el fork.
+                </span>
+              </label>
+              <label class="field">
+                <span class="field__label">Asociaciones autorizadas</span>
+                <input
+                  v-model="policyExternalTrustedAssociations"
+                  class="field__input"
+                  type="text"
+                  data-policy-external-associations
+                />
+                <span class="field__hint">
+                  Separadas por comas: OWNER, MEMBER, COLLABORATOR. El resto se deriva a una persona.
+                </span>
+              </label>
+              <label class="field">
+                <span class="field__label">Máximo de líneas cambiadas</span>
+                <input
+                  v-model.number="policyMaxExternalDiffLines"
+                  class="field__input"
+                  type="number"
+                  min="1"
+                  data-policy-external-diff-lines
+                />
+                <span class="field__hint">Un aporte mayor se deriva sin gastar el motor.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">Runs por autor y día</span>
+                <input
+                  v-model.number="policyMaxExternalRunsPerDay"
+                  class="field__input"
+                  type="number"
+                  min="1"
+                  data-policy-external-runs
+                />
+                <span class="field__hint">Límite de frecuencia por autor externo en 24 h.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">Presupuesto diario de tokens</span>
+                <input
+                  v-model.number="policyExternalDailyTokenBudget"
+                  class="field__input"
+                  type="number"
+                  min="0"
+                  data-policy-external-budget
+                />
+                <span class="field__hint">
+                  0 = sin tope. Se reserva al encolar para que el trabajo en curso cuente.
                 </span>
               </label>
             </div>
