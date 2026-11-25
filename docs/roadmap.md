@@ -156,13 +156,15 @@ Objetivo: que la revisión concluya cuando tiene cobertura y evidencia suficient
 
 Objetivo: pasar de «implementado y en observación» a «medido y promovido por clase», sin ampliar la autonomía sin datos.
 
+Procedimiento paso a paso en [`docs/phase6-runbook.md`](phase6-runbook.md).
+
 - [ ] Rodar la verificación automática en escalera (`off` → `dry_run` → `apply` → `auto_withdraw`) sobre PRs reales y revisar los descartes que un humano restaure. Nunca sobre `major`/`blocker` ni con la regla de descarte apagada.
 - [ ] Medir #65 (razonamiento y latencia) y #66 (tasa de acierto de caché) con un proveedor real, usando el arnés de #140.
 - [ ] Ampliar la muestra del corpus de #140 hasta el criterio de autonomía documentado (300 PRs con comentarios evaluados) y recalcular precisión, graves omitidos, citas y derivaciones por lenguaje y tipo.
 - [ ] Promover el dictamen arquitectónico por clase a un piloto `COMMENT` con umbrales acordados. Medir falsos positivos, defectos graves omitidos y derivaciones injustificadas antes de evaluar su contribución al gate, con reversión prevista.
-- [ ] Cerrar los huecos conocidos antes de promover: editor de consumidores en el panel (#160), contratos YAML/GraphQL como `unknown` (#159), plazo propio de análisis en OCR y citas multiarchivo estructuradas (#157, #162), y sonda de visibilidad real de repositorios (#160).
+- [x] Huecos conocidos antes de promover: editor de consumidores en el panel (#160), contratos YAML y GraphQL como `unknown` (#159), plazo propio de análisis en OCR y citas multiarchivo estructuradas (#157, #162), y sonda de visibilidad real de repositorios (#160). GraphQL sigue `unknown` por decisión.
 
-Criterio de cierre de #164: cada clase promovida tiene evidencia independiente suficiente, la escalera está rodada y los huecos conocidos están decididos (cerrados o aceptados por escrito).
+Criterio de cierre de #198: cada clase promovida tiene evidencia independiente suficiente, la escalera está rodada y los huecos conocidos están decididos (cerrados o aceptados por escrito).
 
 ## Orden de ejecución
 
@@ -177,7 +179,7 @@ Criterio de cierre de #164: cada clase promovida tiene evidencia independiente s
 9. Fases 2–4 del backlog, hechas; #140 con corpus y línea base medidos.
 10. Fase 6: escalera de verificación y medición real de #65/#66.
 11. Fase 6: ampliar el corpus al criterio de autonomía y promover por clase.
-12. Cierre de #164.
+12. Cierre de #198.
 
 ## Reglas de avance
 
