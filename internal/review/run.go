@@ -861,8 +861,18 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	analysisMode := architectureMode(cfg.Policy)
 	signals := []string{}
 	scope := store.ArchitectureScope{}
+	// The contract comparison is local and deterministic: it reads the base
+	// and head trees, never the model. A changed declared contract is an
+	// explicit public-interface signal for the architectural analysis.
+	contracts := store.ArchitectureContracts{Status: store.ContractsNotDeclared}
 	if invErr == nil {
 		signals = detectArchitectureSignals(inventory, archStats)
+		if analysisMode == store.ArchitectureAnalysisObservation {
+			contracts = compareVersionedContracts(runCtx, workDir, fromSHA, headSHA)
+			if contractComparisonChanged(contracts) {
+				signals = appendContractSignal(signals)
+			}
+		}
 		sortArchitectureSignals(signals)
 		scope = architectureScope(inventory, excludePatterns)
 	}
@@ -934,6 +944,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			BaseSHA:    fromSHA,
 			HeadSHA:    headSHA,
 		}, analysisBudget)
+	architectureVerdict = attachContractComparison(architectureVerdict, contracts)
 	if invErr != nil {
 		architectureVerdict.Errors = append(architectureVerdict.Errors,
 			fmt.Sprintf("no se pudo inventariar el cambio: %v", invErr))
@@ -949,6 +960,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 				baseline.Status, len(baseline.Rules), len(baseline.Decisions), len(baseline.Checks)))
 	}
 	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
+	if len(contracts.Contracts) > 0 {
+		log.Log(runCtx, "worker", "analysis", "info", logPhasePolicy, fmt.Sprintf(
+			"contratos: %s, %d comparado(s) de %d declarado(s)",
+			contracts.Status, contracts.Compared, contracts.Declared))
+	}
 	switch {
 	case analysisRequested:
 		log.Log(runCtx, "worker", "analysis", "info", logPhasePolicy, fmt.Sprintf(
@@ -1258,12 +1274,14 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			"analysis skipped: OCR resume is incompatible with --analysis")
 	}
 	// applyNativeArchitectureAnalysis rebuilds the dimensions from the report,
-	// so the trusted baseline dimension and its status are integrated again.
-	// The baseline is deterministic evidence, so its violation wins over the
-	// inconclusive status a skipped analysis leaves behind.
+	// so the deterministic dimensions (trusted baseline and contracts) are
+	// integrated again. The baseline violation wins over the inconclusive
+	// status a skipped analysis leaves behind; the contract result never
+	// changes the status.
 	if baselineEvaluated {
 		architectureVerdict = applyArchitectureBaseline(architectureVerdict, baseline)
 	}
+	architectureVerdict = attachContractComparison(architectureVerdict, contracts)
 	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
 	if analysisRequested {
 		log.Log(runCtx, "worker", "analysis", architectureLogLevel(architectureVerdict.Status), logPhaseOCR,
