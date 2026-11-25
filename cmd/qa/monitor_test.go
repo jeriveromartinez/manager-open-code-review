@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/jeriveromartinez/qa-control-center/internal/monitor"
 )
 
 func TestMonitorConfigFallsBackToDefaults(t *testing.T) {
@@ -37,5 +41,23 @@ func TestMonitorConfigFallsBackToDefaults(t *testing.T) {
 				t.Errorf("AlertWebhookURL = %q, want empty", cfg.AlertWebhookURL)
 			}
 		})
+	}
+}
+
+// TestMonitorDeliveriesFallsBackToMemory keeps the monitor alerting when it
+// has no database: the outbox is not durable, but it is still present.
+func TestMonitorDeliveriesFallsBackToMemory(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, dsn := range []string{
+		"",
+		"postgres://u:p@127.0.0.1:1/db?sslmode=disable&connect_timeout=1",
+	} {
+		deliveries, closeStore := monitorDeliveries(context.Background(), dsn, logger)
+		if _, ok := deliveries.(*monitor.MemoryDeliveryStore); !ok {
+			t.Errorf("deliveries for dsn %q = %T, want the memory fallback", dsn, deliveries)
+		}
+		if closeStore != nil {
+			t.Errorf("closeStore for dsn %q is not nil without a database", dsn)
+		}
 	}
 }

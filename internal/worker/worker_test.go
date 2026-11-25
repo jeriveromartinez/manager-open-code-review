@@ -14,8 +14,10 @@ import (
 
 type stubStats struct {
 	queue     store.QueueStats
+	stages    []store.StageStats
 	runs      store.RunStats
 	queueErr  error
+	stagesErr error
 	runsErr   error
 	pingErr   error
 	pingCalls int
@@ -31,6 +33,13 @@ func (s *stubStats) QueueStats(context.Context) (store.QueueStats, error) {
 		return store.QueueStats{}, s.queueErr
 	}
 	return s.queue, nil
+}
+
+func (s *stubStats) StageStats(context.Context) ([]store.StageStats, error) {
+	if s.stagesErr != nil {
+		return nil, s.stagesErr
+	}
+	return s.stages, nil
 }
 
 func (s *stubStats) RunStatsSince(context.Context, time.Time) (store.RunStats, error) {
@@ -200,6 +209,98 @@ func TestMetricsWithoutStatsIsUnavailable(t *testing.T) {
 
 func TestMetricsSurfacesStoreFailure(t *testing.T) {
 	stats := &stubStats{queueErr: errors.New("database is gone")}
+	srv := New(Config{Stats: stats, StatsWindow: time.Hour, StaleQueueAfter: time.Minute})
+
+	rec := get(t, srv.Handler(), "/metrics")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+// TestMetricsStalledPublishStageWhileSyncRuns is the regression from #154: the
+// aggregate queue reports a running sync job, but the publish stage has an old
+// backlog and no consumer, so it must still be flagged.
+func TestMetricsStalledPublishStageWhileSyncRuns(t *testing.T) {
+	stats := &stubStats{
+		queue: store.QueueStats{Available: 0, Running: 1},
+		stages: []store.StageStats{
+			{Name: store.StageQueue, Kind: store.StageKindQueue, Running: 1, LastProgressSeconds: 5},
+			{Name: store.StagePublish, Kind: store.StageKindQueue, Available: 3, Running: 0,
+				OldestPendingSeconds: 3600, Retryable: 1, Discarded: 1},
+		},
+	}
+	srv := New(Config{Stats: stats, StatsWindow: time.Hour, StaleQueueAfter: 10 * time.Minute})
+
+	rec := get(t, srv.Handler(), "/metrics")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	var body metricsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if !body.Stalled {
+		t.Error("aggregate stalled = false, want true while the publish stage is stopped")
+	}
+	stages := map[string]stageStatus{}
+	for _, stage := range body.Stages {
+		stages[stage.Name] = stage
+	}
+	if !stages[store.StagePublish].Stalled {
+		t.Errorf("publish stage = %+v, want stalled", stages[store.StagePublish])
+	}
+	if stages[store.StageQueue].Stalled {
+		t.Errorf("queue stage = %+v, want healthy", stages[store.StageQueue])
+	}
+}
+
+// TestMetricsOldRunWithFreshActivityIsNotStalled keeps a legitimately long
+// review from paging: age alone is not a stall when logs keep arriving.
+func TestMetricsOldRunWithFreshActivityIsNotStalled(t *testing.T) {
+	stats := &stubStats{
+		stages: []store.StageStats{
+			{Name: store.StageClone, Kind: store.StageKindRun, Running: 1,
+				OldestPendingSeconds: 7200, LastProgressSeconds: 30},
+		},
+	}
+	srv := New(Config{Stats: stats, StatsWindow: time.Hour, StaleQueueAfter: 10 * time.Minute})
+
+	rec := get(t, srv.Handler(), "/metrics")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body)
+	}
+	var body metricsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.Stalled {
+		t.Error("stalled = true for an old run that heartbeated 30s ago")
+	}
+}
+
+// TestMetricsStalledRunWithoutProgress is the other half: active runs whose
+// newest heartbeat is older than the window are a stall.
+func TestMetricsStalledRunWithoutProgress(t *testing.T) {
+	stats := &stubStats{
+		stages: []store.StageStats{
+			{Name: store.StageVerify, Kind: store.StageKindRun, Running: 2,
+				OldestPendingSeconds: 7200, LastProgressSeconds: 900},
+		},
+	}
+	srv := New(Config{Stats: stats, StatsWindow: time.Hour, StaleQueueAfter: 10 * time.Minute})
+
+	rec := get(t, srv.Handler(), "/metrics")
+	var body metricsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(body.Stages) != 1 || !body.Stages[0].Stalled {
+		t.Fatalf("stages = %+v, want the verify stage stalled", body.Stages)
+	}
+}
+
+func TestMetricsSurfacesStageStatsFailure(t *testing.T) {
+	stats := &stubStats{stagesErr: errors.New("database is gone")}
 	srv := New(Config{Stats: stats, StatsWindow: time.Hour, StaleQueueAfter: time.Minute})
 
 	rec := get(t, srv.Handler(), "/metrics")

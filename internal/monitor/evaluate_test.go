@@ -127,6 +127,53 @@ func TestEvaluate(t *testing.T) {
 			want: []string{monitor.CodeQueueStalled},
 		},
 		{
+			name: "a stalled stage alerts while another stage is healthy",
+			obs: func() monitor.Observation {
+				obs := healthyObservation()
+				obs.Metrics.Stages = []monitor.Stage{
+					{Name: "queue", Kind: "queue", Running: 1, LastProgressSeconds: 5},
+					{Name: "publish", Kind: "queue", Available: 3, Running: 0,
+						OldestPendingSeconds: 3600, Retryable: 1, Discarded: 1, Stalled: true},
+				}
+				obs.Metrics.Stalled = true
+				return obs
+			},
+			want: []string{monitor.CodeStageStalled + ":publish"},
+		},
+		{
+			name: "an old but progressing run does not alert",
+			obs: func() monitor.Observation {
+				obs := healthyObservation()
+				obs.Metrics.Stages = []monitor.Stage{
+					{Name: "clone", Kind: "run", Running: 1,
+						OldestPendingSeconds: 7200, LastProgressSeconds: 30, Stalled: false},
+					{Name: "publish", Kind: "queue"},
+				}
+				// The aggregate used to keep the monitor silent; per-stage
+				// evaluation must trust the stage's own verdict.
+				obs.Metrics.Stalled = true
+				return obs
+			},
+			want: nil,
+		},
+		{
+			name: "two stalled stages alert separately",
+			obs: func() monitor.Observation {
+				obs := healthyObservation()
+				obs.Metrics.Stages = []monitor.Stage{
+					{Name: "review", Kind: "run", Running: 2,
+						OldestPendingSeconds: 3600, LastProgressSeconds: 1800, Stalled: true},
+					{Name: "publish", Kind: "queue", Available: 1,
+						OldestPendingSeconds: 3600, Stalled: true},
+				}
+				return obs
+			},
+			want: []string{
+				monitor.CodeStageStalled + ":review",
+				monitor.CodeStageStalled + ":publish",
+			},
+		},
+		{
 			name: "metrics unavailable",
 			obs: func() monitor.Observation {
 				obs := healthyObservation()
@@ -184,6 +231,38 @@ func TestEvaluateMessagesAndValues(t *testing.T) {
 	}
 	if p.Values["oldest_available_seconds"] != 3600 {
 		t.Errorf("Values[oldest_available_seconds] = %v, want 3600", p.Values["oldest_available_seconds"])
+	}
+}
+
+// TestEvaluateStageMessageExplainsTheCause carries the evidence an operator
+// needs to act, including retries and discarded attempts (#154).
+func TestEvaluateStageMessageExplainsTheCause(t *testing.T) {
+	obs := healthyObservation()
+	obs.Metrics.Stages = []monitor.Stage{{
+		Name: "publish", Kind: "queue", Available: 3, Running: 0,
+		OldestPendingSeconds: 7200, Retryable: 2, Discarded: 1, Stalled: true,
+	}}
+
+	problems := monitor.Evaluate(obs)
+	if len(problems) != 1 {
+		t.Fatalf("problems = %v, want exactly one", problems)
+	}
+	p := problems[0]
+	if p.Code != monitor.CodeStageStalled || p.Subject != "publish" {
+		t.Errorf("problem = %s:%s, want %s:publish", p.Code, p.Subject, monitor.CodeStageStalled)
+	}
+	for _, want := range []string{
+		"nothing is consuming the queue",
+		"3 job(s) waiting",
+		"2 job(s) waiting for a retry",
+		"1 job(s) discarded",
+	} {
+		if !strings.Contains(p.Message, want) {
+			t.Errorf("Message = %q, want it to contain %q", p.Message, want)
+		}
+	}
+	if p.Values["stage"] != "publish" || p.Values["retryable"] != 2 {
+		t.Errorf("Values = %v, want the stage and retry count", p.Values)
 	}
 }
 

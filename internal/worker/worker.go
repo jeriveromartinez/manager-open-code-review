@@ -27,6 +27,7 @@ type Dependency struct {
 // package does not depend on the whole store.
 type StatsReader interface {
 	QueueStats(ctx context.Context) (store.QueueStats, error)
+	StageStats(ctx context.Context) ([]store.StageStats, error)
 	RunStatsSince(ctx context.Context, cutoff time.Time) (store.RunStats, error)
 	Ping(ctx context.Context) error
 }
@@ -126,11 +127,20 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, code, resp)
 }
 
+type stageStatus struct {
+	store.StageStats
+	// Stalled is decided here because this process owns the threshold. A queue
+	// with no consumer and an old backlog is stalled; a run phase with active
+	// runs but no recent activity is stalled.
+	Stalled bool `json:"stalled"`
+}
+
 type metricsResponse struct {
-	Queue store.QueueStats `json:"queue"`
-	Runs  store.RunStats   `json:"runs"`
-	// Stalled is true when jobs are waiting, none runs and the oldest has been
-	// waiting longer than the configured window: the worker is not consuming.
+	Queue  store.QueueStats `json:"queue"`
+	Stages []stageStatus    `json:"stages"`
+	Runs   store.RunStats   `json:"runs"`
+	// Stalled is kept for older monitors: true when any stage is stalled or the
+	// aggregate backlog matches the old rule.
 	Stalled bool `json:"stalled"`
 }
 
@@ -150,6 +160,13 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "queue stats unavailable"})
 		return
 	}
+	stages, err := s.cfg.Stats.StageStats(ctx)
+	if err != nil {
+		s.setLast(err)
+		slog.Error("read stage stats", "error", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "stage stats unavailable"})
+		return
+	}
 	runs, err := s.cfg.Stats.RunStatsSince(ctx, s.now().Add(-s.cfg.StatsWindow))
 	if err != nil {
 		s.setLast(err)
@@ -158,18 +175,46 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	statuses := make([]stageStatus, 0, len(stages))
 	stalled := queue.Available > 0 &&
 		queue.Running == 0 &&
 		time.Duration(queue.OldestAvailableSeconds)*time.Second >= s.cfg.StaleQueueAfter
-	if stalled {
-		slog.Warn("review queue stalled",
-			"available", queue.Available,
-			"oldest_available_seconds", queue.OldestAvailableSeconds,
-			"stale_after", s.cfg.StaleQueueAfter)
+	for _, stage := range stages {
+		stageStalled := stageIsStalled(stage, s.cfg.StaleQueueAfter)
+		stalled = stalled || stageStalled
+		if stageStalled {
+			slog.Warn("review stage stalled",
+				"stage", stage.Name,
+				"available", stage.Available,
+				"running", stage.Running,
+				"retryable", stage.Retryable,
+				"discarded", stage.Discarded,
+				"oldest_pending_seconds", stage.OldestPendingSeconds,
+				"last_progress_seconds", stage.LastProgressSeconds,
+				"stale_after", s.cfg.StaleQueueAfter)
+		}
+		statuses = append(statuses, stageStatus{StageStats: stage, Stalled: stageStalled})
 	}
 
 	s.setLast(nil)
-	writeJSON(w, http.StatusOK, metricsResponse{Queue: queue, Runs: runs, Stalled: stalled})
+	writeJSON(w, http.StatusOK, metricsResponse{Queue: queue, Stages: statuses, Runs: runs, Stalled: stalled})
+}
+
+// stageIsStalled tells a stopped stage from work in flight. A queue is stalled
+// only when nobody consumes it; a run phase is stalled only when runs are
+// active but none has produced activity, so an old run that keeps logging
+// stays quiet while one that only heartbeats does not.
+func stageIsStalled(stage store.StageStats, staleAfter time.Duration) bool {
+	if staleAfter <= 0 {
+		return false
+	}
+	if stage.Kind == store.StageKindRun {
+		return stage.Running > 0 &&
+			time.Duration(stage.LastProgressSeconds)*time.Second >= staleAfter
+	}
+	return stage.Available > 0 &&
+		stage.Running == 0 &&
+		time.Duration(stage.OldestPendingSeconds)*time.Second >= staleAfter
 }
 
 func (s *Server) setLast(err error) {

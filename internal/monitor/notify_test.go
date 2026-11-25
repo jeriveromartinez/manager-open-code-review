@@ -25,6 +25,7 @@ func (discard) Write(p []byte) (int, error) { return len(p), nil }
 
 func alert(now time.Time) monitor.Alert {
 	return monitor.Alert{
+		ID:      "alert-1",
 		Code:    monitor.CodeQueueStalled,
 		Message: "review queue stalled: 5 waiting jobs, none running, oldest waiting 3600s",
 		Values:  map[string]any{"available": 5, "running": 0, "oldest_available_seconds": 3600},
@@ -37,12 +38,14 @@ func TestWebhookPayloadShape(t *testing.T) {
 		mu   sync.Mutex
 		body string
 		ct   string
+		key  string
 		srv  = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw, err := io.ReadAll(r.Body)
 			if err == nil {
 				mu.Lock()
 				body = string(raw)
 				ct = r.Header.Get("Content-Type")
+				key = r.Header.Get("Idempotency-Key")
 				mu.Unlock()
 			}
 			w.WriteHeader(http.StatusAccepted)
@@ -55,12 +58,15 @@ func TestWebhookPayloadShape(t *testing.T) {
 		t.Fatalf("Notify() error = %v", err)
 	}
 
-	const want = `{"severity":"warning","code":"queue_stalled","message":"review queue stalled: 5 waiting jobs, none running, oldest waiting 3600s","values":{"available":5,"oldest_available_seconds":3600,"running":0},"timestamp":"2026-11-20T10:00:00Z"}`
+	const want = `{"id":"alert-1","severity":"warning","code":"queue_stalled","message":"review queue stalled: 5 waiting jobs, none running, oldest waiting 3600s","values":{"available":5,"oldest_available_seconds":3600,"running":0},"timestamp":"2026-11-20T10:00:00Z"}`
 	if body != want {
 		t.Errorf("body =\n%s\nwant\n%s", body, want)
 	}
 	if !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+	if key != "alert-1" {
+		t.Errorf("Idempotency-Key = %q, want the alert id", key)
 	}
 }
 
