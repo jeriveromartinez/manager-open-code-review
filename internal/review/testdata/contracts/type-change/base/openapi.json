@@ -1,0 +1,16 @@
+{
+  "openapi": "3.0.3",
+  "info": { "title": "Pets", "version": "1.0.0" },
+  "paths": {},
+  "components": {
+    "schemas": {
+      "Pet": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "integer" }
+        }
+      }
+    }
+  }
+}

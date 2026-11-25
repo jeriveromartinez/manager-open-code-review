@@ -43,6 +43,27 @@ const (
 	ArchitectureExceptionsBaseline = "baseline"
 )
 
+// Versioned contract formats and their compatibility verdicts. The comparison
+// is local and deterministic: it never asks the model and never guesses. A
+// format without a parser is unknown, never compatible.
+const (
+	ContractFormatOpenAPI    = "openapi"
+	ContractFormatJSONSchema = "json-schema"
+	ContractFormatProto      = "proto"
+	ContractFormatGoTypes    = "go-exported"
+	ContractFormatUnknown    = "unknown"
+
+	ContractCompatible   = "compatible"
+	ContractIncompatible = "incompatible"
+	ContractUnknown      = "unknown"
+
+	ContractsNotDeclared = "not_declared"
+
+	ContractChangeAdded    = "added"
+	ContractChangeRemoved  = "removed"
+	ContractChangeModified = "modified"
+)
+
 // ArchitectureVerdict is the structured result of the architectural analysis
 // of one base–head comparison. It is stored as JSON on the review run, so the
 // panel, the summary comment and the check run all read the same object.
@@ -72,6 +93,10 @@ type ArchitectureVerdict struct {
 	// baseline. It is nil when the mode is off or the diff could not be
 	// inventoried.
 	Baseline *ArchitectureBaseline `json:"baseline,omitempty"`
+	// Contracts is the deterministic base–head comparison of versioned public
+	// contracts. It is independent of the model analysis and its status never
+	// changes the review outcome.
+	Contracts ArchitectureContracts `json:"contracts"`
 	// Recommendation is the original maintainer recommendation from the
 	// analysis. It stays as evidence even after a human decision changes the
 	// effective outcome; EffectiveDecision records that later outcome.
@@ -127,6 +152,44 @@ type ArchitectureEvidence struct {
 type ArchitectureControls struct {
 	Observation    bool `json:"observation"`
 	WritesDecision bool `json:"writes_decision"`
+	// ContractsReadOnly records that the contract adapter only reads the base
+	// and head trees; it never writes to the repository.
+	ContractsReadOnly bool `json:"contracts_read_only"`
+}
+
+// ArchitectureContracts is the aggregate of every versioned contract the
+// change touches. Contracts holds only the entries that differ between base and
+// head, so an unchanged contract does not add noise to the verdict.
+type ArchitectureContracts struct {
+	Status    string                 `json:"status"`
+	Declared  int                    `json:"declared"`
+	Compared  int                    `json:"compared"`
+	Contracts []ArchitectureContract `json:"contracts,omitempty"`
+	Errors    []string               `json:"errors,omitempty"`
+}
+
+// ArchitectureContract is one contract file compared between base and head.
+// Adapter names the parser that produced the result; digests identify the exact
+// inputs, so the same content always yields the same verdict.
+type ArchitectureContract struct {
+	Path       string                         `json:"path"`
+	Format     string                         `json:"format"`
+	Adapter    string                         `json:"adapter"`
+	Status     string                         `json:"status"`
+	Change     string                         `json:"change,omitempty"`
+	BaseDigest string                         `json:"base_digest,omitempty"`
+	HeadDigest string                         `json:"head_digest,omitempty"`
+	Evidence   []ArchitectureContractEvidence `json:"evidence,omitempty"`
+	Errors     []string                       `json:"errors,omitempty"`
+}
+
+// ArchitectureContractEvidence points at the exact operation or field whose
+// compatibility changed and names the objective break, independent of whether
+// the team accepts it.
+type ArchitectureContractEvidence struct {
+	Kind    string `json:"kind"`
+	Pointer string `json:"pointer,omitempty"`
+	Detail  string `json:"detail"`
 }
 
 // ArchitectureBaseline is the result of checking the change against the
