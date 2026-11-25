@@ -910,12 +910,16 @@ func TestRunErrorClassification(t *testing.T) {
 		{"no autorizado", errors.New("remote: Unauthorized"), store.RunInconclusive, "token_expired"},
 		{"token de instalación inválido", errors.New("remote: Invalid username or password."), store.RunInconclusive, "token_expired"},
 		{"credenciales rechazadas", errors.New("remote: Bad credentials"), store.RunInconclusive, "token_expired"},
-		{"red", errors.New("git fetch: EOF"), store.RunFailed, "git_error"},
+		{"red", errors.New("git fetch: EOF"), store.RunInconclusive, "git_transient"},
+		{"red transitoria", errors.New(transientFetchFailure), store.RunInconclusive, "git_transient"},
+		{"5xx del remote", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned error: 503"), store.RunInconclusive, "git_transient"},
+		{"HTTP 502", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': HTTP 502"), store.RunInconclusive, "git_transient"},
 		// A bare "401" inside a path, a SHA or an unrelated count is not an HTTP
 		// status: telling the operator to reinstall the App for those is a
-		// misleading and expensive action.
+		// misleading and expensive action. A DNS failure is transient, not
+		// credential-related.
 		{"401 en la ref", errors.New("git fetch: exit status 128: fatal: couldn't find remote ref refs/pull/1401/head"), store.RunFailed, "git_error"},
-		{"401 en la ruta", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': Could not resolve host: git-run-401.internal"), store.RunFailed, "git_error"},
+		{"401 en la ruta", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': Could not resolve host: git-run-401.internal"), store.RunInconclusive, "git_transient"},
 		{"401 en un SHA", errors.New("git fetch: exit status 128: fatal: reference is not a tree: 4f401a2"), store.RunFailed, "git_error"},
 		{"401 en un contador", errors.New("git fetch: exit status 128: fatal: fetch-pack: protocol error after 401 packets"), store.RunFailed, "git_error"},
 	}
@@ -2417,6 +2421,28 @@ func TestRunGitFailureIsFailed(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	assertRunTerminal(t, f, store.RunFailed, "git_error")
+	assertPublishedAndQueued(t, f, f.runID)
+}
+
+// A transport failure on the first fetch must not end the review: the retry
+// recovers the same run and publishes exactly one result.
+func TestRunRecoversFromTransientFetchFailure(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	attempts := stubFetch(t, func(attempt int) error {
+		if attempt == 1 {
+			return errors.New(transientFetchFailure)
+		}
+		return nil
+	})
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+	if *attempts < 2 {
+		t.Errorf("fetch attempts = %d, want the transient failure retried", *attempts)
+	}
 	assertPublishedAndQueued(t, f, f.runID)
 }
 

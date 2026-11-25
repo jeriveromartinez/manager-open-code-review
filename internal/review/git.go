@@ -9,7 +9,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
+)
+
+const (
+	// fetchMaxAttempts bounds a fetch retried after a transient transport
+	// failure. The first attempt counts, so this is one try plus retries.
+	fetchMaxAttempts = 3
+)
+
+var (
+	// fetchRetryBase is the wait before the first retry; each later wait
+	// doubles, capped by fetchRetryMax. Variables so tests can shrink the
+	// backoff instead of sleeping for real.
+	fetchRetryBase = 250 * time.Millisecond
+	fetchRetryMax  = 2 * time.Second
 )
 
 // cloneURL construye la URL de clonado inyectando un token de lectura solo en
@@ -56,6 +72,121 @@ func git(ctx context.Context, dir, op string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w: %s", op, err, detail)
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// fetchGit ejecuta un fetch. Es una variable para que las pruebas puedan
+// simular un transporte que falla y se recupera en el siguiente intento.
+var fetchGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+	return git(ctx, dir, "fetch", args...)
+}
+
+// transientFetchSignals match transport failures a later attempt can survive:
+// 5xx/429 responses and truncated transfers. A rejected credential never
+// reaches them because classifyCloneError checks the credential shapes first,
+// and a missing ref or a non-transient git error is not retried.
+var transientFetchSignals = []*regexp.Regexp{
+	regexp.MustCompile(`\bhttp 5\d\d\b`),
+	regexp.MustCompile(`\breturned error: 5\d\d\b`),
+	regexp.MustCompile(`\bhttp 429\b`),
+	regexp.MustCompile(`\breturned error: 429\b`),
+	regexp.MustCompile(`\beof\b`),
+}
+
+var transientFetchPhrases = []string{
+	"could not resolve host",
+	"temporary failure in name resolution",
+	"name or service not known",
+	"connection timed out",
+	"connection reset",
+	"connection refused",
+	"failed to connect",
+	"network is unreachable",
+	"no route to host",
+	"operation timed out",
+	"the remote end hung up unexpectedly",
+	"early eof",
+	"unexpected eof",
+	"rpc failed",
+	"transfer closed",
+	"ssl_error",
+	"gnutls_handshake",
+	"tls connection",
+	"index-pack failed",
+}
+
+// isTransientFetchError reports whether a fetch failure is a transport problem
+// that a bounded retry may survive, as opposed to a rejected credential, a
+// missing ref or another permanent failure.
+func isTransientFetchError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, signal := range transientFetchSignals {
+		if signal.MatchString(message) {
+			return true
+		}
+	}
+	for _, phrase := range transientFetchPhrases {
+		if strings.Contains(message, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// waitRetry sleeps for wait unless the context is done, so a retry never
+// outlives the run deadline.
+func waitRetry(ctx context.Context, wait time.Duration) bool {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// fetchWithRetry retries only the fetch. Init and remote add stay outside: they
+// already succeeded and repeating them is not what a transport failure needs.
+// The retry is bounded by fetchMaxAttempts, stops early on a non-transient
+// failure or a cancelled context, and keeps the last transport cause and the
+// attempt count in the returned error.
+func fetchWithRetry(ctx context.Context, dir string, args ...string) (string, error) {
+	var lastErr error
+	wait := fetchRetryBase
+	attempts := 0
+	for {
+		attempts++
+		out, err := fetchGit(ctx, dir, args...)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+		if !isTransientFetchError(err) || attempts == fetchMaxAttempts || ctx.Err() != nil {
+			break
+		}
+		// Do not start a wait the run deadline cannot cover: it would only be
+		// interrupted and waste the remaining budget.
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= wait {
+			break
+		}
+		if !waitRetry(ctx, wait) {
+			break
+		}
+		wait *= 2
+		if wait > fetchRetryMax {
+			wait = fetchRetryMax
+		}
+	}
+	if attempts == 1 {
+		return "", lastErr
+	}
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("%w (reintento cancelado: %v)", lastErr, ctx.Err())
+	}
+	return "", fmt.Errorf("fetch falló tras %d intentos: %w", attempts, lastErr)
 }
 
 // fetchHeadRef devuelve el SHA de la línea index de FETCH_HEAD. El fetch de
@@ -110,7 +241,7 @@ func Clone(ctx context.Context, dir, remoteURL, baseRef, headRef string, depthMa
 	}
 
 	for depth := 1; ; {
-		if _, err := git(ctx, dir, "fetch", "--no-pager", "fetch", "--no-tags",
+		if _, err := fetchWithRetry(ctx, dir, "--no-pager", "fetch", "--no-tags",
 			fmt.Sprintf("--depth=%d", depth), "origin", baseRef, headRef); err != nil {
 			return "", err
 		}
