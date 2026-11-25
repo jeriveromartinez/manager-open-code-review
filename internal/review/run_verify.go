@@ -194,8 +194,10 @@ func verifyContext(ctx context.Context, timeout time.Duration) (context.Context,
 
 // verifyFindings runs the second OCR pass over the run's findings and fills
 // out.decisions. It never fails the run: a verifier error or an exhausted
-// budget leaves the findings untriaged.
-func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig, apiKey []byte, workDir, headSHA string, out *runOutcome, reservation verifyReservation, log *runLogSink) {
+// budget leaves the findings untriaged. profile and apiKey are the destination
+// that actually executed the review, which may be an authorized fallback;
+// reservation is the share carved out before the main pass.
+func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig, profile store.LLMProfile, apiKey []byte, workDir, headSHA string, out *runOutcome, reservation verifyReservation, log *runLogSink) {
 	policy := verifyPolicy(cfg.Policy)
 	if policy.Mode == store.AutoTriageOff || len(out.findings) == 0 {
 		return
@@ -244,7 +246,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 				Bin:         r.Cfg.OCRBin,
 				RepoDir:     workDir,
 				Home:        filepath.Join(workDir, "home-ocr-verify"),
-				Profile:     cfg.Profile,
+				Profile:     profile,
 				APIKey:      string(apiKey),
 				Paths:       paths,
 				Background:  buildVerifyContext(selected),
@@ -257,7 +259,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 				verifier.MaxTokens = reviewContextCeiling
 			}
 			started := time.Now()
-			res, _, err := r.runNativeReview(verifyCtx, cfg.Profile.ID, verifier, log, "verify")
+			res, _, err := r.runNativeReview(verifyCtx, profile.ID, verifier, log, "verify")
 			if err != nil {
 				out.verificationSkipped = "verifier_error"
 				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
@@ -270,7 +272,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 						continue
 					}
 					v.HeadSHA = headSHA
-					v.Model = cfg.Profile.Model
+					v.Model = profile.Model
 					v.SessionID = res.SessionID
 					v.VerifiedAt = now
 					verdicts[id] = v

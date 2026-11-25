@@ -127,9 +127,7 @@ type runTestFixture struct {
 	pr            store.PullRequest
 	runID         uint
 	ocrBin        string
-	agentBin      string
 	calls         string
-	agentArgv     string
 	ocrCallLog    string
 	ocrArgv       string
 	ocrBack       string
@@ -201,20 +199,19 @@ func newRunTestFixture(t *testing.T) *runTestFixture {
 
 	team := store.Team{Name: "qa", Slug: "qa"}
 	mustCreateRunTest(t, s, ctx, &team)
-	// The provider is outside the closed table, so the health check keeps using
-	// the fake OpenCode binary instead of reaching a real endpoint. The native
-	// engine resolves it through the explicit base URL.
+	// The provider is outside the closed table; the native engine resolves it
+	// through the explicit base URL.
 	providerURL := "https://nvidia.example/v1"
 	profile := store.LLMProfile{
 		Name: "reviewer", Provider: "nvidia", Model: "nemotron", BaseURL: &providerURL,
 		APIKeyEnc: sealedKey, Enabled: true, HealthStatus: store.HealthUnknown,
 	}
 	mustCreateRunTest(t, s, ctx, &profile)
-	// Health checks fall back to the fake OpenCode binary only for an unknown
-	// provider without an explicit endpoint; the review profile above needs the
-	// endpoint for the native engine.
+	// The health check follows OCR's native endpoint, so the probe profile needs
+	// a reachable provider as well.
+	healthURL := testutil.NewFakeProvider(t, nil).URL()
 	healthProfile := store.LLMProfile{
-		Name: "health", Provider: "nvidia", Model: "nemotron",
+		Name: "health", Provider: "nvidia", Model: "nemotron", BaseURL: &healthURL,
 		APIKeyEnc: sealedKey, Enabled: true, HealthStatus: store.HealthUnknown,
 	}
 	mustCreateRunTest(t, s, ctx, &healthProfile)
@@ -250,15 +247,14 @@ func newRunTestFixture(t *testing.T) *runTestFixture {
 		s: s, box: box, ctx: ctx, root: root, bare: bare,
 		baseSHA: baseSHA, headSHA: headSHA,
 		pr: pr, runID: run.ID, events: &runTestEvents{}, jobs: &runTestJobs{},
-		policy: policy, calls: filepath.Join(root, "agent-calls.txt"),
-		agentArgv:     filepath.Join(root, "agent-argv.txt"),
+		policy:        policy,
+		calls:         filepath.Join(root, "agent-calls.txt"),
 		ocrCallLog:    filepath.Join(root, "ocr-calls.txt"),
 		ocrArgv:       filepath.Join(root, "ocr-argv.txt"),
 		ocrBack:       filepath.Join(root, "ocr-background.md"),
 		healthProfile: healthProfile.ID,
 	}
 	f.setOCR(t, runTestNativeOutput("auth.go"))
-	f.setAgent(t, runTestOutput("auth.go"), false)
 	return f
 }
 
@@ -361,11 +357,6 @@ func runTestNativeFindingCovering(paths ...string) string {
 }`, len(paths), joined, joined)
 }
 
-// runTestOutput is the OpenCode-shaped answer used by the health fallback.
-func runTestOutput(path string) string {
-	return fmt.Sprintf(`{"summary":"Revisión completada","coverage":{"reviewed_files":2,"skipped_files":0},"previous_findings":[],"findings":[{"path":%q,"severity":"major","category":"security","title":"Comparación insegura","body":"usar hash seguro","suggestion":"","confidence":"high","start_line":3,"end_line":3}]}`, path)
-}
-
 func (f *runTestFixture) setOCR(t *testing.T, output string) {
 	t.Helper()
 	dir := filepath.Join(f.root, "ocr")
@@ -400,9 +391,19 @@ fi
 if [ -n "${RUN_FAKE_OCR_LINGER:-}" ]; then
     setsid sleep "$RUN_FAKE_OCR_LINGER" &
 fi
+if [ -n "${RUN_FAKE_OCR_FAIL_ONCE:-}" ] && [ ! -f "$RUN_FAKE_OCR_FAIL_ONCE" ]; then
+    : >"$RUN_FAKE_OCR_FAIL_ONCE"
+    printf '%%s\n' "${RUN_FAKE_OCR_FAIL_ONCE_MESSAGE:-ocr temporal no disponible: 429 rate limited}" >&2
+    exit 1
+fi
 if [ -n "${RUN_FAKE_OCR_FAIL:-}" ]; then
     printf 'ocr no disponible\n' >&2
     exit 1
+fi
+if [ -n "${RUN_FAKE_OCR_ONCE_OUTPUT:-}" ] && [ ! -f "${RUN_FAKE_OCR_ONCE_OUTPUT}.used" ]; then
+    : >"${RUN_FAKE_OCR_ONCE_OUTPUT}.used"
+    cat "$RUN_FAKE_OCR_ONCE_OUTPUT"
+    exit 0
 fi
 case "$1" in
     scan)
@@ -440,6 +441,36 @@ func (f *runTestFixture) setScan(t *testing.T, output string) {
 	path := filepath.Join(f.root, "ocr", "scan-custom.json")
 	writeRunTestFile(t, path, output)
 	t.Setenv("RUN_FAKE_SCAN_OUTPUT", path)
+}
+
+// setFallbackProfiles authorizes an ordered fallback list in the team policy.
+func (f *runTestFixture) setFallbackProfiles(t *testing.T, ids ...uint) {
+	t.Helper()
+	encoded, err := json.Marshal(ids)
+	if err != nil {
+		t.Fatalf("encode fallback ids: %v", err)
+	}
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("team_id = ?", f.policy.TeamID).
+		Update("fallback_profile_ids", datatypes.JSON(encoded)).Error; err != nil {
+		t.Fatalf("update fallback profiles: %v", err)
+	}
+}
+
+// addReviewProfile creates a healthy backup destination with its own sealed key.
+func (f *runTestFixture) addReviewProfile(t *testing.T, name string, health string) store.LLMProfile {
+	t.Helper()
+	sealed, err := f.box.Seal([]byte("sk-" + name))
+	if err != nil {
+		t.Fatalf("seal backup key: %v", err)
+	}
+	profile := store.LLMProfile{
+		Name: name, Provider: "anthropic", Model: "claude-backup", Mode: "api_key",
+		APIKeyEnc: sealed, Concurrency: 1, Enabled: true,
+		HealthStatus: health, AllowPrivateData: true,
+	}
+	mustCreateRunTest(t, f.s, f.ctx, &profile)
+	return profile
 }
 
 // setAutoTriage enables the second pass in the team policy before the run.
@@ -543,30 +574,6 @@ func runTestNativeTwoFindings() string {
 }`
 }
 
-func (f *runTestFixture) setAgent(t *testing.T, output string, fail bool) {
-	t.Helper()
-	dir := filepath.Join(f.root, "agent")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	src, err := os.ReadFile(filepath.Join("testdata", "fakeopencode-review.sh"))
-	if err != nil {
-		t.Fatalf("read fake agent script: %v", err)
-	}
-	bin := filepath.Join(dir, "opencode.sh")
-	writeRunTestFile(t, bin, string(src))
-	if err := os.Chmod(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeRunTestFile(t, filepath.Join(dir, "output.json"), output)
-	t.Setenv("RUN_FAKE_AGENT_CALLS", f.calls)
-	t.Setenv("RUN_FAKE_AGENT_ARGV", f.agentArgv)
-	f.agentBin = bin
-	if fail {
-		t.Setenv("RUN_FAKE_AGENT_FAIL", "1")
-	}
-}
-
 func (f *runTestFixture) runner() *Runner {
 	return &Runner{
 		Store:  f.s,
@@ -576,7 +583,6 @@ func (f *runTestFixture) runner() *Runner {
 		Cfg: RunnerConfig{
 			WorkspaceDir:  filepath.Join(f.root, "ws"),
 			OCRBin:        f.ocrBin,
-			OpencodeBin:   f.agentBin,
 			GitBaseURL:    "file://" + f.root,
 			FetchDepthMax: 10,
 			Timeout:       30 * time.Second,
@@ -660,18 +666,6 @@ func (f *runTestFixture) agentCalls(t *testing.T) int {
 		t.Fatalf("read agent calls: %v", err)
 	}
 	return len(strings.Split(strings.TrimSpace(string(data)), "\n"))
-}
-
-func (f *runTestFixture) agentArgs(t *testing.T) []string {
-	t.Helper()
-	data, err := os.ReadFile(f.agentArgv)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		t.Fatalf("read agent argv: %v", err)
-	}
-	return strings.Split(strings.TrimSpace(string(data)), "\n")
 }
 
 func (f *runTestFixture) ocrCalls(t *testing.T) int {
@@ -1174,11 +1168,15 @@ func skipWithoutShellFake(t *testing.T) {
 	}
 }
 
-// executeForTest runs the pipeline without claiming the run, so the test can
-// inspect the outcome (decisions included) before they are persisted.
+// executeForTest claims the run and runs the pipeline without completing it, so
+// the test can inspect the outcome (decisions included) before they are
+// persisted.
 func (f *runTestFixture) executeForTest(t *testing.T, r *Runner) runOutcome {
 	t.Helper()
-	run := f.loadRun(t)
+	run, claimed, err := f.s.ClaimReviewRun(f.ctx, f.runID)
+	if err != nil || !claimed {
+		t.Fatalf("claim run: claimed=%v err=%v", claimed, err)
+	}
 	cfg, err := f.s.ReviewConfigForPR(f.ctx, run.PullRequestID)
 	if err != nil {
 		t.Fatalf("review config: %v", err)
@@ -2570,9 +2568,19 @@ func TestRunnerCheckProfileDelegates(t *testing.T) {
 		t.Errorf("health_status = %q, want %q", profile.HealthStatus, store.HealthOK)
 	}
 
-	r.Cfg.OpencodeBin = "/bin/false"
+	// The probe follows OCR's native endpoint, so a reachable provider is what
+	// makes it succeed; point the profile at a closed port to force the failure.
+	broken, err := f.s.LLMProfile(f.ctx, f.healthProfile)
+	if err != nil {
+		t.Fatalf("load health profile: %v", err)
+	}
+	unreachable := "http://127.0.0.1:1/v1"
+	broken.BaseURL = &unreachable
+	if err := f.s.UpdateLLMProfile(f.ctx, broken); err != nil {
+		t.Fatalf("point profile at a closed endpoint: %v", err)
+	}
 	if err := r.CheckProfile(f.ctx, f.healthProfile); err == nil {
-		t.Error("CheckProfile with failing binary returned nil error")
+		t.Error("CheckProfile with an unreachable endpoint returned nil error")
 	}
 	if err := f.s.DB.WithContext(f.ctx).First(&profile, f.healthProfile).Error; err != nil {
 		t.Fatalf("reload profile after failure: %v", err)

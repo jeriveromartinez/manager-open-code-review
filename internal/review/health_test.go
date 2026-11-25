@@ -5,11 +5,10 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -49,10 +48,19 @@ func TestCheckProfileUpdatesHealth(t *testing.T) {
 		t.Fatalf("seal key: %v", err)
 	}
 
+	var unavailable atomic.Bool
+	provider := testutil.NewFakeProvider(t, func(testutil.ProviderRequest) testutil.ProviderReply {
+		if unavailable.Load() {
+			return testutil.ProviderReply{Status: http.StatusServiceUnavailable, Body: `{"error":{"message":"provider unavailable"}}`}
+		}
+		return testutil.ProviderReply{Text: `{"ok":true}`}
+	})
+	base := provider.URL()
 	profile := store.LLMProfile{
 		Name:         "health-check",
 		Provider:     "nvidia",
 		Model:        "nemotron",
+		BaseURL:      &base,
 		APIKeyEnc:    sealed,
 		Enabled:      true,
 		HealthStatus: store.HealthUnknown,
@@ -64,11 +72,10 @@ func TestCheckProfileUpdatesHealth(t *testing.T) {
 	checker := &ProfileChecker{
 		Store:   s,
 		Box:     box,
-		Bin:     fakeOpencodeBin(t),
 		Timeout: 5 * time.Second,
 	}
 	if err := checker.Check(ctx, profile.ID); err != nil {
-		t.Fatalf("Check with healthy binary: %v", err)
+		t.Fatalf("Check with a healthy provider: %v", err)
 	}
 
 	var got store.LLMProfile
@@ -85,13 +92,9 @@ func TestCheckProfileUpdatesHealth(t *testing.T) {
 		t.Fatalf("health_error = %q, want empty", got.HealthError)
 	}
 
-	failBin := filepath.Join(t.TempDir(), "fail-opencode.sh")
-	if err := os.WriteFile(failBin, []byte("#!/bin/sh\necho 'provider unavailable' >&2\nexit 1\n"), 0o755); err != nil {
-		t.Fatalf("write failing binary: %v", err)
-	}
-	checker.Bin = failBin
+	unavailable.Store(true)
 	if err := checker.Check(ctx, profile.ID); err == nil {
-		t.Fatal("Check with failing binary returned nil error")
+		t.Fatal("Check with a failing provider returned nil error")
 	}
 
 	if err := s.DB.WithContext(ctx).First(&got, profile.ID).Error; err != nil {
@@ -120,8 +123,16 @@ func TestProfileCheckNotifies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal key: %v", err)
 	}
+	var unavailable atomic.Bool
+	provider := testutil.NewFakeProvider(t, func(testutil.ProviderRequest) testutil.ProviderReply {
+		if unavailable.Load() {
+			return testutil.ProviderReply{Status: http.StatusServiceUnavailable, Body: `{"error":{"message":"down"}}`}
+		}
+		return testutil.ProviderReply{Text: `{"ok":true}`}
+	})
+	base := provider.URL()
 	profile := store.LLMProfile{
-		Name: "health-notify", Provider: "nvidia", Model: "nemotron",
+		Name: "health-notify", Provider: "nvidia", Model: "nemotron", BaseURL: &base,
 		APIKeyEnc: sealed, Enabled: true, HealthStatus: store.HealthUnknown,
 	}
 	if err := s.DB.WithContext(ctx).Create(&profile).Error; err != nil {
@@ -130,43 +141,27 @@ func TestProfileCheckNotifies(t *testing.T) {
 
 	pub := &runTestEvents{}
 	checker := &ProfileChecker{
-		Store: s, Box: box, Bin: fakeOpencodeBin(t), Timeout: 5 * time.Second, Events: pub,
+		Store: s, Box: box, Timeout: 5 * time.Second, Events: pub,
 	}
 	want := events.Event{Type: "llm_profile.updated", ID: strconv.FormatUint(uint64(profile.ID), 10)}
 
 	if err := checker.Check(ctx, profile.ID); err != nil {
-		t.Fatalf("Check with healthy binary: %v", err)
+		t.Fatalf("Check with a healthy provider: %v", err)
 	}
 	if got := pub.snapshot(); !reflect.DeepEqual(got, []events.Event{want}) {
 		t.Fatalf("events after an ok check = %+v, want [%+v]", got, want)
 	}
 
-	failBin := filepath.Join(t.TempDir(), "fail-opencode.sh")
-	if err := os.WriteFile(failBin, []byte("#!/bin/sh\necho 'provider unavailable' >&2\nexit 1\n"), 0o755); err != nil {
-		t.Fatalf("write failing binary: %v", err)
-	}
-	checker.Bin = failBin
+	unavailable.Store(true)
 	if err := checker.Check(ctx, profile.ID); err == nil {
-		t.Fatal("Check with failing binary returned nil error")
+		t.Fatal("Check with a failing provider returned nil error")
 	}
 	if got := pub.snapshot(); !reflect.DeepEqual(got, []events.Event{want, want}) {
 		t.Errorf("events after a failed check = %+v, want [%+v %+v]", got, want, want)
 	}
 
-	emptyBin := filepath.Join(t.TempDir(), "empty-opencode.sh")
-	if err := os.WriteFile(emptyBin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("write silent binary: %v", err)
-	}
-	checker.Bin = emptyBin
-	if err := checker.Check(ctx, profile.ID); err == nil {
-		t.Fatal("Check with an empty answer returned nil error")
-	}
-	if got := pub.snapshot(); !reflect.DeepEqual(got, []events.Event{want, want, want}) {
-		t.Errorf("events after an empty answer = %+v, want three %+v", got, want)
-	}
-
 	// A failed notification must not turn a healthy verdict into an error.
-	checker.Bin = fakeOpencodeBin(t)
+	unavailable.Store(false)
 	checker.Events = failingRunEvents{}
 	if err := checker.Check(ctx, profile.ID); err != nil {
 		t.Errorf("Check with a failing publisher: %v", err)
@@ -464,9 +459,9 @@ func TestProfileCheckFailureRecordsNoUsage(t *testing.T) {
 	}
 }
 
-// OpenCode is the fallback for providers outside the closed table; its raw
-// usage JSON must reach the same structured columns.
-func TestProfileCheckAgentFallbackRecordsUsage(t *testing.T) {
+// A profile the native engine cannot reach must never be marked healthy, even
+// though OpenCode could have answered it through its own provider table (#150).
+func TestProfileCheckRejectsProfileOCRCannotReach(t *testing.T) {
 	s := testutil.NewStore(t)
 	ctx := context.Background()
 	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
@@ -474,38 +469,27 @@ func TestProfileCheckAgentFallbackRecordsUsage(t *testing.T) {
 		t.Fatalf("new box: %v", err)
 	}
 
-	bin := filepath.Join(t.TempDir(), "usage-opencode.sh")
-	script := `#!/bin/sh
-printf '%s\n' '{"type":"step_finish","part":{"tokens":{"input":10,"output":2,"reasoning":1,"total":12,"cache":{"read":3,"write":1}}}}'
-printf '%s\n' '{"type":"text","part":{"type":"text","text":"{\"ok\":true}"}}'
-`
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("write usage binary: %v", err)
+	// Unknown provider and no base URL: nativeEndpoint rejects it, so no
+	// provider request is attempted and no OpenCode binary can paper over it.
+	profile := newProbeProfile(t, s, box, "probe-unreachable", "nvidia", "nemotron", nil)
+	checker := &ProfileChecker{Store: s, Box: box, Timeout: 5 * time.Second}
+	if err := checker.Check(ctx, profile.ID); err == nil {
+		t.Fatal("Check returned nil for a profile OCR cannot reach")
 	}
-	// No base URL and an unknown provider: the checker uses the agent binary.
-	profile := newProbeProfile(t, s, box, "probe-agent-usage", "nvidia", "nemotron", nil)
-
-	checker := &ProfileChecker{Store: s, Box: box, Bin: bin, Timeout: 5 * time.Second}
-	if err := checker.Check(ctx, profile.ID); err != nil {
-		t.Fatalf("Check: %v", err)
+	health := loadHealth(t, s, profile.ID)
+	if health.HealthStatus != store.HealthError {
+		t.Fatalf("health_status = %q, want %q", health.HealthStatus, store.HealthError)
 	}
-
-	check := latestHealthCheck(t, s, profile.ID)
-	if check.InputTokens == nil || *check.InputTokens != 10 ||
-		check.OutputTokens == nil || *check.OutputTokens != 2 ||
-		check.ReasoningTokens == nil || *check.ReasoningTokens != 1 ||
-		check.CacheReadTokens == nil || *check.CacheReadTokens != 3 ||
-		check.CacheWriteTokens == nil || *check.CacheWriteTokens != 1 ||
-		check.TotalTokens == nil || *check.TotalTokens != 12 ||
-		check.MaxContextTokens == nil || *check.MaxContextTokens != 14 {
-		t.Errorf("check = %+v, want 10/2/1/3/1/12/14", check)
+	for _, fragment := range []string{"OCR no puede usar este perfil", "base_url"} {
+		if !strings.Contains(health.HealthError, fragment) {
+			t.Errorf("health_error = %q, want it to contain %q", health.HealthError, fragment)
+		}
 	}
 }
 
-// The configured review_agent_steps is the only remaining agent budget, and it
-// must bound the health probe instead of the silent default. The fake binary
-// fails unless the value reached the generated OpenCode config.
-func TestProfileCheckAgentFallbackUsesConfiguredSteps(t *testing.T) {
+// The probe uses the endpoint OCR configures, so an unknown provider with an
+// explicit base URL is healthy when that endpoint answers.
+func TestProfileCheckUsesOCREndpointForUnknownProvider(t *testing.T) {
 	s := testutil.NewStore(t)
 	ctx := context.Background()
 	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
@@ -513,33 +497,26 @@ func TestProfileCheckAgentFallbackUsesConfiguredSteps(t *testing.T) {
 		t.Fatalf("new box: %v", err)
 	}
 
-	bin := filepath.Join(t.TempDir(), "steps-opencode.sh")
-	script := `#!/bin/sh
-set -eu
-steps=$(sed -n 's/.*"steps": \([0-9][0-9]*\).*/\1/p' "$HOME/.config/opencode/opencode.jsonc")
-if [ "$steps" != "17" ]; then
-	printf 'agent steps = %s, want 17\n' "$steps" >&2
-	exit 1
-fi
-printf '%s\n' '{"type":"text","part":{"type":"text","text":"{\"ok\":true}"}}'
-`
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("write steps binary: %v", err)
-	}
-	profile := newProbeProfile(t, s, box, "probe-agent-steps", "nvidia", "nemotron", nil)
-
-	checker := &ProfileChecker{Store: s, Box: box, Bin: bin, Steps: 17, Timeout: 5 * time.Second}
+	provider := testutil.NewFakeProvider(t, nil)
+	base := provider.URL()
+	profile := newProbeProfile(t, s, box, "probe-ocr-endpoint", "nvidia", "nemotron", &base)
+	checker := &ProfileChecker{Store: s, Box: box, Timeout: 5 * time.Second}
 	if err := checker.Check(ctx, profile.ID); err != nil {
-		t.Fatalf("Check with configured steps: %v", err)
+		t.Fatalf("Check: %v", err)
+	}
+	requests := provider.Requests()
+	if len(requests) != 1 || requests[0].Path != "/v1/chat/completions" {
+		t.Fatalf("requests = %+v, want one OpenAI-compatible completion", requests)
 	}
 	if health := loadHealth(t, s, profile.ID); health.HealthStatus != store.HealthOK {
 		t.Fatalf("health_status = %q, want %q", health.HealthStatus, store.HealthOK)
 	}
 }
 
-// An OpenCode step that omits the total still reports its parts: the total is
-// derived so the check is never recorded as zero tokens (#101).
-func TestProfileCheckAgentFallbackDerivesMissingTotal(t *testing.T) {
+// A rotation while the probe is in flight invalidates its verdict: the check
+// measured the previous credential/model and must not overwrite the unknown
+// state the update left behind.
+func TestProfileCheckDiscardsVerdictAfterRotation(t *testing.T) {
 	s := testutil.NewStore(t)
 	ctx := context.Background()
 	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
@@ -547,62 +524,48 @@ func TestProfileCheckAgentFallbackDerivesMissingTotal(t *testing.T) {
 		t.Fatalf("new box: %v", err)
 	}
 
-	bin := filepath.Join(t.TempDir(), "no-total-opencode.sh")
-	script := `#!/bin/sh
-printf '%s\n' '{"type":"step_finish","part":{"tokens":{"input":10,"output":2}}}'
-printf '%s\n' '{"type":"text","part":{"type":"text","text":"{\"ok\":true}"}}'
-`
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("write usage binary: %v", err)
-	}
-	profile := newProbeProfile(t, s, box, "probe-agent-no-total", "nvidia", "nemotron", nil)
+	requested := make(chan struct{}, 1)
+	release := make(chan struct{})
+	provider := testutil.NewFakeProvider(t, func(testutil.ProviderRequest) testutil.ProviderReply {
+		select {
+		case requested <- struct{}{}:
+		default:
+		}
+		<-release
+		return testutil.ProviderReply{Text: `{"ok":true}`}
+	})
+	base := provider.URL()
+	profile := newProbeProfile(t, s, box, "probe-rotation", "nvidia", "nemotron", &base)
+	checker := &ProfileChecker{Store: s, Box: box, Timeout: 5 * time.Second}
 
-	checker := &ProfileChecker{Store: s, Box: box, Bin: bin, Timeout: 5 * time.Second}
-	if err := checker.Check(ctx, profile.ID); err != nil {
-		t.Fatalf("Check: %v", err)
-	}
+	done := make(chan error, 1)
+	go func() { done <- checker.Check(ctx, profile.ID) }()
+	<-requested
 
-	check := latestHealthCheck(t, s, profile.ID)
-	if check.TotalTokens == nil || *check.TotalTokens != 12 {
-		t.Errorf("total tokens = %v, want 12 derived from input+output", check.TotalTokens)
-	}
-	if check.InputTokens == nil || *check.InputTokens != 10 ||
-		check.OutputTokens == nil || *check.OutputTokens != 2 {
-		t.Errorf("check = %+v, want input 10 and output 2", check)
-	}
-}
-
-// An all-zero OpenCode usage event is unknown, not zero: the check is
-// recorded with NULL token columns so it stays out of the averages (#101).
-func TestProfileCheckAgentFallbackEmptyUsageRecordsNull(t *testing.T) {
-	s := testutil.NewStore(t)
-	ctx := context.Background()
-	box, err := crypto.NewBox(bytes.Repeat([]byte{9}, crypto.KeySize))
+	current, err := s.LLMProfile(ctx, profile.ID)
 	if err != nil {
-		t.Fatalf("new box: %v", err)
+		t.Fatalf("load profile: %v", err)
+	}
+	current.Model = "nemotron-next"
+	if err := s.UpdateLLMProfile(ctx, current); err != nil {
+		t.Fatalf("rotate profile: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Check after rotation error = %v, want the stale verdict to be dropped", err)
 	}
 
-	bin := filepath.Join(t.TempDir(), "empty-usage-opencode.sh")
-	script := `#!/bin/sh
-printf '%s\n' '{"type":"step_finish","part":{"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0},"total":0}}}'
-printf '%s\n' '{"type":"text","part":{"type":"text","text":"{\"ok\":true}"}}'
-`
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatalf("write usage binary: %v", err)
+	health := loadHealth(t, s, profile.ID)
+	if health.HealthStatus != store.HealthUnknown {
+		t.Fatalf("health_status = %q, want %q after rotation", health.HealthStatus, store.HealthUnknown)
 	}
-	profile := newProbeProfile(t, s, box, "probe-agent-empty-usage", "nvidia", "nemotron", nil)
-
-	checker := &ProfileChecker{Store: s, Box: box, Bin: bin, Timeout: 5 * time.Second}
-	if err := checker.Check(ctx, profile.ID); err != nil {
-		t.Fatalf("Check: %v", err)
+	var okChecks int64
+	if err := s.DB.WithContext(ctx).Table("llm_health_checks").
+		Where("profile_id = ? AND status = ?", profile.ID, store.HealthOK).
+		Count(&okChecks).Error; err != nil {
+		t.Fatalf("count health checks: %v", err)
 	}
-
-	if health := loadHealth(t, s, profile.ID); health.HealthStatus != store.HealthOK {
-		t.Fatalf("health_status = %q, want %q", health.HealthStatus, store.HealthOK)
-	}
-	check := latestHealthCheck(t, s, profile.ID)
-	if check.TotalTokens != nil || check.InputTokens != nil || check.OutputTokens != nil ||
-		check.ReasoningTokens != nil || check.CacheReadTokens != nil || check.CacheWriteTokens != nil {
-		t.Errorf("check = %+v, want NULL token columns", check)
+	if okChecks != 0 {
+		t.Fatalf("ok checks = %d, want the stale verdict discarded", okChecks)
 	}
 }

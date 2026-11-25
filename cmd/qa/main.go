@@ -279,7 +279,6 @@ func runWorker() error {
 		Cfg: review.RunnerConfig{
 			WorkspaceDir:   cfg.WorkspaceDir,
 			OCRBin:         cfg.OCRBin,
-			OpencodeBin:    cfg.OpencodeBin,
 			GitBaseURL:     cfg.GitBaseURL,
 			FetchDepthMax:  cfg.FetchDepthMax,
 			ContextCeiling: cfg.ReviewContextCeiling,
@@ -287,8 +286,7 @@ func runWorker() error {
 		},
 	}
 	checker := &review.ProfileChecker{
-		Store: st, Box: workerBox, Bin: cfg.OpencodeBin, Events: eventsPublisher,
-		Steps: cfg.ReviewAgentSteps,
+		Store: st, Box: workerBox, Events: eventsPublisher,
 	}
 	watchdog := &review.Watchdog{
 		Store: st, Events: eventsPublisher, StaleAfter: cfg.ReviewStaleAfter,

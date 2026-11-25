@@ -134,6 +134,11 @@ func (f *runTestFixture) setOCRChunks(t *testing.T, mainOutput string, chunkOutp
 set -eu
 if [ -n "${RUN_FAKE_OCR_CALLS:-}" ]; then printf 'call\n' >>"$RUN_FAKE_OCR_CALLS"; fi
 if [ -n "${RUN_FAKE_OCR_ARGV:-}" ]; then printf '%s\n' "$*" >>"$RUN_FAKE_OCR_ARGV"; fi
+if [ -n "${RUN_FAKE_OCR_ONCE_OUTPUT:-}" ] && [ ! -f "${RUN_FAKE_OCR_ONCE_OUTPUT}.used" ]; then
+    : >"${RUN_FAKE_OCR_ONCE_OUTPUT}.used"
+    cat "$RUN_FAKE_OCR_ONCE_OUTPUT"
+    exit "${RUN_FAKE_OCR_EXIT:-0}"
+fi
 commit=""
 prev=""
 for arg in "$@"; do
