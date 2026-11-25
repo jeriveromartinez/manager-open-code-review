@@ -92,10 +92,10 @@ func TestContractCompatibilityFixtures(t *testing.T) {
 	}
 }
 
-func TestContractUnknownFormatIsNeverCompatible(t *testing.T) {
-	base := contractFixture(t, "unknown-format", "base", "openapi.yaml")
-	head := contractFixture(t, "unknown-format", "head", "openapi.yaml")
-	contract := compareContractContents("api/openapi.yaml", base, head, true, true)
+func TestContractGraphQLFormatIsNeverCompatible(t *testing.T) {
+	base := contractFixture(t, "unknown-format", "base", "schema.graphql")
+	head := contractFixture(t, "unknown-format", "head", "schema.graphql")
+	contract := compareContractContents("api/schema.graphql", base, head, true, true)
 	if contract.Status != store.ContractUnknown {
 		t.Fatalf("status = %q, want unknown", contract.Status)
 	}
@@ -126,7 +126,7 @@ func TestContractUnknownFormatIsNeverCompatible(t *testing.T) {
 	if verdict.Contracts.Status != store.ContractUnknown || len(verdict.Contracts.Contracts) != 1 {
 		t.Errorf("verdict contracts = %+v, want the comparison preserved", verdict.Contracts)
 	}
-	if content := verdict.Dimensions[0].Content; !containsSubstring([]string{content}, "api/openapi.yaml") ||
+	if content := verdict.Dimensions[0].Content; !containsSubstring([]string{content}, "api/schema.graphql") ||
 		!containsSubstring([]string{content}, "(unknown, none, modified)") {
 		t.Errorf("contract dimension lost the path or adapter reference: %q", content)
 	}
@@ -206,6 +206,168 @@ message Pet { int32 id = 1; }
 	}
 }
 
+func TestContractYAMLAdapters(t *testing.T) {
+	cases := []struct {
+		name     string
+		dir      string
+		file     string
+		evidence []store.ArchitectureContractEvidence
+	}{
+		{
+			name: "openapi 3", dir: "yaml-openapi3", file: "openapi.yaml",
+			evidence: []store.ArchitectureContractEvidence{
+				{Kind: "operation_removed", Pointer: "paths.GET /pets/{petId}"},
+				{Kind: "type_changed", Pointer: "components.schemas.Pet.properties.id"},
+				{Kind: "required_field_added", Pointer: "components.schemas.Pet.properties.status"},
+				{Kind: "field_added", Pointer: "components.schemas.Pet.properties.tag"},
+			},
+		},
+		{
+			name: "swagger 2.0", dir: "yaml-swagger2", file: "swagger.yaml",
+			evidence: []store.ArchitectureContractEvidence{
+				{Kind: "required_parameter_added", Pointer: "paths.GET /orders.parameters.query.status"},
+				{Kind: "type_changed", Pointer: "components.schemas.Order.properties.id"},
+				{Kind: "required_field_added", Pointer: "components.schemas.Order.properties.currency"},
+				{Kind: "schema_removed", Pointer: "components.schemas.Customer"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := contractFixture(t, tc.dir, "base", tc.file)
+			head := contractFixture(t, tc.dir, "head", tc.file)
+			contract := compareContractContents("api/"+tc.file, base, head, true, true)
+			if contract.Format != store.ContractFormatOpenAPI || contract.Adapter != contractAdapterOpenAPIYAML {
+				t.Fatalf("format/adapter = %q/%q", contract.Format, contract.Adapter)
+			}
+			if contract.Status != store.ContractIncompatible {
+				t.Fatalf("status = %q, want incompatible (evidence: %+v)", contract.Status, contract.Evidence)
+			}
+			if contract.BaseDigest == "" || contract.HeadDigest == "" || contract.BaseDigest == contract.HeadDigest {
+				t.Errorf("digests = %q/%q, want two different content digests", contract.BaseDigest, contract.HeadDigest)
+			}
+			for _, want := range tc.evidence {
+				if !contractHasEvidence(contract, want.Kind, want.Pointer) {
+					t.Errorf("evidence %+v missing %s %s", contract.Evidence, want.Kind, want.Pointer)
+				}
+			}
+		})
+	}
+}
+
+func TestContractYAMLAnchorsAndAliases(t *testing.T) {
+	base := contractFixture(t, "yaml-anchors", "base", "openapi.yaml")
+	head := contractFixture(t, "yaml-anchors", "head", "openapi.yaml")
+	contract := compareContractContents("api/openapi.yaml", base, head, true, true)
+	if contract.Format != store.ContractFormatOpenAPI || contract.Adapter != contractAdapterOpenAPIYAML {
+		t.Fatalf("format/adapter = %q/%q", contract.Format, contract.Adapter)
+	}
+	if contract.Status != store.ContractIncompatible {
+		t.Fatalf("status = %q, want incompatible (evidence: %+v)", contract.Status, contract.Evidence)
+	}
+	// The alias resolves to the anchored mapping, so both schemas carry the change.
+	for _, name := range []string{"Item", "ItemAlias"} {
+		pointer := "components.schemas." + name + ".properties.id"
+		if !contractHasEvidence(contract, "type_changed", pointer) {
+			t.Errorf("evidence %+v missing %s", contract.Evidence, pointer)
+		}
+	}
+}
+
+func TestContractYAMLMatchesJSONClassification(t *testing.T) {
+	jsonBase := contractFixture(t, "unquoted-status-code", "base", "openapi.json")
+	jsonHead := contractFixture(t, "unquoted-status-code", "head", "openapi.json")
+	yamlBase := contractFixture(t, "unquoted-status-code", "base", "openapi.yaml")
+	yamlHead := contractFixture(t, "unquoted-status-code", "head", "openapi.yaml")
+
+	fromJSON := compareContractContents("api/openapi.json", jsonBase, jsonHead, true, true)
+	fromYAML := compareContractContents("api/openapi.yaml", yamlBase, yamlHead, true, true)
+
+	if fromJSON.Status != store.ContractIncompatible || fromYAML.Status != fromJSON.Status {
+		t.Fatalf("statuses = json %q, yaml %q; want both incompatible", fromJSON.Status, fromYAML.Status)
+	}
+	if fromYAML.Format != fromJSON.Format {
+		t.Errorf("formats = json %q, yaml %q", fromJSON.Format, fromYAML.Format)
+	}
+	if fromJSON.Adapter != contractAdapterOpenAPI || fromYAML.Adapter != contractAdapterOpenAPIYAML {
+		t.Errorf("adapters = json %q, yaml %q", fromJSON.Adapter, fromYAML.Adapter)
+	}
+	if !reflect.DeepEqual(fromYAML.Evidence, fromJSON.Evidence) {
+		t.Fatalf("evidence differs between JSON and YAML:\njson: %+v\nyaml: %+v", fromJSON.Evidence, fromYAML.Evidence)
+	}
+	for _, want := range []store.ArchitectureContractEvidence{
+		{Kind: "operation_removed", Pointer: "paths.GET /pets/{petId}"},
+		{Kind: "type_changed", Pointer: "components.schemas.Pet.properties.id"},
+		{Kind: "required_field_added", Pointer: "components.schemas.Pet.properties.status"},
+		{Kind: "field_added", Pointer: "components.schemas.Pet.properties.tag"},
+	} {
+		if !contractHasEvidence(fromYAML, want.Kind, want.Pointer) {
+			t.Errorf("yaml evidence %+v missing %s %s", fromYAML.Evidence, want.Kind, want.Pointer)
+		}
+	}
+}
+
+func TestContractYAMLMultiDocumentRules(t *testing.T) {
+	base := []byte("openapi: 3.0.3\npaths: {}\n")
+	cases := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "empty document before a real one",
+			content: "---\nnull\n---\nopenapi: 3.0.3\npaths: {}\n",
+			want:    store.ContractUnknown,
+		},
+		{
+			name:    "one trailing empty document",
+			content: "openapi: 3.0.3\npaths: {}\n---\n",
+			want:    store.ContractCompatible,
+		},
+		{
+			name:    "two trailing empty documents",
+			content: "openapi: 3.0.3\npaths: {}\n---\n---\n",
+			want:    store.ContractUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			contract := compareContractContents("api/openapi.yaml", base, []byte(tc.content), true, true)
+			if contract.Status != tc.want {
+				t.Fatalf("status = %q, want %q (evidence: %+v)", contract.Status, tc.want, contract.Evidence)
+			}
+		})
+	}
+}
+
+func TestContractYAMLUnsupportedShapesStayUnknown(t *testing.T) {
+	cases := []struct {
+		name string
+		dir  string
+	}{
+		{name: "malformed", dir: "yaml-malformed"},
+		{name: "multi document", dir: "yaml-multi-document"},
+		{name: "non object root", dir: "yaml-nonobject"},
+		{name: "collection key", dir: "yaml-collection-key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := contractFixture(t, tc.dir, "base", "openapi.yaml")
+			head := contractFixture(t, tc.dir, "head", "openapi.yaml")
+			contract := compareContractContents("api/openapi.yaml", base, head, true, true)
+			if contract.Status != store.ContractUnknown {
+				t.Fatalf("status = %q, want unknown (evidence: %+v)", contract.Status, contract.Evidence)
+			}
+			if contract.Format != store.ContractFormatUnknown || contract.Adapter != contractAdapterNone {
+				t.Errorf("format/adapter = %q/%q, want unknown/none", contract.Format, contract.Adapter)
+			}
+			if !contractHasEvidence(contract, "unsupported_format", "") {
+				t.Errorf("evidence = %+v, want unsupported_format", contract.Evidence)
+			}
+		})
+	}
+}
+
 func TestContractJSONSchemaAdapter(t *testing.T) {
 	base := `{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",
 		"required":["id"],"properties":{"id":{"type":"integer"}}}`
@@ -214,6 +376,43 @@ func TestContractJSONSchemaAdapter(t *testing.T) {
 
 	contract := compareContractContents("contracts/pet.schema.json", []byte(base), []byte(head), true, true)
 	if contract.Format != store.ContractFormatJSONSchema || contract.Adapter != contractAdapterJSONSchema {
+		t.Fatalf("format/adapter = %q/%q", contract.Format, contract.Adapter)
+	}
+	if contract.Status != store.ContractIncompatible {
+		t.Fatalf("status = %q, want incompatible (evidence: %+v)", contract.Status, contract.Evidence)
+	}
+	for _, want := range []store.ArchitectureContractEvidence{
+		{Kind: "type_changed", Pointer: "schemas.$root.properties.id"},
+		{Kind: "required_field_added", Pointer: "schemas.$root.properties.name"},
+	} {
+		if !contractHasEvidence(contract, want.Kind, want.Pointer) {
+			t.Errorf("evidence %+v missing %s %s", contract.Evidence, want.Kind, want.Pointer)
+		}
+	}
+}
+
+func TestContractYAMLJSONSchemaAdapter(t *testing.T) {
+	base := `$schema: https://json-schema.org/draft/2020-12/schema
+type: object
+required:
+  - id
+properties:
+  id:
+    type: integer
+`
+	head := `$schema: https://json-schema.org/draft/2020-12/schema
+type: object
+required:
+  - id
+  - name
+properties:
+  id:
+    type: string
+  name:
+    type: string
+`
+	contract := compareContractContents("contracts/pet.schema.yaml", []byte(base), []byte(head), true, true)
+	if contract.Format != store.ContractFormatJSONSchema || contract.Adapter != contractAdapterJSONSchemaYAML {
 		t.Fatalf("format/adapter = %q/%q", contract.Format, contract.Adapter)
 	}
 	if contract.Status != store.ContractIncompatible {
@@ -405,8 +604,9 @@ func TestCompareVersionedContractsFromGit(t *testing.T) {
 	contracts := compareVersionedContracts(context.Background(), dir, baseSHA, headSHA)
 	byPath := contractsByPath(contracts)
 
-	if got, ok := byPath["api/openapi.yaml"]; !ok || got.Status != store.ContractUnknown {
-		t.Errorf("changed YAML contract = %+v, want a kept unknown entry", got)
+	if got, ok := byPath["api/openapi.yaml"]; !ok || got.Status != store.ContractCompatible ||
+		got.Format != store.ContractFormatOpenAPI || got.Adapter != contractAdapterOpenAPIYAML {
+		t.Errorf("changed YAML contract = %+v, want a compatible OpenAPI YAML entry", got)
 	}
 	if got, ok := byPath["api/broken.json"]; !ok || got.Status != store.ContractUnknown {
 		t.Errorf("truncated JSON contract = %+v, want a kept unknown entry", got)

@@ -6,25 +6,30 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"io"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
+	"go.yaml.in/yaml/v3"
 )
 
 const (
-	contractAdapterOpenAPI    = "openapi-json/v1"
-	contractAdapterJSONSchema = "json-schema/v1"
-	contractAdapterProto      = "proto-text/v1"
-	contractAdapterGoTypes    = "go-ast/v1"
-	contractAdapterNone       = "none"
+	contractAdapterOpenAPI        = "openapi-json/v1"
+	contractAdapterOpenAPIYAML    = "openapi-yaml/v1"
+	contractAdapterJSONSchema     = "json-schema/v1"
+	contractAdapterJSONSchemaYAML = "json-schema-yaml/v1"
+	contractAdapterProto          = "proto-text/v1"
+	contractAdapterGoTypes        = "go-ast/v1"
+	contractAdapterNone           = "none"
 
 	// maxContractFiles and maxContractBytes bound the local comparison so a
 	// repository with generated contract trees cannot stall the run.
@@ -420,39 +425,53 @@ func detectContractFormat(path string, content []byte) (string, string) {
 	case ".go":
 		return store.ContractFormatGoTypes, contractAdapterGoTypes
 	case ".yaml", ".yml":
-		// A YAML OpenAPI is a declared contract, but this build has no YAML
-		// adapter. Guessing compatibility from the extension would be wrong.
-		return store.ContractFormatUnknown, contractAdapterNone
+		doc, err := decodeYAMLObject(content)
+		if err != nil {
+			return store.ContractFormatUnknown, contractAdapterNone
+		}
+		return detectDocumentFormat(doc, contractAdapterOpenAPIYAML, contractAdapterJSONSchemaYAML)
 	case ".json":
 		var doc map[string]any
 		if err := json.Unmarshal(content, &doc); err != nil {
 			return store.ContractFormatUnknown, contractAdapterNone
 		}
-		if _, ok := doc["openapi"]; ok {
-			return store.ContractFormatOpenAPI, contractAdapterOpenAPI
-		}
-		if _, ok := doc["swagger"]; ok {
-			return store.ContractFormatOpenAPI, contractAdapterOpenAPI
-		}
-		if _, ok := doc["$schema"]; ok {
-			return store.ContractFormatJSONSchema, contractAdapterJSONSchema
-		}
-		for _, key := range []string{"properties", "definitions", "$defs"} {
-			if _, ok := doc[key]; ok {
-				return store.ContractFormatJSONSchema, contractAdapterJSONSchema
-			}
-		}
-		return store.ContractFormatUnknown, contractAdapterNone
+		return detectDocumentFormat(doc, contractAdapterOpenAPI, contractAdapterJSONSchema)
 	default:
 		return store.ContractFormatUnknown, contractAdapterNone
 	}
 }
 
+// detectDocumentFormat classifies an already decoded object; JSON and YAML share
+// it so both media types apply the same rules.
+func detectDocumentFormat(doc map[string]any, openAPIAdapter, jsonSchemaAdapter string) (string, string) {
+	if _, ok := doc["openapi"]; ok {
+		return store.ContractFormatOpenAPI, openAPIAdapter
+	}
+	if _, ok := doc["swagger"]; ok {
+		return store.ContractFormatOpenAPI, openAPIAdapter
+	}
+	if _, ok := doc["$schema"]; ok {
+		return store.ContractFormatJSONSchema, jsonSchemaAdapter
+	}
+	for _, key := range []string{"properties", "definitions", "$defs"} {
+		if _, ok := doc[key]; ok {
+			return store.ContractFormatJSONSchema, jsonSchemaAdapter
+		}
+	}
+	return store.ContractFormatUnknown, contractAdapterNone
+}
+
 func parseContract(format, adapter string, content []byte) (contractModel, error) {
 	switch format {
 	case store.ContractFormatOpenAPI:
+		if adapter == contractAdapterOpenAPIYAML {
+			return parseOpenAPIYAMLContract(content)
+		}
 		return parseOpenAPIContract(content)
 	case store.ContractFormatJSONSchema:
+		if adapter == contractAdapterJSONSchemaYAML {
+			return parseJSONSchemaYAMLContract(content)
+		}
 		return parseJSONSchemaContract(content)
 	case store.ContractFormatProto:
 		return parseProtoContract(content)
@@ -460,6 +479,112 @@ func parseContract(format, adapter string, content []byte) (contractModel, error
 		return parseGoTypesContract(content)
 	default:
 		return newContractModel(store.ContractFormatUnknown, adapter), fmt.Errorf("formato no soportado %q", format)
+	}
+}
+
+// decodeYAMLObject decodes one YAML document and normalizes it to the same
+// map[string]any shape encoding/json produces, so the existing adapters
+// consume it unchanged. Anchors and aliases are resolved by the parser; a
+// malformed, multi-document or non-scalar-keyed document is rejected so the
+// caller records it as unknown instead of guessing compatibility.
+func decodeYAMLObject(content []byte) (map[string]any, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	var documents []any
+	for {
+		var document any
+		err := decoder.Decode(&document)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		documents = append(documents, document)
+	}
+	// A final "---" decodes as an empty document; tolerate only that trailing
+	// one, never an empty document before a real one or repeated separators.
+	if len(documents) > 1 && documents[len(documents)-1] == nil {
+		documents = documents[:len(documents)-1]
+	}
+	if len(documents) == 0 || (len(documents) == 1 && documents[0] == nil) {
+		return nil, errors.New("el YAML no contiene un documento")
+	}
+	if len(documents) > 1 {
+		return nil, errors.New("el YAML contiene varios documentos")
+	}
+	normalized, err := normalizeYAMLValue(documents[0])
+	if err != nil {
+		return nil, err
+	}
+	object, ok := normalized.(map[string]any)
+	if !ok {
+		return nil, errors.New("la raíz del YAML no es un objeto")
+	}
+	return object, nil
+}
+
+func normalizeYAMLValue(value any) (any, error) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			normalized, err := normalizeYAMLValue(item)
+			if err != nil {
+				return nil, err
+			}
+			typed[key] = normalized
+		}
+		return typed, nil
+	case map[any]any:
+		normalized := make(map[string]any, len(typed))
+		for key, item := range typed {
+			name, err := yamlKeyString(key)
+			if err != nil {
+				return nil, err
+			}
+			value, err := normalizeYAMLValue(item)
+			if err != nil {
+				return nil, err
+			}
+			normalized[name] = value
+		}
+		return normalized, nil
+	case []any:
+		for i, item := range typed {
+			normalized, err := normalizeYAMLValue(item)
+			if err != nil {
+				return nil, err
+			}
+			typed[i] = normalized
+		}
+		return typed, nil
+	default:
+		return value, nil
+	}
+}
+
+// yamlKeyString renders a scalar key the way JSON spells it. Contract authors
+// routinely leave response status codes unquoted, so 200 must become "200";
+// only collection keys, which JSON cannot represent, are rejected.
+func yamlKeyString(key any) (string, error) {
+	switch typed := key.(type) {
+	case string:
+		return typed, nil
+	case int:
+		return strconv.Itoa(typed), nil
+	case int64:
+		return strconv.FormatInt(typed, 10), nil
+	case uint64:
+		return strconv.FormatUint(typed, 10), nil
+	case float64:
+		return strconv.FormatFloat(typed, 'g', -1, 64), nil
+	case bool:
+		return strconv.FormatBool(typed), nil
+	case nil:
+		return "null", nil
+	case map[string]any, map[any]any, []any:
+		return "", fmt.Errorf("el YAML usa una clave de colección (%v)", key)
+	default:
+		return fmt.Sprint(typed), nil
 	}
 }
 
@@ -638,7 +763,19 @@ func parseOpenAPIContract(content []byte) (contractModel, error) {
 	if err := json.Unmarshal(content, &doc); err != nil {
 		return contractModel{}, err
 	}
-	model := newContractModel(store.ContractFormatOpenAPI, contractAdapterOpenAPI)
+	return parseOpenAPIObject(doc, contractAdapterOpenAPI), nil
+}
+
+func parseOpenAPIYAMLContract(content []byte) (contractModel, error) {
+	doc, err := decodeYAMLObject(content)
+	if err != nil {
+		return contractModel{}, err
+	}
+	return parseOpenAPIObject(doc, contractAdapterOpenAPIYAML), nil
+}
+
+func parseOpenAPIObject(doc map[string]any, adapter string) contractModel {
+	model := newContractModel(store.ContractFormatOpenAPI, adapter)
 	if paths, ok := doc["paths"].(map[string]any); ok {
 		for path, itemAny := range paths {
 			item, ok := itemAny.(map[string]any)
@@ -682,7 +819,7 @@ func parseOpenAPIContract(content []byte) (contractModel, error) {
 			}
 		}
 	}
-	return model, nil
+	return model
 }
 
 func openAPIParameters(raw any) []string {
@@ -719,7 +856,19 @@ func parseJSONSchemaContract(content []byte) (contractModel, error) {
 	if err := json.Unmarshal(content, &doc); err != nil {
 		return contractModel{}, err
 	}
-	model := newContractModel(store.ContractFormatJSONSchema, contractAdapterJSONSchema)
+	return parseJSONSchemaObject(doc, contractAdapterJSONSchema), nil
+}
+
+func parseJSONSchemaYAMLContract(content []byte) (contractModel, error) {
+	doc, err := decodeYAMLObject(content)
+	if err != nil {
+		return contractModel{}, err
+	}
+	return parseJSONSchemaObject(doc, contractAdapterJSONSchemaYAML), nil
+}
+
+func parseJSONSchemaObject(doc map[string]any, adapter string) contractModel {
+	model := newContractModel(store.ContractFormatJSONSchema, adapter)
 	model.schemas["$root"] = parseSchemaObject(doc)
 	for _, key := range []string{"definitions", "$defs"} {
 		defs, ok := doc[key].(map[string]any)
@@ -732,7 +881,7 @@ func parseJSONSchemaContract(content []byte) (contractModel, error) {
 			}
 		}
 	}
-	return model, nil
+	return model
 }
 
 func parseSchemaObject(node map[string]any) contractSchema {

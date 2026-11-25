@@ -1,0 +1,7 @@
+type Pet {
+  id: ID!
+}
+
+type Query {
+  pets: [Pet!]!
+}
