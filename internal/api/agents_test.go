@@ -576,6 +576,50 @@ func TestPolicyReviewerTargets(t *testing.T) {
 	}
 }
 
+func TestPolicyConsumerSettingsOmitPreserve(t *testing.T) {
+	f := newSecureFixture(t)
+	profile := seedProfile(t, f, "primary", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	team := f.team("consumer-team")
+	cookie := f.session(f.user("admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	rec := f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": profile.ID,
+		"consumer_allow_list": []map[string]any{{
+			"repository": "acme/consumer", "contract": "api/openapi.yaml", "ref": "v1.2.0",
+		}},
+		"consumer_baseline_path": ".qa/consumers.json",
+		"consumer_max_lookups":   3,
+		"consumer_max_bytes":     65536,
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var saved map[string]any
+	decodeJSON(t, rec, &saved)
+	if saved["consumer_baseline_path"] != ".qa/consumers.json" ||
+		saved["consumer_max_lookups"] != float64(3) || saved["consumer_max_bytes"] != float64(65536) {
+		t.Errorf("PUT consumers = %v/%v/%v", saved["consumer_baseline_path"],
+			saved["consumer_max_lookups"], saved["consumer_max_bytes"])
+	}
+
+	// The panel does not send these fields yet: an unrelated save keeps them.
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": profile.ID, "blocking_threshold": "blocker",
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	policy, err := f.st.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	refs, err := store.ParseConsumerAllowList(policy.ConsumerAllowList)
+	if err != nil || len(refs) != 1 || refs[0].Repository != "acme/consumer" {
+		t.Errorf("omitted consumer allow list = %+v, %v", refs, err)
+	}
+	if policy.ConsumerBaselinePath != ".qa/consumers.json" ||
+		policy.ConsumerMaxLookups != 3 || policy.ConsumerMaxBytes != 65536 {
+		t.Errorf("omitted consumer settings = %+v", policy)
+	}
+}
+
 func TestPolicyReviewControls(t *testing.T) {
 	f := newSecureFixture(t)
 	profile := seedProfile(t, f, "primary", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})

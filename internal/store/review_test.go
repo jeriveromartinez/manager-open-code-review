@@ -719,6 +719,58 @@ func TestSavePolicyDefaults(t *testing.T) {
 	}())
 }
 
+func TestSavePolicyConsumerSettings(t *testing.T) {
+	f := newFixture(t)
+	team := f.team("qa")
+	profile := f.llmProfile("consumer-profile", true)
+
+	allow, err := store.NormalizeConsumerAllowList([]store.ConsumerRef{{
+		Repository: "acme/consumer", Contract: "api/openapi.yaml", Ref: "v1.2.0",
+	}})
+	if err != nil {
+		t.Fatalf("NormalizeConsumerAllowList: %v", err)
+	}
+	got, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID,
+		ConsumerAllowList: allow, ConsumerBaselinePath: ".qa/consumers.json",
+		ConsumerMaxLookups: 3, ConsumerMaxBytes: 65536,
+	})
+	if err != nil {
+		t.Fatalf("SaveQAPolicy: %v", err)
+	}
+	if got.ConsumerBaselinePath != ".qa/consumers.json" ||
+		got.ConsumerMaxLookups != 3 || got.ConsumerMaxBytes != 65536 {
+		t.Errorf("consumer settings = %+v", got)
+	}
+	refs, err := store.ParseConsumerAllowList(got.ConsumerAllowList)
+	if err != nil || len(refs) != 1 {
+		t.Fatalf("stored allow list = %+v, %v", refs, err)
+	}
+	if refs[0].Path != "api/openapi.yaml" {
+		t.Errorf("path default = %q, want the contract", refs[0].Path)
+	}
+	if refs[0].Visibility != store.ConsumerVisibilityPrivate {
+		t.Errorf("visibility = %q, want the private default", refs[0].Visibility)
+	}
+
+	// Zero values are replaced by the bounded defaults.
+	loadable, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID})
+	if err != nil {
+		t.Fatalf("SaveQAPolicy(defaults): %v", err)
+	}
+	if loadable.ConsumerMaxLookups != store.DefaultConsumerMaxLookups ||
+		loadable.ConsumerMaxBytes != store.DefaultConsumerMaxBytes {
+		t.Errorf("consumer defaults = %d/%d", loadable.ConsumerMaxLookups, loadable.ConsumerMaxBytes)
+	}
+
+	_, err = f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID, ConsumerBaselinePath: "../outside.json",
+	})
+	if err == nil {
+		t.Error("SaveQAPolicy accepted a baseline path outside the checkout")
+	}
+}
+
 // TestSavePolicyReviewControls pins the per-team cost controls added in #72:
 // zero values become low/0/no override, an upsert preserves and clears them,
 // and the engine's documented bounds are enforced before they reach a CHECK.

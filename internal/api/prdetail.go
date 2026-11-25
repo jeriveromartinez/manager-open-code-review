@@ -59,6 +59,23 @@ func jsonObject(raw datatypes.JSON) json.RawMessage {
 	return json.RawMessage(raw)
 }
 
+// architectureObject masks redacted consumers before the verdict reaches the
+// browser. The stored row is already masked for new runs; older rows are
+// filtered on read so the privacy rule cannot depend on the writer.
+func architectureObject(raw datatypes.JSON) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	verdict := store.DecodeArchitectureVerdict(raw)
+	if !store.HasRedactedConsumers(verdict) {
+		return json.RawMessage(raw)
+	}
+	if masked := store.ArchitectureVerdictJSON(store.MaskRedactedConsumers(verdict)); len(masked) > 0 {
+		return json.RawMessage(masked)
+	}
+	return json.RawMessage(raw)
+}
+
 func reviewRunDTOOf(run store.ReviewRun) reviewRunDTO {
 	return reviewRunDTO{
 		ID: run.ID, ProfileID: run.ProfileID, HeadSHA: run.HeadSHA, BaseSHA: run.BaseSHA,
@@ -72,7 +89,7 @@ func reviewRunDTOOf(run store.ReviewRun) reviewRunDTO {
 		Phase: run.Phase, PhaseStartedAt: formatTimePtr(run.PhaseStartedAt),
 		PolicyRevision: run.PolicyRevision, PolicyObservation: run.PolicyObservation,
 		StartedAt: formatTimePtr(run.StartedAt), FinishedAt: formatTimePtr(run.FinishedAt),
-		ArchitectureAnalysis: jsonObject(run.ArchitectureAnalysis),
+		ArchitectureAnalysis: architectureObject(run.ArchitectureAnalysis),
 		CreatedAt:            run.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:            run.UpdatedAt.UTC().Format(time.RFC3339),
 	}

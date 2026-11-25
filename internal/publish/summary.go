@@ -256,24 +256,28 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 }
 
 // buildArchitectureBlock renders the observational architectural verdict of
-// the comparison plus the trusted baseline and the deterministic operational
-// evidence. It is evidence only: no check, status or inline decision reads it.
-// Nothing is rendered when neither an analysis, nor a baseline, nor an
-// applicable operational dimension exists. When the advisory finding already
-// carries the verdict's items, only the surrounding evidence is rendered so the
-// same risks and conditions are not repeated.
+// the comparison plus the trusted baseline, the deterministic operational
+// evidence and the consumer impact. It is evidence only: no check, status or
+// inline decision reads it. The baseline, the operational dimensions and the
+// consumer evidence run independently of the OCR analysis, so they are shown
+// even when #157's activation rule did not request the analysis; a run with
+// none of them renders nothing. When the advisory finding already carries the
+// verdict's items, only the surrounding evidence is rendered so the same risks
+// and conditions are not repeated.
 func (p *publishContext) buildArchitectureBlock(itemsRendered bool) string {
 	verdict := store.DecodeArchitectureVerdict(p.run.ArchitectureAnalysis)
-	analysis := verdict.Requested && verdict.Status != "" && verdict.Status != store.ArchitectureNotRequested
+	requested := verdict.Requested && verdict.Status != "" && verdict.Status != store.ArchitectureNotRequested
 	ops := verdict.OpsEvidence
 	opsShown := ops != nil && ops.HasContent()
-	// The trusted baseline and the operational dimensions run even when the OCR
-	// report was not requested, so their evidence is shown on its own.
-	if !analysis && !opsShown && verdict.Baseline == nil {
+	consumerBlock := renderConsumerBlock(verdict.Consumers, p.sanitize)
+	// The trusted baseline, the operational dimensions and the consumer evidence
+	// run even when the OCR report was not requested, so they are shown on their
+	// own.
+	if !requested && !opsShown && consumerBlock == "" && verdict.Baseline == nil {
 		return ""
 	}
 	var b strings.Builder
-	if analysis {
+	if requested {
 		fmt.Fprintf(&b, "\n**Análisis arquitectónico:** %s · %s\n",
 			p.sanitize(architectureStatusLabel(verdict.Status)), p.sanitize(architectureModeLabel(verdict.Mode)))
 		if len(verdict.Signals) > 0 {
@@ -299,13 +303,18 @@ func (p *publishContext) buildArchitectureBlock(itemsRendered bool) string {
 		}
 	}
 	writeArchitectureBaseline(&b, verdict.Baseline, p.sanitize)
-	if !itemsRendered {
+	if requested && !itemsRendered {
 		writeArchitectureItems(&b, "Comportamiento antes/después", verdict.BehaviorChanges, p.sanitize)
 		writeArchitectureItems(&b, "Riesgos y compatibilidad", verdict.Risks, p.sanitize)
 		writeArchitectureItems(&b, "Alternativas", verdict.Alternatives, p.sanitize)
 		writeArchitectureItems(&b, "Condiciones de aceptación", verdict.AcceptanceConditions, p.sanitize)
 		writeArchitectureItems(&b, "Incertidumbres", verdict.Uncertainties, p.sanitize)
+	} else if !requested {
+		// Without a requested analysis these sections hold only consumer impact.
+		writeArchitectureItems(&b, "Riesgos y compatibilidad", verdict.Risks, p.sanitize)
+		writeArchitectureItems(&b, "Incertidumbres", verdict.Uncertainties, p.sanitize)
 	}
+	b.WriteString(consumerBlock)
 	if recommendation := strings.TrimSpace(verdict.Recommendation); recommendation != "" && !itemsRendered {
 		fmt.Fprintf(&b, "\n**Recomendación original:** %s\n", p.sanitize(recommendation))
 	}
@@ -356,6 +365,50 @@ func (p *publishContext) buildOpsEvidenceBlock() string {
 	return b.String()
 }
 
+// renderConsumerBlock shows the consumer impact the review could prove. A
+// redacted consumer never exposes its repository, path or pinned SHA: the
+// published pull request may have a wider audience than that repository.
+// Redacted entries are masked before the verdict is persisted, so the panel has
+// no hidden detail to fall back to; that gap is deliberate until a live
+// visibility check exists.
+func renderConsumerBlock(consumers store.ArchitectureConsumers, sanitize func(string) string) string {
+	if consumers.Status == "" || consumers.Status == store.ConsumersNotConfigured || consumers.Configured == 0 {
+		return ""
+	}
+	var b strings.Builder
+	counts := fmt.Sprintf("%d configurado(s) · %d consultado(s)", consumers.Configured, consumers.Checked)
+	if consumers.RequiresHuman {
+		counts += " · requiere criterio humano"
+	}
+	fmt.Fprintf(&b, "\n**Consumidores del contrato:** %s · %s\n",
+		sanitize(consumerStatusLabel(consumers.Status)), counts)
+
+	redacted := 0
+	for _, consumer := range consumers.Consumers {
+		if consumer.Redacted {
+			redacted++
+			fmt.Fprintf(&b, "\n- consumidor privado — %s\n", sanitize(consumerStatusLabel(consumer.Status)))
+			continue
+		}
+		detail := fmt.Sprintf("**%s** · `%s`", sanitize(consumer.Repository), sanitize(consumer.Contract))
+		if consumer.Ref != "" {
+			detail += " @ `" + sanitize(consumer.Ref) + "`"
+		}
+		if consumer.SHA != "" {
+			detail += " (`" + shortSHA(consumer.SHA) + "`)"
+		}
+		detail += " — " + sanitize(consumerStatusLabel(consumer.Status))
+		if consumer.Impact != "" {
+			detail += " · impacto " + sanitize(consumerImpactLabel(consumer.Impact))
+		}
+		fmt.Fprintf(&b, "\n- %s\n", detail)
+	}
+	if redacted > 0 {
+		fmt.Fprintf(&b, "\n_%d consumidor(es) privado(s): el detalle no se publica por falta de visibilidad equivalente._\n", redacted)
+	}
+	return b.String()
+}
+
 func opsStatusLabel(status string) string {
 	switch status {
 	case store.OpsStatusSatisfied:
@@ -366,6 +419,27 @@ func opsStatusLabel(status string) string {
 		return "riesgo"
 	case store.OpsStatusNotApplicable:
 		return "no aplica"
+	default:
+		return status
+	}
+}
+
+func consumerStatusLabel(status string) string {
+	switch status {
+	case store.ConsumersComplete:
+		return "completo"
+	case store.ConsumersPartial:
+		return "parcial"
+	case store.ConsumersUnknown:
+		return "desconocido"
+	case store.ConsumerStatusAffected:
+		return "afectado"
+	case store.ConsumerStatusCompatible:
+		return "compatible"
+	case store.ConsumerStatusOutOfScope:
+		return "fuera de alcance"
+	case store.ConsumerStatusSkipped:
+		return "omitido"
 	default:
 		return status
 	}
@@ -383,6 +457,19 @@ func opsDimensionLabel(name string) string {
 		return "Carga y operación"
 	default:
 		return name
+	}
+}
+
+func consumerImpactLabel(impact string) string {
+	switch impact {
+	case store.ConsumerImpactVerified:
+		return "comprobado"
+	case store.ConsumerImpactNone:
+		return "sin impacto"
+	case store.ConsumerImpactUnknown:
+		return "desconocido"
+	default:
+		return impact
 	}
 }
 
@@ -472,23 +559,15 @@ func architectureModeLabel(mode string) string {
 // It never changes the conclusion.
 func (p *publishContext) architectureCheckLine() string {
 	verdict := store.DecodeArchitectureVerdict(p.run.ArchitectureAnalysis)
-	analysis := verdict.Requested && verdict.Status != "" && verdict.Status != store.ArchitectureNotRequested
+	hasAnalysis := verdict.Requested && verdict.Status != "" && verdict.Status != store.ArchitectureNotRequested
 	ops := verdict.OpsEvidence
 	opsShown := ops != nil && ops.HasContent()
-	if !analysis && !opsShown && verdict.Baseline == nil {
+	hasConsumers := verdict.Consumers.Status != "" && verdict.Consumers.Status != store.ConsumersNotConfigured
+	if !hasAnalysis && !opsShown && verdict.Baseline == nil && !hasConsumers {
 		return ""
 	}
-	// The baseline can be the only architecture evidence when neither the OCR
-	// report nor the operational dimensions produced anything to show.
-	if !analysis && !opsShown {
-		line := "Línea base de arquitectura: " + architectureBaselineStatusLabel(verdict.Baseline.Status)
-		if verdict.Baseline.RulesPath != "" {
-			line += " · `" + verdict.Baseline.RulesPath + "`"
-		}
-		return line
-	}
 	line := ""
-	if analysis {
+	if hasAnalysis {
 		line = fmt.Sprintf("Análisis arquitectónico (observación): %s",
 			architectureStatusLabel(verdict.Status))
 		if len(verdict.Signals) > 0 {
@@ -505,7 +584,26 @@ func (p *publishContext) architectureCheckLine() string {
 		line += "Evidencia operativa (observación): " + opsStatusLabel(ops.Status)
 	}
 	if verdict.Baseline != nil {
-		line += " · línea base: " + architectureBaselineStatusLabel(verdict.Baseline.Status)
+		switch {
+		case line == "":
+			line = "Línea base de arquitectura: " + architectureBaselineStatusLabel(verdict.Baseline.Status)
+		default:
+			line += " · línea base: " + architectureBaselineStatusLabel(verdict.Baseline.Status)
+		}
+		if verdict.Baseline.RulesPath != "" {
+			line += " · `" + verdict.Baseline.RulesPath + "`"
+		}
+	}
+	if hasConsumers {
+		switch {
+		case line == "":
+			line = "Consumidores del contrato (observación): "
+		case hasAnalysis:
+			line += " · "
+		default:
+			line += " · consumidores: "
+		}
+		line += consumerStatusLabel(verdict.Consumers.Status)
 	}
 	return line
 }

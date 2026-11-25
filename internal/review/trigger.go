@@ -668,6 +668,22 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 	if cfg.PR.External() {
 		reserved = store.ExternalRunTokenReserve(cfg.Policy)
 	}
+	// The consumer lookup needs the App credentials and no checkout, so it runs
+	// here, like the linked-issue snapshot (#139). The worker only attaches it.
+	consumerImpact := store.ArchitectureConsumers{Status: store.ConsumersNotConfigured}
+	if architectureMode(cfg.Policy) == store.ArchitectureAnalysisObservation {
+		consumerImpact = resolveConsumerImpact(ctx, consumerTriggerEvaluation{
+			Apps:            t.Apps,
+			Comparator:      t.Compare,
+			InstallationID:  cfg.Installation.ID,
+			Repository:      cfg.Repo.FullName,
+			BaseRef:         cfg.PR.BaseRef,
+			HeadSHA:         cfg.PR.HeadSHA,
+			MergeBase:       mergeBase,
+			Policy:          cfg.Policy,
+			ProducerPrivate: cfg.Repo.Private,
+		})
+	}
 	run, err := t.Store.CreateReviewRun(ctx, store.ReviewRun{
 		PullRequestID:       prID,
 		ProfileID:           cfg.Profile.ID,
@@ -682,6 +698,7 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 		PolicyRevision:      cfg.PolicyRevision,
 		PolicyObservation:   cfg.PolicyObservation,
 		LinkedIssues:        datatypes.JSON(linkedIssues),
+		ConsumerImpact:      datatypes.JSON(store.ConsumerImpactJSON(consumerImpact)),
 		ReservedTokens:      reserved,
 	})
 	if err != nil {
