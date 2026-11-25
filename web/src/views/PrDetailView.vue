@@ -172,26 +172,41 @@ const coverageFiles = computed<CoverageFile[]>(() => {
   return Array.isArray(files) && files.length > 0 ? files : []
 })
 
+function coverageMethodSuffix(file: CoverageFile): string {
+  switch (file.method) {
+    case 'ocr':
+      return ' (OCR)'
+    case 'text':
+      return ' (ruta de texto)'
+    default:
+      return ''
+  }
+}
+
+function coverageHumanSuffix(file: CoverageFile): string {
+  return file.human ? ' — revisión humana' : ''
+}
+
 function coverageFileLabel(file: CoverageFile): string {
   switch (file.status) {
     case 'reviewed':
-      return 'Revisado'
+      return `Revisado${coverageMethodSuffix(file)}`
     case 'reviewed_by_parts':
       return typeof file.chunks === 'number'
-        ? `Revisado por partes (${file.chunks} ${file.chunks === 1 ? 'trozo' : 'trozos'})`
-        : 'Revisado por partes'
+        ? `Revisado por partes (${file.chunks} ${file.chunks === 1 ? 'trozo' : 'trozos'})${coverageMethodSuffix(file)}`
+        : `Revisado por partes${coverageMethodSuffix(file)}`
     case 'not_reviewed':
       return file.reason ? `No revisado: ${file.reason}` : 'No revisado'
     case 'pending':
-      return file.reason ? `Pendiente: ${file.reason}` : 'Pendiente'
+      return `${file.reason ? `Pendiente: ${file.reason}` : 'Pendiente'}${coverageHumanSuffix(file)}`
     case 'excluded':
       return file.reason ? `Excluido: ${file.reason}` : 'Excluido'
     case 'deleted':
       return 'Eliminado'
     case 'binary':
-      return 'Binario'
+      return file.human ? 'Binario — revisión humana' : 'Binario'
     case 'submodule':
-      return 'Submódulo'
+      return file.human ? 'Submódulo — revisión humana' : 'Submódulo'
     default:
       return file.status
   }

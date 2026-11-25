@@ -173,7 +173,16 @@ func inventoryCoverage(files []coverageFile, changed []changedFile, patterns []s
 		}
 		switch entry.Kind {
 		case changedDeleted, changedBinary, changedSubmodule:
-			files = setCoverageFile(files, index, coverageFile{Path: p, Status: entry.Kind})
+			// Binaries and submodules have no text an engine can verify. They
+			// are recorded with a human flag instead of passing silently, but
+			// stay outside the required set because no pass can cover them.
+			human := entry.Kind == changedBinary || entry.Kind == changedSubmodule
+			files = setCoverageFile(files, index, coverageFile{
+				Path:   p,
+				Status: entry.Kind,
+				Reason: entry.Kind,
+				Human:  human,
+			})
 			continue
 		}
 		if policyExcludesPath(patterns, p) {
@@ -196,7 +205,13 @@ func inventoryCoverage(files []coverageFile, changed []changedFile, patterns []s
 			if reason == "" {
 				reason = missingCoverageReason(files[i].Status, p, signal)
 			}
-			file := coverageFile{Path: p, Status: coveragePending, Reason: reason}
+			file := coverageFile{
+				Path:   p,
+				Status: coveragePending,
+				Method: files[i].Method,
+				Reason: reason,
+				Human:  files[i].Human,
+			}
 			files[i] = file
 			pending = append(pending, file)
 			continue
@@ -344,6 +359,20 @@ func coverageNotRequiredFromFiles(files []coverageFile) int {
 func pendingRunStatus(status, code string, pending []coverageFile) (string, string) {
 	if len(pending) > 0 && status == store.RunSucceeded {
 		return store.RunInconclusive, "coverage_incomplete"
+	}
+	return status, code
+}
+
+// settledRunStatus reconciles the main pass result with the routes that ran
+// afterwards. The inventory is the authority: when a second route reviewed
+// every file the main pass left uncovered and no required file is pending, a
+// coverage-only inconclusive result becomes succeeded. Without an inventory
+// nothing can prove the gap is closed, so the main result stands.
+func settledRunStatus(status, code string, pending []coverageFile, routed chunkSummary, inventoryOK bool) (string, string) {
+	status, code = pendingRunStatus(status, code, pending)
+	if inventoryOK && len(pending) == 0 && len(routed.statuses) > 0 && routed.allReviewed() &&
+		status == store.RunInconclusive && (code == "coverage_incomplete" || code == "no_coverage") {
+		return store.RunSucceeded, ""
 	}
 	return status, code
 }

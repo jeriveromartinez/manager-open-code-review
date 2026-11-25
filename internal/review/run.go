@@ -850,6 +850,18 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	out.merged = mergeNativeFindings(run.PullRequestID, comments, out.anchors)
 	scopePaths := reviewedPaths(res.Manifest.Coverage)
 
+	// The inventory is needed twice: to route the text files OCR cannot see and
+	// to confront the final per-file coverage with what the range changed. An
+	// OCR-internal exclusion, failure or waiver leaves a required file pending;
+	// only a policy exclusion takes it out of scope.
+	var pending []coverageFile
+	var coverageErr error
+	inventory, invErr := gitChangedFiles(runCtx, workDir, fromSHA, headSHA)
+	if invErr != nil {
+		coverageErr = fmt.Errorf("no se pudo inventariar el diff revisado: %w", invErr)
+		log.Log(runCtx, "worker", "", "error", logPhaseFinish, coverageErr.Error())
+	}
+
 	// OCR excludes oversized files from the main run. Review each of them by
 	// complete hunks in independent conversations instead of leaving the rest of
 	// the pull request unreviewed.
@@ -867,25 +879,59 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			comments = append(comments, chunked.comments...)
 			out.merged = mergeNativeFindings(run.PullRequestID, comments, out.anchors)
 		}
-		if len(chunked.statuses) > 0 {
-			files = overlayCoverage(files, chunked.statuses)
-			status, code = chunkedRunStatus(status, code, chunked)
-			for path := range chunked.reviewedPaths() {
-				scopePaths[normalizeCoveragePath(path)] = true
+	}
+
+	// Text files outside OCR's language list are routed through a synthetic,
+	// bounded review instead of staying uncovered. A path a chunk already
+	// attempted is not retried: the same engine would fail again.
+	var textRouted chunkSummary
+	if invErr == nil && canChunkNativeRun(status, code) {
+		covered := make(map[string]bool)
+		for _, file := range files {
+			if fileCovered(file) {
+				covered[file.Path] = true
+			}
+		}
+		attempted := make(map[string]bool)
+		for path, file := range chunked.statuses {
+			attempted[path] = true
+			if fileCovered(file) {
+				covered[path] = true
+			}
+		}
+		candidates := textRouteCandidates(inventory, excludePatterns, covered, attempted, res)
+		if len(candidates) > 0 {
+			r.setPhase(runCtx, run.ID, store.RunPhaseChunking, log)
+			log.Log(runCtx, "worker", "", "info", logPhaseChunks, fmt.Sprintf(
+				"%d archivo(s) de texto fuera del reconocimiento de OCR; se revisan por la ruta de texto", len(candidates)))
+			textRouted = r.reviewTextFiles(runCtx, run.ID, cfg.Profile.ID, reviewer, fromSHA, headSHA, candidates, budget, out.tokens, out.tokensKnown, log)
+			out.tokens.add(textRouted.tokens)
+			if !textRouted.usageKnown {
+				out.tokensKnown = false
+			}
+			if len(textRouted.comments) > 0 {
+				comments = append(comments, textRouted.comments...)
+				out.merged = mergeNativeFindings(run.PullRequestID, comments, out.anchors)
 			}
 		}
 	}
 
-	// The engine's own coverage is not enough: inventory the files this range
-	// actually changed and confront them with the per-file coverage of the main
-	// and chunked passes. An OCR-internal exclusion, failure or waiver leaves a
-	// required file pending; only a policy exclusion takes it out of scope.
-	var pending []coverageFile
-	var coverageErr error
-	inventory, invErr := gitChangedFiles(runCtx, workDir, fromSHA, headSHA)
+	routed := newChunkSummary()
+	for path, file := range chunked.statuses {
+		routed.statuses[path] = file
+	}
+	for path, file := range textRouted.statuses {
+		routed.statuses[path] = file
+	}
+	if len(routed.statuses) > 0 {
+		files = overlayCoverage(files, routed.statuses)
+		status, code = chunkedRunStatus(status, code, routed)
+		for path := range routed.reviewedPaths() {
+			scopePaths[normalizeCoveragePath(path)] = true
+		}
+	}
+
 	if invErr != nil {
-		coverageErr = fmt.Errorf("no se pudo inventariar el diff revisado: %w", invErr)
-		log.Log(runCtx, "worker", "", "error", logPhaseFinish, coverageErr.Error())
 		if status == store.RunSucceeded {
 			status, code = store.RunInconclusive, "coverage_incomplete"
 		}
@@ -894,7 +940,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	}
 	reviewed, skipped, excluded = coverageCountsFromFiles(files)
 	notRequired := coverageNotRequiredFromFiles(files)
-	status, code = pendingRunStatus(status, code, pending)
+	status, code = settledRunStatus(status, code, pending, routed, invErr == nil)
 	out.summary = coverageSummaryText(status, reviewed, len(out.merged.Findings))
 
 	out.coverage = coverageJSONWithFiles(reviewed, skipped, excluded, notRequired, files)

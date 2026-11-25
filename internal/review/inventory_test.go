@@ -258,6 +258,65 @@ func TestCoverageRegressionMixedPR(t *testing.T) {
 	}
 }
 
+func TestInventoryCoverageMarksBinariesAndSubmodulesForHumans(t *testing.T) {
+	changed := []changedFile{
+		{Path: "logo.png", Kind: changedBinary},
+		{Path: "vendor/lib", Kind: changedSubmodule},
+		{Path: "gone.md", Kind: changedDeleted},
+	}
+	files, pending := inventoryCoverage(nil, changed, nil, coverageSignal{present: true})
+	if len(pending) != 0 {
+		t.Fatalf("pending = %+v, want non-reviewable files out of the required set", pending)
+	}
+	byPath := make(map[string]coverageFile, len(files))
+	for _, file := range files {
+		byPath[file.Path] = file
+	}
+	for _, path := range []string{"logo.png", "vendor/lib"} {
+		if !byPath[path].Human {
+			t.Errorf("%s = %+v, want human review marked", path, byPath[path])
+		}
+		if byPath[path].Reason != byPath[path].Status {
+			t.Errorf("%s reason = %q, want the kind %q", path, byPath[path].Reason, byPath[path].Status)
+		}
+	}
+	if byPath["gone.md"].Human {
+		t.Errorf("deleted = %+v, want a reviewable deletion, not a human-only file", byPath["gone.md"])
+	}
+}
+
+// TestInventoryCoverageKeepsSecondRouteMethod pins the #147 rule: a file a
+// second pass covered with a valid result is reviewed, with its provenance,
+// and no longer forces an inconclusive run.
+func TestInventoryCoverageKeepsSecondRouteMethod(t *testing.T) {
+	changed := []changedFile{{Path: "notes.md", Kind: changedModified}}
+	files := []coverageFile{{Path: "notes.md", Status: coverageReviewed, Method: coverageMethodText}}
+	files, pending := inventoryCoverage(files, changed, nil, coverageSignal{present: true})
+	if len(pending) != 0 {
+		t.Fatalf("pending = %+v, want the text route to count as coverage", pending)
+	}
+	if len(files) != 1 || files[0].Status != coverageReviewed || files[0].Method != coverageMethodText {
+		t.Errorf("files = %+v, want reviewed/text preserved", files)
+	}
+	status, code := pendingRunStatus(store.RunSucceeded, "", pending)
+	if status != store.RunSucceeded || code != "" {
+		t.Errorf("outcome = %q/%q, want succeeded", status, code)
+	}
+
+	pendingInput := []coverageFile{{
+		Path: "notes.md", Status: coveragePending, Method: coverageMethodText,
+		Reason: "text_route_invalid", Human: true,
+	}}
+	files, pending = inventoryCoverage(pendingInput, changed, nil, coverageSignal{present: true})
+	if len(pending) != 1 {
+		t.Fatalf("pending = %+v, want the invalid text route to stay pending", pending)
+	}
+	got := pending[0]
+	if got.Reason != "text_route_invalid" || got.Method != coverageMethodText || !got.Human {
+		t.Errorf("pending = %+v, want reason, method and human flag preserved", got)
+	}
+}
+
 func TestCoverageRegressionPolicyExcludedFileStaysSucceeded(t *testing.T) {
 	res := nativeReview{
 		Status: "complete",

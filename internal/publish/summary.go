@@ -24,7 +24,9 @@ type reviewCoverage struct {
 type coverageFile struct {
 	Path   string `json:"path"`
 	Status string `json:"status"`
+	Method string `json:"method"`
 	Reason string `json:"reason"`
+	Human  bool   `json:"human"`
 }
 
 // pendingFiles returns the changed files the review still owes. They are not
@@ -37,6 +39,18 @@ func (c reviewCoverage) pendingFiles() []coverageFile {
 		}
 	}
 	return pending
+}
+
+// humanFiles returns the changed files no automated pass can analyse, so the
+// summary names them instead of letting them pass silently.
+func (c reviewCoverage) humanFiles() []coverageFile {
+	var human []coverageFile
+	for _, file := range c.Files {
+		if file.Human {
+			human = append(human, file)
+		}
+	}
+	return human
 }
 
 func decodeReviewCoverage(raw []byte) reviewCoverage {
@@ -180,6 +194,17 @@ func (p *publishContext) buildSummary(findings []store.Finding, resolvedSincePre
 			reason := file.Reason
 			if reason == "" {
 				reason = "sin cobertura"
+			}
+			fmt.Fprintf(&b, "\n- `%s` — %s\n", p.sanitize(file.Path), p.sanitize(reason))
+		}
+		b.WriteString("\n")
+	}
+	if human := coverage.humanFiles(); len(human) > 0 {
+		fmt.Fprintf(&b, "**Revisión humana requerida (%d):**\n", len(human))
+		for _, file := range human {
+			reason := file.Reason
+			if reason == "" {
+				reason = "sin análisis automático"
 			}
 			fmt.Fprintf(&b, "\n- `%s` — %s\n", p.sanitize(file.Path), p.sanitize(reason))
 		}

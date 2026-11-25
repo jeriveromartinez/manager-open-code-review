@@ -14,11 +14,15 @@ import (
 )
 
 // coverageFile es una entrada de la cobertura por archivo que pinta el panel.
+// Method names the pass that covered the file (OCR, chunked or text route);
+// Human marks a changed file no automated pass can analyse.
 type coverageFile struct {
 	Path   string `json:"path"`
 	Status string `json:"status"`
+	Method string `json:"method,omitempty"`
 	Chunks int    `json:"chunks,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	Human  bool   `json:"human,omitempty"`
 }
 
 const (
@@ -29,6 +33,11 @@ const (
 	// coveragePending marks a changed file the review still owes: it was not
 	// completed and no policy excluded it, so the run cannot claim full cover.
 	coveragePending = "pending"
+
+	// Method provenance recorded per covered file.
+	coverageMethodOCR     = "ocr"
+	coverageMethodChunked = "chunked"
+	coverageMethodText    = "text"
 
 	// chunkBudgetPercent is the fraction of --max-tokens a chunk may use. OCR
 	// excludes a file as too_large above 80% of the ceiling; 30% leaves a wide
@@ -53,43 +62,48 @@ func newChunkSummary() chunkSummary {
 	return chunkSummary{statuses: make(map[string]coverageFile), usageKnown: true}
 }
 
-func (s *chunkSummary) markNotReviewed(path, reason string) {
-	s.statuses[path] = coverageFile{Path: path, Status: coverageNotReviewed, Reason: reason}
+func (s *chunkSummary) markNotReviewed(path, method, reason string) {
+	s.statuses[path] = coverageFile{Path: path, Status: coverageNotReviewed, Method: method, Reason: reason}
 }
 
-// allReviewed reports whether every chunked file finished fully reviewed.
+// allReviewed reports whether every routed file finished fully reviewed,
+// whichever pass covered it.
 func (s chunkSummary) allReviewed() bool {
 	if len(s.statuses) == 0 {
 		return false
 	}
 	for _, file := range s.statuses {
-		if file.Status != coverageReviewedByParts {
+		if !fileCovered(file) {
 			return false
 		}
 	}
 	return true
 }
 
-// reviewedAny reports whether at least one chunked file finished fully reviewed.
+// reviewedAny reports whether at least one routed file finished fully reviewed.
 func (s chunkSummary) reviewedAny() bool {
 	for _, file := range s.statuses {
-		if file.Status == coverageReviewedByParts {
+		if fileCovered(file) {
 			return true
 		}
 	}
 	return false
 }
 
-// reviewedPaths returns the paths whose chunks all succeeded, so a run may
-// resolve their open findings.
+// reviewedPaths returns the paths a route completed, so a run may resolve their
+// open findings.
 func (s chunkSummary) reviewedPaths() map[string]bool {
 	paths := make(map[string]bool, len(s.statuses))
 	for path, file := range s.statuses {
-		if file.Status == coverageReviewedByParts {
+		if fileCovered(file) {
 			paths[path] = true
 		}
 	}
 	return paths
+}
+
+func fileCovered(file coverageFile) bool {
+	return file.Status == coverageReviewed || file.Status == coverageReviewedByParts
 }
 
 // coverageJSONWithFiles serializes the headline counters and the per-file array
@@ -116,19 +130,19 @@ func nativeCoverageFiles(res nativeReview) []coverageFile {
 	coverage := res.Manifest.Coverage
 	var files []coverageFile
 	seen := make(map[string]bool)
-	add := func(items []nativeCoverageItem, status string, reason func(nativeCoverageItem) string) {
+	add := func(items []nativeCoverageItem, status, method string, reason func(nativeCoverageItem) string) {
 		for _, item := range items {
 			path := normalizeCoveragePath(item.Path)
 			if path == "" || seen[path] {
 				continue
 			}
 			seen[path] = true
-			files = append(files, coverageFile{Path: path, Status: status, Reason: reason(item)})
+			files = append(files, coverageFile{Path: path, Status: status, Method: method, Reason: reason(item)})
 		}
 	}
-	add(coverage.Completed, coverageReviewed, func(nativeCoverageItem) string { return "" })
-	add(coverage.Reused, coverageReviewed, func(nativeCoverageItem) string { return "" })
-	add(coverage.Failed, coverageNotReviewed, func(item nativeCoverageItem) string {
+	add(coverage.Completed, coverageReviewed, coverageMethodOCR, func(nativeCoverageItem) string { return "" })
+	add(coverage.Reused, coverageReviewed, coverageMethodOCR, func(nativeCoverageItem) string { return "" })
+	add(coverage.Failed, coverageNotReviewed, coverageMethodOCR, func(item nativeCoverageItem) string {
 		if class := strings.TrimSpace(item.Classification); class != "" {
 			return class
 		}
@@ -137,13 +151,13 @@ func nativeCoverageFiles(res nativeReview) []coverageFile {
 		}
 		return "failed"
 	})
-	add(coverage.Waived, coverageNotReviewed, func(item nativeCoverageItem) string {
+	add(coverage.Waived, coverageNotReviewed, coverageMethodOCR, func(item nativeCoverageItem) string {
 		if reason := strings.TrimSpace(item.Reason); reason != "" {
 			return reason
 		}
 		return "waived"
 	})
-	add(coverage.Excluded, coverageExcluded, func(item nativeCoverageItem) string {
+	add(coverage.Excluded, coverageExcluded, "", func(item nativeCoverageItem) string {
 		if reason := strings.TrimSpace(item.ExcludeReason); reason != "" {
 			return reason
 		}
@@ -260,7 +274,7 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 
 	for _, path := range paths {
 		if stopBudget {
-			summary.markNotReviewed(path, "token_budget")
+			summary.markNotReviewed(path, coverageMethodChunked, "token_budget")
 			log.Log(ctx, "worker", "", "warn", logPhaseChunks,
 				fmt.Sprintf("%s no se revisó: se agotó el presupuesto de tokens", path))
 			slog.Info("chunked too-large file", "run_id", runID, "path", path, "chunks", 0, "failures", 1)
@@ -268,7 +282,7 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 		}
 		if ctx.Err() != nil {
 			reason := chunkErrorReason(ctx, ctx.Err())
-			summary.markNotReviewed(path, reason)
+			summary.markNotReviewed(path, coverageMethodChunked, reason)
 			log.Log(ctx, "worker", "", "warn", logPhaseChunks,
 				fmt.Sprintf("%s no se revisó (%s): la revisión se agotó", path, reason))
 			slog.Info("chunked too-large file", "run_id", runID, "path", path, "chunks", 0, "failures", 1)
@@ -280,14 +294,14 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 			slog.Warn("chunk diff failed", "run_id", runID, "path", path, "error", err)
 			log.Log(ctx, "worker", "", "error", logPhaseChunks,
 				fmt.Sprintf("no se pudo dividir %s en trozos: %v", path, err))
-			summary.markNotReviewed(path, "chunk_error")
+			summary.markNotReviewed(path, coverageMethodChunked, "chunk_error")
 			slog.Info("chunked too-large file", "run_id", runID, "path", path, "chunks", 0, "failures", 1)
 			continue
 		}
 		if len(chunks) == 0 {
 			log.Log(ctx, "worker", "", "warn", logPhaseChunks,
 				fmt.Sprintf("%s sigue siendo demasiado grande incluso por trozos", path))
-			summary.markNotReviewed(path, "too_large")
+			summary.markNotReviewed(path, coverageMethodChunked, "too_large")
 			slog.Info("chunked too-large file", "run_id", runID, "path", path, "chunks", 0, "failures", 1)
 			continue
 		}
@@ -339,6 +353,7 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 			summary.statuses[path] = coverageFile{
 				Path:   path,
 				Status: coverageReviewedByParts,
+				Method: coverageMethodChunked,
 				Chunks: len(chunks),
 			}
 			log.Log(ctx, "worker", "", "info", logPhaseChunks,
@@ -347,7 +362,7 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 			if reason == "" {
 				reason = "provider"
 			}
-			summary.markNotReviewed(path, reason)
+			summary.markNotReviewed(path, coverageMethodChunked, reason)
 			log.Log(ctx, "worker", "", "warn", logPhaseChunks,
 				fmt.Sprintf("%s quedó sin revisar (%s): %d trozo(s) fallaron", path, reason, failures))
 		}
