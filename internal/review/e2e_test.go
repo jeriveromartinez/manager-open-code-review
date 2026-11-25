@@ -122,6 +122,10 @@ type e2eGitHub struct {
 	producerHead    string
 	consumerSHA     string
 	consumerContent string
+	// consumerPrivate is the visibility the fake GitHub answers for the consumer
+	// repository. consumerCalls records the probe and read order.
+	consumerPrivate bool
+	consumerCalls   []string
 	// failReviewCommentsOnce drops one per-review comments response, emulating a
 	// review created on GitHub whose coordinates never reached the caller.
 	failReviewCommentsOnce bool
@@ -169,11 +173,21 @@ func (g *e2eGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(e2eContentPayload(content, "producer-blob"), http.StatusOK)
 
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/consumer":
+		g.consumerCalls = append(g.consumerCalls, "probe")
+		visibility := store.ConsumerVisibilityPublic
+		if g.consumerPrivate {
+			visibility = store.ConsumerVisibilityPrivate
+		}
+		writeJSON(map[string]any{"visibility": visibility, "private": g.consumerPrivate}, http.StatusOK)
+
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/consumer/commits/v1":
+		g.consumerCalls = append(g.consumerCalls, "read")
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte(g.consumerSHA))
 
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/consumer/contents/api/openapi.yaml":
+		g.consumerCalls = append(g.consumerCalls, "contents")
 		writeJSON(e2eContentPayload(g.consumerContent, "consumer-blob"), http.StatusOK)
 
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/origin/check-runs":
@@ -365,6 +379,12 @@ func (g *e2eGitHub) commentPatchCount() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.commentPatchCalls
+}
+
+func (g *e2eGitHub) consumerRequestOrder() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.consumerCalls...)
 }
 
 func (g *e2eGitHub) reviewList() []e2eReview {
@@ -1397,6 +1417,9 @@ func testE2EConsumerImpact(t *testing.T) {
 	f.gh.producerHead = "openapi: 2\n"
 	f.gh.consumerSHA = "consumer-sha"
 	f.gh.consumerContent = "openapi: 1\n"
+	// The consumer is explicitly public both in the policy and in the repository
+	// the fake GitHub reports.
+	f.gh.consumerPrivate = false
 	// The lookup needs the changed paths; production wires the same resolver.
 	f.trigger.Compare = &ghapp.Compare{Apps: f.apps}
 
@@ -1430,6 +1453,13 @@ func testE2EConsumerImpact(t *testing.T) {
 	if consumer.Status != store.ConsumerStatusAffected || consumer.Impact != store.ConsumerImpactVerified ||
 		consumer.SHA != "consumer-sha" || consumer.Repository != "acme/consumer" {
 		t.Fatalf("snapshot consumer = %+v", consumer)
+	}
+	if consumer.Private || consumer.Redacted {
+		t.Errorf("public consumer was masked in the snapshot: %+v", consumer)
+	}
+	if order := f.gh.consumerRequestOrder(); len(order) != 3 ||
+		order[0] != "probe" || order[1] != "read" || order[2] != "contents" {
+		t.Errorf("consumer GitHub calls = %v, want probe before read and contents", order)
 	}
 	if !containsString(snapshot.Sources, store.ConsumerSourcePolicy) ||
 		!containsString(snapshot.Sources, "github") {

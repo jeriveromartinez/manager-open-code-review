@@ -58,6 +58,9 @@ type consumerResolveRequest struct {
 	Path           string
 	InstallationID int64
 	MaxBytes       int64
+	// ConfiguredPrivate is the visibility the policy declared. It is only a
+	// fallback: the resolver probes GitHub when it can.
+	ConfiguredPrivate bool
 }
 
 // consumerResolution is what the resolver could prove. No file content leaves
@@ -66,6 +69,19 @@ type consumerResolution struct {
 	PinnedSHA   string
 	ContractSHA string
 	Digest      string
+	// Private and VisibilityKnown carry the probed visibility. When Known is
+	// false the caller keeps the configured visibility.
+	Private         bool
+	VisibilityKnown bool
+}
+
+// consumerRepositoryReader is the read-only slice of the GitHub repositories
+// API the consumer resolver needs. *gh.RepositoriesService implements it.
+type consumerRepositoryReader interface {
+	Get(ctx context.Context, owner, repo string) (*gh.Repository, *gh.Response, error)
+	GetCommitSHA1(ctx context.Context, owner, repo, ref, lastSHA string) (string, *gh.Response, error)
+	GetContents(ctx context.Context, owner, repo, path string,
+		opts *gh.RepositoryContentGetOptions) (*gh.RepositoryContent, []*gh.RepositoryContent, *gh.Response, error)
 }
 
 // consumerResolver reads one consumer contract at its pinned ref. The review
@@ -191,15 +207,22 @@ func evaluateConsumers(ctx context.Context, opts consumerEvaluation) store.Archi
 
 		lookupCtx, cancel := context.WithTimeout(ctx, budget.PerLookup)
 		resolved, err := resolver.Resolve(lookupCtx, consumerResolveRequest{
-			Repository:     entry.Ref.Repository,
-			Ref:            entry.Ref.Ref,
-			Path:           entry.Ref.Path,
-			InstallationID: entry.Ref.InstallationID,
-			MaxBytes:       budget.MaxBytes,
+			Repository:        entry.Ref.Repository,
+			Ref:               entry.Ref.Ref,
+			Path:              entry.Ref.Path,
+			InstallationID:    entry.Ref.InstallationID,
+			MaxBytes:          budget.MaxBytes,
+			ConfiguredPrivate: store.ConsumerIsPrivate(entry.Ref),
 		})
 		timedOut := lookupCtx.Err() != nil
 		cancel()
 
+		// The probe is authoritative even when the read fails, so a repository
+		// GitHub reported private is masked before the reason switch.
+		if resolved.VisibilityKnown {
+			consumer.Private = resolved.Private
+			consumer.Redacted = resolved.Private && !opts.ProducerPrivate
+		}
 		switch {
 		case err == nil:
 			consumer.SHA = resolved.PinnedSHA
@@ -711,20 +734,52 @@ func (unavailableConsumerResolver) Resolve(context.Context, consumerResolveReque
 
 // githubConsumerResolver reads a consumer contract through the App installation
 // that covers it. The allow-list is the only source of requests, so the App is
-// never used to browse repositories the team did not configure.
+// never used to browse repositories the team did not configure. Before reading,
+// it probes the repository visibility; the probe is cached per run because a
+// resolver instance lives for one control-process resolution.
 type githubConsumerResolver struct {
-	apps              appgithub.AppProvider
 	ownerInstallation int64
+	readers           func(ctx context.Context, installationID int64) (consumerRepositoryReader, error)
 
 	mu      sync.Mutex
-	clients map[int64]*gh.Client
+	clients map[int64]consumerRepositoryReader
+	probes  map[string]consumerVisibilityProbe
+}
+
+// consumerVisibilityProbe is the cached answer of GET /repos/{owner}/{repo}.
+// status is 0 when the request succeeded; err is a transport or decoding error.
+type consumerVisibilityProbe struct {
+	private bool
+	status  int
+	err     error
 }
 
 func newGitHubConsumerResolver(apps appgithub.AppProvider, ownerInstallation int64) consumerResolver {
 	if apps == nil {
 		return unavailableConsumerResolver{}
 	}
-	return &githubConsumerResolver{apps: apps, ownerInstallation: ownerInstallation, clients: make(map[int64]*gh.Client)}
+	readers := func(ctx context.Context, installationID int64) (consumerRepositoryReader, error) {
+		app, err := apps.App(ctx)
+		if err != nil {
+			return nil, err
+		}
+		client, err := app.InstallationClient(installationID)
+		if err != nil {
+			return nil, err
+		}
+		return client.Repositories, nil
+	}
+	return newGitHubConsumerResolverWithReaders(readers, ownerInstallation)
+}
+
+func newGitHubConsumerResolverWithReaders(
+	readers func(context.Context, int64) (consumerRepositoryReader, error), ownerInstallation int64) *githubConsumerResolver {
+	return &githubConsumerResolver{
+		ownerInstallation: ownerInstallation,
+		readers:           readers,
+		clients:           make(map[int64]consumerRepositoryReader),
+		probes:            make(map[string]consumerVisibilityProbe),
+	}
 }
 
 func (r *githubConsumerResolver) Resolve(ctx context.Context, req consumerResolveRequest) (consumerResolution, error) {
@@ -741,40 +796,148 @@ func (r *githubConsumerResolver) Resolve(ctx context.Context, req consumerResolv
 		return consumerResolution{}, err
 	}
 
-	sha, resp, err := client.Repositories.GetCommitSHA1(ctx, owner, name, req.Ref, "")
+	private, err := r.probeVisibility(ctx, client, installationID, owner, name, req.ConfiguredPrivate)
 	if err != nil {
-		return consumerResolution{}, consumerLookupError(resp, err)
+		return consumerResolution{}, err
+	}
+	// A late read error must not discard what the probe proved: the caller uses
+	// it to mask the consumer even when the contract could not be read.
+	resolved := consumerResolution{Private: private, VisibilityKnown: true}
+
+	sha, resp, err := client.GetCommitSHA1(ctx, owner, name, req.Ref, "")
+	if err != nil {
+		return resolved, consumerLookupError(resp, err)
 	}
 	sha = strings.TrimSpace(sha)
 	if sha == "" {
-		return consumerResolution{}, errConsumerUnavailable
+		return resolved, errConsumerUnavailable
 	}
 
-	file, _, resp, err := client.Repositories.GetContents(ctx, owner, name, req.Path,
+	file, _, resp, err := client.GetContents(ctx, owner, name, req.Path,
 		&gh.RepositoryContentGetOptions{Ref: req.Ref})
 	if err != nil {
-		return consumerResolution{}, consumerLookupError(resp, err)
+		return resolved, consumerLookupError(resp, err)
 	}
 	if file == nil {
-		return consumerResolution{}, errConsumerUnavailable
+		return resolved, errConsumerUnavailable
 	}
 	maxBytes := req.MaxBytes
 	if maxBytes <= 0 {
 		maxBytes = store.DefaultConsumerMaxBytes
 	}
 	if file.GetSize() > int(maxBytes) {
-		return consumerResolution{}, errConsumerTooLarge
+		return resolved, errConsumerTooLarge
 	}
 	content, err := consumerFileContent(file)
 	if err != nil {
-		return consumerResolution{}, err
+		return resolved, err
 	}
 	sum := sha256.Sum256([]byte(content))
-	return consumerResolution{
-		PinnedSHA:   sha,
-		ContractSHA: strings.TrimSpace(file.GetSHA()),
-		Digest:      hex.EncodeToString(sum[:]),
-	}, nil
+	resolved.PinnedSHA = sha
+	resolved.ContractSHA = strings.TrimSpace(file.GetSHA())
+	resolved.Digest = hex.EncodeToString(sum[:])
+	return resolved, nil
+}
+
+// probeVisibility asks GitHub whether the consumer repository is public. A
+// private repository whose read succeeds is authorized: the App could see it.
+// A forbidden, missing or failed answer is an explicit unknown, never a reason
+// to trust the configured visibility for compatibility.
+func (r *githubConsumerResolver) probeVisibility(ctx context.Context, client consumerRepositoryReader,
+	installationID int64, owner, name string, configuredPrivate bool) (bool, error) {
+	// Authorization is installation-specific: a repository hidden from one
+	// installation may be visible to another, so the cache is keyed by both.
+	key := strconv.FormatInt(installationID, 10) + "\x00" + strings.ToLower(owner+"/"+name)
+	r.mu.Lock()
+	probe, ok := r.probes[key]
+	r.mu.Unlock()
+	if !ok {
+		repository, resp, err := client.Get(ctx, owner, name)
+		probe = consumerVisibilityProbe{status: probeStatusCode(resp, err), err: err}
+		if err == nil {
+			if repository == nil {
+				probe.err = errConsumerUnavailable
+			} else {
+				probe.private = repositoryIsPrivate(repository)
+			}
+		}
+		// A canceled lookup says nothing about the repository; a later consumer
+		// of the same run may still ask.
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+			r.mu.Lock()
+			r.probes[key] = probe
+			r.mu.Unlock()
+		}
+	}
+	switch {
+	case errors.Is(probe.err, context.DeadlineExceeded) || errors.Is(probe.err, context.Canceled):
+		return false, probe.err
+	case isRateLimitError(probe.err):
+		// A rate-limited 403 says nothing about authorization.
+		return false, errConsumerUnavailable
+	case probe.status == http.StatusUnauthorized || probe.status == http.StatusForbidden:
+		return false, errConsumerUnauthorized
+	case probe.status == http.StatusNotFound:
+		// GitHub answers 404 for a private repository the installation cannot
+		// see, so a configured private consumer is explicitly unauthorized.
+		if configuredPrivate {
+			return false, errConsumerUnauthorized
+		}
+		return false, errConsumerUnavailable
+	case probe.err != nil:
+		return false, errConsumerUnavailable
+	}
+	return probe.private, nil
+}
+
+func isRateLimitError(err error) bool {
+	var rateLimit *gh.RateLimitError
+	if errors.As(err, &rateLimit) {
+		return true
+	}
+	var abuse *gh.AbuseRateLimitError
+	return errors.As(err, &abuse)
+}
+
+func repositoryIsPrivate(repository *gh.Repository) bool {
+	if visibility := strings.ToLower(strings.TrimSpace(repository.GetVisibility())); visibility != "" {
+		return visibility != store.ConsumerVisibilityPublic
+	}
+	return repository.GetPrivate()
+}
+
+func probeStatusCode(resp *gh.Response, err error) int {
+	if resp != nil {
+		return resp.StatusCode
+	}
+	var response *gh.ErrorResponse
+	if errors.As(err, &response) && response.Response != nil {
+		return response.Response.StatusCode
+	}
+	return 0
+}
+
+func (r *githubConsumerResolver) client(ctx context.Context, installationID int64) (consumerRepositoryReader, error) {
+	if installationID <= 0 {
+		return nil, errConsumerUnauthorized
+	}
+	r.mu.Lock()
+	client := r.clients[installationID]
+	r.mu.Unlock()
+	if client != nil {
+		return client, nil
+	}
+	if r.readers == nil {
+		return nil, errConsumerUnavailable
+	}
+	client, err := r.readers(ctx, installationID)
+	if err != nil || client == nil {
+		return nil, errConsumerUnavailable
+	}
+	r.mu.Lock()
+	r.clients[installationID] = client
+	r.mu.Unlock()
+	return client, nil
 }
 
 // consumerFileContent rejects a body that cannot be hashed faithfully. GitHub
@@ -798,30 +961,6 @@ func consumerFileContent(file *gh.RepositoryContent) (string, error) {
 		return "", errConsumerDigest
 	}
 	return content, nil
-}
-
-func (r *githubConsumerResolver) client(ctx context.Context, installationID int64) (*gh.Client, error) {
-	if installationID <= 0 {
-		return nil, errConsumerUnauthorized
-	}
-	r.mu.Lock()
-	client := r.clients[installationID]
-	r.mu.Unlock()
-	if client != nil {
-		return client, nil
-	}
-	app, err := r.apps.App(ctx)
-	if err != nil {
-		return nil, errConsumerUnavailable
-	}
-	client, err = app.InstallationClient(installationID)
-	if err != nil {
-		return nil, errConsumerUnavailable
-	}
-	r.mu.Lock()
-	r.clients[installationID] = client
-	r.mu.Unlock()
-	return client, nil
 }
 
 func consumerLookupError(resp *gh.Response, err error) error {
