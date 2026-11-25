@@ -1003,6 +1003,123 @@ func TestPublishArchitectureBaselineOnly(t *testing.T) {
 	}
 }
 
+func TestPublishOpsEvidenceIsObservational(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	verdict := store.ArchitectureVerdict{
+		Status: store.ArchitectureNotRequested,
+		Mode:   store.ArchitectureAnalysisObservation,
+		OpsEvidence: &store.OpsEvidence{
+			Status: store.OpsStatusUnknown,
+			Dimensions: []store.OpsDimension{
+				{
+					Name:     store.OpsDimensionSchema,
+					Applies:  true,
+					Status:   store.OpsStatusUnknown,
+					Reason:   "schema change without a migration in the change",
+					Missing:  []string{"migration"},
+					Evidence: []string{"artifact: migration migrations/00022_add.sql"},
+				},
+				{
+					Name:    store.OpsDimensionTopology,
+					Applies: false,
+					Status:  store.OpsStatusNotApplicable,
+				},
+			},
+			Controls: store.OpsControls{Observation: true, WritesDecision: false},
+		},
+	}
+	if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+		Update("architecture_analysis", datatypes.JSON(store.ArchitectureVerdictJSON(verdict))).Error; err != nil {
+		t.Fatal(err)
+	}
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	bodies := summaryBodies(t, gh)
+	if len(bodies) != 1 {
+		t.Fatalf("summary comments = %d, want 1", len(bodies))
+	}
+	for _, want := range []string{
+		"Evidencia operativa", "Migraciones y datos", "desconocida",
+		"falta: migration", "artifact: migration migrations/00022_add.sql", "Modo observación",
+		"`abcdef1`",
+	} {
+		if !strings.Contains(bodies[0], want) {
+			t.Errorf("summary %q does not contain %q", bodies[0], want)
+		}
+	}
+	if strings.Contains(bodies[0], "Despliegue y topología") {
+		t.Errorf("summary %q rendered a dimension that does not apply", bodies[0])
+	}
+
+	gh.mu.Lock()
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	reviews := len(gh.reviews)
+	gh.mu.Unlock()
+	if len(patches) == 0 || patches[0].Conclusion != "success" {
+		t.Fatalf("check conclusion = %+v, want success", patches)
+	}
+	if !strings.Contains(patches[0].Output.Text, "Evidencia operativa") {
+		t.Errorf("check text %q does not carry the operational verdict", patches[0].Output.Text)
+	}
+	if reviews != 0 {
+		t.Errorf("inline reviews = %d, want 0", reviews)
+	}
+	var saved store.PullRequest
+	if err := st.DB.WithContext(ctx).Take(&saved, pr.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if saved.QAStatus != store.StatusReadyForHuman {
+		t.Errorf("qa_status = %q, want %q", saved.QAStatus, store.StatusReadyForHuman)
+	}
+}
+
+func TestPublishOpsEvidenceInventoryErrorIsNotSilent(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, _ := seedPublishContext(t, st, store.RunSucceeded, "major")
+	verdict := store.ArchitectureVerdict{
+		Status: store.ArchitectureNotRequested,
+		Mode:   store.ArchitectureAnalysisObservation,
+		OpsEvidence: &store.OpsEvidence{
+			Status:   store.OpsStatusUnknown,
+			Error:    "diff inventory failed: git diff timed out",
+			Controls: store.OpsControls{Observation: true, WritesDecision: false},
+		},
+	}
+	if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+		Update("architecture_analysis", datatypes.JSON(store.ArchitectureVerdictJSON(verdict))).Error; err != nil {
+		t.Fatal(err)
+	}
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	bodies := summaryBodies(t, gh)
+	if len(bodies) != 1 {
+		t.Fatalf("summary comments = %d, want 1", len(bodies))
+	}
+	for _, want := range []string{"Evidencia operativa incompleta", "diff inventory failed"} {
+		if !strings.Contains(bodies[0], want) {
+			t.Errorf("summary %q does not contain %q", bodies[0], want)
+		}
+	}
+	gh.mu.Lock()
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	gh.mu.Unlock()
+	if len(patches) == 0 || patches[0].Conclusion != "success" {
+		t.Fatalf("check conclusion = %+v, want success", patches)
+	}
+}
+
 func TestPublishCheckConclusions(t *testing.T) {
 	cases := []struct {
 		name       string

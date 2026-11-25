@@ -945,6 +945,15 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			HeadSHA:    headSHA,
 		}, analysisBudget)
 	architectureVerdict = attachContractComparison(architectureVerdict, contracts)
+	// The operational dimensions are deterministic evidence from the change, so
+	// they are evaluated even when the engine analysis has no signal. A failed
+	// inventory yields an explicit unknown. They never enter the review outcome.
+	opsEvidence, opsEvaluated := evaluateRunOpsEvidence(analysisMode, invErr, workDir, inventory)
+	if opsEvaluated {
+		architectureVerdict = applyOpsEvidence(architectureVerdict, opsEvidence)
+		log.Log(runCtx, "worker", "ops", opsLogLevel(opsEvidence.Status), logPhasePolicy,
+			fmt.Sprintf("evidencia operativa %s: %s", opsEvidence.Status, opsEvidenceSummary(opsEvidence)))
+	}
 	if invErr != nil {
 		architectureVerdict.Errors = append(architectureVerdict.Errors,
 			fmt.Sprintf("no se pudo inventariar el cambio: %v", invErr))
@@ -1273,15 +1282,19 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		architectureVerdict.Errors = append(architectureVerdict.Errors,
 			"analysis skipped: OCR resume is incompatible with --analysis")
 	}
-	// applyNativeArchitectureAnalysis rebuilds the dimensions from the report,
-	// so the deterministic dimensions (trusted baseline and contracts) are
-	// integrated again. The baseline violation wins over the inconclusive
-	// status a skipped analysis leaves behind; the contract result never
-	// changes the status.
+	// applyNativeArchitectureAnalysis rebuilds the dimensions and the risk and
+	// uncertainty lists from the report, so the deterministic evidence is
+	// integrated again: the trusted baseline, the contract comparison and the
+	// operational dimensions. The baseline violation wins over the inconclusive
+	// status a skipped analysis leaves behind; neither the contract result nor
+	// the operational evidence changes the status.
 	if baselineEvaluated {
 		architectureVerdict = applyArchitectureBaseline(architectureVerdict, baseline)
 	}
 	architectureVerdict = attachContractComparison(architectureVerdict, contracts)
+	if opsEvaluated {
+		architectureVerdict = applyOpsEvidence(architectureVerdict, opsEvidence)
+	}
 	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
 	if analysisRequested {
 		log.Log(runCtx, "worker", "analysis", architectureLogLevel(architectureVerdict.Status), logPhaseOCR,

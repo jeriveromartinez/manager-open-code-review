@@ -75,6 +75,10 @@ type ArchitectureVerdict struct {
 	Signals    []string               `json:"signals,omitempty"`
 	Comparison ArchitectureComparison `json:"comparison"`
 	Scope      ArchitectureScope      `json:"scope"`
+	// OpsEvidence is the deterministic evaluation of the operational dimensions
+	// the change touches. It is computed from the diff, not from the engine
+	// report, and never changes the review outcome.
+	OpsEvidence *OpsEvidence `json:"ops_evidence,omitempty"`
 	// Dimensions are the report sections OCR accepted, with their evidence.
 	Dimensions []ArchitectureDimension `json:"dimensions,omitempty"`
 	// BehaviorChanges, Risks, Alternatives, AcceptanceConditions and
@@ -271,6 +275,101 @@ type ArchitectureUsage struct {
 	CacheRead  int64 `json:"cache_read"`
 	CacheWrite int64 `json:"cache_write"`
 	Total      int64 `json:"total"`
+}
+
+// Operations evidence states. A dimension that applies but lacks evidence is
+// unknown, never satisfied: a green check cannot substitute an ordered,
+// reversible migration or a rollback path.
+const (
+	OpsStatusNotApplicable = "not_applicable"
+	OpsStatusSatisfied     = "satisfied"
+	OpsStatusUnknown       = "unknown"
+	OpsStatusRisk          = "risk"
+
+	OpsDimensionSchema      = "schema"
+	OpsDimensionTopology    = "topology"
+	OpsDimensionPermissions = "permissions"
+	OpsDimensionLoad        = "load"
+)
+
+// OpsEvidence is the per-dimension result of the operational review: what the
+// change touches, what evidence it carries and what is still missing. It is
+// evidence only; the controls record that it cannot change a decision.
+type OpsEvidence struct {
+	Status     string         `json:"status"`
+	Dimensions []OpsDimension `json:"dimensions,omitempty"`
+	Controls   OpsControls    `json:"controls"`
+	// Error records why the evaluation could not inspect the change at all
+	// (for example, an unreadable diff inventory). An error is an unknown, not
+	// a pass.
+	Error string `json:"error,omitempty"`
+}
+
+// OpsDimension records the verdict and evidence of one operational dimension.
+// Applies distinguishes "not touched by this change" from "touched but
+// unproven"; only the latter escalates an uncertainty.
+type OpsDimension struct {
+	Name     string   `json:"name"`
+	Applies  bool     `json:"applies"`
+	Status   string   `json:"status"`
+	Evidence []string `json:"evidence,omitempty"`
+	Missing  []string `json:"missing,omitempty"`
+	Reason   string   `json:"reason,omitempty"`
+}
+
+type OpsControls struct {
+	Observation    bool `json:"observation"`
+	WritesDecision bool `json:"writes_decision"`
+}
+
+// HasApplicable reports whether any dimension was touched by the change.
+func (o OpsEvidence) HasApplicable() bool {
+	for _, dimension := range o.Dimensions {
+		if dimension.Applies {
+			return true
+		}
+	}
+	return false
+}
+
+// HasContent reports whether there is anything to publish: an applicable
+// dimension or a failure that made the evaluation unknown.
+func (o OpsEvidence) HasContent() bool {
+	return o.HasApplicable() || strings.TrimSpace(o.Error) != ""
+}
+
+// RiskItems are the material operational risks, in dimension order, so the
+// verdict can surface them next to the engine's own risks.
+func (o OpsEvidence) RiskItems() []string {
+	var items []string
+	for _, dimension := range o.Dimensions {
+		if !dimension.Applies || dimension.Status != OpsStatusRisk || dimension.Reason == "" {
+			continue
+		}
+		items = append(items, "ops/"+dimension.Name+": "+dimension.Reason)
+	}
+	return items
+}
+
+// UncertaintyItems are the applicable dimensions that lack evidence. A missing
+// dimension is an unproven area, not a pass. An evaluation error is reported as
+// an inventory uncertainty so a failed diff cannot look silent.
+func (o OpsEvidence) UncertaintyItems() []string {
+	var items []string
+	if errorText := strings.TrimSpace(o.Error); errorText != "" {
+		items = append(items, "ops/inventory: "+errorText)
+	}
+	for _, dimension := range o.Dimensions {
+		if !dimension.Applies || dimension.Status != OpsStatusUnknown {
+			continue
+		}
+		item := "ops/" + dimension.Name + ": " + dimension.Reason
+		if len(dimension.Missing) > 0 {
+			item += " (missing: " + strings.Join(dimension.Missing, ", ") + ")"
+		}
+		items = append(items, item)
+	}
+	return items
 }
 
 // DecodeArchitectureVerdict reads a stored verdict. An empty or malformed value
