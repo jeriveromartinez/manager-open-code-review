@@ -407,12 +407,21 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 			// A new head superseded this run while it was executing. The
 			// trigger already cancelled its check; persisting or publishing
 			// stale results would overwrite the state of the current run.
+			r.removeRunState(runID)
+			// The run can no longer be resumed, so its unit state must not
+			// outlive the supersession.
+			if err := r.Store.DeleteReviewUnits(persistCtx, runID); err != nil {
+				slog.Warn("delete units of superseded run", "run_id", runID, "error", err)
+			}
 			return nil
 		}
 		log.Log(persistCtx, "worker", "", "error", logPhaseFinish,
 			fmt.Sprintf("no se pudo guardar el resultado del run: %v", err))
 		return fmt.Errorf("complete review run %d: %w", runID, err)
 	}
+	// The unit state is only useful while the run can be resumed; retention
+	// ends with the terminal write.
+	r.removeRunState(runID)
 	log.Log(persistCtx, "worker", "", terminalLogLevel(outcome.status), logPhaseFinish,
 		fmt.Sprintf("run %s%s: %s", outcome.status, terminalCodeSuffix(outcome.code), outcome.message))
 
@@ -568,6 +577,31 @@ func (r *Runner) requeueInterrupted(ctx context.Context, run store.ReviewRun, lo
 	return ctx.Err()
 }
 
+// newNativeReviewer builds one OCR invocation bound to a concrete profile,
+// isolated home and effective budget. The resume state key and the attempt row
+// use the same candidate, so a unit is always attributed to the profile that
+// produced it (#149, #150).
+func newNativeReviewer(bin, repoDir, home string, profile store.LLMProfile, key []byte,
+	excludes, background, baseRef, headRef, effort string, maxTokens int,
+	tokenBudget int64, timeout time.Duration, onLog func(string)) *NativeReviewer {
+	return &NativeReviewer{
+		Bin:         bin,
+		RepoDir:     repoDir,
+		Home:        home,
+		Profile:     profile,
+		APIKey:      string(key),
+		Excludes:    excludes,
+		Background:  background,
+		BaseRef:     baseRef,
+		HeadRef:     headRef,
+		Effort:      effort,
+		MaxTokens:   maxTokens,
+		TokenBudget: tokenBudget,
+		Timeout:     timeout,
+		OnLog:       onLog,
+	}
+}
+
 // execute runs the pipeline and returns the state to persist. Every early exit
 // returns a terminal outcome so the caller can always complete the run. The
 // error is only set when the run must be retried instead of finished.
@@ -622,9 +656,21 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	pipelineCtx, cancelPipeline := context.WithCancel(ctx)
 	defer cancelPipeline()
 	runCtx := pipelineCtx
+	// The aggregate time budget spans every attempt of the run. A requeue
+	// resets started_at, so the origin is the first claim (#149).
+	budgetTimeout := r.Cfg.Timeout
+	if budgetTimeout > 0 && run.BudgetStartedAt != nil {
+		budgetTimeout -= time.Since(*run.BudgetStartedAt)
+	}
 	if r.Cfg.Timeout > 0 {
+		if budgetTimeout <= 0 {
+			log.Log(runCtx, "worker", "", "warn", logPhaseFinish,
+				"el tiempo agregado del run se agotó antes de reanudar")
+			return out.inconclusive(errors.New(
+				"el tiempo agregado del run se agotó antes de reanudar la revisión"), "timeout"), nil
+		}
 		var cancelTimeout context.CancelFunc
-		runCtx, cancelTimeout = context.WithTimeout(pipelineCtx, r.Cfg.Timeout)
+		runCtx, cancelTimeout = context.WithTimeout(pipelineCtx, budgetTimeout)
 		defer cancelTimeout()
 	}
 	// The heartbeat reports that the worker is alive, not that the pipeline
@@ -834,13 +880,25 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	for _, note := range repoCtx.Notes {
 		log.Log(runCtx, "worker", "", "info", logPhasePrepare, "contexto: "+note)
 	}
+	background := buildBackground(cfg.PR, cfg.Policy.ExtraInstructions, backgroundExtras{
+		linked:          linked,
+		repo:            repoCtx,
+		contextBytes:    contextBytes,
+		contextBytesSet: true,
+	})
+	contextRev := reviewContextRevision(background)
 
+	resume := r.loadResume(runCtx, run.ID)
 	candidates := r.reviewProfiles(runCtx, cfg)
 	var (
 		res             nativeReview
 		status, code    string
 		activeProfile   store.LLMProfile
 		activeKey       []byte
+		activeScope     unitScope
+		activeMainKey   string
+		mainReused      bool
+		mainRaw         []byte
 		nativeErr       error
 		activeAttemptID uint
 		attemptBase     tokenUsage
@@ -849,6 +907,8 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		attemptStarted  time.Time
 		resultReady     bool
 		reviewer        *NativeReviewer
+		budgetBlocked   bool
+		failedUsageLost bool
 	)
 	// A return after an attempt started closes it with the work it actually did.
 	// Usage is the delta over the attempt's own snapshot, so the run total keeps
@@ -869,7 +929,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	}()
 
 	for index, candidate := range candidates {
-		if index > 0 {
+		scope := newUnitScopeFor(cfg, candidate, fromSHA, headSHA, effort, ceiling, budget)
+		scope.Context = contextRev
+		mainKey := scope.unitKey("main", "", "")
+		reused, reusable := resume.reusableReview(mainKey)
+		if !reusable && index > 0 {
 			if !canStartFallback(runCtx, budget, out.tokens) {
 				log.Log(runCtx, "worker", "", "warn", logPhaseOCR,
 					"no queda presupuesto ni tiempo para un perfil de respaldo")
@@ -893,6 +957,42 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		}
 		log.AddSecret(key)
 
+		// A compatible unit keeps the profile that produced it: the key covers
+		// the executing candidate and the policy snapshot (#149, #150).
+		if reusable {
+			activeProfile, activeKey = candidate, key
+			activeScope, activeMainKey = scope, mainKey
+			attemptBase = out.tokens
+			attemptStarted = time.Now()
+			res = reused
+			mainReused = true
+			status, code = nativeOutcome(res)
+			resume.markUsage(res.hasSummary)
+			// Chunks still need the checkout, the executing profile and its
+			// isolated home, even though the main pass itself is reused.
+			home := filepath.Join(runStateDir(r.Cfg.WorkspaceDir, run.ID), fmt.Sprintf("home-ocr-%d", candidate.ID))
+			reviewer = newNativeReviewer(r.Cfg.OCRBin, workDir, home, candidate, key,
+				excludes, background, fromSHA, headSHA,
+				effort, ceiling, 0, timeout, log.OCRLogger(runCtx, "main"))
+			log.Log(runCtx, "worker", "main", "info", logPhaseOCR, fmt.Sprintf(
+				"se reutiliza el resultado principal del perfil %d de un intento anterior", candidate.ID))
+			resultReady = true
+			break
+		}
+
+		// The main pass shares the aggregate spend of the run with the chunks
+		// and every prior attempt. Never pass 0: OCR reads it as "no cap".
+		attemptBudget := int64(0)
+		if budget > 0 {
+			attemptBudget = chunkAllowance(budget, resume.spent, resume.usageKnown)
+			if attemptBudget <= 0 {
+				budgetBlocked = true
+				log.Log(runCtx, "worker", "main", "warn", logPhaseOCR,
+					"no se ejecuta la pasada principal: el presupuesto de tokens agregado está agotado")
+				break
+			}
+		}
+
 		attempt, startErr := r.Store.StartReviewAttempt(runCtx, run.ID, candidate, attemptConfigRevision(cfg, candidate))
 		if startErr != nil {
 			log.Log(runCtx, "worker", "", "error", logPhasePolicy,
@@ -902,35 +1002,14 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		activeAttemptID = attempt.ID
 		attemptSeq = attempt.Seq
 		activeProfile, activeKey = candidate, key
+		activeScope, activeMainKey = scope, mainKey
 		attemptBase = out.tokens
 		attemptKnown = false
 
-		reviewer = &NativeReviewer{
-			Bin:      r.Cfg.OCRBin,
-			RepoDir:  workDir,
-			Home:     filepath.Join(workDir, "home-ocr"),
-			Profile:  candidate,
-			APIKey:   string(key),
-			Excludes: excludes,
-			Background: buildBackground(cfg.PR, cfg.Policy.ExtraInstructions, backgroundExtras{
-				linked:          linked,
-				repo:            repoCtx,
-				contextBytes:    contextBytes,
-				contextBytesSet: true,
-			}),
-			BaseRef:     fromSHA,
-			HeadRef:     headSHA,
-			Effort:      effort,
-			MaxTokens:   ceiling,
-			TokenBudget: budget,
-			Timeout:     timeout,
-			OnLog:       log.OCRLogger(runCtx, "main"),
-		}
-
-		// Point the attempt at its own isolated home and remaining budget; the
-		// profile was already resolved to the candidate above.
-		reviewer.Home = filepath.Join(workDir, fmt.Sprintf("home-ocr-%d", attemptSeq))
-		reviewer.TokenBudget = attemptFallbackBudget(budget, out.tokens)
+		home := filepath.Join(runStateDir(r.Cfg.WorkspaceDir, run.ID), fmt.Sprintf("home-ocr-%d", candidate.ID))
+		reviewer = newNativeReviewer(r.Cfg.OCRBin, workDir, home, candidate, key,
+			excludes, background, fromSHA, headSHA,
+			effort, ceiling, attemptBudget, timeout, log.OCRLogger(runCtx, "main"))
 
 		r.setPhase(runCtx, run.ID, store.RunPhaseReviewing, log)
 		slog.Info("native OCR review started", "run_id", run.ID, "profile_id", candidate.ID,
@@ -938,10 +1017,34 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		log.Log(runCtx, "worker", "main", "info", logPhaseOCR,
 			fmt.Sprintf("iniciando OCR sobre %s..%s", fromSHA, headSHA))
 		attemptStarted = time.Now()
-		res, _, nativeErr = r.runNativeReview(runCtx, candidate.ID, reviewer, log, "main")
+		sessionBefore := snapshotOCRSessions(reviewer.Home)
+		if session := resumeSession(run, scope); session != "" {
+			reviewer.ResumeSession = session
+			log.Log(runCtx, "worker", "main", "info", logPhaseOCR,
+				"reanudando la sesión de OCR de un intento anterior")
+		}
+		reviewer.OnSession = func(sessionID string) {
+			r.saveSession(runCtx, run.ID, sessionID, scope.key())
+		}
+		res, mainRaw, nativeErr = r.runNativeReview(runCtx, candidate.ID, reviewer, log, "main")
+		var capacity *ProfileCapacityError
+		if nativeErr != nil && reviewer.ResumeSession != "" &&
+			!errors.As(nativeErr, &capacity) && !truncatedContext(runCtx, nativeErr) {
+			// A session can be gone or unusable (for example after OCR was
+			// upgraded). Do not persist its failure: discard the session and
+			// retry the pending main unit once without --resume.
+			log.Log(runCtx, "worker", "main", "warn", logPhaseOCR,
+				fmt.Sprintf("la sesión de OCR no se pudo reanudar; se reintenta la pasada completa: %v", nativeErr))
+			r.clearSession(runCtx, run.ID)
+			reviewer.ResumeSession = ""
+			sessionBefore = snapshotOCRSessions(reviewer.Home)
+			res, mainRaw, nativeErr = r.runNativeReview(runCtx, candidate.ID, reviewer, log, "main")
+		}
 		if nativeErr != nil {
+			if sessionID := newestOCRSession(reviewer.Home, sessionBefore); sessionID != "" {
+				r.saveSession(runCtx, run.ID, sessionID, scope.key())
+			}
 			log.Log(runCtx, "worker", "main", "error", logPhaseOCR, fmt.Sprintf("OCR falló: %v", nativeErr))
-			var capacity *ProfileCapacityError
 			if errors.As(nativeErr, &capacity) {
 				if err := r.Store.FinishReviewAttempt(runCtx, activeAttemptID,
 					store.AttemptFailed, "capacity", capacity.Error(), nil, false); err != nil {
@@ -963,6 +1066,13 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			activeAttemptID = 0
 			continue
 		}
+		sessionID := res.SessionID
+		if sessionID == "" {
+			sessionID = newestOCRSession(reviewer.Home, sessionBefore)
+		}
+		if sessionID != "" {
+			r.saveSession(runCtx, run.ID, sessionID, scope.key())
+		}
 
 		status, code = nativeOutcome(res)
 		if status != store.RunSucceeded && recoverableNativeResult(code) &&
@@ -973,6 +1083,8 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			usage, known := attemptUsage(res)
 			if known {
 				out.tokens.add(nativeTokenUsage(res))
+			} else {
+				failedUsageLost = true
 			}
 			if err := r.Store.FinishReviewAttempt(runCtx, activeAttemptID, store.AttemptFailed,
 				code, truncateRunMessage(nativeStatusMessage(res, code)), usage, known); err != nil {
@@ -985,11 +1097,26 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		break
 	}
 	if !resultReady {
+		if budgetBlocked && nativeErr == nil {
+			return out.inconclusive(errors.New(
+				"el presupuesto de tokens agregado se agotó antes de la pasada principal"), "token_budget"), nil
+		}
 		if nativeErr == nil {
 			nativeErr = errors.New("ningún perfil apto pudo ejecutar la revisión")
 		}
 		out, _ = classifyNativeError(runCtx, out, nativeErr)
 		return out, nil
+	}
+	if failedUsageLost {
+		resume.markUsage(false)
+	}
+	if !mainReused {
+		usage := nativeTokenUsage(res)
+		resume.markSpent(usage)
+		resume.markUsage(res.hasSummary)
+		if status == store.RunSucceeded {
+			r.persistUnit(runCtx, completedMainUnit(run.ID, activeMainKey, res, mainRaw))
+		}
 	}
 
 	reviewed, skipped, excluded := nativeCoverageCounts(res)
@@ -1010,6 +1137,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	out.tokens.add(nativeTokenUsage(res))
 	out.tokensKnown = res.hasSummary
 	attemptKnown = res.hasSummary
+	resume.adopt(out.tokens)
 	out.executedProfile = activeProfile
 	out.summary = nativeSummaryText(res, status)
 
@@ -1037,7 +1165,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		r.setPhase(runCtx, run.ID, store.RunPhaseChunking, log)
 		log.Log(runCtx, "worker", "", "info", logPhaseChunks, fmt.Sprintf(
 			"%d archivo(s) demasiado grandes para el run principal; se revisan por partes", len(paths)))
-		chunked = r.reviewTooLargeFiles(runCtx, run.ID, activeProfile.ID, reviewer, headSHA, paths, budget, out.tokens, out.tokensKnown, log)
+		chunked = r.reviewTooLargeFiles(runCtx, run.ID, activeProfile.ID, reviewer, headSHA, paths, budget, log, resume, activeScope)
 		out.tokens.add(chunked.tokens)
 		if !chunked.usageKnown {
 			out.tokensKnown = false

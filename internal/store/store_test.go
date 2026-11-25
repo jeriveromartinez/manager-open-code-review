@@ -28,6 +28,7 @@ func TestMigrateCreatesTables(t *testing.T) {
 		"finding_events",
 		"github_artifacts",
 		"app_settings",
+		"review_units",
 		"river_job",
 	}
 

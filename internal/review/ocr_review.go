@@ -165,6 +165,9 @@ type nativeInvocation struct {
 	Effort         string
 	MaxTokens      int
 	TokenBudget    int64
+	// ResumeSession is the OCR session id of an interrupted attempt. It is only
+	// valid for a range/commit review whose scope did not change (#149).
+	ResumeSession string
 	// TaskTimeout is OCR's own per-task budget, already divided by the
 	// effort rounds (see ocrBudget). Zero leaves OCR's default.
 	TaskTimeout time.Duration
@@ -183,6 +186,9 @@ func buildReviewArgs(in nativeInvocation) []string {
 		args = append(args, "--commit", in.Commit)
 	} else {
 		args = append(args, "--from", in.BaseRef, "--to", in.HeadRef)
+	}
+	if in.ResumeSession != "" && in.Commit == "" {
+		args = append(args, "--resume", in.ResumeSession)
 	}
 	args = append(args,
 		"--format", "json",
@@ -402,6 +408,12 @@ type NativeReviewer struct {
 	// CloseMargin overrides ocrCloseMargin. Tests use a short window; zero
 	// keeps the production margin.
 	CloseMargin time.Duration
+	// ResumeSession resumes the interrupted main pass inside the same session,
+	// so OCR skips the subtasks it already completed (#149).
+	ResumeSession string
+	// OnSession receives the session id OCR announces on stderr. It lets the
+	// runner persist the session even when the process is later interrupted.
+	OnSession func(sessionID string)
 	// OnLog receives every stderr line as OCR prints it, so the review log can
 	// stream progress live. Nil keeps the buffered path used elsewhere.
 	OnLog func(line string)
@@ -469,6 +481,7 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 		Effort:         n.Effort,
 		MaxTokens:      n.MaxTokens,
 		TokenBudget:    n.TokenBudget,
+		ResumeSession:  n.ResumeSession,
 		TaskTimeout:    taskTimeout,
 		GlobalDeadline: global,
 	})
@@ -488,7 +501,19 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 
-	closer, runErr := execNative(cmd, &stderr, n.OnLog, deadline, graceful, margin)
+	onLog := n.OnLog
+	if n.OnSession != nil {
+		stream := onLog
+		onLog = func(line string) {
+			if id := ocrSessionFromLine(line); id != "" {
+				n.OnSession(id)
+			}
+			if stream != nil {
+				stream(line)
+			}
+		}
+	}
+	closer, runErr := execNative(cmd, &stderr, onLog, deadline, graceful, margin)
 	signalled, _ := closer.result()
 	exitedAt := time.Now()
 	// Decide from the exit instant, not from the timer race: an exit at or
@@ -1234,4 +1259,75 @@ func nativeMessageOr(res nativeReview, fallback string) string {
 		return message
 	}
 	return fallback
+}
+
+// ocrSessionFromLine extracts the session id OCR prints on stderr. The message
+// is `[ocr] Session: <id> (retry with: --resume <id>)`; the id is a UUID, so
+// parsing only that token keeps the rest of the progress text untouched.
+func ocrSessionFromLine(line string) string {
+	const marker = "[ocr] Session: "
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(line[i+len(marker):])
+	if j := strings.IndexAny(rest, " \t("); j >= 0 {
+		rest = rest[:j]
+	}
+	return strings.Trim(rest, " \t\r\n")
+}
+
+// snapshotOCRSessions records the session files that already exist, so the
+// session created by this attempt can be found even if the process is killed
+// before it prints its id.
+func snapshotOCRSessions(home string) map[string]bool {
+	seen := make(map[string]bool)
+	for _, path := range ocrSessionFiles(home) {
+		seen[path] = true
+	}
+	return seen
+}
+
+// newestOCRSession returns the id of the session file created after the
+// snapshot. Empty means the attempt did not persist a session.
+func newestOCRSession(home string, before map[string]bool) string {
+	var newest string
+	var newestMod time.Time
+	for _, path := range ocrSessionFiles(home) {
+		if before[path] {
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		if newest == "" || info.ModTime().After(newestMod) {
+			newest = path
+			newestMod = info.ModTime()
+		}
+	}
+	if newest == "" {
+		return ""
+	}
+	return strings.TrimSuffix(filepath.Base(newest), ".jsonl")
+}
+
+// ocrSessionFiles lists ~/.opencodereview/sessions/*/*.jsonl under the isolated
+// OCR home. The repository is encoded in the directory name, so one walk covers
+// every repository of that home.
+func ocrSessionFiles(home string) []string {
+	root := filepath.Join(home, ".opencodereview", "sessions")
+	var files []string
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			// A missing home is the common case before the first review.
+			return nil
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+			return nil
+		}
+		files = append(files, path)
+		return nil
+	})
+	return files
 }

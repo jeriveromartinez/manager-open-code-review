@@ -20,6 +20,10 @@ const (
 	// that claimed it disappeared before writing a terminal state.
 	RunErrorInterrupted = "interrupted"
 
+	// ReviewUnitCompleted marks a unit whose result is reusable. Only completed
+	// units are persisted; anything else is pending for the next attempt (#149).
+	ReviewUnitCompleted = "completed"
+
 	// Phases of a running review (#123). They are stable identifiers: the panel
 	// translates them and the log groups by milestone, so the values must not
 	// carry prose. Empty means the run is queued, finished or predates phases.
@@ -468,6 +472,15 @@ type ReviewRun struct {
 	// steps already delivered so a retry resumes only the missing ones.
 	PublishPending bool           `gorm:"column:publish_pending"`
 	PublishState   datatypes.JSON `gorm:"column:publish_state"`
+	// BudgetStartedAt is set when the run is first claimed and survives
+	// requeues: the aggregate time budget is measured from it, not from the
+	// start of the current attempt (#149). Nil on runs created before it existed.
+	BudgetStartedAt *time.Time `gorm:"column:budget_started_at"`
+	// OCRSessionID and OCRSessionScope carry the main OCR pass's session across
+	// attempts of the same run. The scope fingerprints the comparison, policy,
+	// profile and analyzer a session may be resumed under (#149).
+	OCRSessionID    string `gorm:"column:ocr_session_id"`
+	OCRSessionScope string `gorm:"column:ocr_session_scope"`
 	// HeartbeatAt is refreshed by the executing worker every minute. Nil on
 	// runs claimed before the heartbeat existed (#130).
 	HeartbeatAt *time.Time `gorm:"column:heartbeat_at"`
@@ -535,6 +548,23 @@ type ReviewRunLog struct {
 	Level      string    `gorm:"column:level"`
 	Phase      string    `gorm:"column:phase"`
 	Line       string    `gorm:"column:line"`
+}
+
+// ReviewUnit is one resumable piece of a review run: the main OCR pass or one
+// diff chunk. Result holds the engine's raw JSON (coverage included) and Usage
+// its measured tokens. Rows live only while the run is active;
+// CompleteReviewRun removes them.
+type ReviewUnit struct {
+	ID        uint           `gorm:"column:id;primaryKey"`
+	RunID     uint           `gorm:"column:run_id"`
+	UnitKey   string         `gorm:"column:unit_key"`
+	Kind      string         `gorm:"column:kind"`
+	Path      string         `gorm:"column:path"`
+	Status    string         `gorm:"column:status"`
+	Result    datatypes.JSON `gorm:"column:result"`
+	Usage     datatypes.JSON `gorm:"column:usage"`
+	CreatedAt time.Time      `gorm:"column:created_at"`
+	UpdatedAt time.Time      `gorm:"column:updated_at"`
 }
 
 // Finding is a review comment deduplicated by (pull request, fingerprint).

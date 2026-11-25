@@ -266,8 +266,12 @@ func chunkAllowance(mainBudget, used int64, usageKnown bool) int64 {
 
 // reviewTooLargeFiles reviews each path by synthetic chunks sequentially. A
 // failing chunk is recorded and the loop continues: the rest of the PR and the
-// chunks that did succeed keep their findings.
-func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint, reviewer *NativeReviewer, headSHA string, paths []string, budget int64, mainUsage tokenUsage, usageKnown bool, log *runLogSink) chunkSummary {
+// chunks that did succeed keep their findings. Chunks persisted by an earlier
+// attempt of the same run and scope are reused instead of invoked again (#149).
+func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint, reviewer *NativeReviewer, headSHA string, paths []string, budget int64, log *runLogSink, resume *runResume, scope unitScope) chunkSummary {
+	if resume == nil {
+		resume = newRunResume(nil)
+	}
 	summary := newChunkSummary()
 	maxBytes := chunkByteBudget(reviewer.MaxTokens)
 	stopBudget := false
@@ -312,6 +316,19 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 		reason := ""
 		for i, ch := range chunks {
 			invocation := fmt.Sprintf("chunk %d/%d", i+1, len(chunks))
+			unitKey := scope.unitKey("chunk", path, ch.Commit)
+			if reused, ok := resume.reusableReview(unitKey); ok && !chunkExcludedTooLarge(reused, path) {
+				usage := nativeTokenUsage(reused)
+				summary.tokens.add(usage)
+				if !reused.hasSummary {
+					summary.usageKnown = false
+					resume.markUsage(false)
+				}
+				summary.comments = append(summary.comments, reused.Comments...)
+				log.Log(ctx, "worker", invocation, "info", logPhaseChunks,
+					fmt.Sprintf("trozo %d/%d de %s reutilizado de un intento anterior", i+1, len(chunks), path))
+				continue
+			}
 			if ctx.Err() != nil {
 				failures++
 				if reason == "" {
@@ -325,8 +342,10 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 			chunkReviewer := *reviewer
 			chunkReviewer.Commit = ch.Commit
 			chunkReviewer.OnLog = log.OCRLogger(ctx, invocation)
+			chunkReviewer.OnSession = nil
+			chunkReviewer.ResumeSession = ""
 			if budget > 0 {
-				remaining := chunkAllowance(budget, int64(mainUsage.Total)+int64(summary.tokens.Total), usageKnown && summary.usageKnown)
+				remaining := chunkAllowance(budget, resume.spent, resume.usageKnown && summary.usageKnown)
 				if remaining <= 0 {
 					failures++
 					if reason == "" {
@@ -343,8 +362,16 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 			log.Log(ctx, "worker", invocation, "info", logPhaseChunks,
 				fmt.Sprintf("iniciando trozo %d/%d de %s", i+1, len(chunks), path))
 			started := time.Now()
-			chunkRes, _, reviewErr := r.runNativeReview(ctx, profileID, &chunkReviewer, log, invocation)
+			chunkRes, raw, reviewErr := r.runNativeReview(ctx, profileID, &chunkReviewer, log, invocation)
 			finishChunk(ctx, &summary, path, chunkRes, reviewErr, &failures, &reason)
+			if !summary.usageKnown {
+				resume.markUsage(false)
+			}
+			if chunkSucceeded(chunkRes, reviewErr, path) {
+				resume.markSpent(nativeTokenUsage(chunkRes))
+				resume.markUsage(chunkRes.hasSummary)
+				r.persistUnit(ctx, completedChunkUnit(runID, unitKey, path, chunkRes, raw))
+			}
 			log.Log(ctx, "worker", invocation, chunkLogLevel(reviewErr), logPhaseChunks, chunkLogLine(
 				path, i+1, len(chunks), chunkRes, reviewErr, time.Since(started)))
 		}
@@ -441,6 +468,16 @@ func chunkErrorReason(ctx context.Context, err error) string {
 		return "timeout"
 	}
 	return "provider"
+}
+
+// chunkSucceeded reports whether one chunk may be reused and counted as a
+// completed part of its file.
+func chunkSucceeded(res nativeReview, err error, path string) bool {
+	if err != nil {
+		return false
+	}
+	status, _ := nativeOutcome(res)
+	return status == store.RunSucceeded && !chunkExcludedTooLarge(res, path)
 }
 
 func chunkFailureReason(code string, tooLarge bool) string {

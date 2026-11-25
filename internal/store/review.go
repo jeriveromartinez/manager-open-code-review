@@ -930,10 +930,13 @@ func (s *Store) ClaimReviewRun(ctx context.Context, id uint) (ReviewRun, bool, e
 	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
 		Where("id = ? AND status = ?", id, RunQueued).
 		Updates(map[string]any{
-			"status":       RunRunning,
-			"started_at":   now,
-			"heartbeat_at": now,
-			"updated_at":   now,
+			"status":     RunRunning,
+			"started_at": now,
+			// The aggregate time budget starts at the first claim and survives
+			// requeues, so retrying a run cannot reset it (#149).
+			"budget_started_at": gorm.Expr("COALESCE(budget_started_at, ?)", now),
+			"heartbeat_at":      now,
+			"updated_at":        now,
 		})
 	if res.Error != nil {
 		return ReviewRun{}, false, fmt.Errorf("claim review run %d: %w", id, res.Error)
@@ -1154,6 +1157,69 @@ func (s *Store) ReviewRun(ctx context.Context, id uint) (ReviewRun, error) {
 	return run, nil
 }
 
+// ReviewUnitsForRun returns the resumable units persisted by earlier attempts
+// of a run, oldest first.
+func (s *Store) ReviewUnitsForRun(ctx context.Context, runID uint) ([]ReviewUnit, error) {
+	var units []ReviewUnit
+	if err := s.DB.WithContext(ctx).
+		Where("run_id = ?", runID).
+		Order("id").
+		Find(&units).Error; err != nil {
+		return nil, fmt.Errorf("list review units of run %d: %w", runID, err)
+	}
+	return units, nil
+}
+
+// UpsertReviewUnit records the outcome of one unit. The key is the run's
+// compatibility fingerprint, so a retried unit replaces its previous row instead
+// of duplicating it.
+func (s *Store) UpsertReviewUnit(ctx context.Context, unit ReviewUnit) error {
+	if unit.Status == "" {
+		unit.Status = ReviewUnitCompleted
+	}
+	now := time.Now().UTC()
+	unit.CreatedAt = now
+	unit.UpdatedAt = now
+	err := s.DB.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "run_id"}, {Name: "unit_key"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"kind", "path", "status", "result", "usage", "updated_at",
+		}),
+	}).Create(&unit).Error
+	if err != nil {
+		return fmt.Errorf("save review unit %q of run %d: %w", unit.UnitKey, unit.RunID, err)
+	}
+	return nil
+}
+
+// DeleteReviewUnits drops the resumable state of a run. It runs when the run
+// reaches a terminal state: retention is bounded to interrupted reviews.
+func (s *Store) DeleteReviewUnits(ctx context.Context, runID uint) error {
+	if err := s.DB.WithContext(ctx).Where("run_id = ?", runID).Delete(&ReviewUnit{}).Error; err != nil {
+		return fmt.Errorf("delete review units of run %d: %w", runID, err)
+	}
+	return nil
+}
+
+// SetReviewRunSession stores the main OCR session so the next attempt of the
+// same run can resume it. A run that is no longer active keeps no state.
+func (s *Store) SetReviewRunSession(ctx context.Context, id uint, sessionID, scope string) error {
+	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunRunning).
+		Updates(map[string]any{
+			"ocr_session_id":    sessionID,
+			"ocr_session_scope": scope,
+			"updated_at":        time.Now().UTC(),
+		})
+	if res.Error != nil {
+		return fmt.Errorf("set OCR session of review run %d: %w", id, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("set OCR session of review run %d: %w", id, ErrRunNotActive)
+	}
+	return nil
+}
+
 // RunForSHA returns the latest run of a pull request for a given head SHA.
 func (s *Store) RunForSHA(ctx context.Context, prID uint, headSHA string) (ReviewRun, error) {
 	var run ReviewRun
@@ -1189,17 +1255,32 @@ func (s *Store) PreviousSucceededRun(ctx context.Context, prID, beforeRunID uint
 // new head can be queued. Terminal runs are left untouched for the audit trail.
 // The clone token is cleared because a superseded run never publishes.
 func (s *Store) SupersedeActiveRuns(ctx context.Context, prID uint) error {
-	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
-		Where("pull_request_id = ? AND status IN ?", prID, []string{RunQueued, RunRunning}).
-		Updates(map[string]any{
-			"status":           RunSuperseded,
-			"clone_token_enc":  "",
-			"phase":            "",
-			"phase_started_at": nil,
-			"updated_at":       time.Now().UTC(),
-		})
-	if res.Error != nil {
-		return fmt.Errorf("supersede runs of pull request %d: %w", prID, res.Error)
+	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var ids []uint
+		if err := tx.Model(&ReviewRun{}).
+			Where("pull_request_id = ? AND status IN ?", prID, []string{RunQueued, RunRunning}).
+			Pluck("id", &ids).Error; err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		if err := tx.Model(&ReviewRun{}).Where("id IN ?", ids).
+			Updates(map[string]any{
+				"status":           RunSuperseded,
+				"clone_token_enc":  "",
+				"phase":            "",
+				"phase_started_at": nil,
+				"updated_at":       time.Now().UTC(),
+			}).Error; err != nil {
+			return err
+		}
+		// A superseded run can never be resumed; its raw review JSON must not
+		// outlive it (#149).
+		return tx.Where("run_id IN ?", ids).Delete(&ReviewUnit{}).Error
+	})
+	if err != nil {
+		return fmt.Errorf("supersede runs of pull request %d: %w", prID, err)
 	}
 	return nil
 }
@@ -1211,25 +1292,40 @@ func (s *Store) SupersedeActiveRuns(ctx context.Context, prID uint) error {
 // match any comparison. Superseded runs lose their clone token and never
 // publish.
 func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, comparison Comparison) error {
-	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
-		Where("pull_request_id = ? AND status IN ?", prID, []string{RunQueued, RunRunning}).
-		Where(`NOT (
-			head_sha = ? AND (
-				(base_ref = '' AND base_sha = '')
-				OR ((base_ref = '' OR base_ref = ?) AND base_sha <> '' AND ? <> '' AND base_sha = ?)
-				OR (base_ref <> '' AND base_ref = ? AND base_sha = '' AND ? = '')
-			)
-		)`, comparison.HeadSHA, comparison.BaseRef, comparison.MergeBaseSHA,
-			comparison.MergeBaseSHA, comparison.BaseRef, comparison.MergeBaseSHA).
-		Updates(map[string]any{
-			"status":           RunSuperseded,
-			"clone_token_enc":  "",
-			"phase":            "",
-			"phase_started_at": nil,
-			"updated_at":       time.Now().UTC(),
-		})
-	if res.Error != nil {
-		return fmt.Errorf("supersede other runs of pull request %d: %w", prID, res.Error)
+	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		where := tx.Model(&ReviewRun{}).
+			Where("pull_request_id = ? AND status IN ?", prID, []string{RunQueued, RunRunning}).
+			Where(`NOT (
+				head_sha = ? AND (
+					(base_ref = '' AND base_sha = '')
+					OR ((base_ref = '' OR base_ref = ?) AND base_sha <> '' AND ? <> '' AND base_sha = ?)
+					OR (base_ref <> '' AND base_ref = ? AND base_sha = '' AND ? = '')
+				)
+			)`, comparison.HeadSHA, comparison.BaseRef, comparison.MergeBaseSHA,
+				comparison.MergeBaseSHA, comparison.BaseRef, comparison.MergeBaseSHA)
+		var ids []uint
+		if err := where.Pluck("id", &ids).Error; err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		if err := tx.Model(&ReviewRun{}).Where("id IN ?", ids).
+			Updates(map[string]any{
+				"status":           RunSuperseded,
+				"clone_token_enc":  "",
+				"phase":            "",
+				"phase_started_at": nil,
+				"updated_at":       time.Now().UTC(),
+			}).Error; err != nil {
+			return err
+		}
+		// The superseded comparison can never be resumed, so its units go with
+		// it (#149).
+		return tx.Where("run_id IN ?", ids).Delete(&ReviewUnit{}).Error
+	})
+	if err != nil {
+		return fmt.Errorf("supersede other runs of pull request %d: %w", prID, err)
 	}
 	return nil
 }
@@ -1403,6 +1499,11 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 			}).Error; err != nil {
 			return fmt.Errorf("close open attempts of review run %d: %w", id, err)
 		}
+		// The run is terminal: its per-unit state is no longer resumable and the
+		// retention window ends here (#149).
+		if err := tx.Where("run_id = ?", id).Delete(&ReviewUnit{}).Error; err != nil {
+			return fmt.Errorf("delete review units of run %d: %w", id, err)
+		}
 		return nil
 	})
 }
@@ -1446,6 +1547,15 @@ RETURNING *`
 	if err != nil {
 		return nil, fmt.Errorf("interrupt review runs started before %s: %w",
 			p.StartedBefore.UTC().Format(time.RFC3339), err)
+	}
+	if len(runs) > 0 {
+		ids := make([]uint, 0, len(runs))
+		for _, run := range runs {
+			ids = append(ids, run.ID)
+		}
+		if err := s.DB.WithContext(ctx).Where("run_id IN ?", ids).Delete(&ReviewUnit{}).Error; err != nil {
+			return runs, fmt.Errorf("delete review units of interrupted runs: %w", err)
+		}
 	}
 	return runs, nil
 }
