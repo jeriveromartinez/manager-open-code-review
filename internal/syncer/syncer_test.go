@@ -84,6 +84,7 @@ type fakeGitHub struct {
 
 	repos            func(http.ResponseWriter, *http.Request)
 	pulls            func(http.ResponseWriter, *http.Request)
+	pullGet          func(http.ResponseWriter, *http.Request)
 	appInstallations func(http.ResponseWriter, *http.Request)
 	getInstallation  func(http.ResponseWriter, *http.Request)
 	reviewReqs       []syncerReviewRequest
@@ -177,6 +178,12 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		f.pullsCalls++
 		f.mu.Unlock()
 		f.pulls(w, r)
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/") && strings.Contains(r.URL.Path, "/pulls/"):
+		if f.pullGet != nil {
+			f.pullGet(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
 	default:
 		http.NotFound(w, r)
 	}
@@ -613,6 +620,105 @@ func TestSyncClosesMissing(t *testing.T) {
 	}
 	if present.State != "open" {
 		t.Errorf("PR #6 state = %q, want open", present.State)
+	}
+}
+
+// A failure in the first repository of an installation must not abandon the
+// remaining repositories, and the failed one must be retried once GitHub
+// recovers.
+func TestSyncIsolatesRepositoryFailures(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 10, testInstallationID, "acme/broken", true)
+	seedRepo(t, s, 20, testInstallationID, "acme/healthy", true)
+	updated := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	var broken atomic.Bool
+	broken.Store(true)
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{
+				repo(10, "acme/broken"),
+				repo(20, "acme/healthy"),
+			}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/repos/acme/broken/pulls" && broken.Load() {
+				http.Error(w, "repository read failed", http.StatusInternalServerError)
+				return
+			}
+			writePulls(t, w, r, []int{1}, updated, "")
+		}, nil)
+	sy := newSyncer(s, f.srv.URL, noopPublisher{})
+
+	if err := sy.SyncInstallation(ctx, testInstallationID); err == nil {
+		t.Fatal("SyncInstallation() error = nil, want the failed repository reported")
+	}
+	if got := countRows(t, s, &store.PullRequest{}, "repository_id = ?", 20); got != 1 {
+		t.Fatalf("healthy repository PRs = %d, want 1 synced despite the failure", got)
+	}
+
+	broken.Store(false)
+	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() after recovery error = %v", err)
+	}
+	for _, repoID := range []int64{10, 20} {
+		if got := countRows(t, s, &store.PullRequest{}, "repository_id = ?", repoID); got != 1 {
+			t.Errorf("repository %d PRs = %d, want 1", repoID, got)
+		}
+	}
+}
+
+// The paginated snapshot can miss a pull request opened while it was being
+// read. The sweep must re-check a missing row before closing it.
+func TestSyncRechecksMissingBeforeClosing(t *testing.T) {
+	cases := []struct {
+		name  string
+		state string
+		want  string
+	}{
+		{"opened during the sweep", "open", "open"},
+		{"really closed on GitHub", "closed", store.StatusClosed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := testutil.NewStore(t)
+			seedInstallation(t, s, testInstallationID)
+			seedRepo(t, s, 1, testInstallationID, "acme/repo-1", true)
+			seedPR(t, s, 1, 5, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+			f := newFakeGitHub(t,
+				func(w http.ResponseWriter, r *http.Request) {
+					writeRepos(t, w, r, []*gh.Repository{repo(1, "acme/repo-1")}, "")
+				},
+				func(w http.ResponseWriter, r *http.Request) {
+					writePulls(t, w, r, []int{6}, time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), "")
+				}, nil)
+			f.pullGet = func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/repos/acme/repo-1/pulls/5" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(&gh.PullRequest{
+					Number: gh.Int(5),
+					State:  gh.String(tc.state),
+				})
+			}
+
+			if err := newSyncer(s, f.srv.URL, noopPublisher{}).SyncInstallation(ctx, testInstallationID); err != nil {
+				t.Fatalf("SyncInstallation() error = %v", err)
+			}
+			var pr store.PullRequest
+			if err := s.DB.WithContext(ctx).Where("repository_id = ? AND number = ?", 1, 5).Take(&pr).Error; err != nil {
+				t.Fatalf("load PR #5: %v", err)
+			}
+			if pr.State != tc.want {
+				t.Errorf("PR #5 state = %q, want %q", pr.State, tc.want)
+			}
+		})
 	}
 }
 

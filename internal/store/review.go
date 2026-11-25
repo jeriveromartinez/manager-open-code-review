@@ -1020,6 +1020,19 @@ func (s *Store) PendingReviewPRs(ctx context.Context, limit int) ([]PullRequest,
 	if limit <= 0 {
 		return nil, nil
 	}
+	return s.pendingReviewPRs(ctx, limit)
+}
+
+// PendingReviewCandidates lists every pending pull request in the same
+// priority order as PendingReviewPRs, without a limit. The trigger uses it to
+// apply the external policy to each candidate before counting it against the
+// batch, so contributions that will never be reviewed cannot crowd out an
+// eligible pull request.
+func (s *Store) PendingReviewCandidates(ctx context.Context) ([]PullRequest, error) {
+	return s.pendingReviewPRs(ctx, 0)
+}
+
+func (s *Store) pendingReviewPRs(ctx context.Context, limit int) ([]PullRequest, error) {
 	const query = `
 SELECT pr.*,
        q.require_green_ci AS team_require_green_ci,
@@ -1072,7 +1085,7 @@ ORDER BY pr.updated_at DESC`
 			}
 		}
 		prs = append(prs, candidate.PullRequest)
-		if len(prs) == limit {
+		if limit > 0 && len(prs) == limit {
 			break
 		}
 	}

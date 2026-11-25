@@ -341,51 +341,96 @@ func (s *Syncer) syncPullRequests(ctx context.Context, client *gh.Client, instal
 	if err != nil {
 		return fmt.Errorf("list enabled repositories of installation %d: %w", installationID, err)
 	}
+	var errs []error
 	for _, repo := range repos {
-		owner, name, ok := strings.Cut(repo.FullName, "/")
-		if !ok || owner == "" || name == "" {
-			slog.Warn("skip repository with invalid full name", "repository_id", repo.ID, "full_name", repo.FullName)
-			continue
-		}
-		pulls, err := listOpenPullRequests(ctx, client, owner, name)
-		if err != nil {
-			return fmt.Errorf("list open pull requests of %s: %w", repo.FullName, err)
-		}
-
-		openNumbers := make([]int, 0, len(pulls))
-		for _, pull := range pulls {
-			if pull == nil || pull.GetNumber() == 0 {
-				continue
-			}
-			openNumbers = append(openNumbers, pull.GetNumber())
-			pr, changed, err := s.Store.SyncPullRequest(ctx, github.PRFromGitHub(repo.ID, repo.FullName, pull))
-			if err != nil {
-				return fmt.Errorf("sync pull request #%d of %s: %w", pull.GetNumber(), repo.FullName, err)
-			}
-			if pr.Origin == store.OriginUnknown {
-				slog.Warn("pull request origin could not be determined",
-					"repository", repo.FullName, "pull_request", pr.Number,
-					"head_repository", pr.HeadRepoFullName)
-			}
-			if changed {
-				if err := s.publish(ctx, events.Event{
-					Type: "pr.updated",
-					ID:   strconv.FormatUint(uint64(pr.ID), 10),
-				}); err != nil {
-					return err
-				}
-			}
-			if err := s.refreshChecks(ctx, client, pr); err != nil {
-				slog.Error("refresh pull request checks failed",
-					"pull_request_id", pr.ID, "head_sha", pr.HeadSHA, "error", err)
-			}
-			s.requestForkReview(ctx, pr)
-		}
-		if err := s.Store.CloseMissingPullRequests(ctx, repo.ID, openNumbers); err != nil {
-			return fmt.Errorf("close missing pull requests of %s: %w", repo.FullName, err)
+		if err := s.syncRepositoryPullRequests(ctx, client, repo); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
+}
+
+// syncRepositoryPullRequests reconciles one repository. The caller keeps
+// walking the rest of the installation after an error: a repository GitHub
+// cannot be read from must not starve its siblings. Closing is skipped when the
+// listing or a pull request sync failed, because the snapshot would be
+// incomplete and valid rows could be closed.
+func (s *Syncer) syncRepositoryPullRequests(ctx context.Context, client *gh.Client, repo store.Repository) error {
+	owner, name, ok := strings.Cut(repo.FullName, "/")
+	if !ok || owner == "" || name == "" {
+		slog.Warn("skip repository with invalid full name", "repository_id", repo.ID, "full_name", repo.FullName)
+		return nil
+	}
+	pulls, err := listOpenPullRequests(ctx, client, owner, name)
+	if err != nil {
+		return fmt.Errorf("list open pull requests of %s: %w", repo.FullName, err)
+	}
+
+	openNumbers := make([]int, 0, len(pulls))
+	for _, pull := range pulls {
+		if pull == nil || pull.GetNumber() == 0 {
+			continue
+		}
+		openNumbers = append(openNumbers, pull.GetNumber())
+		pr, changed, err := s.Store.SyncPullRequest(ctx, github.PRFromGitHub(repo.ID, repo.FullName, pull))
+		if err != nil {
+			return fmt.Errorf("sync pull request #%d of %s: %w", pull.GetNumber(), repo.FullName, err)
+		}
+		if pr.Origin == store.OriginUnknown {
+			slog.Warn("pull request origin could not be determined",
+				"repository", repo.FullName, "pull_request", pr.Number,
+				"head_repository", pr.HeadRepoFullName)
+		}
+		if changed {
+			if err := s.publish(ctx, events.Event{
+				Type: "pr.updated",
+				ID:   strconv.FormatUint(uint64(pr.ID), 10),
+			}); err != nil {
+				return err
+			}
+		}
+		if err := s.refreshChecks(ctx, client, pr); err != nil {
+			slog.Error("refresh pull request checks failed",
+				"pull_request_id", pr.ID, "head_sha", pr.HeadSHA, "error", err)
+		}
+		s.requestForkReview(ctx, pr)
+	}
+
+	openNumbers, revalidateErr := s.revalidateAbsentPullRequests(ctx, client, owner, name, repo, openNumbers)
+	closeErr := s.Store.CloseMissingPullRequests(ctx, repo.ID, openNumbers)
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close missing pull requests of %s: %w", repo.FullName, closeErr)
+	}
+	return errors.Join(revalidateErr, closeErr)
+}
+
+// revalidateAbsentPullRequests re-checks every locally open pull request that
+// was absent from a successful paginated listing before the sweep closes it. A
+// pull request opened while the pages were being read is missing from the
+// snapshot but still open, so closing it would cancel live work. A 404 confirms
+// it is gone; any other read failure keeps the row open and retries on the next
+// sweep.
+func (s *Syncer) revalidateAbsentPullRequests(ctx context.Context, client *gh.Client, owner, name string, repo store.Repository, openNumbers []int) ([]int, error) {
+	missing, err := s.Store.MissingOpenPullRequests(ctx, repo.ID, openNumbers)
+	if err != nil {
+		return openNumbers, fmt.Errorf("list missing pull requests of %s: %w", repo.FullName, err)
+	}
+	var errs []error
+	for _, pr := range missing {
+		pull, resp, getErr := client.PullRequests.Get(ctx, owner, name, pr.Number)
+		if getErr != nil {
+			if resp != nil && resp.StatusCode == http.StatusNotFound {
+				continue
+			}
+			openNumbers = append(openNumbers, pr.Number)
+			errs = append(errs, fmt.Errorf("re-check pull request #%d of %s: %w", pr.Number, repo.FullName, getErr))
+			continue
+		}
+		if pull == nil || strings.EqualFold(pull.GetState(), "open") {
+			openNumbers = append(openNumbers, pr.Number)
+		}
+	}
+	return openNumbers, errors.Join(errs...)
 }
 
 // refreshChecks keeps the stored counters current in polling mode. A failure is
