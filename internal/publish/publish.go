@@ -706,23 +706,107 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 
 	path := p.repoPath(fmt.Sprintf("check-runs/%d", checkID))
 	const pageSize = 50
-	for i := 0; ; i += pageSize {
-		end := i + pageSize
+
+	// GitHub appends annotations on every PATCH instead of replacing them. An
+	// earlier attempt may have been accepted even when its response was lost, so
+	// reconcile with what the check already holds and with the durable cursor
+	// before sending anything: resending a page would duplicate its annotations.
+	state, err := p.fetchCheckRun(ctx, path)
+	if err != nil {
+		return err
+	}
+	if state.Output.AnnotationsCount > len(annotations) {
+		// A delivery from before the cursor appended duplicates that cannot be
+		// removed. Every expected annotation is present, so stop appending.
+		slog.Warn("check run holds more annotations than expected",
+			"check_run_id", checkID,
+			"stored", state.Output.AnnotationsCount,
+			"expected", len(annotations))
+	}
+	start := state.Output.AnnotationsCount
+	if p.progress.CheckAnnotations > start {
+		start = p.progress.CheckAnnotations
+	}
+	if start > len(annotations) {
+		start = len(annotations)
+	}
+
+	posted := false
+	for start < len(annotations) {
+		end := start + pageSize
 		if end > len(annotations) {
 			end = len(annotations)
 		}
-		page := output
-		if i > 0 {
-			page = map[string]any{"title": title, "summary": summary}
+		page := map[string]any{"title": title, "summary": summary}
+		if start == 0 {
+			page["text"] = output["text"]
 		}
-		page["annotations"] = annotations[i:end]
+		page["annotations"] = annotations[start:end]
 		payload := map[string]any{"status": "completed", "conclusion": conclusion, "output": page}
 		if err := p.request(ctx, http.MethodPatch, path, payload, nil); err != nil {
 			return fmt.Errorf("complete check run %d: %w", checkID, err)
 		}
-		if end == len(annotations) {
-			break
+		if err := p.advanceCheckCursor(ctx, end); err != nil {
+			return err
 		}
+		posted = true
+		start = end
+	}
+	if !posted {
+		// A retry that resumes after the last accepted page still has to assert
+		// the conclusion, and a run without annotations still has to close the
+		// check. Both send one page with no annotations.
+		page := map[string]any{
+			"title": title, "summary": summary, "text": output["text"],
+			"annotations": []checkAnnotation{},
+		}
+		payload := map[string]any{"status": "completed", "conclusion": conclusion, "output": page}
+		if err := p.request(ctx, http.MethodPatch, path, payload, nil); err != nil {
+			return fmt.Errorf("complete check run %d: %w", checkID, err)
+		}
+	}
+
+	// The step is recorded only after GitHub confirms the effect, not after a
+	// 2xx: an accepted-then-lost page must not make completion an assumption.
+	return p.verifyCheckEffect(ctx, path, checkID, conclusion, len(annotations))
+}
+
+// checkRunState is the subset of a check run the publisher reconciles against.
+type checkRunState struct {
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	Output     struct {
+		AnnotationsCount int `json:"annotations_count"`
+	} `json:"output"`
+}
+
+func (p *publishContext) fetchCheckRun(ctx context.Context, path string) (checkRunState, error) {
+	var state checkRunState
+	if err := p.request(ctx, http.MethodGet, path, nil, &state); err != nil {
+		return state, fmt.Errorf("read check run: %w", err)
+	}
+	return state, nil
+}
+
+// verifyCheckEffect confirms that GitHub actually stored the completion and
+// every expected annotation. More annotations than expected are tolerated
+// because a previous delivery may have duplicated them and the API cannot
+// remove them.
+func (p *publishContext) verifyCheckEffect(ctx context.Context, path string, checkID int64, conclusion string, expected int) error {
+	state, err := p.fetchCheckRun(ctx, path)
+	if err != nil {
+		return err
+	}
+	if state.Status != "completed" {
+		return fmt.Errorf("complete check run %d: status is %q, want completed", checkID, state.Status)
+	}
+	if !strings.EqualFold(state.Conclusion, conclusion) {
+		return fmt.Errorf("complete check run %d: conclusion is %q, want %q",
+			checkID, state.Conclusion, conclusion)
+	}
+	if state.Output.AnnotationsCount < expected {
+		return fmt.Errorf("complete check run %d: GitHub holds %d annotations, want %d",
+			checkID, state.Output.AnnotationsCount, expected)
 	}
 	return nil
 }

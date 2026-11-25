@@ -46,9 +46,19 @@ type reviewComment struct {
 }
 
 type fakeReview struct {
+	CommitID string          `json:"commit_id"`
 	Event    string          `json:"event"`
 	Body     string          `json:"body"`
 	Comments []reviewComment `json:"comments"`
+}
+
+type fakeCheckAnnotation struct {
+	Path            string `json:"path"`
+	StartLine       int    `json:"start_line"`
+	EndLine         int    `json:"end_line"`
+	AnnotationLevel string `json:"annotation_level"`
+	Title           string `json:"title"`
+	Message         string `json:"message"`
 }
 
 type reviewRequestCall struct {
@@ -60,17 +70,10 @@ type checkPatch struct {
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
 	Output     struct {
-		Title       string `json:"title"`
-		Summary     string `json:"summary"`
-		Text        string `json:"text"`
-		Annotations []struct {
-			Path            string `json:"path"`
-			StartLine       int    `json:"start_line"`
-			EndLine         int    `json:"end_line"`
-			AnnotationLevel string `json:"annotation_level"`
-			Title           string `json:"title"`
-			Message         string `json:"message"`
-		} `json:"annotations"`
+		Title       string                `json:"title"`
+		Summary     string                `json:"summary"`
+		Text        string                `json:"text"`
+		Annotations []fakeCheckAnnotation `json:"annotations"`
 	} `json:"output"`
 }
 
@@ -94,6 +97,19 @@ type fakeGitHub struct {
 	nextCommentID      int64
 	nextReviewID       int64
 	omitReviewComments bool
+	// headSHA is the commit GitHub currently resolves implicit review targets
+	// to, so a review posted without commit_id is visible as landing elsewhere.
+	headSHA          string
+	reviewCommits    []string
+	checkStatus      string
+	checkConclusion  string
+	checkAnnotations []fakeCheckAnnotation
+	// ignoreCheckWrites answers the check PATCH with 2xx but drops the effect,
+	// modelling a response that lies about what GitHub stored.
+	ignoreCheckWrites bool
+	// failCheckAppliedOnce appends the annotations of one PATCH and then fails
+	// the request, modelling an accepted page whose response was lost.
+	failCheckAppliedOnce bool
 	// reviewCommentsWithoutLine mimics GitHub returning a just-created review's
 	// comments with no line fields, only their position.
 	reviewCommentsWithoutLine bool
@@ -111,7 +127,8 @@ type fakeGitHub struct {
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
 	t.Helper()
-	return &fakeGitHub{t: t, files: defaultPRFiles, nextCommentID: 1000, nextReviewID: 899}
+	return &fakeGitHub{t: t, files: defaultPRFiles, nextCommentID: 1000, nextReviewID: 899,
+		headSHA: "abcdef1234567890"}
 }
 
 func (g *fakeGitHub) failNextResolve() {
@@ -318,6 +335,11 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		var review fakeReview
 		_ = json.Unmarshal(body, &review)
+		commit := review.CommitID
+		if commit == "" {
+			commit = g.headSHA
+		}
+		g.reviewCommits = append(g.reviewCommits, commit)
 		g.nextReviewID++
 		g.reviews = append(g.reviews, review)
 		g.reviewIDs = append(g.reviewIDs, g.nextReviewID)
@@ -365,6 +387,16 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		g.replies = append(g.replies, in.Body)
 		writeJSON(map[string]any{"id": 7000}, http.StatusCreated)
 
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/check-runs/555":
+		status := g.checkStatus
+		if status == "" {
+			status = "in_progress"
+		}
+		writeJSON(map[string]any{
+			"id": 555, "status": status, "conclusion": g.checkConclusion,
+			"output": map[string]any{"annotations_count": len(g.checkAnnotations)},
+		}, http.StatusOK)
+
 	case r.Method == http.MethodPatch && r.URL.Path == "/repos/acme/repo/check-runs/555":
 		if g.failCheckOnce {
 			g.failCheckOnce = false
@@ -377,6 +409,20 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.checkPatches = append(g.checkPatches, patch)
+		if !g.ignoreCheckWrites {
+			g.checkAnnotations = append(g.checkAnnotations, patch.Output.Annotations...)
+			if patch.Status != "" {
+				g.checkStatus = patch.Status
+			}
+			if patch.Conclusion != "" {
+				g.checkConclusion = patch.Conclusion
+			}
+		}
+		if g.failCheckAppliedOnce {
+			g.failCheckAppliedOnce = false
+			http.Error(w, "check response lost", http.StatusInternalServerError)
+			return
+		}
 		writeJSON(map[string]any{"id": 555}, http.StatusOK)
 
 	case r.Method == http.MethodPost && r.URL.Path == "/graphql":
@@ -2420,11 +2466,13 @@ func TestPublishReconcilesRunWhoseJobWasLost(t *testing.T) {
 	if saved.PublishPending {
 		t.Error("publish_pending is still true after a successful delivery")
 	}
-	state := map[string]bool{}
+	state := struct {
+		Completed bool `json:"completed"`
+	}{}
 	if err := json.Unmarshal(saved.PublishState, &state); err != nil {
 		t.Fatalf("decode publish_state %s: %v", saved.PublishState, err)
 	}
-	if !state["completed"] {
+	if !state.Completed {
 		t.Errorf("publish_state = %s, want completed", saved.PublishState)
 	}
 }
@@ -2458,6 +2506,110 @@ func TestPublishDuplicateIsNoOp(t *testing.T) {
 	gh.mu.Unlock()
 	if after != before {
 		t.Errorf("redelivery wrote again: before %+v, after %+v", before, after)
+	}
+}
+
+// GitHub appends annotations on every PATCH. When an accepted page's response
+// is lost, a retry must resume after the annotations GitHub already stored
+// instead of appending the same page again (#138).
+func TestPublishCheckResumesAfterAcceptedPage(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	for i := 0; i < 60; i++ {
+		seedFinding(t, st, pr.ID, run.ID, fmt.Sprintf("f%02d", i), 2, "major", store.FindingOpen)
+	}
+	gh := newFakeGitHub(t)
+	gh.failCheckAppliedOnce = true
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err == nil {
+		t.Fatal("first Publish() error = nil, want the injected failure after the page was accepted")
+	}
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("retry Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	annotations := append([]fakeCheckAnnotation(nil), gh.checkAnnotations...)
+	gh.mu.Unlock()
+	if len(annotations) != 60 {
+		t.Errorf("check annotations = %d, want 60 without duplicates", len(annotations))
+	}
+	seen := map[string]bool{}
+	for _, annotation := range annotations {
+		if seen[annotation.Title] {
+			t.Errorf("annotation %q was appended twice", annotation.Title)
+		}
+		seen[annotation.Title] = true
+	}
+	saved := loadRun(t, st, run.ID)
+	var state struct {
+		Accepted int `json:"check_annotations"`
+	}
+	if err := json.Unmarshal(saved.PublishState, &state); err != nil {
+		t.Fatalf("decode publish_state %s: %v", saved.PublishState, err)
+	}
+	if state.Accepted != 60 {
+		t.Errorf("durable cursor = %d, want 60", state.Accepted)
+	}
+}
+
+// The check step is settled only when GitHub reports the expected status and
+// annotations. A 2xx that did not persist the effect must keep the run pending.
+func TestPublishDoesNotCompleteCheckWithoutRemoteEffect(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+	setPublishPending(t, st, run.ID)
+	gh := newFakeGitHub(t)
+	gh.ignoreCheckWrites = true
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err == nil {
+		t.Fatal("Publish() error = nil, want an unverified check to fail")
+	}
+	saved := loadRun(t, st, run.ID)
+	if !saved.PublishPending {
+		t.Error("an unverified check settled the publish intent")
+	}
+	state := struct {
+		Check bool `json:"check"`
+	}{}
+	if err := json.Unmarshal(saved.PublishState, &state); err != nil {
+		t.Fatalf("decode publish_state %s: %v", saved.PublishState, err)
+	}
+	if state.Check {
+		t.Error("an unverified check was recorded as delivered")
+	}
+}
+
+// A review posted without commit_id lands on whatever head GitHub has now.
+// Pinning the run's reviewed head keeps the inline comments on the code the
+// run actually saw (#138).
+func TestPublishInlineReviewPinsReviewedHead(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "f1", 2, "major", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	// The local guard still sees the reviewed head, but GitHub already moved.
+	gh.headSHA = "feedface99999999"
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	commits := append([]string(nil), gh.reviewCommits...)
+	gh.mu.Unlock()
+	if len(commits) != 1 {
+		t.Fatalf("review commits = %v, want one review", commits)
+	}
+	if commits[0] != run.HeadSHA {
+		t.Errorf("inline review attached to %q, want the reviewed head %q", commits[0], run.HeadSHA)
 	}
 }
 
@@ -2676,13 +2828,15 @@ func TestPublishAfterComparisonAdoption(t *testing.T) {
 	if !pending.PublishPending {
 		t.Fatal("an unresolved comparison settled its publish intent")
 	}
-	state := map[string]bool{}
+	state := struct {
+		Completed bool `json:"completed"`
+	}{}
 	if len(pending.PublishState) > 0 {
 		if err := json.Unmarshal(pending.PublishState, &state); err != nil {
 			t.Fatalf("decode publish_state %s: %v", pending.PublishState, err)
 		}
 	}
-	if state["completed"] {
+	if state.Completed {
 		t.Fatal("an unresolved comparison was marked completed")
 	}
 

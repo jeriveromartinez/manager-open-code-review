@@ -76,6 +76,25 @@ WHERE id = ?`, step, time.Now().UTC(), id)
 	return nil
 }
 
+// AdvancePublishCursor records how much of a multi-request effect GitHub has
+// already accepted. Annotations are appended per request, so a retry resumes
+// after this durable count instead of resending a page that was accepted
+// before the response was lost (#138).
+func (s *Store) AdvancePublishCursor(ctx context.Context, id uint, cursor string, accepted int) error {
+	res := s.DB.WithContext(ctx).Exec(`
+UPDATE review_runs
+SET publish_state = COALESCE(publish_state, '{}'::jsonb) || jsonb_build_object(CAST(? AS text), CAST(? AS int)),
+    updated_at = ?
+WHERE id = ?`, cursor, accepted, time.Now().UTC(), id)
+	if res.Error != nil {
+		return fmt.Errorf("advance publish cursor %q of review run %d: %w", cursor, id, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("advance publish cursor %q of review run %d: %w", cursor, id, ErrNotFound)
+	}
+	return nil
+}
+
 // CompletePublish settles the run's delivery: the pending intent is cleared and
 // the state records that every owed step was delivered or deliberately skipped.
 // A redelivery after this point is a no-op.

@@ -85,6 +85,45 @@ func TestPublishIntentLifecycle(t *testing.T) {
 	}
 }
 
+// The per-page cursor survives the process so a retry can resume after the
+// annotations GitHub already accepted instead of appending them again.
+func TestPublishCursorPersistsAcceptedAnnotations(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	f.repo(installID, installID, "acme/cursor", nil, true)
+	pr := f.openPR(installID, 13, store.StatusReviewing, false)
+	run := f.run(pr, store.RunRunning)
+
+	if err := f.s.AdvancePublishCursor(f.ctx, run.ID, store.PublishCursorCheckAnnotations, 50); err != nil {
+		t.Fatalf("AdvancePublishCursor(50): %v", err)
+	}
+	if err := f.s.AdvancePublishCursor(f.ctx, run.ID, store.PublishCursorCheckAnnotations, 60); err != nil {
+		t.Fatalf("AdvancePublishCursor(60): %v", err)
+	}
+	if err := f.s.MarkPublishStep(f.ctx, run.ID, store.PublishStepCheck); err != nil {
+		t.Fatalf("MarkPublishStep: %v", err)
+	}
+
+	stored, err := f.s.ReviewRun(f.ctx, run.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun: %v", err)
+	}
+	var state struct {
+		Accepted int  `json:"check_annotations"`
+		Check    bool `json:"check"`
+	}
+	if err := json.Unmarshal(stored.PublishState, &state); err != nil {
+		t.Fatalf("decode publish_state %s: %v", stored.PublishState, err)
+	}
+	if state.Accepted != 60 {
+		t.Errorf("cursor = %d, want 60", state.Accepted)
+	}
+	if !state.Check {
+		t.Errorf("publish_state = %s, want the check step too", stored.PublishState)
+	}
+}
+
 // The reconciler must not pick up queued, running or settled runs.
 func TestPendingPublishRunsOnlyTerminalUnsettled(t *testing.T) {
 	f := newFixture(t)

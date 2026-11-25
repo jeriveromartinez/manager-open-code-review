@@ -85,6 +85,11 @@ const (
 	PublishStepResolutions = "resolutions"
 	PublishStepCheck       = "check"
 	PublishStepStatus      = "status"
+	// PublishCursorCheckAnnotations counts the check annotations GitHub has
+	// already accepted. The Checks API appends annotations on every update, so
+	// a retried page must resume after this durable cursor instead of being
+	// sent again (#138).
+	PublishCursorCheckAnnotations = "check_annotations"
 )
 
 // AppConfig is the single-row instance configuration (id = 1) that holds the
