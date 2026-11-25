@@ -616,6 +616,15 @@ async function savePolicy(): Promise<void> {
       .filter((value) => value !== ''),
     max_external_diff_lines: Number(policyMaxExternalDiffLines.value) || 3000,
     max_external_runs_per_day: Number(policyMaxExternalRunsPerDay.value) || 10,
+    // The API rebuilds omitted fields from zero; send the stored architecture
+    // settings so an unrelated save does not reset them.
+    architecture_analysis_mode: policy.value?.architecture_analysis_mode ?? 'observation',
+    architecture_token_share: policy.value?.architecture_token_share ?? 25,
+    architecture_time_share: policy.value?.architecture_time_share ?? 20,
+    architecture_token_max: policy.value?.architecture_token_max ?? 100000,
+    architecture_baseline_path:
+      policy.value?.architecture_baseline_path ?? '.architecture/baseline.json',
+    architecture_exception_policy: policy.value?.architecture_exception_policy ?? 'deny',
     external_daily_token_budget: Number(policyExternalDailyTokenBudget.value) || 0,
   }
   try {

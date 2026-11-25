@@ -484,10 +484,29 @@ export type ReviewEffort = 'low' | 'medium' | 'high'
 
 export type AutoTriageMode = 'off' | 'dry_run' | 'apply'
 
+export type ArchitectureAnalysisMode = 'off' | 'observation'
+
+export type ArchitectureExceptionPolicy = 'deny' | 'baseline'
+
 /** One check the gate needs. origin is app:<id>, status, or omitted for any. */
 export type RequiredCheck = {
   name: string
   origin?: string
+}
+
+/** Consumidor autorizado de un contrato publicado (#160). */
+export type ConsumerRef = {
+  repository: string
+  contract: string
+  /** Archivo del consumidor que fija el contrato; vacío usa `contract`. */
+  path?: string
+  /** Tag o SHA completo; una rama se resuelve y se registra el SHA observado. */
+  ref: string
+  installation_id?: number
+  essential?: boolean
+  /** `private` por defecto: solo se publica por nombre si el equipo lo autoriza. */
+  visibility?: 'public' | 'private'
+  version?: string
 }
 
 export type QAPolicy = {
@@ -527,6 +546,22 @@ export type QAPolicy = {
   max_external_runs_per_day: number
   /** Daily external token budget; 0 disables it. */
   external_daily_token_budget: number
+  /** Architecture analysis shares its own budget with the review (#157). */
+  architecture_analysis_mode: ArchitectureAnalysisMode
+  architecture_token_share: number
+  architecture_time_share: number
+  architecture_token_max: number
+  /** Trusted rule file resolved from the base commit, not the pull request. */
+  architecture_baseline_path: string
+  architecture_exception_policy: ArchitectureExceptionPolicy
+  /** Autoriza la lectura de otros repositorios durante la revisión (#160). */
+  consumer_allow_list: ConsumerRef[]
+  /** Archivo del árbol base que declara consumidores adicionales. */
+  consumer_baseline_path: string
+  /** Consultas autorizadas por revisión; el backend limita el rango. */
+  consumer_max_lookups: number
+  /** Bytes máximos leídos de los consumidores; el backend limita el rango. */
+  consumer_max_bytes: number
   /** Read-only: whether the profile accepts an explicit prompt cache key. */
   prompt_cache: boolean
   /** Identifica el contenido de la política; se registra en cada revisión (#153). */
@@ -560,7 +595,20 @@ export type QAPolicyInput = Pick<
   | 'max_external_diff_lines'
   | 'max_external_runs_per_day'
   | 'external_daily_token_budget'
->
+  | 'architecture_analysis_mode'
+  | 'architecture_token_share'
+  | 'architecture_time_share'
+  | 'architecture_token_max'
+  | 'architecture_baseline_path'
+  | 'architecture_exception_policy'
+> & {
+  // Consumer settings are omitted unless the panel edited them, so the API
+  // keeps the stored values on an unrelated policy save.
+  consumer_allow_list?: ConsumerRef[]
+  consumer_baseline_path?: string
+  consumer_max_lookups?: number
+  consumer_max_bytes?: number
+}
 
 /**
  * Overrides de revisión de un repositorio (#153). Solo se envían los campos

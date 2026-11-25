@@ -3,8 +3,10 @@ import { computed, onMounted, ref } from 'vue'
 import {
   api,
   ApiError,
+  type ConsumerRef,
   type Installation,
   type QAPolicy,
+  type QAPolicyInput,
   type Repository,
   type RepositoryPolicy,
   type RepositoryPolicyInput,
@@ -226,6 +228,39 @@ const globsRaw = ref('')
 const checksEnabled = ref(false)
 const checksRaw = ref('')
 
+type ConsumerRow = {
+  key: number
+  repository: string
+  ref: string
+  contract: string
+  path: string
+  installation_id?: number
+  essential?: boolean
+  visibility?: ConsumerRef['visibility']
+  version?: string
+}
+
+let nextConsumerKey = 0
+
+function newConsumerRow(consumer?: ConsumerRef): ConsumerRow {
+  return {
+    key: nextConsumerKey++,
+    repository: consumer?.repository ?? '',
+    ref: consumer?.ref ?? '',
+    contract: consumer?.contract ?? '',
+    path: consumer?.path ?? '',
+    installation_id: consumer?.installation_id,
+    essential: consumer?.essential,
+    visibility: consumer?.visibility,
+    version: consumer?.version,
+  }
+}
+
+const consumerRows = ref<ConsumerRow[]>([])
+const consumerBaselinePath = ref('')
+const consumerMaxLookups = ref<number | ''>('')
+const consumerMaxBytes = ref<number | ''>('')
+
 function effectiveValue(policy: QAPolicy, key: string): string {
   const values: Record<string, string | number | boolean | null> = {
     blocking_threshold: policy.blocking_threshold,
@@ -272,6 +307,182 @@ function parseLines(raw: string): string[] {
     .filter((line) => line !== '')
 }
 
+function addConsumer(): void {
+  consumerRows.value = [...consumerRows.value, newConsumerRow()]
+}
+
+function removeConsumer(index: number): void {
+  consumerRows.value = consumerRows.value.filter((_, current) => current !== index)
+}
+
+function consumerPayload(row: ConsumerRow): ConsumerRef {
+  const consumer: ConsumerRef = {
+    repository: row.repository.trim(),
+    ref: row.ref.trim(),
+    contract: row.contract.trim(),
+  }
+  const path = row.path.trim()
+  if (path) consumer.path = path
+  if (row.installation_id !== undefined) consumer.installation_id = row.installation_id
+  if (row.essential) consumer.essential = true
+  if (row.visibility) consumer.visibility = row.visibility
+  if (row.version) consumer.version = row.version
+  return consumer
+}
+
+// The allow-list is only sent when it changed. Comparing the visible fields
+// keeps hidden metadata (installation, visibility, version) out of the diff.
+function consumerListChanged(original: ConsumerRef[]): boolean {
+  const rows = consumerRows.value
+  if (rows.length !== original.length) return true
+  return rows.some((row, index) => {
+    const consumer = consumerPayload(row)
+    const stored = original[index]
+    return (
+      consumer.repository !== stored.repository ||
+      consumer.ref !== stored.ref ||
+      consumer.contract !== stored.contract ||
+      (consumer.path ?? consumer.contract) !== (stored.path || stored.contract)
+    )
+  })
+}
+
+// Only the fields the user touched travel in the PUT; the rest keep their
+// stored value because consumer settings are replaced as a whole by the API.
+function consumerChanges(): Pick<
+  QAPolicyInput,
+  'consumer_allow_list' | 'consumer_baseline_path' | 'consumer_max_lookups' | 'consumer_max_bytes'
+> {
+  const effective = repoPolicy.value?.effective
+  const changes: ReturnType<typeof consumerChanges> = {}
+  if (!effective) return changes
+  if (consumerListChanged(effective.consumer_allow_list ?? [])) {
+    changes.consumer_allow_list = consumerRows.value.map(consumerPayload)
+  }
+  const baseline = consumerBaselinePath.value.trim()
+  if (baseline !== (effective.consumer_baseline_path ?? '').trim()) {
+    changes.consumer_baseline_path = baseline
+  }
+  if (
+    consumerMaxLookups.value !== '' &&
+    Number(consumerMaxLookups.value) !== effective.consumer_max_lookups
+  ) {
+    changes.consumer_max_lookups = Number(consumerMaxLookups.value)
+  }
+  if (
+    consumerMaxBytes.value !== '' &&
+    Number(consumerMaxBytes.value) !== effective.consumer_max_bytes
+  ) {
+    changes.consumer_max_bytes = Number(consumerMaxBytes.value)
+  }
+  return changes
+}
+
+function consumerName(consumer: ConsumerRow): string {
+  const repository = consumer.repository.trim()
+  const ref = consumer.ref.trim()
+  if (repository && ref) return `${repository} ${ref}`
+  return repository || ref || 'sin identificar'
+}
+
+function validateConsumers(): string | null {
+  for (const [index, consumer] of consumerRows.value.entries()) {
+    const position = index + 1
+    const repository = consumer.repository.trim()
+    if (!repository) {
+      return `El consumidor ${position} necesita un repositorio (owner/repo)`
+    }
+    if (!consumer.ref.trim()) {
+      return `El consumidor ${position} (${repository}) necesita una ref fija`
+    }
+    if (!consumer.contract.trim()) {
+      return `El consumidor ${position} (${repository}) necesita un contrato`
+    }
+  }
+
+  if (consumerMaxLookups.value === '') {
+    return 'El máximo de consultas no puede quedar vacío; usa un valor entre 1 y 50'
+  }
+  const lookups = Number(consumerMaxLookups.value)
+  if (!Number.isInteger(lookups) || lookups < 1 || lookups > 50) {
+    return 'El máximo de consultas debe ser un entero entre 1 y 50'
+  }
+
+  if (consumerMaxBytes.value === '') {
+    return 'El máximo de bytes no puede quedar vacío; usa un valor entre 4096 y 16777216'
+  }
+  const bytes = Number(consumerMaxBytes.value)
+  if (!Number.isInteger(bytes) || bytes < 4096 || bytes > 16 * 1024 * 1024) {
+    return 'El máximo de bytes debe ser un entero entre 4096 y 16777216'
+  }
+  return null
+}
+
+function teamPolicyBody(policy: QAPolicy): QAPolicyInput {
+  return {
+    llm_profile_id: policy.llm_profile_id,
+    blocking_threshold: policy.blocking_threshold,
+    extra_instructions: policy.extra_instructions,
+    exclude_globs: policy.exclude_globs,
+    max_files: policy.max_files,
+    max_diff_lines: policy.max_diff_lines,
+    max_passes: policy.max_passes,
+    require_green_ci: policy.require_green_ci,
+    required_checks: policy.required_checks,
+    review_context_ceiling: policy.review_context_ceiling,
+    review_effort: policy.review_effort,
+    review_token_budget: policy.review_token_budget,
+    auto_triage_mode: policy.auto_triage_mode,
+    auto_withdraw: policy.auto_withdraw,
+    verify_max_findings: policy.verify_max_findings,
+    verify_max_files: policy.verify_max_files,
+    verify_token_share: policy.verify_token_share,
+    verify_time_share: policy.verify_time_share,
+    verify_token_max: policy.verify_token_max,
+    allow_external_reviews: policy.allow_external_reviews,
+    external_trusted_associations: policy.external_trusted_associations,
+    max_external_diff_lines: policy.max_external_diff_lines,
+    max_external_runs_per_day: policy.max_external_runs_per_day,
+    external_daily_token_budget: policy.external_daily_token_budget,
+    // The team PUT rebuilds omitted fields from zero, so the architecture
+    // settings must travel with the body or a consumer save resets them.
+    architecture_analysis_mode: policy.architecture_analysis_mode,
+    architecture_token_share: policy.architecture_token_share,
+    architecture_time_share: policy.architecture_time_share,
+    architecture_token_max: policy.architecture_token_max,
+    architecture_baseline_path: policy.architecture_baseline_path,
+    architecture_exception_policy: policy.architecture_exception_policy,
+  }
+}
+
+function backendError(err: unknown): string {
+  if (typeof err !== 'object' || err === null) return ''
+  const message = (err as { message?: unknown }).message
+  if (typeof message !== 'string') return ''
+  try {
+    const parsed = JSON.parse(message) as { error?: unknown }
+    if (typeof parsed.error === 'string') return parsed.error
+  } catch {
+    // The body was not JSON; fall through to the generic message.
+  }
+  return ''
+}
+
+const consumerErrors: Record<string, string> = {
+  invalid_consumer_allow_list: 'La lista de consumidores no es válida',
+  invalid_consumer_baseline_path: 'La ruta de línea base de consumidores no es válida',
+  invalid_consumer_max_lookups: 'El máximo de consultas de consumidores no es válido',
+  invalid_consumer_max_bytes: 'El máximo de bytes de consumidores no es válido',
+}
+
+function consumerErrorMessage(err: unknown): string {
+  return consumerErrors[backendError(err)] ?? 'No se pudo guardar la política del equipo'
+}
+
+function saveErrorMessage(): string {
+  return 'No se pudo guardar la política del repositorio'
+}
+
 function fillFromPolicy(policy: RepositoryPolicy): void {
   repoPolicy.value = policy
   observationMode.value = policy.overrides.observation_mode
@@ -288,6 +499,10 @@ function fillFromPolicy(policy: RepositoryPolicy): void {
   globsRaw.value = (policy.overrides.exclude_globs ?? policy.effective.exclude_globs ?? []).join('\n')
   checksEnabled.value = policy.overrides.required_checks !== null
   checksRaw.value = formatChecks(policy.overrides.required_checks ?? policy.effective.required_checks)
+  consumerRows.value = (policy.effective.consumer_allow_list ?? []).map(newConsumerRow)
+  consumerBaselinePath.value = policy.effective.consumer_baseline_path ?? ''
+  consumerMaxLookups.value = policy.effective.consumer_max_lookups ?? ''
+  consumerMaxBytes.value = policy.effective.consumer_max_bytes ?? ''
 }
 
 function applyRepoState(repo: Repository, policy: RepositoryPolicy): void {
@@ -373,17 +588,61 @@ async function saveRepoPolicy(): Promise<void> {
   if (globsEnabled.value) body.exclude_globs = parseLines(globsRaw.value)
   if (checksEnabled.value) body.required_checks = parseChecks(checksRaw.value)
 
+  const consumerValidation = validateConsumers()
+  if (consumerValidation) {
+    policyError.value = consumerValidation
+    return
+  }
+
+  // Deliberate scope (#160): consumers are stored on the team policy, so this
+  // dialog edits them for the whole team. The repository PUT ignores them.
+  // Only the fields the user touched are sent; the API preserves the rest.
+  const consumers = consumerChanges()
+  const hasConsumers = Object.keys(consumers).length > 0
+  const teamId = repo.team_id ?? repoPolicy.value?.team_id ?? null
+  if (hasConsumers && teamId === null) {
+    policyError.value = 'El repositorio no tiene equipo: no se pueden guardar consumidores'
+    return
+  }
+
   policySaving.value = true
   try {
+    // Persist the repository overrides first so a failed team PUT can state
+    // exactly what did and did not apply.
     const saved =
       Object.keys(body).length === 0
         ? await api.clearRepoPolicy(repo.id)
         : await api.saveRepoPolicy(repo.id, body)
+    if (hasConsumers && teamId !== null) {
+      try {
+        const current = await api.getPolicy(teamId)
+        await api.savePolicy(teamId, { ...teamPolicyBody(current), ...consumers })
+      } catch (err) {
+        applyRepoState(repo, saved)
+        policyError.value = `La política del repositorio se guardó, pero los consumidores no: ${consumerErrorMessage(err)}`
+        return
+      }
+      // savePolicy returns the team policy, so re-read the effective one.
+      let refreshed: RepositoryPolicy
+      try {
+        refreshed = await api.getRepoPolicy(repo.id)
+      } catch {
+        applyRepoState(repo, saved)
+        policyMessage.value = 'Cambios guardados; vuelve a abrir para ver la política efectiva'
+        return
+      }
+      fillFromPolicy(refreshed)
+      applyRepoState(repo, refreshed)
+      policyMessage.value = 'Cambios guardados'
+      return
+    }
     fillFromPolicy(saved)
     applyRepoState(repo, saved)
-    policyMessage.value = saved.inherited ? 'Política heredada del equipo' : 'Overrides guardados'
+    policyMessage.value = saved.inherited
+      ? 'Política heredada del equipo'
+      : 'Overrides guardados'
   } catch {
-    policyError.value = 'No se pudo guardar la política del repositorio'
+    policyError.value = saveErrorMessage()
   } finally {
     policySaving.value = false
   }
@@ -761,10 +1020,124 @@ onMounted(() => {
             </span>
           </label>
 
+          <section class="policy-consumers" data-policy-consumers>
+            <header class="policy-consumers__head">
+              <h3 class="policy-consumers__title">Consumidores autorizados</h3>
+              <p class="field__hint">
+                Se guardan en la política del equipo y se aplican a todos sus repositorios. Solo se
+                leen las refs fijadas aquí o en la línea base.
+              </p>
+            </header>
+
+            <div
+              v-for="(consumer, index) in consumerRows"
+              :key="consumer.key"
+              class="consumer-row"
+              :data-consumer-row="index"
+            >
+              <label class="field consumer-row__field">
+                <span class="field__label">Repositorio</span>
+                <input
+                  v-model="consumer.repository"
+                  class="field__input"
+                  type="text"
+                  placeholder="owner/repo"
+                  :data-consumer-repository="index"
+                />
+              </label>
+              <label class="field consumer-row__field">
+                <span class="field__label">Ref</span>
+                <input
+                  v-model="consumer.ref"
+                  class="field__input"
+                  type="text"
+                  placeholder="v1.2.0 o SHA"
+                  :data-consumer-ref="index"
+                />
+              </label>
+              <label class="field consumer-row__field">
+                <span class="field__label">Contrato</span>
+                <input
+                  v-model="consumer.contract"
+                  class="field__input"
+                  type="text"
+                  placeholder="api/openapi.yaml"
+                  :data-consumer-contract="index"
+                />
+              </label>
+              <label class="field consumer-row__field">
+                <span class="field__label">Ruta</span>
+                <input
+                  v-model="consumer.path"
+                  class="field__input"
+                  type="text"
+                  placeholder="Igual que el contrato"
+                  :data-consumer-path="index"
+                />
+              </label>
+              <button
+                type="button"
+                class="button button--ghost consumer-row__remove"
+                :data-consumer-remove="index"
+                :aria-label="`Quitar consumidor ${consumerName(consumer)}`"
+                @click="removeConsumer(index)"
+              >
+                Quitar
+              </button>
+            </div>
+
+            <button type="button" class="button button--ghost" data-consumer-add @click="addConsumer">
+              Añadir consumidor
+            </button>
+
+            <div class="policy-consumers__limits">
+              <label class="field">
+                <span class="field__label">Línea base</span>
+                <input
+                  v-model="consumerBaselinePath"
+                  class="field__input"
+                  type="text"
+                  placeholder=".qa/consumers.json"
+                  data-consumer-baseline
+                />
+                <span class="field__hint">
+                  Archivo del árbol base con consumidores adicionales; un PR no puede cambiarlo.
+                </span>
+              </label>
+              <label class="field">
+                <span class="field__label">Máx. consultas</span>
+                <input
+                  v-model.number="consumerMaxLookups"
+                  class="field__input"
+                  type="number"
+                  min="1"
+                  max="50"
+                  data-consumer-max-lookups
+                />
+                <span class="field__hint">Entre 1 y 50 lecturas por revisión.</span>
+              </label>
+              <label class="field">
+                <span class="field__label">Máx. bytes</span>
+                <input
+                  v-model.number="consumerMaxBytes"
+                  class="field__input"
+                  type="number"
+                  min="4096"
+                  max="16777216"
+                  data-consumer-max-bytes
+                />
+                <span class="field__hint">Entre 4 KiB y 16 MiB de contratos leídos.</span>
+              </label>
+            </div>
+          </section>
+
           <p v-if="policyError" class="form-error" role="alert">{{ policyError }}</p>
           <p v-else-if="policyMessage" class="policy-message" role="status">{{ policyMessage }}</p>
 
           <footer class="policy-dialog__actions">
+            <span class="field__hint policy-dialog__scope">
+              Los consumidores se guardan para todo el equipo.
+            </span>
             <button
               type="button"
               class="button button--ghost"
@@ -781,7 +1154,7 @@ onMounted(() => {
               :disabled="policySaving"
               @click="saveRepoPolicy"
             >
-              Guardar overrides
+              Guardar cambios
             </button>
           </footer>
         </template>
@@ -1058,11 +1431,57 @@ onMounted(() => {
   font-size: 13.5px;
 }
 
+.policy-consumers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: var(--rule-hair) solid var(--border);
+}
+
+.policy-consumers__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.policy-consumers__title {
+  font-size: 15px;
+}
+
+.consumer-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  gap: var(--space-2);
+  align-items: end;
+}
+
+.consumer-row__remove {
+  min-height: 40px;
+}
+
+.policy-consumers__limits {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-3);
+}
+
+@media (max-width: 900px) {
+  .consumer-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .policy-dialog__actions {
   display: flex;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+
+.policy-dialog__scope {
+  margin-right: auto;
+  align-self: center;
 }
 
 @media (max-width: 700px) {
