@@ -323,6 +323,51 @@ func TestSyncPullRequestEqualTimestampChangedPayload(t *testing.T) {
 	}
 }
 
+func TestSyncPullRequestPersistsDescription(t *testing.T) {
+	f := newFixture(t)
+	inst := f.installation(1015)
+	repo := f.repo(5303, inst.ID, "acme/app", nil, true)
+
+	stamp := time.Date(2026, 11, 11, 13, 0, 0, 0, time.UTC)
+	first, changed, err := f.s.SyncPullRequest(f.ctx, store.PullRequest{
+		RepositoryID:    repo.ID,
+		Number:          12,
+		Title:           "Descripción",
+		Body:            "primera versión",
+		HeadSHA:         "same-sha",
+		State:           "open",
+		GitHubUpdatedAt: stamp,
+	})
+	if err != nil {
+		t.Fatalf("first SyncPullRequest() returned error: %v", err)
+	}
+	if !changed {
+		t.Fatal("first SyncPullRequest() changed = false, want true")
+	}
+	if got := f.pullRequest(t, first.ID); got.Body != "primera versión" {
+		t.Errorf("Body = %q, want %q", got.Body, "primera versión")
+	}
+
+	updated, changed, err := f.s.SyncPullRequest(f.ctx, store.PullRequest{
+		RepositoryID:    repo.ID,
+		Number:          12,
+		Title:           "Descripción",
+		Body:            "segunda versión",
+		HeadSHA:         "same-sha",
+		State:           "open",
+		GitHubUpdatedAt: stamp,
+	})
+	if err != nil {
+		t.Fatalf("updated SyncPullRequest() returned error: %v", err)
+	}
+	if !changed {
+		t.Error("edited body: changed = false, want true")
+	}
+	if got := f.pullRequest(t, first.ID); got.Body != "segunda versión" || updated.Body != "segunda versión" {
+		t.Errorf("Body = %q (returned %q), want %q", got.Body, updated.Body, "segunda versión")
+	}
+}
+
 func TestSyncPullRequestPersistsForkFields(t *testing.T) {
 	f := newFixture(t)
 	inst := f.installation(1014)

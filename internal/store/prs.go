@@ -192,6 +192,7 @@ func syncExisting(tx *gorm.DB, prev *PullRequest, in PullRequest, out *PullReque
 
 	updates := map[string]any{
 		"title":               in.Title,
+		"body":                in.Body,
 		"author_login":        in.AuthorLogin,
 		"author_association":  in.AuthorAssociation,
 		"head_sha":            in.HeadSHA,
@@ -238,6 +239,7 @@ func syncExisting(tx *gorm.DB, prev *PullRequest, in PullRequest, out *PullReque
 // and UpdatedAt are local bookkeeping and must not make an event look new.
 func pullRequestPayloadEqual(prev, in PullRequest, status string) bool {
 	return prev.Title == in.Title &&
+		prev.Body == in.Body &&
 		prev.AuthorLogin == in.AuthorLogin &&
 		prev.AuthorAssociation == in.AuthorAssociation &&
 		prev.HeadSHA == in.HeadSHA &&

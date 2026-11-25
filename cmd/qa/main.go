@@ -278,7 +278,7 @@ func runWorker() error {
 
 	eventsPublisher := events.NewPGPublisher(st.Pool)
 	runner := &review.Runner{
-		Store: st, Apps: nil, Box: workerBox, Events: eventsPublisher,
+		Store: st, Box: workerBox, Events: eventsPublisher,
 		Cfg: review.RunnerConfig{
 			WorkspaceDir:   cfg.WorkspaceDir,
 			OCRBin:         cfg.OCRBin,
