@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import {
   api,
   ApiError,
@@ -31,6 +31,9 @@ const renameTarget = ref<Team | null>(null)
 const renameName = ref('')
 const renameError = ref<string | null>(null)
 const renameSaving = ref(false)
+const renameDialog = ref<HTMLElement | null>(null)
+const renameInput = ref<HTMLInputElement | null>(null)
+let renameReturnFocus: HTMLElement | null = null
 
 const deleteTarget = ref<Team | null>(null)
 const deleteRepos = ref<Repository[]>([])
@@ -39,6 +42,9 @@ const deleteConfirmName = ref('')
 const deleteError = ref<string | null>(null)
 const deleteBlocked = ref<BlockingRepository[]>([])
 const deleteSaving = ref(false)
+const deleteDialog = ref<HTMLElement | null>(null)
+const deleteInput = ref<HTMLInputElement | null>(null)
+let deleteReturnFocus: HTMLElement | null = null
 
 const roleLabels: Record<TeamRole, string> = {
   lead: 'Lead',
@@ -61,6 +67,7 @@ const canDelete = computed(() => {
     !deleteLoading.value &&
     !deleteSaving.value &&
     deleteRepos.value.length === 0 &&
+    deleteBlocked.value.length === 0 &&
     deleteConfirmName.value === team.name
   )
 })
@@ -126,7 +133,7 @@ async function load({ silent = false } = {}): Promise<void> {
 
 // Drafts live in their own ref keyed by team, so a refetch leaves a
 // half-filled "add member" form alone.
-useLiveRefresh(['team.updated', 'user.updated'], () => load({ silent: true }))
+useLiveRefresh(['team.updated', 'repo.updated', 'user.updated'], () => load({ silent: true }))
 
 // La sesión se carga en paralelo; cuando llega, habilitamos el listado si el
 // usuario es admin o lead de algún equipo.
@@ -199,16 +206,44 @@ async function removeMember(team: Team, member: TeamMember): Promise<void> {
   }
 }
 
-function openRename(team: Team): void {
+function activeElement(): HTMLElement | null {
+  return document.activeElement instanceof HTMLElement ? document.activeElement : null
+}
+
+const focusableSelector =
+  'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+
+function trapFocus(event: KeyboardEvent, container: HTMLElement | null): void {
+  if (event.key !== 'Tab' || container === null) return
+  const focusable = Array.from(container.querySelectorAll<HTMLElement>(focusableSelector))
+  if (focusable.length === 0) return
+  const first = focusable[0]
+  const last = focusable[focusable.length - 1]
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault()
+    last.focus()
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault()
+    first.focus()
+  }
+}
+
+async function openRename(team: Team): Promise<void> {
+  renameReturnFocus = activeElement()
   renameTarget.value = team
   renameName.value = team.name
   renameError.value = null
+  await nextTick()
+  renameInput.value?.focus()
 }
 
 function closeRename(): void {
+  const returnTo = renameReturnFocus
+  renameReturnFocus = null
   renameTarget.value = null
   renameName.value = ''
   renameError.value = null
+  returnTo?.focus()
 }
 
 async function submitRename(): Promise<void> {
@@ -228,15 +263,7 @@ async function submitRename(): Promise<void> {
   }
 }
 
-async function openDelete(team: Team): Promise<void> {
-  deleteTarget.value = team
-  deleteConfirmName.value = ''
-  deleteError.value = null
-  deleteBlocked.value = []
-  deleteRepos.value = []
-  deleteLoading.value = false
-  if (team.repository_count === 0) return
-
+async function loadAssignedRepositories(team: Team): Promise<void> {
   deleteLoading.value = true
   try {
     const assigned = (await api.repos()).filter((repo) => repo.team_id === team.id)
@@ -250,26 +277,44 @@ async function openDelete(team: Team): Promise<void> {
   }
 }
 
+async function openDelete(team: Team): Promise<void> {
+  deleteReturnFocus = activeElement()
+  deleteTarget.value = team
+  deleteConfirmName.value = ''
+  deleteError.value = null
+  deleteBlocked.value = []
+  deleteRepos.value = []
+  deleteLoading.value = false
+  await nextTick()
+  deleteInput.value?.focus()
+  if (team.repository_count > 0) await loadAssignedRepositories(team)
+}
+
 function closeDelete(): void {
+  const returnTo = deleteReturnFocus
+  deleteReturnFocus = null
   deleteTarget.value = null
   deleteRepos.value = []
   deleteConfirmName.value = ''
   deleteError.value = null
   deleteBlocked.value = []
+  returnTo?.focus()
 }
 
 async function reassignRepository(repo: Repository, event: Event): Promise<void> {
   const select = event.target as HTMLSelectElement
   const teamId = select.value === '' ? null : Number(select.value)
+  if (teamId === repo.team_id) return
   deleteError.value = null
   try {
     await api.patchRepo(repo.id, { team_id: teamId })
     deleteRepos.value = deleteRepos.value.filter((candidate) => candidate.id !== repo.id)
+    deleteBlocked.value = []
     if (deleteTarget.value && deleteTarget.value.repository_count > 0) {
       deleteTarget.value.repository_count -= 1
     }
   } catch {
-    select.value = ''
+    select.value = repo.team_id === null ? '' : String(repo.team_id)
     deleteError.value = 'No se pudo reasignar el repositorio'
   }
 }
@@ -296,6 +341,7 @@ async function submitDelete(): Promise<void> {
     if (repositories.length > 0) {
       deleteBlocked.value = repositories
       deleteError.value = 'El servidor rechazó la eliminación: quedan repositorios asignados'
+      await loadAssignedRepositories(team)
     } else {
       deleteError.value = 'No se pudo eliminar el equipo'
     }
@@ -479,11 +525,13 @@ onMounted(() => {
 
     <div v-if="renameTarget" class="modal-backdrop" @keydown.esc="closeRename">
       <div
+        ref="renameDialog"
         class="modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="rename-dialog-title"
         data-rename-dialog
+        @keydown="trapFocus($event, renameDialog)"
       >
         <form class="modal__form" @submit.prevent="submitRename">
           <header class="modal__head">
@@ -496,6 +544,7 @@ onMounted(() => {
             <label class="field">
               <span class="field__label">Nombre del equipo</span>
               <input
+                ref="renameInput"
                 v-model="renameName"
                 class="field__input"
                 type="text"
@@ -524,11 +573,13 @@ onMounted(() => {
 
     <div v-if="deleteTarget" class="modal-backdrop" @keydown.esc="closeDelete">
       <div
+        ref="deleteDialog"
         class="modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="delete-dialog-title"
         data-delete-dialog
+        @keydown="trapFocus($event, deleteDialog)"
       >
         <form class="modal__form" @submit.prevent="submitDelete">
           <header class="modal__head">
@@ -547,10 +598,17 @@ onMounted(() => {
                   <span class="delete-repos__name">{{ repo.full_name }}</span>
                   <select
                     class="field__input delete-repos__select"
+                    :value="repo.team_id === null ? '' : repo.team_id"
                     :aria-label="`Reasignar ${repo.full_name}`"
                     :data-delete-repo="repo.id"
                     @change="reassignRepository(repo, $event)"
                   >
+                    <option
+                      v-if="repo.team_id !== null"
+                      :value="repo.team_id"
+                    >
+                      {{ deleteTarget?.name ?? '' }} (actual)
+                    </option>
                     <option value="">Sin equipo</option>
                     <option
                       v-for="candidate in otherTeams"
@@ -579,6 +637,7 @@ onMounted(() => {
                 Escribe «{{ deleteTarget?.name ?? '' }}» para confirmar
               </span>
               <input
+                ref="deleteInput"
                 v-model="deleteConfirmName"
                 class="field__input"
                 type="text"

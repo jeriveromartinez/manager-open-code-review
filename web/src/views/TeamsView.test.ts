@@ -162,7 +162,7 @@ describe('TeamsView', () => {
     await flushPromises()
 
     const [registration] = live.registrations
-    expect(registration.types).toEqual(['team.updated', 'user.updated'])
+    expect(registration.types).toEqual(['team.updated', 'repo.updated', 'user.updated'])
     await card(wrapper, 1).get('select[data-add-member-role]').setValue('developer')
     mocks.api.teams.mockClear()
     mocks.api.users.mockClear()
@@ -446,8 +446,69 @@ describe('TeamsView', () => {
     await flushPromises()
 
     expect(mocks.api.deleteTeam).toHaveBeenCalledWith(1)
-    expect(wrapper.get('[data-delete-dialog]').text()).toContain('acme/late-repo')
+    const dialog = wrapper.get('[data-delete-dialog]')
+    expect(dialog.text()).toContain('acme/late-repo')
+    expect(dialog.text()).toContain('acme/web')
+    expect(dialog.get('[data-delete-submit]').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-delete-repo="31"]').setValue('2')
+    await flushPromises()
+    expect(mocks.api.patchRepo).toHaveBeenCalledWith(31, { team_id: 2 })
+    expect(dialog.get('[data-delete-submit]').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
+  })
+
+  it('restores the repository select when a reassignment fails', async () => {
+    mocks.session.me = admin
+    mocks.api.patchRepo.mockRejectedValue(new Error('boom'))
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    await card(wrapper, 2).get('[data-delete-team]').trigger('click')
+    await flushPromises()
+
+    const select = wrapper.get('[data-delete-repo="30"]')
+    expect((select.element as HTMLSelectElement).value).toBe('2')
+
+    await select.setValue('1')
+    await flushPromises()
+
+    expect((select.element as HTMLSelectElement).value).toBe('2')
+    expect(wrapper.get('[data-delete-dialog]').text()).toContain(
+      'No se pudo reasignar el repositorio',
+    )
+    wrapper.unmount()
+  })
+
+  it('focuses the dialog, traps Tab and restores the opener focus', async () => {
+    mocks.session.me = admin
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const wrapper = mount(TeamsView, { attachTo: host })
+    await flushPromises()
+
+    const opener = card(wrapper, 1).get('[data-rename-team]')
+    ;(opener.element as HTMLElement).focus()
+    await opener.trigger('click')
+    await flushPromises()
+
+    const input = wrapper.get('[data-rename-name]').element as HTMLElement
+    expect(document.activeElement).toBe(input)
+
+    const submit = wrapper.get('[data-rename-submit]')
+    ;(submit.element as HTMLElement).focus()
+    await wrapper.get('[data-rename-dialog]').trigger('keydown', { key: 'Tab' })
+    expect(document.activeElement).toBe(input)
+
+    await wrapper
+      .get('[data-rename-dialog] .modal__actions button[type="button"]')
+      .trigger('click')
+    await flushPromises()
+    expect(document.activeElement).toBe(opener.element)
+
+    wrapper.unmount()
+    host.remove()
   })
 
   it('hides rename and delete from non-admins', async () => {
