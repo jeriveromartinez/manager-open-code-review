@@ -1,0 +1,9 @@
+type Pet {
+  id: ID!
+  name: String!
+  status: String
+}
+
+type Query {
+  pet(id: ID!): Pet
+}
