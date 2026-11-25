@@ -583,4 +583,13 @@ func TestMarkArchitectureInconclusiveKeepsTrustedViolation(t *testing.T) {
 	if unfinished.Status != store.ArchitectureInconclusive {
 		t.Errorf("status = %q, want inconclusive when there is no trusted violation", unfinished.Status)
 	}
+
+	stale := store.ArchitectureVerdict{Status: store.ArchitectureStale}
+	markArchitectureInconclusive(&out, &stale, errors.New("OCR no disponible"))
+	if stale.Status != store.ArchitectureStale {
+		t.Errorf("status = %q, want the pending revalidation preserved", stale.Status)
+	}
+	if len(stale.Errors) != 1 {
+		t.Errorf("errors = %v, want the failure recorded", stale.Errors)
+	}
 }

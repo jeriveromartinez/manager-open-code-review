@@ -793,19 +793,52 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	// not move and the new head still descends from it. A missing, failed or
 	// outdated prior run, a base change or a force-push all review the full
 	// diff: resolving findings outside the range would be wrong.
+	//
+	// The previous architectural evidence is revalidated against the push
+	// (#163), but it never widens this range: the incremental base and its
+	// coverage are decided only by the review comparison. Evidence that stays
+	// valid is carried; invalidated dimensions are marked stale.
+	sourceDigests := checkoutSourceDigests(workDir)
+	ruleVersion := architectureRuleVersion(cfg.Policy, excludePatterns)
 	fromSHA := ocrBase
 	incremental := false
+	var carried store.ArchitectureVerdict
+	carryEvidence := false
 	prev, prevErr := r.Store.PreviousSucceededRun(runCtx, run.PullRequestID, run.ID)
+	prevArch := store.ArchitectureVerdict{}
+	comparisonChanged := false
+	if prevErr == nil {
+		prevArch = store.DecodeArchitectureVerdict(prev.ArchitectureAnalysis)
+		comparisonChanged = prev.BaseSHA != "" && !strings.EqualFold(prev.BaseSHA, ocrBase)
+		if run.BaseRef != "" && prev.BaseRef != "" && run.BaseRef != prev.BaseRef {
+			comparisonChanged = true
+		}
+	}
 	switch {
 	case prevErr == nil:
+		revalidation := revalidateArchitectureEvidence(prevArch, ruleVersion, nil, comparisonChanged, sourceDigests)
 		if from, ok := incrementalSource(run, prev, ocrBase, headSHA); ok {
 			// A shallow clone may lack the prior head: that is a failure of the
 			// ancestry check and falls back to the full review.
 			if _, err := git(runCtx, workDir, "merge-base --is-ancestor", "merge-base", "--is-ancestor", prev.HeadSHA, headSHA); err == nil {
 				fromSHA = from
 				incremental = true
+				// The evidence is revalidated against the push, but its verdict
+				// never decides how much of the pull request OCR reviews: the
+				// incremental range and its coverage stay untouched (#163).
+				if pushFiles, pushErr := gitChangedFiles(runCtx, workDir, prev.HeadSHA, headSHA); pushErr == nil {
+					revalidation = revalidateArchitectureEvidence(prevArch, ruleVersion, architectureChangedPaths(pushFiles), false, sourceDigests)
+				}
+			} else {
+				// A base change (or a force-push) makes the earlier comparison a
+				// different context: its evidence cannot be reused.
+				revalidation = revalidateArchitectureEvidence(prevArch, ruleVersion, nil, true, sourceDigests)
+				log.Log(runCtx, "worker", "analysis", "warn", logPhasePrepare,
+					"la comparación cambió; la evidencia arquitectónica queda pendiente de revalidación")
 			}
 		}
+		carried = revalidation.Verdict
+		carryEvidence = carried.Requested && len(carried.Dimensions) > 0
 	case errors.Is(prevErr, store.ErrNotFound):
 		// No prior complete run: the full diff is the only safe range.
 		log.Log(runCtx, "worker", "", "info", logPhasePrepare,
@@ -911,6 +944,14 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	// analysis on and never changes #157's explicit activation rule.
 	consumerRequested := consumerLookupRelevant(consumerImpact)
 	analysisRequested := architectureAnalysisRequested(analysisMode, invErr, signals)
+	if !analysisRequested && carryEvidence && analysisMode == store.ArchitectureAnalysisObservation &&
+		architectureEvidenceStale(carried) && invErr == nil {
+		// Earlier evidence lost its source: the review must re-check it even
+		// when this push would not have activated the analysis on its own.
+		analysisRequested = true
+		log.Log(runCtx, "worker", "analysis", "info", logPhasePolicy,
+			"evidencia arquitectónica previa pendiente de revalidación: se repite el análisis sobre el rango acumulado")
+	}
 	analysisBudget := architectureBudget(cfg.Policy, timeout, reviewBudget)
 	// The analysis spends from the same aggregate budget. Carve its cap out
 	// before the verifier's share so analysis + review + verification cannot
@@ -973,6 +1014,17 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if invErr != nil {
 		architectureVerdict.Errors = append(architectureVerdict.Errors,
 			fmt.Sprintf("no se pudo inventariar el cambio: %v", invErr))
+	}
+	if !analysisRequested && carryEvidence && analysisMode == store.ArchitectureAnalysisObservation {
+		// The push did not touch the evidence: keep the previous verdict
+		// instead of silently dropping it on the incremental path.
+		architectureVerdict = carryArchitectureVerdict(carried, ocrBase, headSHA, analysisMode)
+		architectureVerdict.Comparison.Repository = cfg.Repo.FullName
+		architectureVerdict.Comparison.BaseRef = cfg.PR.BaseRef
+		architectureVerdict.Comparison.HeadRef = cfg.PR.HeadRef
+		log.Log(runCtx, "worker", "analysis", "info", logPhasePolicy, fmt.Sprintf(
+			"evidencia arquitectónica conservada desde %s: %s",
+			architectureVerdict.CarriedFrom, architectureVerdict.Status))
 	}
 	if baselineEvaluated {
 		architectureVerdict = applyArchitectureBaseline(architectureVerdict, baseline)
@@ -1226,6 +1278,10 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 				!canStartFallback(runCtx, budget, out.tokens) {
 				// The deferred close records the code the classifier assigns.
 				if analysisRequested {
+					// A failed re-check must not discard evidence that was still
+					// valid; stale dimensions keep their stale marker.
+					architectureVerdict = finalizeArchitectureVerdict(
+						architectureVerdict, carried, carryEvidence, ruleVersion, sourceDigests)
 					markArchitectureInconclusive(&out, &architectureVerdict, nativeErr)
 				}
 				out, _ = classifyNativeError(runCtx, out, nativeErr)
@@ -1272,6 +1328,8 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		if budgetBlocked && nativeErr == nil {
 			nativeErr = errors.New("el presupuesto de tokens agregado se agotó antes de la pasada principal")
 			if analysisRequested {
+				architectureVerdict = finalizeArchitectureVerdict(
+					architectureVerdict, carried, carryEvidence, ruleVersion, sourceDigests)
 				markArchitectureInconclusive(&out, &architectureVerdict, nativeErr)
 			}
 			return out.inconclusive(nativeErr, "token_budget"), nil
@@ -1280,6 +1338,8 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			nativeErr = errors.New("ningún perfil apto pudo ejecutar la revisión")
 		}
 		if analysisRequested {
+			architectureVerdict = finalizeArchitectureVerdict(
+				architectureVerdict, carried, carryEvidence, ruleVersion, sourceDigests)
 			markArchitectureInconclusive(&out, &architectureVerdict, nativeErr)
 		}
 		out, _ = classifyNativeError(runCtx, out, nativeErr)
@@ -1301,6 +1361,13 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		architectureVerdict.Status = store.ArchitectureInconclusive
 		architectureVerdict.Errors = append(architectureVerdict.Errors,
 			"analysis skipped: OCR resume is incompatible with --analysis")
+	}
+	if analysisRequested {
+		// Bind every fresh section to the current rule version and sources,
+		// including partial reports, and keep earlier evidence the re-check did
+		// not cover.
+		architectureVerdict = finalizeArchitectureVerdict(
+			architectureVerdict, carried, carryEvidence, ruleVersion, sourceDigests)
 	}
 	// applyNativeArchitectureAnalysis rebuilds the dimensions and the risk and
 	// uncertainty lists from the report, so the deterministic evidence is
@@ -1856,12 +1923,13 @@ func classifyNativeError(ctx context.Context, out runOutcome, err error) (runOut
 // markArchitectureInconclusive records that a requested observation could not
 // finish. It only touches the analysis field: the review outcome is never
 // derived from it. A trusted-baseline violation is deterministic evidence and
-// must not be downgraded by an unrelated OCR or budget failure.
+// must not be downgraded by an unrelated OCR or budget failure; a stale verdict
+// keeps its stale marker so the panel still shows the evidence as pending.
 func markArchitectureInconclusive(out *runOutcome, verdict *store.ArchitectureVerdict, err error) {
 	if err == nil {
 		err = errors.New("analysis did not run")
 	}
-	if verdict.Status != store.ArchitectureViolation {
+	if verdict.Status != store.ArchitectureViolation && verdict.Status != store.ArchitectureStale {
 		verdict.Status = store.ArchitectureInconclusive
 	}
 	verdict.Errors = append(verdict.Errors, err.Error())
