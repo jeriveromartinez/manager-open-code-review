@@ -197,6 +197,10 @@ func (r *Runner) reviewTextFiles(ctx context.Context, runID, profileID uint, rev
 			// by a language glob such as **/*.go.
 			textReviewer.Excludes = ""
 			textReviewer.OnLog = log.OCRLogger(ctx, invocation)
+			// A text window is a synthetic commit, not the main pass: it must
+			// not resume the main session or overwrite its stored id.
+			textReviewer.OnSession = nil
+			textReviewer.ResumeSession = ""
 			if budget > 0 {
 				remaining := chunkAllowance(budget, int64(used.Total)+int64(summary.tokens.Total), usageKnown && summary.usageKnown)
 				if remaining <= 0 {
