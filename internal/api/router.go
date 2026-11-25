@@ -133,9 +133,10 @@ func NewRouter(d Deps) http.Handler {
 			r.Put("/repos/{id}/policy", s.putRepoPolicy)
 			r.Delete("/repos/{id}/policy", s.deleteRepoPolicy)
 
-			// Retry and finding actions are limited to admins and the lead of
-			// the repo's team.
+			// Retry, finding actions and the human verdict of an inconclusive
+			// review are limited to admins and the lead or QA of the repo's team.
 			r.Post("/prs/{id}/retry", s.retryPR)
+			r.Post("/prs/{id}/human-verdict", s.recordHumanVerdict)
 			r.Post("/prs/{id}/findings/{findingID}/withdraw", s.withdrawFinding)
 			r.Post("/prs/{id}/findings/{findingID}/confirm", s.confirmFinding)
 

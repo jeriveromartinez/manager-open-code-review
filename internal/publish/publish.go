@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -141,9 +140,12 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 			} else if !ok {
 				return nil
 			}
+			// A human verdict recorded after the failure may open or keep the
+			// gate closed; either way the automated result is not rewritten.
+			conclusion, _ := p.gateOutcome(ctx, open)
 			// ErrNotFound means the failure happened before StartCheck, so there
 			// is no check run to close; the QA status is still updated.
-			if err := p.completeCheck(ctx, "action_required", open); err != nil &&
+			if err := p.completeCheck(ctx, conclusion, open); err != nil &&
 				!errors.Is(err, store.ErrNotFound) {
 				return err
 			}
@@ -157,7 +159,8 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 			} else if !ok {
 				return nil
 			}
-			if err := p.setPRStatus(ctx, store.StatusInconclusive); err != nil {
+			_, status := p.gateOutcome(ctx, open)
+			if err := p.setPRStatus(ctx, status); err != nil {
 				return err
 			}
 			if err := p.markStep(ctx, store.PublishStepStatus); err != nil {
@@ -202,19 +205,7 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 	p.findingSnapshot = findings
 	open = openFindings(findings)
 
-	ci, ciErr := p.ciVerdict(ctx)
-	if ciErr != nil {
-		slog.Warn("read CI gate at publish", "pull_request_id", p.pr.ID, "run_id", p.run.ID, "error", ciErr)
-	}
-	conclusion := "action_required"
-	if p.run.Status == store.RunSucceeded {
-		switch {
-		case p.hasBlocking(open):
-			conclusion = "failure"
-		case ci.Green():
-			conclusion = "success"
-		}
-	}
+	conclusion, qaStatus := p.gateOutcome(ctx, open)
 	resolvedSincePrevious := 0
 	for _, f := range findings {
 		if f.Status == store.FindingResolved && f.LastSeenRunID == p.run.ID {
@@ -271,20 +262,7 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 		} else if !ok {
 			return nil
 		}
-		status := store.StatusInconclusive
-		if p.run.Status == store.RunSucceeded {
-			switch conclusion {
-			case "failure":
-				status = store.StatusChangesRequested
-			case "success":
-				status = store.StatusReadyForHuman
-			default:
-				// The review concluded but the required checks did not: the head is
-				// still waiting for a CI verdict, not for a person.
-				status = store.StatusWaitingCI
-			}
-		}
-		if err := p.setPRStatus(ctx, status); err != nil {
+		if err := p.setPRStatus(ctx, qaStatus); err != nil {
 			return err
 		}
 		if err := p.markStep(ctx, store.PublishStepStatus); err != nil {
@@ -634,6 +612,10 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 
 	title := "QA Control Center"
 	summary := fmt.Sprintf("Revisión #%d · %s", p.runNumber, shortSHA(p.run.HeadSHA))
+	verdict, hasHuman := p.humanVerdict(ctx)
+	if hasHuman {
+		summary += " · humano: " + humanDecisionLabel(verdict.Decision)
+	}
 	if conclusion == "failure" {
 		summary += " · hallazgos bloqueantes"
 	}
@@ -652,6 +634,15 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 			text += "\n\n"
 		}
 		text += pending
+	}
+	if hasHuman {
+		// The automated result above and the human result below stay visibly
+		// separate: a human decision never means the engine completed coverage.
+		text = strings.TrimSpace(text)
+		if text != "" {
+			text += "\n\n"
+		}
+		text += p.renderHumanVerdict(verdict)
 	}
 	output := map[string]any{
 		"title":   title,

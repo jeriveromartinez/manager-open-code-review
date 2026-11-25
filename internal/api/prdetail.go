@@ -121,8 +121,11 @@ func findingDTOOf(f store.Finding) findingDTO {
 // exact same fields as the list and adds the review history.
 type prDetailResponse struct {
 	prResponse
-	Runs     []reviewRunDTO `json:"runs"`
-	Findings []findingDTO   `json:"findings"`
+	// HumanVerdict is the latest human decision, shown apart from the automated
+	// run. current is false when a push or retarget invalidated it.
+	HumanVerdict *humanVerdictResponse `json:"human_verdict"`
+	Runs         []reviewRunDTO        `json:"runs"`
+	Findings     []findingDTO          `json:"findings"`
 }
 
 // visiblePRView returns the caller's view of a pull request, or writes the
@@ -173,10 +176,29 @@ func (s *server) prDetail(w http.ResponseWriter, r *http.Request) {
 	for _, finding := range findings {
 		findingDTOs = append(findingDTOs, findingDTOOf(finding))
 	}
+
+	var humanVerdict *humanVerdictResponse
+	latest, found, err := s.Store.LatestHumanVerdict(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "load human verdict")
+		return
+	}
+	if found {
+		pr, err := s.Store.PullRequest(r.Context(), id)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "load pull request")
+			return
+		}
+		current := latest.InvalidatedAt == nil && latest.Covers(pr)
+		dto := humanVerdictDTO(latest, current)
+		humanVerdict = &dto
+	}
+
 	writeJSON(w, http.StatusOK, prDetailResponse{
-		prResponse: prDTO(*view),
-		Runs:       runDTOs,
-		Findings:   findingDTOs,
+		prResponse:   prDTO(*view),
+		HumanVerdict: humanVerdict,
+		Runs:         runDTOs,
+		Findings:     findingDTOs,
 	})
 }
 

@@ -152,6 +152,8 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleReviewThread(r.Context(), w, p, r.Header.Get("X-GitHub-Delivery"), reviewThreadEventTime(body))
 	case *gh.PullRequestReviewCommentEvent:
 		h.handleReviewComment(r.Context(), w, p, r.Header.Get("X-GitHub-Delivery"))
+	case *gh.PullRequestReviewEvent:
+		h.handlePullRequestReview(r.Context(), w, p)
 	case *gh.IssueCommentEvent:
 		h.handleIssueComment(r.Context(), w, p)
 	default:

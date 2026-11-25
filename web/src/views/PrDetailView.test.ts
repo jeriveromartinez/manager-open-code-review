@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     retryPR: vi.fn(),
     withdrawFinding: vi.fn(),
     confirmFinding: vi.fn(),
+    recordHumanVerdict: vi.fn(),
     reviewRunLogs: vi.fn(),
   },
 }))
@@ -73,8 +74,7 @@ const detail: PRDetail = {
   ],
   findings: [
     {
-      id: 'f1',
-      fingerprint: 'fp1',
+      id: 'f1',      fingerprint: 'fp1',
       path: 'internal/auth.go',
       start_line: 10,
       end_line: 12,
@@ -142,6 +142,7 @@ const detail: PRDetail = {
       updated_at: '2026-11-19T10:00:00Z',
     },
   ],
+  human_verdict: null,
 }
 
 function mountDetail(): VueWrapper {
@@ -156,6 +157,7 @@ describe('PrDetailView', () => {
     mocks.api.retryPR.mockResolvedValue({ status: 'queued' })
     mocks.api.withdrawFinding.mockResolvedValue({ ...detail.findings[0], status: 'withdrawn' })
     mocks.api.confirmFinding.mockResolvedValue({ ...detail.findings[0], status: 'open' })
+    mocks.api.recordHumanVerdict.mockResolvedValue({})
     mocks.api.reviewRunLogs.mockResolvedValue({
       run_id: 9,
       entries: [
@@ -901,6 +903,99 @@ describe('PrDetailView', () => {
     await flushPromises()
 
     expect(wrapper.get('[role="alert"]').text()).toBe('El hallazgo ya está resuelto en el código')
+
+    wrapper.unmount()
+  })
+
+  it('shows the human verdict separately from the automated run', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      human_verdict: {
+        decision: 'changes_requested' as const,
+        conclusion: 'El rango pendiente sigue teniendo el fallo',
+        reason: 'El motor no cubrió ese archivo',
+        actor_login: 'qa-lead',
+        scope: {
+          files: [{ path: 'internal/auth.go', start_line: 10, end_line: 12 }],
+          pending_findings: ['f1'],
+          complete: false,
+        },
+        head_sha: 'abc123def',
+        base_ref: 'main',
+        merge_base_sha: 'base123',
+        current: true,
+        invalidated_at: null,
+        invalidated_reason: '',
+        created_at: '2026-11-19T10:05:00Z',
+      },
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const human = wrapper.get('[data-human-verdict]')
+    expect(human.text()).toContain('Resultado humano')
+    expect(human.text()).toContain('Cambios requeridos')
+    expect(human.text()).toContain('qa-lead')
+    expect(human.text()).toContain('internal/auth.go:10-12')
+    expect(human.text()).toContain('alcance parcial')
+    expect(human.text()).toContain('El rango pendiente sigue teniendo el fallo')
+    // The automated result stays its own line.
+    expect(wrapper.get('[data-check="ai"]').text()).toContain('fallida')
+
+    wrapper.unmount()
+  })
+
+  it('marks a human verdict obsolete after a push', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      qa_status: 'inconclusive',
+      human_verdict: {
+        decision: 'approved' as const,
+        conclusion: 'Todo revisado',
+        reason: '',
+        actor_login: 'qa-lead',
+        scope: { files: [], pending_findings: [], complete: true },
+        head_sha: 'oldsha',
+        base_ref: 'main',
+        merge_base_sha: 'base123',
+        current: false,
+        invalidated_at: '2026-11-19T11:00:00Z',
+        invalidated_reason: 'head_moved',
+        created_at: '2026-11-19T10:05:00Z',
+      },
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const human = wrapper.get('[data-human-verdict]')
+    expect(human.get('[data-human-verdict-state]').text()).toBe('Obsoleta')
+    expect(human.get('[data-human-verdict-stale]').text()).toContain('push')
+
+    wrapper.unmount()
+  })
+
+  it('records a scoped human verdict for an inconclusive review', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    await wrapper.get('[data-human-verdict-conclusion]').setValue('Revisé el rango pendiente')
+    await wrapper.get('[data-human-verdict-scope-input]').setValue('src/a.go:10-12')
+    await wrapper.get('[data-human-verdict-complete]').setValue(true)
+    await wrapper.get('[data-human-verdict-submit]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.recordHumanVerdict).toHaveBeenCalledWith(42, {
+      decision: 'approved',
+      conclusion: 'Revisé el rango pendiente',
+      reason: undefined,
+      scope: {
+        files: [{ path: 'src/a.go', start_line: 10, end_line: 12 }],
+        pending_findings: [],
+        complete: true,
+      },
+    })
 
     wrapper.unmount()
   })

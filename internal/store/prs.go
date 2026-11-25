@@ -190,6 +190,26 @@ func syncExisting(tx *gorm.DB, prev *PullRequest, in PullRequest, out *PullReque
 		return nil
 	}
 
+	// A human verdict belongs to the comparison it was recorded for (#146). A
+	// push or retarget makes it history; the panel and the gate fall back to the
+	// automated result, and an open pull request asks for a new decision when
+	// the head did not already reset it to pending.
+	headMoved := !strings.EqualFold(prev.HeadSHA, in.HeadSHA)
+	retargeted := !headMoved && (prev.BaseRef != in.BaseRef || !strings.EqualFold(prev.BaseSHA, in.BaseSHA))
+	if headMoved || retargeted {
+		reason := HumanVerdictInvalidatedHeadMoved
+		if retargeted {
+			reason = HumanVerdictInvalidatedRetarget
+		}
+		invalidated, err := invalidateHumanVerdicts(tx, prev.ID, reason)
+		if err != nil {
+			return err
+		}
+		if invalidated > 0 && !headMoved && in.State == stateOpen && !in.Draft {
+			status = StatusInconclusive
+		}
+	}
+
 	updates := map[string]any{
 		"title":               in.Title,
 		"body":                in.Body,
