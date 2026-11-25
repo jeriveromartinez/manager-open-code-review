@@ -309,21 +309,16 @@ func (h *WebhookHandler) handlePullRequest(ctx context.Context, w http.ResponseW
 		}
 	}
 
-	row, changed, err := h.Store.SyncPullRequest(ctx, PRFromGitHub(repo.ID, pr))
+	row, changed, err := h.Store.SyncPullRequest(ctx, PRFromGitHub(repo.ID, repo.FullName, pr))
 	if err != nil {
 		h.serverError(w)
 		return
 	}
 	if changed {
-		// Fork pull requests are stored so the UI and later syncs know about
-		// them, but Fase 2 neither notifies browsers nor starts reviews for
-		// them.
-		if !row.IsFork {
-			ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(row.ID), 10)}
-			if err := h.Events.Publish(ctx, ev); err != nil {
-				h.serverError(w)
-				return
-			}
+		ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(row.ID), 10)}
+		if err := h.Events.Publish(ctx, ev); err != nil {
+			h.serverError(w)
+			return
 		}
 	}
 
@@ -333,20 +328,21 @@ func (h *WebhookHandler) handlePullRequest(ctx context.Context, w http.ResponseW
 	}
 	if h.Reviews != nil {
 		switch {
-		case !row.IsOpen() || row.Draft || row.IsFork:
-			// A closed, merged, draft or fork pull request can still carry live
-			// work from an earlier delivery. Reconciling on every delivery, not
-			// only when the sync changed something, lets an identical
-			// redelivery discard a run whose first cancellation failed.
+		case !row.IsOpen() || row.Draft:
+			// A closed, merged or draft pull request can still carry live work
+			// from an earlier delivery. Reconciling on every delivery, not only
+			// when the sync changed something, lets an identical redelivery
+			// discard a run whose first cancellation failed.
 			if err := h.Reviews.OnPullRequestIneligible(ctx, row.ID); err != nil {
 				h.serverError(w)
 				return
 			}
 		case trigger:
-			// The trigger deduplicates by comparison and repairs a queued run
-			// that lost its job or check, so reasserting it is idempotent.
-			// Gating this on `changed` let an identical redelivery skip the
-			// work the previous delivery failed to finish.
+			// The trigger applies the external policy before queueing: an
+			// authorized contribution is reviewed from the base repository, and
+			// one outside the policy becomes a human request. It also
+			// deduplicates by comparison and repairs a queued run that lost its
+			// job or check, so reasserting it is idempotent.
 			if err := h.Reviews.OnPullRequest(ctx, row.ID); err != nil {
 				h.serverError(w)
 				return
@@ -418,14 +414,14 @@ func (h *WebhookHandler) handleCheckEvent(ctx context.Context, w http.ResponseWr
 		// The gate is re-evaluated even when the counters did not move: a review
 		// blocked on a red head must be released by the delivery that completes the
 		// checks, and OnChecksUpdated is what deduplicates it against existing runs.
-		if changed && !pr.IsFork {
+		if changed {
 			ev := events.Event{Type: "pr.updated", ID: strconv.FormatUint(uint64(pr.ID), 10)}
 			if err := h.Events.Publish(ctx, ev); err != nil {
 				h.serverError(w)
 				return
 			}
 		}
-		if !pr.Draft && !pr.IsFork && h.Reviews != nil {
+		if !pr.Draft && h.Reviews != nil {
 			if err := h.Reviews.OnChecksUpdated(ctx, pr.ID); err != nil {
 				h.serverError(w)
 				return

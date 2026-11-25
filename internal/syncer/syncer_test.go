@@ -237,12 +237,21 @@ func writePulls(t *testing.T, w http.ResponseWriter, r *http.Request, numbers []
 		w.Header().Set("Link", fmt.Sprintf(`<http://%s%s?%s>; rel="next"`, r.Host, r.URL.Path, q.Encode()))
 	}
 	pulls := make([]*gh.PullRequest, 0, len(numbers))
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	baseRepo := ""
+	if len(parts) >= 3 {
+		baseRepo = parts[1] + "/" + parts[2]
+	}
 	for _, number := range numbers {
 		pulls = append(pulls, &gh.PullRequest{
-			Number:    gh.Int(number),
-			Title:     gh.String(fmt.Sprintf("PR %d", number)),
-			User:      &gh.User{Login: gh.String("alice")},
-			Head:      &gh.PullRequestBranch{Ref: gh.String("feature"), SHA: gh.String(fmt.Sprintf("sha-%d", number))},
+			Number: gh.Int(number),
+			Title:  gh.String(fmt.Sprintf("PR %d", number)),
+			User:   &gh.User{Login: gh.String("alice")},
+			Head: &gh.PullRequestBranch{
+				Ref:  gh.String("feature"),
+				SHA:  gh.String(fmt.Sprintf("sha-%d", number)),
+				Repo: &gh.Repository{FullName: gh.String(baseRepo)},
+			},
 			Base:      &gh.PullRequestBranch{Ref: gh.String("main")},
 			HTMLURL:   gh.String(fmt.Sprintf("https://github.com/acme/repo/pull/%d", number)),
 			State:     gh.String("open"),
@@ -315,11 +324,16 @@ func seedRepo(t *testing.T, s *store.Store, id int64, installationID int64, full
 
 func seedPR(t *testing.T, s *store.Store, repoID int64, number int, updated time.Time) store.PullRequest {
 	t.Helper()
+	var repository store.Repository
+	if err := s.DB.WithContext(context.Background()).Take(&repository, repoID).Error; err != nil {
+		t.Fatalf("load repository %d: %v", repoID, err)
+	}
 	pr, changed, err := s.SyncPullRequest(context.Background(), store.PullRequest{
 		RepositoryID: repoID, Number: number, Title: fmt.Sprintf("PR %d", number),
 		AuthorLogin: "alice", HeadSHA: fmt.Sprintf("sha-%d", number),
 		BaseRef: "main", HeadRef: "feature", HTMLURL: fmt.Sprintf("https://github.com/acme/repo/pull/%d", number),
-		State: "open", GitHubUpdatedAt: updated,
+		State: "open", GitHubUpdatedAt: updated, Origin: store.OriginInternal,
+		HeadRepoFullName: repository.FullName,
 	})
 	if err != nil {
 		t.Fatalf("seed pull request #%d: %v", number, err)

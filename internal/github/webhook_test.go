@@ -476,8 +476,8 @@ func TestWebhookReviewTriggeredForNonForkPR(t *testing.T) {
 	assertStatus(t, f.deliver("pull_request", "pr-opened.json"), http.StatusAccepted)
 
 	pr := f.pullRequest()
-	if pr.IsFork || pr.HeadRepoFullName != "" {
-		t.Fatalf("pull request = %+v, want a non-fork PR", pr)
+	if pr.IsFork || pr.Origin != store.OriginInternal || pr.HeadRepoFullName != "acme/backend-api" {
+		t.Fatalf("pull request = %+v, want an internal PR of acme/backend-api", pr)
 	}
 	if got := f.reviews.snapshot(); len(got) != 1 || got[0] != pr.ID {
 		t.Fatalf("OnPullRequest calls = %v, want [%d]", got, pr.ID)
@@ -495,7 +495,7 @@ func TestWebhookReviewTriggeredForNonForkPR(t *testing.T) {
 	}
 }
 
-func TestWebhookForkPRIsIgnored(t *testing.T) {
+func TestWebhookCrossRepoPRIsEscalatedThroughTrigger(t *testing.T) {
 	f := newWebhookFixture(t)
 	f.seedRepoWithTeam()
 
@@ -524,17 +524,21 @@ func TestWebhookForkPRIsIgnored(t *testing.T) {
 	assertStatus(t, f.deliverBody("pull_request", body, signWebhook(body)), http.StatusAccepted)
 
 	pr := f.pullRequest()
-	if !pr.IsFork || pr.HeadRepoFullName != "ext/backend-api" {
-		t.Fatalf("pull request = %+v, want IsFork=true, HeadRepoFullName=ext/backend-api", pr)
+	if !pr.IsFork || pr.Origin != store.OriginCrossRepo || pr.HeadRepoFullName != "ext/backend-api" {
+		t.Fatalf("pull request = %+v, want origin=%q, IsFork=true, HeadRepoFullName=ext/backend-api",
+			pr, store.OriginCrossRepo)
 	}
-	if got := f.reviews.snapshot(); len(got) != 0 {
-		t.Fatalf("OnPullRequest calls for a fork PR = %v, want none", got)
+	// The trigger owns the policy: it reviews an authorized contribution and
+	// requests a person when the fork is outside it. The webhook must not
+	// pre-filter the delivery.
+	if got := f.reviews.snapshot(); len(got) != 1 || got[0] != pr.ID {
+		t.Fatalf("OnPullRequest calls for an external PR = %v, want [%d]", got, pr.ID)
 	}
-	if got := f.pub.snapshot(); len(got) != 0 {
-		t.Fatalf("published events for a fork PR = %v, want none", got)
+	if got := f.pub.snapshot(); len(got) != 1 {
+		t.Fatalf("published events for an external PR = %v, want the pr.updated event", got)
 	}
 	if got := f.jobs.snapshot(); len(got) != 0 {
-		t.Fatalf("EnqueueSync calls for a fork PR = %v, want none", got)
+		t.Fatalf("EnqueueSync calls for an external PR = %v, want none", got)
 	}
 }
 

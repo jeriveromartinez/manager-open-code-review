@@ -199,6 +199,11 @@ func verifyContext(ctx context.Context, timeout time.Duration) (context.Context,
 // reservation is the share carved out before the main pass.
 func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig, profile store.LLMProfile, apiKey []byte, workDir, headSHA string, out *runOutcome, reservation verifyReservation, log *runLogSink) {
 	policy := verifyPolicy(cfg.Policy)
+	if cfg.PR.External() {
+		// Never withdraw a finding based on hostile input: the verifier reads
+		// the contributor checkout, so its refutation needs a human.
+		policy.AutoWithdraw = false
+	}
 	if policy.Mode == store.AutoTriageOff || len(out.findings) == 0 {
 		return
 	}
@@ -249,7 +254,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 				Profile:     profile,
 				APIKey:      string(apiKey),
 				Paths:       paths,
-				Background:  buildVerifyContext(selected),
+				Background:  buildVerifyContext(selected, cfg.PR.External()),
 				MaxTokens:   r.Cfg.ContextCeiling,
 				TokenBudget: budget,
 				Timeout:     timeout,

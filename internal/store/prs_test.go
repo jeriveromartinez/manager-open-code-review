@@ -929,7 +929,7 @@ func TestReviewStateScenarios(t *testing.T) {
 		state  string
 		reason string
 	}{
-		{"fork", prFork.ID, "blocked", "PR de fork: no se revisa en esta fase"},
+		{"fork", prFork.ID, "blocked", "PR externo: el equipo no permite aportes externos"},
 		{"draft", prDraft.ID, "blocked", "Borrador: se revisará cuando pase a listo"},
 		{"no team", prNoTeam.ID, "blocked", "Repositorio sin equipo asignado"},
 		{"no policy", prNoPolicy.ID, "blocked", "El equipo no tiene política QA"},
@@ -965,7 +965,15 @@ func TestReviewStateFor(t *testing.T) {
 	}{
 		{"active run ignores config", store.ReviewSignals{ActiveRun: true}, "running", ""},
 		{"draft", with(full, func(s *store.ReviewSignals) { s.Draft = true }), "blocked", "Borrador: se revisará cuando pase a listo"},
-		{"fork", with(full, func(s *store.ReviewSignals) { s.Fork = true }), "blocked", "PR de fork: no se revisa en esta fase"},
+		{"fork", with(full, func(s *store.ReviewSignals) { s.Fork = true }), "blocked", "PR externo: el equipo no permite aportes externos"},
+		{"fork allowed", with(full, func(s *store.ReviewSignals) {
+			s.Origin = store.OriginCrossRepo
+			s.ExternalAllowed = true
+		}), "scheduled", ""},
+		{"unknown origin", with(full, func(s *store.ReviewSignals) {
+			s.Origin = store.OriginUnknown
+			s.ExternalAllowed = true
+		}), "blocked", "Origen del PR indeterminado: requiere revisión humana"},
 		{"draft beats fork", store.ReviewSignals{Draft: true, Fork: true}, "blocked", "Borrador: se revisará cuando pase a listo"},
 		{"no team", store.ReviewSignals{HasPolicy: true, ProfileEnabled: true}, "blocked", "Repositorio sin equipo asignado"},
 		{"no policy", store.ReviewSignals{TeamAssigned: true, ProfileEnabled: true}, "blocked", "El equipo no tiene política QA"},

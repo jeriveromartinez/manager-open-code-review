@@ -204,7 +204,7 @@ func TestReevaluateObjectionUnauthorizedDoesNotRunTheVerifier(t *testing.T) {
 }
 
 func TestBuildObjectionContextIncludesTheObjection(t *testing.T) {
-	background := buildObjectionContext(testFinding("f_1", "minor", ""), "la función ya valida nil")
+	background := buildObjectionContext(testFinding("f_1", "minor", ""), "la función ya valida nil", false)
 	if !strings.Contains(background, "f_1") || !strings.Contains(background, "la función ya valida nil") {
 		t.Errorf("background = %q, want the finding and the objection", background)
 	}

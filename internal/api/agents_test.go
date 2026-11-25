@@ -1266,3 +1266,71 @@ func assertFallbackOrder(t *testing.T, value any, want ...uint) {
 		}
 	}
 }
+func TestPolicyExternalContributionFields(t *testing.T) {
+	f := newSecureFixture(t)
+	profile, err := f.st.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "primary", Provider: "openai", Model: "gpt-4o-mini", APIKeyEnc: "sealed", Enabled: true,
+		HealthStatus: store.HealthOK,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+	team := f.team("external-team")
+	admin := f.user("admin", true)
+	cookie := f.session(admin)
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	rec := f.request(http.MethodGet, path, nil, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var current map[string]any
+	decodeJSON(t, rec, &current)
+	if current["allow_external_reviews"] != false ||
+		current["max_external_diff_lines"] != float64(store.DefaultExternalDiffLines) ||
+		current["max_external_runs_per_day"] != float64(store.DefaultExternalRunsPerDay) ||
+		current["external_daily_token_budget"] != float64(0) {
+		t.Fatalf("external defaults = %+v", current)
+	}
+
+	body := map[string]any{
+		"llm_profile_id":                profile.ID,
+		"allow_external_reviews":        true,
+		"external_trusted_associations": []string{"OWNER", "MEMBER"},
+		"max_external_diff_lines":       500,
+		"max_external_runs_per_day":     3,
+		"external_daily_token_budget":   9000,
+	}
+	rec = f.request(http.MethodPut, path, body, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var saved map[string]any
+	decodeJSON(t, rec, &saved)
+	if saved["allow_external_reviews"] != true ||
+		saved["max_external_diff_lines"] != float64(500) ||
+		saved["max_external_runs_per_day"] != float64(3) ||
+		saved["external_daily_token_budget"] != float64(9000) {
+		t.Fatalf("saved external policy = %+v", saved)
+	}
+
+	// A PUT that only carries one external field keeps the rest from the
+	// stored policy instead of resetting the budget to unlimited.
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id":         profile.ID,
+		"allow_external_reviews": false,
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &saved)
+	if saved["allow_external_reviews"] != false ||
+		saved["max_external_diff_lines"] != float64(500) ||
+		saved["max_external_runs_per_day"] != float64(3) ||
+		saved["external_daily_token_budget"] != float64(9000) {
+		t.Fatalf("partial PUT reset external limits: %+v", saved)
+	}
+
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": profile.ID, "max_external_runs_per_day": 0,
+	}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": profile.ID, "external_daily_token_budget": -1,
+	}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+}

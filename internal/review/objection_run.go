@@ -117,6 +117,7 @@ func (r *Runner) ReevaluateObjection(ctx context.Context, objectionID uint) erro
 			MaxTokens:   r.Cfg.ContextCeiling,
 			TokenBudget: policy.TokenMax,
 			Timeout:     objectionMaxTimeout,
+			External:    cfg.PR.External(),
 		}
 	}
 	verification, err := verifier.VerifyObjection(ctx, finding, intent.Body, workDir, intent.HeadSHA)
@@ -301,9 +302,9 @@ func writeObjectionCheckout(path string, content []byte) (string, error) {
 
 // buildObjectionContext is the verifier's background for one disputed finding:
 // the finding itself plus the reply that disputes it, both fenced.
-func buildObjectionContext(f store.Finding, objection string) string {
+func buildObjectionContext(f store.Finding, objection string, external bool) string {
 	var b strings.Builder
-	b.WriteString(buildVerifyContext([]store.Finding{f}))
+	b.WriteString(buildVerifyContext([]store.Finding{f}, external))
 	b.WriteString("\nThe author replied in the review thread with the objection below. ")
 	b.WriteString("Decide whether that objection refutes the finding using the code at this revision.\n")
 	b.WriteString("## objection\n")
@@ -322,6 +323,8 @@ type nativeObjectionVerifier struct {
 	MaxTokens   int
 	TokenBudget int64
 	Timeout     time.Duration
+	// External marks a contribution whose checkout is untrusted data.
+	External bool
 }
 
 func (v *nativeObjectionVerifier) VerifyObjection(ctx context.Context, f store.Finding, objection, workDir, headSHA string) (Verification, error) {
@@ -335,7 +338,7 @@ func (v *nativeObjectionVerifier) VerifyObjection(ctx context.Context, f store.F
 		Profile:     v.Profile,
 		APIKey:      v.APIKey,
 		Paths:       []string{f.Path},
-		Background:  buildObjectionContext(f, objection),
+		Background:  buildObjectionContext(f, objection, v.External),
 		MaxTokens:   v.MaxTokens,
 		TokenBudget: v.TokenBudget,
 		Timeout:     v.Timeout,

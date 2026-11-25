@@ -148,6 +148,10 @@ type triggerReviewRequest struct {
 type seedOpts struct {
 	draft          bool
 	fork           bool
+	origin         string
+	authorAssoc    string
+	additions      int
+	deletions      int
 	repoEnabled    bool
 	withPolicy     bool
 	profileEnabled bool
@@ -156,6 +160,11 @@ type seedOpts struct {
 	requireGreenCI bool
 	reviewerLogin  string
 	reviewerTeam   string
+	allowExternal  bool
+	externalDiff   int
+	externalRuns   int
+	externalBudget int64
+	externalAssocs []string
 }
 
 func newTriggerFixture(t *testing.T) *triggerFixture {
@@ -318,10 +327,22 @@ func (f *triggerFixture) seed(name string, opts seedOpts) store.PullRequest {
 		f.t.Fatalf("create profile %q: %v", name, err)
 	}
 	if opts.withPolicy {
-		if _, err := f.st.SaveQAPolicy(f.ctx, store.QAPolicy{
+		policy := store.QAPolicy{
 			TeamID: team.ID, LLMProfileID: profile.ID, RequireGreenCI: opts.requireGreenCI,
 			ReviewerLogin: opts.reviewerLogin, ReviewerTeam: opts.reviewerTeam,
-		}); err != nil {
+			AllowExternalReviews:     opts.allowExternal,
+			MaxExternalDiffLines:     opts.externalDiff,
+			MaxExternalRunsPerDay:    opts.externalRuns,
+			ExternalDailyTokenBudget: opts.externalBudget,
+		}
+		if len(opts.externalAssocs) > 0 {
+			raw, err := json.Marshal(opts.externalAssocs)
+			if err != nil {
+				f.t.Fatalf("encode external associations: %v", err)
+			}
+			policy.ExternalTrustedAssociations = raw
+		}
+		if _, err := f.st.SaveQAPolicy(f.ctx, policy); err != nil {
 			f.t.Fatalf("SaveQAPolicy(%q): %v", name, err)
 		}
 	}
@@ -345,11 +366,22 @@ func (f *triggerFixture) seed(name string, opts seedOpts) store.PullRequest {
 	if state == "" {
 		state = "open"
 	}
+	origin := opts.origin
+	if origin == "" && opts.fork {
+		origin = store.OriginCrossRepo
+	}
+	association := opts.authorAssoc
+	if association == "" {
+		association = "CONTRIBUTOR"
+	}
 	pr := store.PullRequest{
 		RepositoryID: repoID, Number: int(f.seq), Title: "PR " + name,
-		AuthorLogin: "octocat", HeadSHA: sha, BaseRef: "main", HeadRef: "branch-" + name,
+		AuthorLogin: "octocat", AuthorAssociation: association,
+		HeadSHA: sha, BaseRef: "main", HeadRef: "branch-" + name,
 		HTMLURL: "https://github.com/acme/" + name + "/pull/1",
-		Draft:   opts.draft, IsFork: opts.fork, State: state, QAStatus: store.StatusPending,
+		Draft:   opts.draft, IsFork: opts.fork, Origin: origin,
+		Additions: opts.additions, Deletions: opts.deletions,
+		State: state, QAStatus: store.StatusPending,
 		GitHubUpdatedAt: time.Now().UTC(),
 	}
 	if err := f.st.DB.WithContext(f.ctx).Create(&pr).Error; err != nil {
@@ -1348,9 +1380,9 @@ func (f *triggerFixture) reviewRequests() []triggerReviewRequest {
 	return append([]triggerReviewRequest(nil), f.reviewReqs...)
 }
 
-// A fork never enters the engine, so the trigger hands it to a person through
-// the official review-request API. Repeating the delivery stays deduplicated
-// by pull request and head.
+// External reviews are disabled by default, so the trigger hands the fork to a
+// person through the official review-request API. Repeating the delivery stays
+// deduplicated by pull request and head.
 func TestTriggerRequestsHumanReviewForFork(t *testing.T) {
 	f := newTriggerFixture(t)
 	pr := f.seed("fork", seedOpts{
@@ -1406,6 +1438,173 @@ func TestTriggerRecordsForkWithoutPolicy(t *testing.T) {
 	if saved.Status != store.ReviewRequestRejected || saved.ReviewerLogin != "" ||
 		!strings.Contains(saved.LastError, "no reviewer") {
 		t.Errorf("request = %+v, want a rejected row naming the missing target", saved)
+	}
+}
+
+// An external contribution the policy authorizes is reviewed from the base
+// repository's pull ref. No human request is created for it.
+func TestTriggerReviewsAuthorizedExternalPR(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("authorized-fork", seedOpts{
+		fork: true, origin: store.OriginCrossRepo, authorAssoc: "OWNER",
+		repoEnabled: true, withPolicy: true, profileEnabled: true,
+		allowExternal: true, additions: 10, deletions: 2,
+	})
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Status != store.RunQueued || runs[0].HeadSHA != pr.HeadSHA {
+		t.Fatalf("runs = %+v, want one queued run for the current head", runs)
+	}
+	if got := f.reviewRequests(); len(got) != 0 {
+		t.Fatalf("review requests = %+v, want none for an authorized contribution", got)
+	}
+	if len(f.jobs.reviews) != 1 || len(f.checks.started) != 1 {
+		t.Errorf("jobs/checks = %v/%v, want the run queued and its check started",
+			f.jobs.reviews, f.checks.started)
+	}
+}
+
+// A contribution outside the policy is never analysed: the reason is recorded
+// as a human request instead.
+func TestTriggerEscalatesExternalPROutsidePolicy(t *testing.T) {
+	cases := []struct {
+		name  string
+		opts  seedOpts
+		cause string
+		prep  func(*triggerFixture, store.PullRequest)
+	}{
+		{
+			name: "reviews disabled",
+			opts: seedOpts{fork: true, repoEnabled: true, withPolicy: true, profileEnabled: true,
+				reviewerLogin: "human-qa", authorAssoc: "OWNER"},
+			cause: store.ReviewRequestCauseFork,
+		},
+		{
+			name: "untrusted association",
+			opts: seedOpts{fork: true, repoEnabled: true, withPolicy: true, profileEnabled: true,
+				reviewerLogin: "human-qa", allowExternal: true, externalAssocs: []string{"MEMBER"}},
+			cause: store.ReviewRequestCauseForkUnauthorized,
+		},
+		{
+			name: "over the size limit",
+			opts: seedOpts{fork: true, repoEnabled: true, withPolicy: true, profileEnabled: true,
+				reviewerLogin: "human-qa", authorAssoc: "OWNER", allowExternal: true,
+				externalDiff: 100, additions: 90, deletions: 20},
+			cause: store.ReviewRequestCauseForkTooLarge,
+		},
+		{
+			name: "over the token budget",
+			opts: seedOpts{fork: true, repoEnabled: true, withPolicy: true, profileEnabled: true,
+				reviewerLogin: "human-qa", authorAssoc: "OWNER", allowExternal: true,
+				externalBudget: 100},
+			cause: store.ReviewRequestCauseForkBudget,
+			prep: func(f *triggerFixture, pr store.PullRequest) {
+				run := f.seedRun(pr, "old-head", "main", "", store.RunSuperseded)
+				tokens := int64(150)
+				if err := f.st.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+					Where("id = ?", run.ID).Update("total_tokens", tokens).Error; err != nil {
+					f.t.Fatalf("record token usage: %v", err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTriggerFixture(t)
+			pr := f.seed("external", tc.opts)
+			if tc.prep != nil {
+				tc.prep(f, pr)
+			}
+
+			if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+				t.Fatalf("OnPullRequest() error = %v", err)
+			}
+			runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+			if err != nil {
+				t.Fatalf("ListReviewRuns: %v", err)
+			}
+			for _, run := range runs {
+				if run.Status == store.RunQueued || run.Status == store.RunRunning {
+					t.Fatalf("external contribution was queued: %+v", run)
+				}
+			}
+			if len(f.jobs.reviews) != 0 || len(f.checks.started) != 0 {
+				t.Fatalf("external contribution was queued: jobs=%v checks=%v",
+					f.jobs.reviews, f.checks.started)
+			}
+			saved, err := f.st.ReviewRequestFor(f.ctx, pr.ID, pr.HeadSHA)
+			if err != nil {
+				t.Fatalf("ReviewRequestFor: %v", err)
+			}
+			if saved.Cause != tc.cause || saved.Status != store.ReviewRequestDelivered {
+				t.Fatalf("request = %+v, want cause %q delivered", saved, tc.cause)
+			}
+		})
+	}
+}
+
+// The daily run limit counts runs of the same external author across the
+// instance, so a burst of contributions is stopped even in another repository.
+func TestTriggerEscalatesExternalPRRateLimited(t *testing.T) {
+	f := newTriggerFixture(t)
+	first := f.seed("external-one", seedOpts{
+		fork: true, repoEnabled: true, withPolicy: true, profileEnabled: true,
+		authorAssoc: "OWNER", allowExternal: true, externalRuns: 1,
+	})
+	second := f.seed("external-two", seedOpts{
+		fork: true, repoEnabled: true, withPolicy: true, profileEnabled: true,
+		authorAssoc: "OWNER", allowExternal: true, externalRuns: 1,
+		reviewerLogin: "human-qa",
+	})
+	if err := f.trigger.OnPullRequest(f.ctx, first.ID); err != nil {
+		t.Fatalf("OnPullRequest(first) error = %v", err)
+	}
+	if err := f.trigger.OnPullRequest(f.ctx, second.ID); err != nil {
+		t.Fatalf("OnPullRequest(second) error = %v", err)
+	}
+	runs, err := f.st.ListReviewRuns(f.ctx, second.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("rate-limited contribution was queued: %+v", runs)
+	}
+	saved, err := f.st.ReviewRequestFor(f.ctx, second.ID, second.HeadSHA)
+	if err != nil {
+		t.Fatalf("ReviewRequestFor: %v", err)
+	}
+	if saved.Cause != store.ReviewRequestCauseForkRateLimited {
+		t.Fatalf("request = %+v, want cause %q", saved, store.ReviewRequestCauseForkRateLimited)
+	}
+}
+
+// A branch of the base repository is internal even when the repository itself
+// is a fork of another project.
+func TestTriggerReviewsInternalBranchOfForkOwnedRepo(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("fork-owned-internal", seedOpts{
+		origin: store.OriginInternal, authorAssoc: "NONE",
+		repoEnabled: true, withPolicy: true, profileEnabled: true,
+	})
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %+v, want the internal branch reviewed", runs)
+	}
+	if got := f.reviewRequests(); len(got) != 0 {
+		t.Fatalf("review requests = %+v, want none", got)
 	}
 }
 

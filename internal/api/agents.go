@@ -448,33 +448,38 @@ func (s *server) enqueueLLMHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 type qaPolicyResponse struct {
-	ID                      uint                  `json:"id"`
-	TeamID                  uint                  `json:"team_id"`
-	LLMProfileID            uint                  `json:"llm_profile_id"`
-	FallbackProfileIDs      []uint                `json:"fallback_profile_ids"`
-	BlockingThreshold       string                `json:"blocking_threshold"`
-	ExtraInstructions       string                `json:"extra_instructions"`
-	ExcludeGlobs            []string              `json:"exclude_globs"`
-	MaxFiles                int                   `json:"max_files"`
-	MaxDiffLines            int                   `json:"max_diff_lines"`
-	MaxPasses               int                   `json:"max_passes"`
-	RequireGreenCI          bool                  `json:"require_green_ci"`
-	RequiredChecks          []store.RequiredCheck `json:"required_checks"`
-	ReviewContextCeiling    *int                  `json:"review_context_ceiling"`
-	GlobalContextCeiling    int                   `json:"global_context_ceiling"`
-	EffectiveContextCeiling int                   `json:"effective_context_ceiling"`
-	ReviewEffort            string                `json:"review_effort"`
-	ReviewTokenBudget       int64                 `json:"review_token_budget"`
-	AutoTriageMode          string                `json:"auto_triage_mode"`
-	AutoWithdraw            bool                  `json:"auto_withdraw"`
-	VerifyMaxFindings       int                   `json:"verify_max_findings"`
-	VerifyMaxFiles          int                   `json:"verify_max_files"`
-	VerifyTokenShare        int                   `json:"verify_token_share"`
-	VerifyTimeShare         int                   `json:"verify_time_share"`
-	VerifyTokenMax          int64                 `json:"verify_token_max"`
-	ReviewerLogin           string                `json:"reviewer_login"`
-	ReviewerTeam            string                `json:"reviewer_team"`
-	PromptCache             bool                  `json:"prompt_cache"`
+	ID                       uint                  `json:"id"`
+	TeamID                   uint                  `json:"team_id"`
+	LLMProfileID             uint                  `json:"llm_profile_id"`
+	FallbackProfileIDs       []uint                `json:"fallback_profile_ids"`
+	BlockingThreshold        string                `json:"blocking_threshold"`
+	ExtraInstructions        string                `json:"extra_instructions"`
+	ExcludeGlobs             []string              `json:"exclude_globs"`
+	MaxFiles                 int                   `json:"max_files"`
+	MaxDiffLines             int                   `json:"max_diff_lines"`
+	MaxPasses                int                   `json:"max_passes"`
+	RequireGreenCI           bool                  `json:"require_green_ci"`
+	RequiredChecks           []store.RequiredCheck `json:"required_checks"`
+	ReviewContextCeiling     *int                  `json:"review_context_ceiling"`
+	GlobalContextCeiling     int                   `json:"global_context_ceiling"`
+	EffectiveContextCeiling  int                   `json:"effective_context_ceiling"`
+	ReviewEffort             string                `json:"review_effort"`
+	ReviewTokenBudget        int64                 `json:"review_token_budget"`
+	AutoTriageMode           string                `json:"auto_triage_mode"`
+	AutoWithdraw             bool                  `json:"auto_withdraw"`
+	VerifyMaxFindings        int                   `json:"verify_max_findings"`
+	VerifyMaxFiles           int                   `json:"verify_max_files"`
+	VerifyTokenShare         int                   `json:"verify_token_share"`
+	VerifyTimeShare          int                   `json:"verify_time_share"`
+	VerifyTokenMax           int64                 `json:"verify_token_max"`
+	ReviewerLogin            string                `json:"reviewer_login"`
+	ReviewerTeam             string                `json:"reviewer_team"`
+	AllowExternalReviews     bool                  `json:"allow_external_reviews"`
+	ExternalAssociations     []string              `json:"external_trusted_associations"`
+	MaxExternalDiffLines     int                   `json:"max_external_diff_lines"`
+	MaxExternalRunsPerDay    int                   `json:"max_external_runs_per_day"`
+	ExternalDailyTokenBudget int64                 `json:"external_daily_token_budget"`
+	PromptCache              bool                  `json:"prompt_cache"`
 	// Revision identifies the policy content; a review records it (#153).
 	Revision  string `json:"revision"`
 	UpdatedAt string `json:"updated_at"`
@@ -540,6 +545,18 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 	if fallbacks == nil {
 		fallbacks = []uint{}
 	}
+	var associations []string
+	if err := json.Unmarshal(p.ExternalTrustedAssociations, &associations); err != nil || len(associations) == 0 {
+		associations = append([]string(nil), store.DefaultExternalAssociations...)
+	}
+	externalDiffLines := p.MaxExternalDiffLines
+	if externalDiffLines <= 0 {
+		externalDiffLines = store.DefaultExternalDiffLines
+	}
+	externalRuns := p.MaxExternalRunsPerDay
+	if externalRuns <= 0 {
+		externalRuns = store.DefaultExternalRunsPerDay
+	}
 	return qaPolicyResponse{
 		ID: p.ID, TeamID: p.TeamID, LLMProfileID: p.LLMProfileID,
 		FallbackProfileIDs: fallbacks,
@@ -551,18 +568,23 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 		ReviewContextCeiling: p.ReviewContextCeiling,
 		GlobalContextCeiling: globalCeiling, EffectiveContextCeiling: effective,
 		ReviewEffort: effort, ReviewTokenBudget: p.ReviewTokenBudget,
-		AutoTriageMode:    mode,
-		AutoWithdraw:      p.AutoWithdraw,
-		VerifyMaxFindings: verifyDefault(p.VerifyMaxFindings, store.DefaultVerifyMaxFindings),
-		VerifyMaxFiles:    verifyDefault(p.VerifyMaxFiles, store.DefaultVerifyMaxFiles),
-		VerifyTokenShare:  verifyDefault(p.VerifyTokenShare, store.DefaultVerifyTokenShare),
-		VerifyTimeShare:   verifyDefault(p.VerifyTimeShare, store.DefaultVerifyTimeShare),
-		VerifyTokenMax:    verifyDefault64(p.VerifyTokenMax, store.DefaultVerifyTokenMax),
-		ReviewerLogin:     p.ReviewerLogin,
-		ReviewerTeam:      p.ReviewerTeam,
-		PromptCache:       promptCache,
-		Revision:          store.PolicyRevision(p, false),
-		UpdatedAt:         p.UpdatedAt.UTC().Format(time.RFC3339),
+		AutoTriageMode:           mode,
+		AutoWithdraw:             p.AutoWithdraw,
+		VerifyMaxFindings:        verifyDefault(p.VerifyMaxFindings, store.DefaultVerifyMaxFindings),
+		VerifyMaxFiles:           verifyDefault(p.VerifyMaxFiles, store.DefaultVerifyMaxFiles),
+		VerifyTokenShare:         verifyDefault(p.VerifyTokenShare, store.DefaultVerifyTokenShare),
+		VerifyTimeShare:          verifyDefault(p.VerifyTimeShare, store.DefaultVerifyTimeShare),
+		VerifyTokenMax:           verifyDefault64(p.VerifyTokenMax, store.DefaultVerifyTokenMax),
+		ReviewerLogin:            p.ReviewerLogin,
+		ReviewerTeam:             p.ReviewerTeam,
+		AllowExternalReviews:     p.AllowExternalReviews,
+		ExternalAssociations:     associations,
+		MaxExternalDiffLines:     externalDiffLines,
+		MaxExternalRunsPerDay:    externalRuns,
+		ExternalDailyTokenBudget: p.ExternalDailyTokenBudget,
+		PromptCache:              promptCache,
+		Revision:                 store.PolicyRevision(p, false),
+		UpdatedAt:                p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -599,13 +621,16 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 			FallbackProfileIDs: []uint{},
 			MaxFiles:           40, MaxDiffLines: 3000, MaxPasses: 4,
 			GlobalContextCeiling: global, EffectiveContextCeiling: global,
-			ReviewEffort:      store.ReviewEffortLow,
-			AutoTriageMode:    store.AutoTriageOff,
-			VerifyMaxFindings: store.DefaultVerifyMaxFindings,
-			VerifyMaxFiles:    store.DefaultVerifyMaxFiles,
-			VerifyTokenShare:  store.DefaultVerifyTokenShare,
-			VerifyTimeShare:   store.DefaultVerifyTimeShare,
-			VerifyTokenMax:    store.DefaultVerifyTokenMax,
+			ReviewEffort:          store.ReviewEffortLow,
+			AutoTriageMode:        store.AutoTriageOff,
+			VerifyMaxFindings:     store.DefaultVerifyMaxFindings,
+			VerifyMaxFiles:        store.DefaultVerifyMaxFiles,
+			VerifyTokenShare:      store.DefaultVerifyTokenShare,
+			VerifyTimeShare:       store.DefaultVerifyTimeShare,
+			VerifyTokenMax:        store.DefaultVerifyTokenMax,
+			ExternalAssociations:  append([]string(nil), store.DefaultExternalAssociations...),
+			MaxExternalDiffLines:  store.DefaultExternalDiffLines,
+			MaxExternalRunsPerDay: store.DefaultExternalRunsPerDay,
 		})
 		return
 	}
@@ -789,6 +814,76 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 	if !store.ValidReviewRecipient(strings.TrimSpace(policy.ReviewerTeam)) {
 		writeAPIError(w, http.StatusBadRequest, "invalid reviewer_team")
 		return
+	}
+
+	// External-contribution settings are new and the panel does not send them
+	// yet, so each omitted field keeps its stored value instead of being reset
+	// by an unrelated save.
+	allowExternalSet, associationsSet, externalDiffSet, externalRunsSet, externalBudgetSet := false, false, false, false, false
+	if value, present := raw["allow_external_reviews"]; present {
+		if err := json.Unmarshal(value, &policy.AllowExternalReviews); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid allow_external_reviews")
+			return
+		}
+		allowExternalSet = true
+	}
+	if value, present := raw["external_trusted_associations"]; present {
+		var associations []string
+		if err := json.Unmarshal(value, &associations); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid external_trusted_associations")
+			return
+		}
+		encoded, err := json.Marshal(associations)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid external_trusted_associations")
+			return
+		}
+		policy.ExternalTrustedAssociations = encoded
+		associationsSet = true
+	}
+	if value, present := raw["max_external_diff_lines"]; present {
+		if err := json.Unmarshal(value, &policy.MaxExternalDiffLines); err != nil || policy.MaxExternalDiffLines <= 0 {
+			writeAPIError(w, http.StatusBadRequest, "invalid max_external_diff_lines")
+			return
+		}
+		externalDiffSet = true
+	}
+	if value, present := raw["max_external_runs_per_day"]; present {
+		if err := json.Unmarshal(value, &policy.MaxExternalRunsPerDay); err != nil || policy.MaxExternalRunsPerDay <= 0 {
+			writeAPIError(w, http.StatusBadRequest, "invalid max_external_runs_per_day")
+			return
+		}
+		externalRunsSet = true
+	}
+	if value, present := raw["external_daily_token_budget"]; present {
+		if err := json.Unmarshal(value, &policy.ExternalDailyTokenBudget); err != nil ||
+			policy.ExternalDailyTokenBudget < 0 || policy.ExternalDailyTokenBudget > store.ReviewTokenBudgetMax {
+			writeAPIError(w, http.StatusBadRequest, "invalid external_daily_token_budget")
+			return
+		}
+		externalBudgetSet = true
+	}
+	if !allowExternalSet || !associationsSet || !externalDiffSet || !externalRunsSet || !externalBudgetSet {
+		if stored, err := s.Store.QAPolicyForTeam(r.Context(), teamID); err == nil {
+			if !allowExternalSet {
+				policy.AllowExternalReviews = stored.AllowExternalReviews
+			}
+			if !associationsSet {
+				policy.ExternalTrustedAssociations = stored.ExternalTrustedAssociations
+			}
+			if !externalDiffSet {
+				policy.MaxExternalDiffLines = stored.MaxExternalDiffLines
+			}
+			if !externalRunsSet {
+				policy.MaxExternalRunsPerDay = stored.MaxExternalRunsPerDay
+			}
+			if !externalBudgetSet {
+				policy.ExternalDailyTokenBudget = stored.ExternalDailyTokenBudget
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			writeAPIError(w, http.StatusInternalServerError, "load qa policy")
+			return
+		}
 	}
 	// A null or omitted ceiling clears the team override: PUT replaces the whole
 	// policy, so inheriting the global value is expressed by leaving it out.

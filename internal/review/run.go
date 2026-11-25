@@ -649,8 +649,8 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if baseRef == "" {
 		baseRef = cfg.PR.BaseRef
 	}
-	headRef := fmt.Sprintf("refs/pull/%d/head", cfg.PR.Number)
-	remote := strings.TrimSuffix(r.Cfg.GitBaseURL, "/") + "/" + cfg.Repo.FullName + ".git"
+	headRef := pullHeadRef(cfg.PR.Number)
+	remote := reviewRemote(r.Cfg.GitBaseURL, cfg.Repo.FullName)
 	remote = withCloneToken(remote, token)
 
 	pipelineCtx, cancelPipeline := context.WithCancel(ctx)
@@ -672,6 +672,13 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		var cancelTimeout context.CancelFunc
 		runCtx, cancelTimeout = context.WithTimeout(pipelineCtx, budgetTimeout)
 		defer cancelTimeout()
+	}
+	if cfg.PR.External() {
+		// The contribution is fetched from the base repository's pull ref, never
+		// from the fork, and the checkout stays detached and read-only. The SHA
+		// check below refuses a ref that moved after the trigger.
+		log.Log(runCtx, "worker", "", "info", logPhaseClone,
+			fmt.Sprintf("aporte externo: revisión de solo lectura desde %s %s", cfg.Repo.FullName, headRef))
 	}
 	// The heartbeat reports that the worker is alive, not that the pipeline
 	// still has budget: it outlives the review deadline so a run that overran
@@ -696,7 +703,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	log.Log(runCtx, "worker", "", "info", logPhaseClone,
 		fmt.Sprintf("checkout listo en %s: head %s, merge-base %s",
 			time.Since(cloneStarted).Round(time.Second), headSHA, mergeBase))
-	if run.HeadSHA != "" && !strings.EqualFold(headSHA, run.HeadSHA) {
+	if checkoutHeadMoved(run.HeadSHA, headSHA) {
 		// refs/pull/<n>/head is a moving ref: a push can land between the
 		// trigger and the clone. Reviewing that code and publishing it under
 		// run.HeadSHA would approve a SHA that was never reviewed.
@@ -1249,6 +1256,12 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		// Identity matching sees every known finding; resolution is limited to
 		// the paths this run actually reviewed.
 		upserts, resolved := ReconcileScoped(out.open, out.merged, run.ID, true, run.PullRequestID, out.anchors, scopePaths)
+		if cfg.PR.External() {
+			// Closing the contributor's review threads is a write based on
+			// hostile content; an external run only reports findings, it never
+			// resolves threads.
+			resolved = nil
+		}
 		for i := range upserts {
 			upserts[i].PullRequestID = run.PullRequestID
 		}
@@ -1348,6 +1361,24 @@ func (r *Runner) boxOpen(sealed string) ([]byte, error) {
 		return nil, errors.New("crypto box no configurado")
 	}
 	return r.Box.Open(sealed)
+}
+
+// pullHeadRef is the pull request ref in the base repository. External
+// contributions are always fetched from there, never from the fork.
+func pullHeadRef(number int) string {
+	return fmt.Sprintf("refs/pull/%d/head", number)
+}
+
+// reviewRemote is the clone URL of the base repository.
+func reviewRemote(gitBaseURL, repoFullName string) string {
+	return strings.TrimSuffix(gitBaseURL, "/") + "/" + repoFullName + ".git"
+}
+
+// checkoutHeadMoved reports whether the checked-out ref no longer matches the
+// head the run was created for. A moving pull ref must never be reviewed under
+// the old SHA. An empty expected SHA is a legacy run without the comparison.
+func checkoutHeadMoved(expected, actual string) bool {
+	return expected != "" && !strings.EqualFold(expected, actual)
 }
 
 func withCloneToken(remote string, token []byte) string {

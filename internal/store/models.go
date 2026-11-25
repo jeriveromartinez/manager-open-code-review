@@ -184,16 +184,28 @@ type PullRequest struct {
 	// the comparison identity (#141): the real base of the three-dot diff,
 	// resolved through the Compare API and cleared whenever the head or the
 	// base moves.
-	BaseSHA           string    `gorm:"column:base_sha"`
-	MergeBaseSHA      string    `gorm:"column:merge_base_sha"`
-	HeadRef           string    `gorm:"column:head_ref"`
-	HTMLURL           string    `gorm:"column:html_url"`
-	Draft             bool      `gorm:"column:draft"`
-	State             string    `gorm:"column:state"`
-	QAStatus          string    `gorm:"column:qa_status"`
-	GitHubUpdatedAt   time.Time `gorm:"column:github_updated_at"`
-	IsFork            bool      `gorm:"column:is_fork"`
-	HeadRepoFullName  string    `gorm:"column:head_repo_full_name"`
+	BaseSHA         string    `gorm:"column:base_sha"`
+	MergeBaseSHA    string    `gorm:"column:merge_base_sha"`
+	HeadRef         string    `gorm:"column:head_ref"`
+	HTMLURL         string    `gorm:"column:html_url"`
+	Draft           bool      `gorm:"column:draft"`
+	State           string    `gorm:"column:state"`
+	QAStatus        string    `gorm:"column:qa_status"`
+	GitHubUpdatedAt time.Time `gorm:"column:github_updated_at"`
+	// IsFork is derived from Origin for backward compatibility: an external
+	// (cross-repository or indeterminate) pull request is never auto-reviewed
+	// without the external policy. Origin is the source of truth because the
+	// head repository's own `fork` flag says nothing about the relationship
+	// between head and base (#148).
+	IsFork           bool   `gorm:"column:is_fork"`
+	Origin           string `gorm:"column:origin"`
+	HeadRepoFullName string `gorm:"column:head_repo_full_name"`
+	// Additions, Deletions and ChangedFiles are the size GitHub reported for
+	// the pull request. The external policy bounds the number of changed lines
+	// before a run is queued.
+	Additions         int       `gorm:"column:additions"`
+	Deletions         int       `gorm:"column:deletions"`
+	ChangedFiles      int       `gorm:"column:changed_files"`
 	CreatedAt         time.Time `gorm:"column:created_at"`
 	UpdatedAt         time.Time `gorm:"column:updated_at"`
 	ValidationsPassed int       `gorm:"column:validations_passed"`
@@ -365,11 +377,19 @@ type QAPolicy struct {
 	VerifyTimeShare   int    `gorm:"column:verify_time_share"`
 	VerifyTokenMax    int64  `gorm:"column:verify_token_max"`
 	// ReviewerLogin and ReviewerTeam are the GitHub review-request recipients
-	// of a run the engine cannot conclude, and of forks it does not review.
-	ReviewerLogin string    `gorm:"column:reviewer_login"`
-	ReviewerTeam  string    `gorm:"column:reviewer_team"`
-	CreatedAt     time.Time `gorm:"column:created_at"`
-	UpdatedAt     time.Time `gorm:"column:updated_at"`
+	// of a run the engine cannot conclude, and of external contributions it
+	// escalates.
+	ReviewerLogin string `gorm:"column:reviewer_login"`
+	ReviewerTeam  string `gorm:"column:reviewer_team"`
+	// External contributions are reviewed read-only only when the team opts in
+	// and the author is trusted. The limits are enforced before a run starts.
+	AllowExternalReviews        bool           `gorm:"column:allow_external_reviews"`
+	ExternalTrustedAssociations datatypes.JSON `gorm:"column:external_trusted_associations"`
+	MaxExternalDiffLines        int            `gorm:"column:max_external_diff_lines"`
+	MaxExternalRunsPerDay       int            `gorm:"column:max_external_runs_per_day"`
+	ExternalDailyTokenBudget    int64          `gorm:"column:external_daily_token_budget"`
+	CreatedAt                   time.Time      `gorm:"column:created_at"`
+	UpdatedAt                   time.Time      `gorm:"column:updated_at"`
 }
 
 // ReviewRequest is one GitHub review request for a pull request revision. The
@@ -450,6 +470,10 @@ type ReviewRun struct {
 	ErrorCode     string         `gorm:"column:error_code"`
 	ErrorMessage  string         `gorm:"column:error_message"`
 	CloneTokenEnc string         `gorm:"column:clone_token_enc"`
+	// ReservedTokens is the spend an external run holds before it reports real
+	// usage. The daily contribution budget counts COALESCE(total, reserved) so
+	// queued and running work is not invisible.
+	ReservedTokens int64 `gorm:"column:reserved_tokens"`
 	// CloneTokenExpiresAt lets the control process renew the token of a run
 	// that waits in the queue longer than the token lives. Nil on runs created
 	// before the expiry was stored.

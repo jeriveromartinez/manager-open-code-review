@@ -43,6 +43,20 @@ func TestMigrateCreatesPhase2Tables(t *testing.T) {
 	if !st.DB.Migrator().HasColumn(&store.PullRequest{}, "head_repo_full_name") {
 		t.Fatal("pull_requests.head_repo_full_name missing")
 	}
+	for _, column := range []string{"origin", "additions", "deletions", "changed_files"} {
+		if !st.DB.Migrator().HasColumn(&store.PullRequest{}, column) {
+			t.Fatalf("pull_requests.%s missing", column)
+		}
+	}
+	for _, column := range []string{
+		"allow_external_reviews", "external_trusted_associations",
+		"max_external_diff_lines", "max_external_runs_per_day",
+		"external_daily_token_budget",
+	} {
+		if !st.DB.Migrator().HasColumn(&store.QAPolicy{}, column) {
+			t.Fatalf("qa_policies.%s missing", column)
+		}
+	}
 }
 
 func TestOneActiveRunPerPullRequest(t *testing.T) {
@@ -850,10 +864,6 @@ func TestReviewConfigForPR(t *testing.T) {
 			return c.f.s.DB.WithContext(c.f.ctx).Model(&store.PullRequest{}).
 				Where("id = ?", c.pr.ID).Update("draft", true).Error
 		}},
-		{"fork PR", func(c *configSeed) error {
-			return c.f.s.DB.WithContext(c.f.ctx).Model(&store.PullRequest{}).
-				Where("id = ?", c.pr.ID).Update("is_fork", true).Error
-		}},
 		{"missing policy", func(c *configSeed) error {
 			return c.f.s.DB.WithContext(c.f.ctx).Delete(&store.QAPolicy{}, c.policy.ID).Error
 		}},
@@ -870,6 +880,24 @@ func TestReviewConfigForPR(t *testing.T) {
 			_, err := seed.f.s.ReviewConfigForPR(seed.f.ctx, seed.pr.ID)
 			requireNoReviewConfig(t, err)
 		})
+	}
+}
+
+// An authorized external pull request resolves the same configuration as an
+// internal one; the trigger applies the external policy before queueing.
+func TestReviewConfigForPRAllowsExternalOrigin(t *testing.T) {
+	seed := newConfigSeed(t)
+	if err := seed.f.s.DB.WithContext(seed.f.ctx).Model(&store.PullRequest{}).
+		Where("id = ?", seed.pr.ID).
+		Updates(map[string]any{"origin": store.OriginCrossRepo, "is_fork": true}).Error; err != nil {
+		t.Fatalf("mark external: %v", err)
+	}
+	cfg, err := seed.f.s.ReviewConfigForPR(seed.f.ctx, seed.pr.ID)
+	if err != nil {
+		t.Fatalf("ReviewConfigForPR(external) = %v, want a resolved config", err)
+	}
+	if cfg.PR.Origin != store.OriginCrossRepo || !cfg.PR.External() {
+		t.Fatalf("config PR = %+v, want an external origin", cfg.PR)
 	}
 }
 
@@ -1027,18 +1055,18 @@ func TestPendingReviewPRs(t *testing.T) {
 		t.Fatalf("PendingReviewPRs: %v", err)
 	}
 	ids := prIDs(got)
-	for _, pr := range []store.PullRequest{eligible, superseded} {
+	for _, pr := range []store.PullRequest{eligible, superseded, fork} {
 		if !hasID(ids, pr.ID) {
 			t.Errorf("PR #%d should be pending; got IDs %v", pr.Number, ids)
 		}
 	}
-	for _, pr := range []store.PullRequest{failed, succeeded, queued, draft, fork, closed, noPolicy, disabled} {
+	for _, pr := range []store.PullRequest{failed, succeeded, queued, draft, closed, noPolicy, disabled} {
 		if hasID(ids, pr.ID) {
 			t.Errorf("PR #%d should not be pending; got IDs %v", pr.Number, ids)
 		}
 	}
-	if len(ids) != 2 {
-		t.Fatalf("PendingReviewPRs returned %d PRs, want 2: %v", len(ids), ids)
+	if len(ids) != 3 {
+		t.Fatalf("PendingReviewPRs returned %d PRs, want 3: %v", len(ids), ids)
 	}
 
 	// Ordering is by updated_at DESC and LIMIT is applied in SQL.
@@ -1050,13 +1078,17 @@ func TestPendingReviewPRs(t *testing.T) {
 	if err := db.Exec(`UPDATE pull_requests SET updated_at = ? WHERE id = ?`, recent, superseded.ID).Error; err != nil {
 		t.Fatalf("refresh superseded PR: %v", err)
 	}
+	middle := time.Now().UTC().Add(-30 * time.Minute)
+	if err := db.Exec(`UPDATE pull_requests SET updated_at = ? WHERE id = ?`, middle, fork.ID).Error; err != nil {
+		t.Fatalf("age fork PR: %v", err)
+	}
 	got, err = f.s.PendingReviewPRs(f.ctx, 50)
 	if err != nil {
 		t.Fatalf("PendingReviewPRs after ordering: %v", err)
 	}
 	ids = prIDs(got)
-	if len(ids) != 2 || ids[0] != superseded.ID || ids[1] != eligible.ID {
-		t.Fatalf("order = %v, want [%d %d]", ids, superseded.ID, eligible.ID)
+	if len(ids) != 3 || ids[0] != superseded.ID || ids[1] != fork.ID || ids[2] != eligible.ID {
+		t.Fatalf("order = %v, want [%d %d %d]", ids, superseded.ID, fork.ID, eligible.ID)
 	}
 	got, err = f.s.PendingReviewPRs(f.ctx, 1)
 	if err != nil {

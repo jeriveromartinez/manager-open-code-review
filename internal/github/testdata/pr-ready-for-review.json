@@ -7,7 +7,7 @@
     "title": "Add QA endpoint",
     "user": {"login": "alice"},
     "author_association": "CONTRIBUTOR",
-    "head": {"sha": "aaa111", "ref": "feature/qa"},
+    "head": {"sha": "aaa111", "ref": "feature/qa", "repo": {"full_name": "acme/backend-api", "fork": false}},
     "base": {"ref": "main"},
     "html_url": "https://github.com/acme/backend-api/pull/142",
     "draft": false,
