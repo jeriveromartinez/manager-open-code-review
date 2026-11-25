@@ -67,6 +67,12 @@ const (
 	DefaultArchitectureTimeShare  = 20
 	DefaultArchitectureTokenMax   = 100000
 	ArchitectureTokenMaxMin       = 10000
+
+	// DefaultArchitectureBaselinePath is the trusted rule file resolved from
+	// the base commit. The exception policy defaults to deny so an exception
+	// only applies when an administrator opts in.
+	DefaultArchitectureBaselinePath    = ".architecture/baseline.json"
+	DefaultArchitectureExceptionPolicy = ArchitectureExceptionsDeny
 )
 
 // VerifyTokenMaxMin is the smallest per-run cap the second OCR pass accepts:
@@ -112,6 +118,18 @@ func ValidAutoTriageMode(mode string) bool {
 func ValidArchitectureAnalysisMode(mode string) bool {
 	switch mode {
 	case ArchitectureAnalysisOff, ArchitectureAnalysisObservation:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidArchitectureExceptionPolicy reports whether the baseline exception
+// policy is known. Unknown values are rejected instead of silently allowing
+// or denying exceptions.
+func ValidArchitectureExceptionPolicy(policy string) bool {
+	switch policy {
+	case ArchitectureExceptionsDeny, ArchitectureExceptionsBaseline:
 		return true
 	default:
 		return false
@@ -634,6 +652,16 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid architecture token max %d",
 			p.TeamID, p.ArchitectureTokenMax)
 	}
+	if p.ArchitectureBaselinePath == "" {
+		p.ArchitectureBaselinePath = DefaultArchitectureBaselinePath
+	}
+	if p.ArchitectureExceptionPolicy == "" {
+		p.ArchitectureExceptionPolicy = DefaultArchitectureExceptionPolicy
+	}
+	if !ValidArchitectureExceptionPolicy(p.ArchitectureExceptionPolicy) {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid architecture exception policy %q",
+			p.TeamID, p.ArchitectureExceptionPolicy)
+	}
 	globs := bytes.TrimSpace(p.ExcludeGlobs)
 	if len(globs) == 0 || bytes.Equal(globs, []byte("null")) {
 		p.ExcludeGlobs = datatypes.JSON([]byte(`[]`))
@@ -696,7 +724,8 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 			"max_external_diff_lines", "max_external_runs_per_day",
 			"external_daily_token_budget",
 			"architecture_analysis_mode", "architecture_token_share",
-			"architecture_time_share", "architecture_token_max", "updated_at",
+			"architecture_time_share", "architecture_token_max",
+			"architecture_baseline_path", "architecture_exception_policy", "updated_at",
 		}),
 	}).Create(&p).Error
 	if err != nil {
