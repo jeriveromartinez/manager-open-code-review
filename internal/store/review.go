@@ -73,7 +73,181 @@ const (
 	// only applies when an administrator opts in.
 	DefaultArchitectureBaselinePath    = ".architecture/baseline.json"
 	DefaultArchitectureExceptionPolicy = ArchitectureExceptionsDeny
+	// Consumer lookups are bounded independently of the review budget. The
+	// allow-list is small by design; the byte cap keeps a single vendored
+	// contract from dominating the run.
+	DefaultConsumerMaxLookups = 8
+	ConsumerMaxLookupsMin     = 1
+	ConsumerMaxLookupsMax     = 50
+	DefaultConsumerMaxBytes   = 1 << 20
+	ConsumerMaxBytesMin       = 4096
+	ConsumerMaxBytesMax       = 16 << 20
+
+	ConsumerVisibilityPublic  = "public"
+	ConsumerVisibilityPrivate = "private"
 )
+
+// ConsumerRef is one authorized producer–consumer dependency in a review
+// policy. Repository, Contract and Ref identify what to read; Path is the
+// consumer-side file that carries the pinned contract and defaults to Contract.
+// Ref may be a tag or a full commit SHA, but a branch is a moving ref: the
+// lookup resolves and records the observed commit SHA in the verdict, so the
+// evidence is reproducible even though a later run may see a different tip.
+// Visibility defaults to private: a consumer is only published by name when the
+// team explicitly declares it public and the reviewed repository is public too.
+type ConsumerRef struct {
+	Repository     string `json:"repository"`
+	Contract       string `json:"contract"`
+	Path           string `json:"path,omitempty"`
+	Ref            string `json:"ref"`
+	InstallationID int64  `json:"installation_id,omitempty"`
+	Essential      bool   `json:"essential,omitempty"`
+	Visibility     string `json:"visibility,omitempty"`
+	Version        string `json:"version,omitempty"`
+}
+
+// ConsumerIsPrivate reports whether the consumer's details may not be
+// published in a pull request. An undeclared visibility is private, so a
+// forgotten field never leaks another repository.
+func ConsumerIsPrivate(ref ConsumerRef) bool {
+	return strings.ToLower(strings.TrimSpace(ref.Visibility)) != ConsumerVisibilityPublic
+}
+
+// ValidConsumerVisibility reports whether visibility is empty, public or
+// private. Empty keeps the fail-closed private default.
+func ValidConsumerVisibility(visibility string) bool {
+	switch strings.ToLower(strings.TrimSpace(visibility)) {
+	case "", ConsumerVisibilityPublic, ConsumerVisibilityPrivate:
+		return true
+	default:
+		return false
+	}
+}
+
+// ParseConsumerAllowList decodes the policy column. An empty or null value is
+// an empty list, not an error.
+func ParseConsumerAllowList(raw datatypes.JSON) ([]ConsumerRef, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	var refs []ConsumerRef
+	if err := json.Unmarshal(trimmed, &refs); err != nil {
+		return nil, fmt.Errorf("decode consumer allow list: %w", err)
+	}
+	return refs, nil
+}
+
+// NormalizeConsumerAllowList validates and canonicalizes the allow-list. It
+// rejects duplicate repository/contract pairs instead of guessing which entry
+// the team meant.
+func NormalizeConsumerAllowList(refs []ConsumerRef) (datatypes.JSON, error) {
+	normalized := make([]ConsumerRef, 0, len(refs))
+	seen := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		ref.Repository = strings.TrimSpace(ref.Repository)
+		ref.Contract = normalizePolicyPath(ref.Contract)
+		ref.Path = normalizePolicyPath(ref.Path)
+		ref.Ref = strings.TrimSpace(ref.Ref)
+		ref.Visibility = strings.ToLower(strings.TrimSpace(ref.Visibility))
+		ref.Version = strings.TrimSpace(ref.Version)
+		if ref.Path == "" {
+			ref.Path = ref.Contract
+		}
+		if !validConsumerRepository(ref.Repository) {
+			return nil, fmt.Errorf("invalid consumer repository %q", ref.Repository)
+		}
+		if !validConsumerPath(ref.Contract) {
+			return nil, fmt.Errorf("invalid consumer contract %q", ref.Contract)
+		}
+		if !validConsumerPath(ref.Path) {
+			return nil, fmt.Errorf("invalid consumer path %q", ref.Path)
+		}
+		if ref.Ref == "" {
+			return nil, fmt.Errorf("consumer %s has no pinned ref", ref.Repository)
+		}
+		if ref.InstallationID < 0 {
+			return nil, fmt.Errorf("consumer %s has an invalid installation id", ref.Repository)
+		}
+		if !ValidConsumerVisibility(ref.Visibility) {
+			return nil, fmt.Errorf("consumer %s has an invalid visibility %q", ref.Repository, ref.Visibility)
+		}
+		if ref.Visibility == "" {
+			ref.Visibility = ConsumerVisibilityPrivate
+		}
+		key := ref.Repository + "\x00" + ref.Contract
+		if seen[key] {
+			return nil, fmt.Errorf("consumer %s for contract %s is duplicated", ref.Repository, ref.Contract)
+		}
+		seen[key] = true
+		normalized = append(normalized, ref)
+	}
+	if normalized == nil {
+		normalized = []ConsumerRef{}
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("encode consumer allow list: %w", err)
+	}
+	return datatypes.JSON(encoded), nil
+}
+
+// ValidConsumerBaselinePath reports whether path can be read from the base
+// tree. It must be repository-relative and cannot escape the checkout.
+func ValidConsumerBaselinePath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return true
+	}
+	normalized := normalizePolicyPath(path)
+	if normalized == "" || normalized != path {
+		return false
+	}
+	if strings.HasPrefix(normalized, "/") || strings.Contains(normalized, `\`) {
+		return false
+	}
+	for _, part := range strings.Split(normalized, "/") {
+		if part == ".." || part == "." || part == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizePolicyPath(path string) string {
+	path = strings.TrimSpace(strings.ReplaceAll(path, `\`, "/"))
+	path = strings.TrimPrefix(path, "./")
+	path = strings.TrimPrefix(path, "/")
+	return path
+}
+
+func validConsumerRepository(fullName string) bool {
+	parts := strings.Split(fullName, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.ContainsAny(part, " \t\r\n") {
+			return false
+		}
+	}
+	return true
+}
+
+func validConsumerPath(path string) bool {
+	if path == "" || strings.HasPrefix(path, "/") || strings.Contains(path, `\`) {
+		return false
+	}
+	if strings.ContainsAny(path, "*?[]") {
+		return false
+	}
+	for _, part := range strings.Split(path, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
 
 // VerifyTokenMaxMin is the smallest per-run cap the second OCR pass accepts:
 // below it the scan cannot answer anything useful.
@@ -662,6 +836,34 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid architecture exception policy %q",
 			p.TeamID, p.ArchitectureExceptionPolicy)
 	}
+	if p.ConsumerMaxLookups == 0 {
+		p.ConsumerMaxLookups = DefaultConsumerMaxLookups
+	}
+	if p.ConsumerMaxBytes == 0 {
+		p.ConsumerMaxBytes = DefaultConsumerMaxBytes
+	}
+	if p.ConsumerMaxLookups < ConsumerMaxLookupsMin || p.ConsumerMaxLookups > ConsumerMaxLookupsMax {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid consumer max lookups %d",
+			p.TeamID, p.ConsumerMaxLookups)
+	}
+	if p.ConsumerMaxBytes < ConsumerMaxBytesMin || p.ConsumerMaxBytes > ConsumerMaxBytesMax {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid consumer max bytes %d",
+			p.TeamID, p.ConsumerMaxBytes)
+	}
+	p.ConsumerBaselinePath = strings.TrimSpace(p.ConsumerBaselinePath)
+	if !ValidConsumerBaselinePath(p.ConsumerBaselinePath) {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid consumer baseline path %q",
+			p.TeamID, p.ConsumerBaselinePath)
+	}
+	consumers, parseErr := ParseConsumerAllowList(p.ConsumerAllowList)
+	if parseErr != nil {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: %w", p.TeamID, parseErr)
+	}
+	normalizedConsumers, normalizeErr := NormalizeConsumerAllowList(consumers)
+	if normalizeErr != nil {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: %w", p.TeamID, normalizeErr)
+	}
+	p.ConsumerAllowList = normalizedConsumers
 	globs := bytes.TrimSpace(p.ExcludeGlobs)
 	if len(globs) == 0 || bytes.Equal(globs, []byte("null")) {
 		p.ExcludeGlobs = datatypes.JSON([]byte(`[]`))
@@ -725,7 +927,9 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 			"external_daily_token_budget",
 			"architecture_analysis_mode", "architecture_token_share",
 			"architecture_time_share", "architecture_token_max",
-			"architecture_baseline_path", "architecture_exception_policy", "updated_at",
+			"architecture_baseline_path", "architecture_exception_policy",
+			"consumer_allow_list", "consumer_baseline_path",
+			"consumer_max_lookups", "consumer_max_bytes", "updated_at",
 		}),
 	}).Create(&p).Error
 	if err != nil {

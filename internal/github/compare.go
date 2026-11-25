@@ -14,6 +14,59 @@ type Compare struct {
 	Apps AppProvider
 }
 
+// ChangedFile is one path of a comparison. PreviousFilename keeps a rename
+// visible so a consumer pinned to the old contract is still checked.
+type ChangedFile struct {
+	Filename         string
+	PreviousFilename string
+}
+
+// Comparison is everything the consumer lookup needs from a base–head diff:
+// the merge base it is relative to and the changed paths. GitHub caps the file
+// list, so Truncated tells the caller the list may miss a changed contract.
+type Comparison struct {
+	MergeBase string
+	Files     []ChangedFile
+	Truncated bool
+}
+
+// compareFilesLimit is GitHub's documented cap for CommitComparison.Files.
+const compareFilesLimit = 300
+
+// ComparisonFiles resolves the merge base and the changed paths of a
+// comparison. It is a separate call from MergeBase because the consumer lookup
+// needs the paths, while the run identity only needs the merge base.
+func (c *Compare) ComparisonFiles(ctx context.Context, installationID int64, repoFullName, base, head string) (Comparison, error) {
+	if c == nil || c.Apps == nil {
+		return Comparison{}, errors.New("github: compare has no app provider")
+	}
+	owner, name, ok := strings.Cut(repoFullName, "/")
+	if !ok || owner == "" || name == "" {
+		return Comparison{}, fmt.Errorf("invalid repository full name %q", repoFullName)
+	}
+	app, err := c.Apps.App(ctx)
+	if err != nil {
+		return Comparison{}, fmt.Errorf("load GitHub App: %w", err)
+	}
+	client, err := app.InstallationClient(installationID)
+	if err != nil {
+		return Comparison{}, fmt.Errorf("create installation %d client: %w", installationID, err)
+	}
+	comparison, _, err := client.Repositories.CompareCommits(ctx, owner, name, base, head, nil)
+	if err != nil {
+		return Comparison{}, fmt.Errorf("compare %s...%s in %s: %w", base, head, repoFullName, err)
+	}
+	out := Comparison{MergeBase: comparison.GetMergeBaseCommit().GetSHA()}
+	for _, file := range comparison.Files {
+		out.Files = append(out.Files, ChangedFile{
+			Filename:         file.GetFilename(),
+			PreviousFilename: file.GetPreviousFilename(),
+		})
+	}
+	out.Truncated = len(out.Files) >= compareFilesLimit
+	return out, nil
+}
+
 // MergeBase asks GitHub for the merge base of head against base. Any failure is
 // returned to the caller, which must enqueue a conservative review instead of
 // reusing a result of a comparison it could not resolve.

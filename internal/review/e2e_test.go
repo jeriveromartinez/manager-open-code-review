@@ -9,6 +9,7 @@ package review
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,7 @@ func TestE2EFlow(t *testing.T) {
 	t.Run("push before checkout supersedes and the new head is reviewed", testE2ESuperseded)
 	t.Run("only a successful run resolves an open finding", testE2EFindingsLifecycle)
 	t.Run("auto-triage withdraws the refuted finding and publishes a curated summary", testE2EAutoTriagePublishesCuratedSummary)
+	t.Run("consumer impact is resolved by the control process and reaches the verdict", testE2EConsumerImpact)
 }
 
 // --- fake GitHub API -------------------------------------------------------
@@ -113,6 +115,13 @@ type e2eGitHub struct {
 	nextCommentID      int64
 	nextReviewID       int64
 	nextCheckID        int64
+	// Consumer fixture: the producer contract at the merge base and at the
+	// head, and the pinned consumer evidence the App returns.
+	mergeBase       string
+	producerBase    string
+	producerHead    string
+	consumerSHA     string
+	consumerContent string
 	// failReviewCommentsOnce drops one per-review comments response, emulating a
 	// review created on GitHub whose coordinates never reached the caller.
 	failReviewCommentsOnce bool
@@ -142,6 +151,31 @@ func (g *e2eGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer g.mu.Unlock()
 
 	switch {
+	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/compare/"):
+		writeJSON(map[string]any{
+			"merge_base_commit": map[string]any{"sha": g.mergeBase},
+			"files": []map[string]string{
+				{"filename": "auth.go"},
+				{"filename": "main.go"},
+				{"filename": "api/openapi.yaml"},
+			},
+		}, http.StatusOK)
+
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/origin/contents/api/openapi.yaml":
+		content := g.producerBase
+		ref := r.URL.Query().Get("ref")
+		if ref != "" && ref != g.mergeBase && ref != "main" {
+			content = g.producerHead
+		}
+		writeJSON(e2eContentPayload(content, "producer-blob"), http.StatusOK)
+
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/consumer/commits/v1":
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte(g.consumerSHA))
+
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/consumer/contents/api/openapi.yaml":
+		writeJSON(e2eContentPayload(g.consumerContent, "consumer-blob"), http.StatusOK)
+
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/origin/check-runs":
 		var in struct {
 			HeadSHA string `json:"head_sha"`
@@ -564,11 +598,23 @@ type e2eApps struct{ app *ghapp.App }
 
 func (p e2eApps) App(context.Context) (*ghapp.App, error) { return p.app, nil }
 
+// e2eContentPayload is the Contents API shape the App client decodes.
+func e2eContentPayload(content, sha string) map[string]any {
+	return map[string]any{
+		"type":     "file",
+		"encoding": "base64",
+		"size":     len(content),
+		"sha":      sha,
+		"content":  base64.StdEncoding.EncodeToString([]byte(content)),
+	}
+}
+
 type e2eFixture struct {
 	*runTestFixture
 	runner    *Runner
 	worker    *publish.Worker
 	trigger   *Trigger
+	apps      e2eApps
 	gh        *e2eGitHub
 	events    *e2eEventStream
 	publisher events.Publisher
@@ -605,6 +651,7 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 		runTestFixture: f,
 		runner:         runner,
 		worker:         worker,
+		apps:           apps,
 		trigger: &Trigger{
 			Store: f.s, Apps: apps, Jobs: e2eTriggerJobs{f.jobs}, Checks: worker, Box: f.box,
 		},
@@ -1341,6 +1388,63 @@ func testE2EAutoTriagePublishesCuratedSummary(t *testing.T) {
 		t.Errorf("inline comment at %s:%d, want the confirmed finding's added line",
 			comment.Path, comment.Line)
 	}
+}
+
+func testE2EConsumerImpact(t *testing.T) {
+	f := newE2EFixture(t)
+	f.gh.mergeBase = f.baseSHA
+	f.gh.producerBase = "openapi: 1\n"
+	f.gh.producerHead = "openapi: 2\n"
+	f.gh.consumerSHA = "consumer-sha"
+	f.gh.consumerContent = "openapi: 1\n"
+	// The lookup needs the changed paths; production wires the same resolver.
+	f.trigger.Compare = &ghapp.Compare{Apps: f.apps}
+
+	allow, err := store.NormalizeConsumerAllowList([]store.ConsumerRef{{
+		Repository: "acme/consumer", Contract: "api/openapi.yaml", Ref: "v1",
+		Visibility: store.ConsumerVisibilityPublic, Essential: true,
+	}})
+	if err != nil {
+		t.Fatalf("normalize consumer allow-list: %v", err)
+	}
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("team_id = ?", f.policy.TeamID).
+		Updates(map[string]any{
+			"consumer_allow_list":  allow,
+			"consumer_max_lookups": store.DefaultConsumerMaxLookups,
+			"consumer_max_bytes":   store.DefaultConsumerMaxBytes,
+		}).Error; err != nil {
+		t.Fatalf("configure consumers: %v", err)
+	}
+
+	runID := f.enqueue(t, false)
+	run := f.loadRun(t, runID)
+	snapshot := store.DecodeConsumerImpact(run.ConsumerImpact)
+	if snapshot.Status != store.ConsumersComplete || snapshot.Configured != 1 || snapshot.Checked != 1 {
+		t.Fatalf("control-process snapshot = %+v", snapshot)
+	}
+	if len(snapshot.Consumers) != 1 {
+		t.Fatalf("snapshot consumers = %+v", snapshot.Consumers)
+	}
+	consumer := snapshot.Consumers[0]
+	if consumer.Status != store.ConsumerStatusAffected || consumer.Impact != store.ConsumerImpactVerified ||
+		consumer.SHA != "consumer-sha" || consumer.Repository != "acme/consumer" {
+		t.Fatalf("snapshot consumer = %+v", consumer)
+	}
+	if !containsString(snapshot.Sources, store.ConsumerSourcePolicy) ||
+		!containsString(snapshot.Sources, "github") {
+		t.Errorf("snapshot sources = %v", snapshot.Sources)
+	}
+
+	f.execute(t, runID)
+	run = f.loadRun(t, runID)
+	assertE2ERun(t, run, store.RunSucceeded, "")
+	verdict := store.DecodeArchitectureVerdict(run.ArchitectureAnalysis)
+	if verdict.Consumers.Status != store.ConsumersComplete || len(verdict.Consumers.Consumers) != 1 ||
+		verdict.Consumers.Consumers[0].SHA != "consumer-sha" {
+		t.Fatalf("worker verdict consumers = %+v", verdict.Consumers)
+	}
+	assertE2ESummary(t, f, "Consumidores del contrato", "acme/consumer", "api/openapi.yaml", "afectado")
 }
 
 func (f *e2eFixture) reloadFinding(t *testing.T, id string) store.Finding {

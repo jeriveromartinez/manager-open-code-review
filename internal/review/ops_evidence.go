@@ -668,6 +668,7 @@ func opsContainsAny(value string, needles []string) bool {
 
 func appendUnique(values []string, additions ...string) []string {
 	for _, addition := range additions {
+		addition = strings.TrimSpace(addition)
 		if addition == "" {
 			continue
 		}

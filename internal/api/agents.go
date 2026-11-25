@@ -485,6 +485,10 @@ type qaPolicyResponse struct {
 	ArchitectureTokenMax        int64                 `json:"architecture_token_max"`
 	ArchitectureBaselinePath    string                `json:"architecture_baseline_path"`
 	ArchitectureExceptionPolicy string                `json:"architecture_exception_policy"`
+	ConsumerAllowList           []store.ConsumerRef   `json:"consumer_allow_list"`
+	ConsumerBaselinePath        string                `json:"consumer_baseline_path"`
+	ConsumerMaxLookups          int                   `json:"consumer_max_lookups"`
+	ConsumerMaxBytes            int64                 `json:"consumer_max_bytes"`
 	PromptCache                 bool                  `json:"prompt_cache"`
 	// Revision identifies the policy content; a review records it (#153).
 	Revision  string `json:"revision"`
@@ -575,6 +579,13 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 	if exceptionPolicy == "" {
 		exceptionPolicy = store.DefaultArchitectureExceptionPolicy
 	}
+	consumers, err := store.ParseConsumerAllowList(p.ConsumerAllowList)
+	if err != nil {
+		consumers = nil
+	}
+	if consumers == nil {
+		consumers = []store.ConsumerRef{}
+	}
 	return qaPolicyResponse{
 		ID: p.ID, TeamID: p.TeamID, LLMProfileID: p.LLMProfileID,
 		FallbackProfileIDs: fallbacks,
@@ -606,6 +617,10 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 		ArchitectureTokenMax:        verifyDefault64(p.ArchitectureTokenMax, store.DefaultArchitectureTokenMax),
 		ArchitectureBaselinePath:    baselinePath,
 		ArchitectureExceptionPolicy: exceptionPolicy,
+		ConsumerAllowList:           consumers,
+		ConsumerBaselinePath:        p.ConsumerBaselinePath,
+		ConsumerMaxLookups:          verifyDefault(p.ConsumerMaxLookups, store.DefaultConsumerMaxLookups),
+		ConsumerMaxBytes:            verifyDefault64(p.ConsumerMaxBytes, store.DefaultConsumerMaxBytes),
 		PromptCache:                 promptCache,
 		Revision:                    store.PolicyRevision(p, false),
 		UpdatedAt:                   p.UpdatedAt.UTC().Format(time.RFC3339),
@@ -659,6 +674,9 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 			ArchitectureTokenShare:   store.DefaultArchitectureTokenShare,
 			ArchitectureTimeShare:    store.DefaultArchitectureTimeShare,
 			ArchitectureTokenMax:     store.DefaultArchitectureTokenMax,
+			ConsumerAllowList:        []store.ConsumerRef{},
+			ConsumerMaxLookups:       store.DefaultConsumerMaxLookups,
+			ConsumerMaxBytes:         store.DefaultConsumerMaxBytes,
 		})
 		return
 	}
@@ -1036,6 +1054,71 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 			(policy.ArchitectureExceptionPolicy != "" &&
 				!store.ValidArchitectureExceptionPolicy(policy.ArchitectureExceptionPolicy)) {
 			writeAPIError(w, http.StatusBadRequest, "invalid architecture_exception_policy")
+			return
+		}
+	}
+
+	// Consumer settings are new and the panel does not send them yet, so an
+	// omitted value keeps the stored one instead of clearing the allow-list on
+	// every unrelated policy save.
+	consumerListSet, consumerBaselineSet := false, false
+	consumerLookupsSet, consumerBytesSet := false, false
+	if value, present := raw["consumer_allow_list"]; present {
+		var refs []store.ConsumerRef
+		if err := json.Unmarshal(value, &refs); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid consumer_allow_list")
+			return
+		}
+		encoded, err := store.NormalizeConsumerAllowList(refs)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid consumer_allow_list")
+			return
+		}
+		policy.ConsumerAllowList = encoded
+		consumerListSet = true
+	}
+	if value, present := raw["consumer_baseline_path"]; present {
+		if err := json.Unmarshal(value, &policy.ConsumerBaselinePath); err != nil ||
+			!store.ValidConsumerBaselinePath(policy.ConsumerBaselinePath) {
+			writeAPIError(w, http.StatusBadRequest, "invalid consumer_baseline_path")
+			return
+		}
+		consumerBaselineSet = true
+	}
+	if value, present := raw["consumer_max_lookups"]; present {
+		if err := json.Unmarshal(value, &policy.ConsumerMaxLookups); err != nil ||
+			policy.ConsumerMaxLookups < store.ConsumerMaxLookupsMin ||
+			policy.ConsumerMaxLookups > store.ConsumerMaxLookupsMax {
+			writeAPIError(w, http.StatusBadRequest, "invalid consumer_max_lookups")
+			return
+		}
+		consumerLookupsSet = true
+	}
+	if value, present := raw["consumer_max_bytes"]; present {
+		if err := json.Unmarshal(value, &policy.ConsumerMaxBytes); err != nil ||
+			policy.ConsumerMaxBytes < store.ConsumerMaxBytesMin ||
+			policy.ConsumerMaxBytes > store.ConsumerMaxBytesMax {
+			writeAPIError(w, http.StatusBadRequest, "invalid consumer_max_bytes")
+			return
+		}
+		consumerBytesSet = true
+	}
+	if !consumerListSet || !consumerBaselineSet || !consumerLookupsSet || !consumerBytesSet {
+		if stored, err := s.Store.QAPolicyForTeam(r.Context(), teamID); err == nil {
+			if !consumerListSet {
+				policy.ConsumerAllowList = stored.ConsumerAllowList
+			}
+			if !consumerBaselineSet {
+				policy.ConsumerBaselinePath = stored.ConsumerBaselinePath
+			}
+			if !consumerLookupsSet {
+				policy.ConsumerMaxLookups = stored.ConsumerMaxLookups
+			}
+			if !consumerBytesSet {
+				policy.ConsumerMaxBytes = stored.ConsumerMaxBytes
+			}
+		} else if !errors.Is(err, store.ErrNotFound) {
+			writeAPIError(w, http.StatusInternalServerError, "load qa policy")
 			return
 		}
 	}

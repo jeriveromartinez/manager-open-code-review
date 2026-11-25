@@ -391,6 +391,17 @@ type QAPolicy struct {
 	// ArchitectureExceptionPolicy decides whether exceptions declared in the
 	// baseline are honored. Deny is the safe default.
 	ArchitectureExceptionPolicy string `gorm:"column:architecture_exception_policy;default:deny"`
+	// ConsumerAllowList is the JSON array of authorized producer–consumer
+	// dependencies the review may look up in other repositories (#160). The
+	// lookup is bounded by ConsumerMaxLookups and ConsumerMaxBytes, and only the
+	// listed App installations and repositories are ever contacted.
+	ConsumerAllowList datatypes.JSON `gorm:"column:consumer_allow_list"`
+	// ConsumerBaselinePath optionally points at a JSON file in the base tree
+	// that declares more consumers. It is read from the reviewed base, so a
+	// pull request cannot change the consumers it is checked against.
+	ConsumerBaselinePath string `gorm:"column:consumer_baseline_path"`
+	ConsumerMaxLookups   int    `gorm:"column:consumer_max_lookups"`
+	ConsumerMaxBytes     int64  `gorm:"column:consumer_max_bytes"`
 	// ReviewerLogin and ReviewerTeam are the GitHub review-request recipients
 	// of a run the engine cannot conclude, and of external contributions it
 	// escalates.
@@ -498,6 +509,11 @@ type ReviewRun struct {
 	// (#139). The worker process has no master key, so it cannot call GitHub
 	// itself and reads this snapshot instead.
 	LinkedIssues datatypes.JSON `gorm:"column:linked_issues"`
+	// ConsumerImpact is the masked snapshot of the authorized consumer lookups
+	// the control process resolved for this run (#160). The worker cannot call
+	// GitHub, so it attaches this evidence to the verdict instead of resolving
+	// it. Null means the lookup was not available and must stay explicit.
+	ConsumerImpact datatypes.JSON `gorm:"column:consumer_impact"`
 	// Structured token consumption, summed over every model call of the run.
 	// Nil on runs created before consumption was recorded (#73).
 	InputTokens      *int64 `gorm:"column:input_tokens"`

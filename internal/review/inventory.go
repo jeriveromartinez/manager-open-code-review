@@ -25,7 +25,9 @@ type changedFile struct {
 	Path string
 	// OldPath is the source of a rename or copy. It lets the dependency check
 	// compare the head imports with the file's actual base content instead of
-	// treating every import as new.
+	// treating every import as new, and the consumer lookup matches it too: a
+	// contract moved elsewhere is still a change for a consumer pinned to the
+	// old path.
 	OldPath string
 	Kind    string
 	// Renamed distinguishes a move from an in-place edit. It is a structural

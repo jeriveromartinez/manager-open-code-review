@@ -895,6 +895,21 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 				fmt.Sprintf("no se pudo inventariar el cambio para la línea base: %v", baselineInvErr))
 		}
 	}
+	// The control process resolved the authorized consumers with the App
+	// credentials and stored a masked snapshot on the run (#160). The worker
+	// only attaches it; a missing snapshot is an explicit limitation, never a
+	// silent pass.
+	consumerImpact := store.DecodeConsumerImpact(run.ConsumerImpact)
+	if consumerImpact.Status == "" {
+		if analysisMode == store.ArchitectureAnalysisObservation {
+			consumerImpact = unavailableConsumerImpact(runCtx, workDir, fromSHA, cfg.Policy, cfg.Repo.Private)
+		} else {
+			consumerImpact = store.ArchitectureConsumers{Status: store.ConsumersNotConfigured}
+		}
+	}
+	// Consumer evidence is rendered independently: it never forces the OCR
+	// analysis on and never changes #157's explicit activation rule.
+	consumerRequested := consumerLookupRelevant(consumerImpact)
 	analysisRequested := architectureAnalysisRequested(analysisMode, invErr, signals)
 	analysisBudget := architectureBudget(cfg.Policy, timeout, reviewBudget)
 	// The analysis spends from the same aggregate budget. Carve its cap out
@@ -954,6 +969,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		log.Log(runCtx, "worker", "ops", opsLogLevel(opsEvidence.Status), logPhasePolicy,
 			fmt.Sprintf("evidencia operativa %s: %s", opsEvidence.Status, opsEvidenceSummary(opsEvidence)))
 	}
+	architectureVerdict.Consumers = consumerImpact
 	if invErr != nil {
 		architectureVerdict.Errors = append(architectureVerdict.Errors,
 			fmt.Sprintf("no se pudo inventariar el cambio: %v", invErr))
@@ -968,7 +984,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			fmt.Sprintf("línea base de arquitectura %s: %d regla(s), %d decisión(es), %d comprobación(es)",
 				baseline.Status, len(baseline.Rules), len(baseline.Decisions), len(baseline.Checks)))
 	}
-	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
+	out.architecture = store.ArchitectureVerdictJSON(store.MaskRedactedConsumers(architectureVerdict))
 	if len(contracts.Contracts) > 0 {
 		log.Log(runCtx, "worker", "analysis", "info", logPhasePolicy, fmt.Sprintf(
 			"contratos: %s, %d comparado(s) de %d declarado(s)",
@@ -983,6 +999,10 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	case analysisMode == store.ArchitectureAnalysisObservation:
 		log.Log(runCtx, "worker", "analysis", "info", logPhasePolicy,
 			"análisis arquitectónico no solicitado: el cambio no activó ninguna señal")
+		if consumerRequested {
+			log.Log(runCtx, "worker", "analysis", "info", logPhasePolicy,
+				fmt.Sprintf("consumidores evaluados sin análisis arquitectónico: estado %s", consumerImpact.Status))
+		}
 	}
 
 	// The review context is profile-independent, so it is built once and reused
@@ -1295,6 +1315,8 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if opsEvaluated {
 		architectureVerdict = applyOpsEvidence(architectureVerdict, opsEvidence)
 	}
+	architectureVerdict = applyConsumerImpact(architectureVerdict)
+	architectureVerdict = store.MaskRedactedConsumers(architectureVerdict)
 	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
 	if analysisRequested {
 		log.Log(runCtx, "worker", "analysis", architectureLogLevel(architectureVerdict.Status), logPhaseOCR,
@@ -1843,7 +1865,8 @@ func markArchitectureInconclusive(out *runOutcome, verdict *store.ArchitectureVe
 		verdict.Status = store.ArchitectureInconclusive
 	}
 	verdict.Errors = append(verdict.Errors, err.Error())
-	out.architecture = store.ArchitectureVerdictJSON(*verdict)
+	final := store.MaskRedactedConsumers(applyConsumerImpact(*verdict))
+	out.architecture = store.ArchitectureVerdictJSON(final)
 }
 
 func truncateRunMessage(message string) string {

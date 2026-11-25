@@ -64,6 +64,41 @@ const (
 	ContractChangeModified = "modified"
 )
 
+// Consumer impact states. The lookup is observation-only: it records what it
+// could prove about authorized consumers in other repositories and never
+// changes the check, the QA status or the review outcome.
+const (
+	ConsumersNotConfigured = "not_configured"
+	ConsumersComplete      = "complete"
+	ConsumersPartial       = "partial"
+	ConsumersUnknown       = "unknown"
+
+	ConsumerStatusAffected   = "affected"
+	ConsumerStatusCompatible = "compatible"
+	ConsumerStatusUnknown    = "unknown"
+	ConsumerStatusOutOfScope = "out_of_scope"
+	ConsumerStatusSkipped    = "skipped"
+
+	ConsumerImpactVerified = "verified"
+	ConsumerImpactNone     = "none"
+	ConsumerImpactUnknown  = "unknown"
+
+	ConsumerSourcePolicy   = "policy"
+	ConsumerSourceBaseline = "baseline"
+
+	ConsumerReasonUnauthorized      = "unauthorized"
+	ConsumerReasonUnavailable       = "unavailable"
+	ConsumerReasonTimeout           = "timeout"
+	ConsumerReasonLookupFailed      = "lookup_failed"
+	ConsumerReasonLookupBudget      = "lookup_budget_exhausted"
+	ConsumerReasonTooLarge          = "contract_too_large"
+	ConsumerReasonNoDigest          = "no_digest"
+	ConsumerReasonContractUnchanged = "contract_not_changed"
+	ConsumerReasonDifferentVersion  = "different_version"
+	ConsumerReasonOnHead            = "already_on_head"
+	ConsumerReasonOnBase            = "still_on_base"
+)
+
 // ArchitectureVerdict is the structured result of the architectural analysis
 // of one base–head comparison. It is stored as JSON on the review run, so the
 // panel, the summary comment and the check run all read the same object.
@@ -101,6 +136,11 @@ type ArchitectureVerdict struct {
 	// contracts. It is independent of the model analysis and its status never
 	// changes the review outcome.
 	Contracts ArchitectureContracts `json:"contracts"`
+	// Consumers records the authorized producer–consumer dependencies of the
+	// changed contracts, the pinned revision consulted for each one and the
+	// remaining evidence gaps. It is independent of the model analysis and its
+	// status never changes the review outcome.
+	Consumers ArchitectureConsumers `json:"consumers"`
 	// Recommendation is the original maintainer recommendation from the
 	// analysis. It stays as evidence even after a human decision changes the
 	// effective outcome; EffectiveDecision records that later outcome.
@@ -326,6 +366,104 @@ type OpsControls struct {
 func (o OpsEvidence) HasApplicable() bool {
 	for _, dimension := range o.Dimensions {
 		if dimension.Applies {
+			return true
+		}
+	}
+	return false
+}
+
+// ArchitectureConsumers is the aggregate of the consumer lookup. Checked counts
+// the entries that were actually queried; an entry outside the changed
+// contracts or past the lookup budget stays visible without being contacted.
+type ArchitectureConsumers struct {
+	Status        string                 `json:"status"`
+	Configured    int                    `json:"configured"`
+	Checked       int                    `json:"checked"`
+	Essential     int                    `json:"essential,omitempty"`
+	RequiresHuman bool                   `json:"requires_human,omitempty"`
+	Consumers     []ArchitectureConsumer `json:"consumers,omitempty"`
+	Sources       []string               `json:"sources,omitempty"`
+	Errors        []string               `json:"errors,omitempty"`
+}
+
+// ArchitectureConsumer is one configured dependency. SHA is the pinned commit
+// the consumer ref resolved to; ContractSHA and Digest identify the exact
+// consumer-side contract read, so the same input always yields the same result.
+type ArchitectureConsumer struct {
+	Repository     string `json:"repository"`
+	Contract       string `json:"contract"`
+	Path           string `json:"path,omitempty"`
+	Ref            string `json:"ref,omitempty"`
+	SHA            string `json:"sha,omitempty"`
+	ContractSHA    string `json:"contract_sha,omitempty"`
+	Version        string `json:"version,omitempty"`
+	Status         string `json:"status"`
+	Impact         string `json:"impact"`
+	Essential      bool   `json:"essential,omitempty"`
+	Source         string `json:"source,omitempty"`
+	Private        bool   `json:"private,omitempty"`
+	Redacted       bool   `json:"redacted,omitempty"`
+	Digest         string `json:"digest,omitempty"`
+	ProducerDigest string `json:"producer_digest,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+// MaskRedactedConsumers clears every identifying field of a consumer whose
+// details may not be published. The verdict is persisted and served to the
+// panel, so redaction has to happen before serialization and not only in the
+// summary renderer.
+func MaskRedactedConsumers(verdict ArchitectureVerdict) ArchitectureVerdict {
+	verdict.Consumers = MaskRedactedConsumerImpact(verdict.Consumers)
+	return verdict
+}
+
+// MaskRedactedConsumerImpact masks the consumer aggregate itself, so the
+// control process can persist a snapshot before the worker ever sees it.
+func MaskRedactedConsumerImpact(consumers ArchitectureConsumers) ArchitectureConsumers {
+	for i := range consumers.Consumers {
+		consumer := &consumers.Consumers[i]
+		if !consumer.Redacted {
+			continue
+		}
+		consumer.Repository = ""
+		consumer.Contract = ""
+		consumer.Path = ""
+		consumer.Ref = ""
+		consumer.SHA = ""
+		consumer.ContractSHA = ""
+		consumer.Version = ""
+		consumer.Digest = ""
+		consumer.ProducerDigest = ""
+	}
+	return consumers
+}
+
+// ConsumerImpactJSON encodes the masked consumer snapshot persisted on a run.
+func ConsumerImpactJSON(consumers ArchitectureConsumers) []byte {
+	raw, err := json.Marshal(consumers)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// DecodeConsumerImpact reads the snapshot the control process stored on the
+// run. An empty value yields the zero aggregate, which the worker treats as a
+// missing lookup and fills with an explicit unavailable result.
+func DecodeConsumerImpact(raw []byte) ArchitectureConsumers {
+	var consumers ArchitectureConsumers
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return consumers
+	}
+	_ = json.Unmarshal(raw, &consumers)
+	return consumers
+}
+
+// HasRedactedConsumers reports whether any stored consumer must be masked
+// before serving the verdict.
+func HasRedactedConsumers(verdict ArchitectureVerdict) bool {
+	for _, consumer := range verdict.Consumers.Consumers {
+		if consumer.Redacted {
 			return true
 		}
 	}
