@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
     getRepoPolicy: vi.fn(),
     saveRepoPolicy: vi.fn(),
     clearRepoPolicy: vi.fn(),
+    getPolicy: vi.fn(),
+    savePolicy: vi.fn(),
   },
   session: {
     me: null as Me | null,
@@ -93,6 +95,21 @@ function basePolicy(overrides: Partial<QAPolicy> = {}): QAPolicy {
     verify_token_share: 20,
     verify_time_share: 15,
     verify_token_max: 100000,
+    allow_external_reviews: false,
+    external_trusted_associations: ['OWNER', 'MEMBER', 'COLLABORATOR'],
+    max_external_diff_lines: 3000,
+    max_external_runs_per_day: 10,
+    external_daily_token_budget: 0,
+    architecture_analysis_mode: 'observation',
+    architecture_token_share: 25,
+    architecture_time_share: 20,
+    architecture_token_max: 100000,
+    architecture_baseline_path: '.architecture/baseline.json',
+    architecture_exception_policy: 'deny',
+    consumer_allow_list: [],
+    consumer_baseline_path: '',
+    consumer_max_lookups: 8,
+    consumer_max_bytes: 1048576,
     prompt_cache: false,
     revision: 'team-rev',
     updated_at: '2026-11-19T10:00:00Z',
@@ -172,6 +189,8 @@ describe('ReposView', () => {
     mocks.api.getRepoPolicy.mockResolvedValue(repoPolicyResponse())
     mocks.api.saveRepoPolicy.mockResolvedValue(repoPolicyResponse())
     mocks.api.clearRepoPolicy.mockResolvedValue(repoPolicyResponse())
+    mocks.api.getPolicy.mockResolvedValue(basePolicy())
+    mocks.api.savePolicy.mockResolvedValue(basePolicy())
     mocks.session.load.mockResolvedValue(null)
     live.registrations.length = 0
   })
@@ -675,6 +694,249 @@ describe('ReposView', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-repo-policy="20"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('muestra los consumidores efectivos y sus límites en el editor', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+    mocks.api.getRepoPolicy.mockResolvedValue(
+      repoPolicyResponse({
+        effective: basePolicy({
+          consumer_allow_list: [
+            { repository: 'acme/consumer', ref: 'v1.2.0', contract: 'api/openapi.yaml' },
+          ],
+          consumer_baseline_path: '.qa/consumers.json',
+          consumer_max_lookups: 3,
+          consumer_max_bytes: 65536,
+        }),
+      }),
+    )
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-policy-consumers]').text()).toContain('Consumidores autorizados')
+    expect(
+      (wrapper.get('[data-consumer-repository="0"]').element as HTMLInputElement).value,
+    ).toBe('acme/consumer')
+    expect((wrapper.get('[data-consumer-ref="0"]').element as HTMLInputElement).value).toBe(
+      'v1.2.0',
+    )
+    expect((wrapper.get('[data-consumer-contract="0"]').element as HTMLInputElement).value).toBe(
+      'api/openapi.yaml',
+    )
+    expect((wrapper.get('[data-consumer-baseline]').element as HTMLInputElement).value).toBe(
+      '.qa/consumers.json',
+    )
+    expect((wrapper.get('[data-consumer-max-lookups]').element as HTMLInputElement).value).toBe(
+      '3',
+    )
+    expect((wrapper.get('[data-consumer-max-bytes]').element as HTMLInputElement).value).toBe(
+      '65536',
+    )
+    expect(wrapper.get('[data-consumer-remove="0"]').attributes('aria-label')).toBe(
+      'Quitar consumidor acme/consumer v1.2.0',
+    )
+    wrapper.unmount()
+  })
+
+  it('añade y quita filas de consumidores', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-consumer-row]')).toHaveLength(0)
+    await wrapper.get('[data-consumer-add]').trigger('click')
+    expect(wrapper.findAll('[data-consumer-row]')).toHaveLength(1)
+    await wrapper.get('[data-consumer-remove="0"]').trigger('click')
+    expect(wrapper.findAll('[data-consumer-row]')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('guarda los consumidores en la política del equipo y conserva los campos intactos', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+    const team = basePolicy({
+      architecture_analysis_mode: 'off',
+      architecture_token_share: 30,
+      architecture_time_share: 10,
+      architecture_token_max: 50000,
+      architecture_baseline_path: 'docs/arch-baseline.json',
+      architecture_exception_policy: 'baseline',
+      allow_external_reviews: true,
+      external_trusted_associations: ['OWNER'],
+      max_external_diff_lines: 1234,
+      max_external_runs_per_day: 5,
+      external_daily_token_budget: 9000,
+      verify_max_findings: 33,
+      verify_max_files: 7,
+      verify_token_share: 12,
+      verify_time_share: 9,
+      verify_token_max: 120000,
+    })
+    mocks.api.getPolicy.mockResolvedValue(team)
+    const saved = repoPolicyResponse({
+      effective: basePolicy({
+        consumer_allow_list: [
+          { repository: 'acme/consumer', ref: 'v1.2.0', contract: 'api/openapi.yaml' },
+        ],
+        consumer_max_lookups: 4,
+      }),
+    })
+    mocks.api.getRepoPolicy
+      .mockResolvedValueOnce(repoPolicyResponse())
+      .mockResolvedValueOnce(saved)
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-consumer-add]').trigger('click')
+    await wrapper.get('[data-consumer-repository="0"]').setValue('acme/consumer')
+    await wrapper.get('[data-consumer-ref="0"]').setValue('v1.2.0')
+    await wrapper.get('[data-consumer-contract="0"]').setValue('api/openapi.yaml')
+    await wrapper.get('[data-consumer-max-lookups]').setValue('4')
+    await wrapper.get('[data-repo-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.getPolicy).toHaveBeenCalledWith(1)
+    const [teamId, body] = mocks.api.savePolicy.mock.calls[0]
+    expect(teamId).toBe(1)
+    expect(body.consumer_allow_list).toEqual([
+      { repository: 'acme/consumer', ref: 'v1.2.0', contract: 'api/openapi.yaml' },
+    ])
+    expect(body.consumer_max_lookups).toBe(4)
+    expect(body).not.toHaveProperty('consumer_baseline_path')
+    expect(body).not.toHaveProperty('consumer_max_bytes')
+    expect(body).toMatchObject({
+      architecture_analysis_mode: 'off',
+      architecture_token_share: 30,
+      architecture_time_share: 10,
+      architecture_token_max: 50000,
+      architecture_baseline_path: 'docs/arch-baseline.json',
+      architecture_exception_policy: 'baseline',
+      allow_external_reviews: true,
+      external_trusted_associations: ['OWNER'],
+      max_external_diff_lines: 1234,
+      max_external_runs_per_day: 5,
+      external_daily_token_budget: 9000,
+      verify_max_findings: 33,
+      verify_max_files: 7,
+      verify_token_share: 12,
+      verify_time_share: 9,
+      verify_token_max: 120000,
+    })
+    expect(mocks.api.getRepoPolicy).toHaveBeenCalledTimes(2)
+    expect(
+      (wrapper.get('[data-consumer-repository="0"]').element as HTMLInputElement).value,
+    ).toBe('acme/consumer')
+    expect(wrapper.text()).toContain('Cambios guardados')
+    wrapper.unmount()
+  })
+
+  it('no guarda la política del equipo cuando solo cambian los overrides del repositorio', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+    mocks.api.saveRepoPolicy.mockResolvedValue(
+      repoPolicyResponse({
+        inherited: false,
+        overrides: {
+          ...repoPolicyResponse().overrides,
+          blocking_threshold: 'blocker',
+        },
+      }),
+    )
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-policy-override="blocking_threshold"]').setValue(true)
+    await wrapper.get('[data-policy-field="blocking_threshold"]').setValue('blocker')
+    await wrapper.get('[data-repo-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.saveRepoPolicy).toHaveBeenCalledWith(20, {
+      blocking_threshold: 'blocker',
+    })
+    expect(mocks.api.getPolicy).not.toHaveBeenCalled()
+    expect(mocks.api.savePolicy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('rechaza consumidores incompletos y nombra la fila antes de guardar', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-consumer-add]').trigger('click')
+    await wrapper.get('[data-consumer-repository="0"]').setValue('acme/consumer')
+    await wrapper.get('[data-repo-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(
+      'El consumidor 1 (acme/consumer) necesita una ref fija',
+    )
+    expect(mocks.api.saveRepoPolicy).not.toHaveBeenCalled()
+    expect(mocks.api.clearRepoPolicy).not.toHaveBeenCalled()
+    expect(mocks.api.savePolicy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('rechaza un límite de consumidores vacío en vez de omitirlo', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-consumer-max-lookups]').setValue('')
+    await wrapper.get('[data-repo-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('El máximo de consultas no puede quedar vacío')
+    expect(mocks.api.savePolicy).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('muestra el error de validación del backend al guardar consumidores', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([{ ...repos[1], has_policy_override: false }])
+    mocks.api.savePolicy.mockRejectedValue(
+      new Error('{"error":"invalid_consumer_allow_list"}'),
+    )
+
+    const wrapper = mountRepos()
+    await flushPromises()
+    await wrapper.get('[data-repo-policy="20"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-consumer-add]').trigger('click')
+    await wrapper.get('[data-consumer-repository="0"]').setValue('acme/consumer')
+    await wrapper.get('[data-consumer-ref="0"]').setValue('v1.2.0')
+    await wrapper.get('[data-consumer-contract="0"]').setValue('api/openapi.yaml')
+    await wrapper.get('[data-repo-policy-save]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain(
+      'La política del repositorio se guardó, pero los consumidores no',
+    )
+    expect(wrapper.text()).toContain('La lista de consumidores no es válida')
     wrapper.unmount()
   })
 })
