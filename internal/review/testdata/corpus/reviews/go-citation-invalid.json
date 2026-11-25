@@ -1,0 +1,33 @@
+{
+  "status": "complete",
+  "llm": {"model": "fake-model"},
+  "message": "Review complete: 1 finding(s) across 1 selected item(s).",
+  "comments": [
+    {
+      "path": "cmd/report/main.go",
+      "content": "compute can return nil and println dereferences it.",
+      "existing_code": "if value == nil { return }",
+      "start_line": 4,
+      "end_line": 4,
+      "category": "bug",
+      "severity": "high"
+    }
+  ],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "terminal_state": "complete",
+    "input": {
+      "resolved_base": "2020202020202020202020202020202020202020",
+      "resolved_head": "2121212121212121212121212121212121212121"
+    },
+    "execution": {"ocr_version": "v1.14.0", "model": "fake-model", "provider": "fake", "effort": "low"},
+    "coverage": {
+      "selected": [{"item_id": "c12-1", "path": "cmd/report/main.go"}],
+      "completed": [{"item_id": "c12-1", "path": "cmd/report/main.go"}],
+      "reused": [],
+      "failed": [],
+      "waived": [],
+      "excluded": []
+    }
+  }
+}

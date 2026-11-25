@@ -1,0 +1,30 @@
+{
+  "status": "failed",
+  "llm": {"model": "fake-model"},
+  "message": "Review failed: invalid configuration for the selected provider.",
+  "comments": [],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "terminal_state": "failed",
+    "input": {
+      "resolved_base": "1818181818181818181818181818181818181818",
+      "resolved_head": "1919191919191919191919191919191919191919"
+    },
+    "execution": {"ocr_version": "v1.14.0", "model": "fake-model", "provider": "fake", "effort": "low"},
+    "coverage": {
+      "selected": [{"item_id": "c11-1", "path": "internal/cache/cache.go"}],
+      "completed": [],
+      "reused": [],
+      "failed": [
+        {
+          "item_id": "c11-1",
+          "path": "internal/cache/cache.go",
+          "classification": "config",
+          "reason": "provider configuration rejected"
+        }
+      ],
+      "waived": [],
+      "excluded": []
+    }
+  }
+}

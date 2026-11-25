@@ -1,0 +1,33 @@
+{
+  "status": "complete",
+  "llm": {"model": "fake-model"},
+  "message": "Review complete: 1 finding(s) across 1 selected item(s).",
+  "comments": [
+    {
+      "path": "migrations/20261124_drop_user_email.sql",
+      "content": "Dropping a column is irreversible and breaks readers that still select it. Expand with a deprecation window and a rollback path.",
+      "existing_code": "    DROP COLUMN email;",
+      "start_line": 4,
+      "end_line": 4,
+      "category": "bug",
+      "severity": "high"
+    }
+  ],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "terminal_state": "complete",
+    "input": {
+      "resolved_base": "2222222222222222222222222222222222222223",
+      "resolved_head": "2323232323232323232323232323232323232323"
+    },
+    "execution": {"ocr_version": "v1.14.0", "model": "fake-model", "provider": "fake", "effort": "low"},
+    "coverage": {
+      "selected": [{"item_id": "c13-1", "path": "migrations/20261124_drop_user_email.sql"}],
+      "completed": [{"item_id": "c13-1", "path": "migrations/20261124_drop_user_email.sql"}],
+      "reused": [],
+      "failed": [],
+      "waived": [],
+      "excluded": []
+    }
+  }
+}
