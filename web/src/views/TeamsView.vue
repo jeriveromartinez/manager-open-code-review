@@ -1,6 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { api, type Team, type TeamMember, type TeamRole, type User } from '../api'
+import {
+  api,
+  ApiError,
+  type Repository,
+  type Team,
+  type TeamMember,
+  type TeamRole,
+  type User,
+} from '../api'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { useSessionStore } from '../stores/session'
 
@@ -17,6 +25,21 @@ const formError = ref<string | null>(null)
 const newTeamName = ref('')
 const drafts = ref<Record<number, { userId: number | null; role: TeamRole }>>({})
 
+type BlockingRepository = { id: number; full_name: string }
+
+const renameTarget = ref<Team | null>(null)
+const renameName = ref('')
+const renameError = ref<string | null>(null)
+const renameSaving = ref(false)
+
+const deleteTarget = ref<Team | null>(null)
+const deleteRepos = ref<Repository[]>([])
+const deleteLoading = ref(false)
+const deleteConfirmName = ref('')
+const deleteError = ref<string | null>(null)
+const deleteBlocked = ref<BlockingRepository[]>([])
+const deleteSaving = ref(false)
+
 const roleLabels: Record<TeamRole, string> = {
   lead: 'Lead',
   qa: 'QA',
@@ -24,6 +47,23 @@ const roleLabels: Record<TeamRole, string> = {
 }
 
 const isAdmin = computed(() => session.me?.is_admin === true)
+
+const otherTeams = computed(() =>
+  deleteTarget.value === null
+    ? []
+    : teams.value.filter((team) => team.id !== deleteTarget.value?.id),
+)
+
+const canDelete = computed(() => {
+  const team = deleteTarget.value
+  return (
+    team !== null &&
+    !deleteLoading.value &&
+    !deleteSaving.value &&
+    deleteRepos.value.length === 0 &&
+    deleteConfirmName.value === team.name
+  )
+})
 
 /** Solo quien gestiona miembros necesita el listado de usuarios. */
 const needsUsers = computed(
@@ -41,6 +81,12 @@ function canManage(team: Team): boolean {
 
 function policyHref(team: Team): string {
   return `/agents?team=${team.id}#policy`
+}
+
+function teamCounts(team: Team): string {
+  const repositories = `${team.repository_count} repo${team.repository_count === 1 ? '' : 's'}`
+  const members = `${team.members.length} miembro${team.members.length === 1 ? '' : 's'}`
+  return `${repositories} · ${members}`
 }
 
 function ensureDraft(teamId: number): void {
@@ -153,6 +199,111 @@ async function removeMember(team: Team, member: TeamMember): Promise<void> {
   }
 }
 
+function openRename(team: Team): void {
+  renameTarget.value = team
+  renameName.value = team.name
+  renameError.value = null
+}
+
+function closeRename(): void {
+  renameTarget.value = null
+  renameName.value = ''
+  renameError.value = null
+}
+
+async function submitRename(): Promise<void> {
+  const team = renameTarget.value
+  const name = renameName.value.trim()
+  if (!team || !name || renameSaving.value) return
+  renameSaving.value = true
+  renameError.value = null
+  try {
+    await api.renameTeam(team.id, name)
+    closeRename()
+    await load()
+  } catch {
+    renameError.value = 'No se pudo renombrar el equipo'
+  } finally {
+    renameSaving.value = false
+  }
+}
+
+async function openDelete(team: Team): Promise<void> {
+  deleteTarget.value = team
+  deleteConfirmName.value = ''
+  deleteError.value = null
+  deleteBlocked.value = []
+  deleteRepos.value = []
+  deleteLoading.value = false
+  if (team.repository_count === 0) return
+
+  deleteLoading.value = true
+  try {
+    const assigned = (await api.repos()).filter((repo) => repo.team_id === team.id)
+    if (deleteTarget.value?.id === team.id) deleteRepos.value = assigned
+  } catch {
+    if (deleteTarget.value?.id === team.id) {
+      deleteError.value = 'No se pudieron cargar los repositorios del equipo'
+    }
+  } finally {
+    if (deleteTarget.value?.id === team.id) deleteLoading.value = false
+  }
+}
+
+function closeDelete(): void {
+  deleteTarget.value = null
+  deleteRepos.value = []
+  deleteConfirmName.value = ''
+  deleteError.value = null
+  deleteBlocked.value = []
+}
+
+async function reassignRepository(repo: Repository, event: Event): Promise<void> {
+  const select = event.target as HTMLSelectElement
+  const teamId = select.value === '' ? null : Number(select.value)
+  deleteError.value = null
+  try {
+    await api.patchRepo(repo.id, { team_id: teamId })
+    deleteRepos.value = deleteRepos.value.filter((candidate) => candidate.id !== repo.id)
+    if (deleteTarget.value && deleteTarget.value.repository_count > 0) {
+      deleteTarget.value.repository_count -= 1
+    }
+  } catch {
+    select.value = ''
+    deleteError.value = 'No se pudo reasignar el repositorio'
+  }
+}
+
+function conflictRepositories(err: unknown): BlockingRepository[] {
+  if (!(err instanceof ApiError) || err.status !== 409) return []
+  const repositories = (err.payload as { repositories?: BlockingRepository[] } | undefined)
+    ?.repositories
+  return Array.isArray(repositories) ? repositories : []
+}
+
+async function submitDelete(): Promise<void> {
+  const team = deleteTarget.value
+  if (!team || !canDelete.value) return
+  deleteSaving.value = true
+  deleteError.value = null
+  deleteBlocked.value = []
+  try {
+    await api.deleteTeam(team.id)
+    closeDelete()
+    await load()
+  } catch (err) {
+    const repositories = conflictRepositories(err)
+    if (repositories.length > 0) {
+      deleteBlocked.value = repositories
+      deleteError.value = 'El servidor rechazó la eliminación: quedan repositorios asignados'
+    } else {
+      deleteError.value = 'No se pudo eliminar el equipo'
+    }
+  } finally {
+    deleteSaving.value = false
+  }
+}
+
 onMounted(() => {
   void session.load()
   void load()
@@ -202,9 +353,7 @@ onMounted(() => {
             <p class="team-roster__slug">{{ team.slug }}</p>
           </div>
           <div class="team-roster__meta">
-            <p class="team-roster__count">
-              {{ team.members.length }} miembro{{ team.members.length === 1 ? '' : 's' }}
-            </p>
+            <p class="team-roster__count">{{ teamCounts(team) }}</p>
             <a
               v-if="isAdmin"
               class="button button--ghost team-roster__policy"
@@ -213,6 +362,24 @@ onMounted(() => {
             >
               Política de revisión
             </a>
+            <button
+              v-if="isAdmin"
+              class="button button--ghost team-roster__policy"
+              type="button"
+              data-rename-team
+              @click="openRename(team)"
+            >
+              Renombrar
+            </button>
+            <button
+              v-if="isAdmin"
+              class="button button--ghost team-roster__policy"
+              type="button"
+              data-delete-team
+              @click="openDelete(team)"
+            >
+              Eliminar
+            </button>
           </div>
         </header>
 
@@ -308,6 +475,135 @@ onMounted(() => {
           </p>
         </form>
       </article>
+    </div>
+
+    <div v-if="renameTarget" class="modal-backdrop" @keydown.esc="closeRename">
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="rename-dialog-title"
+        data-rename-dialog
+      >
+        <form class="modal__form" @submit.prevent="submitRename">
+          <header class="modal__head">
+            <h2 id="rename-dialog-title" class="modal__title">Renombrar equipo</h2>
+            <p class="field__hint modal__hint">
+              El identificador (slug) se recalcula con el nuevo nombre.
+            </p>
+          </header>
+          <div class="modal__body">
+            <label class="field">
+              <span class="field__label">Nombre del equipo</span>
+              <input
+                v-model="renameName"
+                class="field__input"
+                type="text"
+                :aria-label="`Nombre de ${renameTarget?.name ?? ''}`"
+                data-rename-name
+              />
+            </label>
+            <p v-if="renameError" class="form-error" role="alert">{{ renameError }}</p>
+          </div>
+          <footer class="modal__actions">
+            <button class="button button--ghost" type="button" @click="closeRename">
+              Cancelar
+            </button>
+            <button
+              class="button button--primary"
+              type="submit"
+              :disabled="renameSaving || !renameName.trim()"
+              data-rename-submit
+            >
+              {{ renameSaving ? 'Guardando…' : 'Guardar' }}
+            </button>
+          </footer>
+        </form>
+      </div>
+    </div>
+
+    <div v-if="deleteTarget" class="modal-backdrop" @keydown.esc="closeDelete">
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-dialog-title"
+        data-delete-dialog
+      >
+        <form class="modal__form" @submit.prevent="submitDelete">
+          <header class="modal__head">
+            <h2 id="delete-dialog-title" class="modal__title">Eliminar equipo</h2>
+            <p class="field__hint modal__hint">
+              Se elimina «{{ deleteTarget?.name ?? '' }}» junto con sus miembros. Esta acción no se
+              puede deshacer.
+            </p>
+          </header>
+          <div class="modal__body">
+            <p v-if="deleteLoading" class="field__hint">Cargando repositorios…</p>
+            <div v-else-if="deleteRepos.length > 0" class="delete-repos" data-delete-repos>
+              <p class="field__hint">Reasigna cada repositorio antes de eliminar el equipo.</p>
+              <ul class="delete-repos__list">
+                <li v-for="repo in deleteRepos" :key="repo.id" class="delete-repos__row">
+                  <span class="delete-repos__name">{{ repo.full_name }}</span>
+                  <select
+                    class="field__input delete-repos__select"
+                    :aria-label="`Reasignar ${repo.full_name}`"
+                    :data-delete-repo="repo.id"
+                    @change="reassignRepository(repo, $event)"
+                  >
+                    <option value="">Sin equipo</option>
+                    <option
+                      v-for="candidate in otherTeams"
+                      :key="candidate.id"
+                      :value="candidate.id"
+                    >
+                      {{ candidate.name }}
+                    </option>
+                  </select>
+                </li>
+              </ul>
+            </div>
+            <div
+              v-if="deleteBlocked.length > 0"
+              class="delete-blocked"
+              role="alert"
+              data-delete-blocked
+            >
+              <p>El servidor rechazó la eliminación: estos repositorios siguen asignados.</p>
+              <ul class="delete-repos__list">
+                <li v-for="repo in deleteBlocked" :key="repo.id">{{ repo.full_name }}</li>
+              </ul>
+            </div>
+            <label class="field">
+              <span class="field__label">
+                Escribe «{{ deleteTarget?.name ?? '' }}» para confirmar
+              </span>
+              <input
+                v-model="deleteConfirmName"
+                class="field__input"
+                type="text"
+                autocomplete="off"
+                :aria-label="`Confirma el nombre de ${deleteTarget?.name ?? ''}`"
+                data-delete-confirm
+              />
+            </label>
+            <p v-if="deleteError" class="form-error" role="alert">{{ deleteError }}</p>
+          </div>
+          <footer class="modal__actions">
+            <button class="button button--ghost" type="button" @click="closeDelete">
+              Cancelar
+            </button>
+            <button
+              class="button button--primary"
+              type="submit"
+              :disabled="!canDelete"
+              data-delete-submit
+            >
+              {{ deleteSaving ? 'Eliminando…' : 'Eliminar' }}
+            </button>
+          </footer>
+        </form>
+      </div>
     </div>
   </section>
 </template>
@@ -465,6 +761,108 @@ onMounted(() => {
   grid-column: 1 / -1;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: var(--scrim);
+  overflow-y: auto;
+}
+
+.modal {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  max-height: calc(100dvh - var(--space-6));
+  color: var(--text);
+  background: var(--surface);
+  border: var(--rule-hair) solid var(--border-strong);
+  overflow: hidden;
+}
+
+.modal__form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: inherit;
+}
+
+.modal__head {
+  flex: none;
+  padding: var(--space-5) var(--space-5) var(--space-4);
+  border-bottom: var(--rule-heavy) solid var(--text);
+}
+
+.modal__title {
+  font-size: 22px;
+}
+
+.modal__hint {
+  margin-top: var(--space-2);
+  max-width: 60ch;
+}
+
+.modal__body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 0;
+  padding: var(--space-4) var(--space-5);
+  overflow-y: auto;
+}
+
+.modal__actions {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5) var(--space-5);
+  border-top: var(--rule-hair) solid var(--border);
+}
+
+.modal__actions .button {
+  white-space: nowrap;
+}
+
+.delete-repos__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.delete-repos__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 220px);
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.delete-repos__name {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+
+.delete-repos__select {
+  width: 100%;
+}
+
+.delete-blocked {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 14px;
+}
+
 .teams .field__input {
   transition:
     border-color var(--dur-micro) ease,
@@ -523,6 +921,27 @@ onMounted(() => {
 
   .member-add {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .delete-repos__row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .modal__head {
+    padding: var(--space-4);
+  }
+
+  .modal__body {
+    padding: var(--space-4);
+  }
+
+  .modal__actions {
+    flex-wrap: wrap;
+    padding: var(--space-3) var(--space-4) var(--space-4);
+  }
+
+  .modal__actions .button {
+    flex: 1 1 auto;
   }
 
   .team-roster__title {

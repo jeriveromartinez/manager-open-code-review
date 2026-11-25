@@ -1,7 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import TeamsView from './TeamsView.vue'
-import type { Me, Team, User } from '../api'
+import { ApiError, type Me, type Repository, type Team, type User } from '../api'
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -10,6 +10,10 @@ const mocks = vi.hoisted(() => ({
     createTeam: vi.fn(),
     setMember: vi.fn(),
     removeMember: vi.fn(),
+    renameTeam: vi.fn(),
+    deleteTeam: vi.fn(),
+    repos: vi.fn(),
+    patchRepo: vi.fn(),
   },
   session: {
     me: null as Me | null,
@@ -17,7 +21,20 @@ const mocks = vi.hoisted(() => ({
   },
 }))
 
-vi.mock('../api', () => ({ api: mocks.api }))
+vi.mock('../api', () => ({
+  ApiError: class ApiError extends Error {
+    status: number
+    payload?: unknown
+
+    constructor(status: number, message: string, payload?: unknown) {
+      super(message)
+      this.name = 'ApiError'
+      this.status = status
+      this.payload = payload
+    }
+  },
+  api: mocks.api,
+}))
 type LiveRegistration = { types: string[]; reload: () => unknown; filter?: (event: { type: string; id: string }) => boolean }
 const live = vi.hoisted(() => ({ registrations: [] as LiveRegistration[] }))
 vi.mock('../composables/useLiveRefresh', () => ({
@@ -35,6 +52,7 @@ const teams: Team[] = [
     id: 1,
     name: 'T1',
     slug: 't1',
+    repository_count: 0,
     members: [
       { user_id: 11, login: 'lead1', avatar_url: '', role: 'lead' },
       { user_id: 12, login: 'dev1', avatar_url: '', role: 'developer' },
@@ -44,7 +62,37 @@ const teams: Team[] = [
     id: 2,
     name: 'T2',
     slug: 't2',
+    repository_count: 1,
     members: [{ user_id: 21, login: 'lead2', avatar_url: '', role: 'lead' }],
+  },
+]
+
+const repos: Repository[] = [
+  {
+    id: 30,
+    installation_id: 1,
+    full_name: 'acme/api',
+    private: true,
+    default_branch: 'main',
+    enabled: true,
+    team_id: 2,
+    has_policy: false,
+    has_policy_override: false,
+    policy_observation: false,
+    account_login: 'acme',
+  },
+  {
+    id: 31,
+    installation_id: 1,
+    full_name: 'acme/web',
+    private: true,
+    default_branch: 'main',
+    enabled: true,
+    team_id: 1,
+    has_policy: false,
+    has_policy_override: false,
+    policy_observation: false,
+    account_login: 'acme',
   },
 ]
 
@@ -86,9 +134,24 @@ describe('TeamsView', () => {
       teams.map((team) => ({ ...team, members: team.members.map((member) => ({ ...member })) })),
     )
     mocks.api.users.mockResolvedValue(users.map((user) => ({ ...user })))
-    mocks.api.createTeam.mockResolvedValue({ id: 3, name: 'Nuevo', slug: 'nuevo', members: [] })
+    mocks.api.createTeam.mockResolvedValue({
+      id: 3,
+      name: 'Nuevo',
+      slug: 'nuevo',
+      repository_count: 0,
+      members: [],
+    })
     mocks.api.setMember.mockResolvedValue(undefined)
     mocks.api.removeMember.mockResolvedValue(undefined)
+    mocks.api.renameTeam.mockResolvedValue({
+      id: 1,
+      name: 'T1',
+      slug: 't1',
+      repository_count: 0,
+    })
+    mocks.api.deleteTeam.mockResolvedValue(undefined)
+    mocks.api.repos.mockResolvedValue(repos.map((repo) => ({ ...repo })))
+    mocks.api.patchRepo.mockResolvedValue(undefined)
     mocks.session.load.mockResolvedValue(null)
     live.registrations.length = 0
   })
@@ -264,6 +327,137 @@ describe('TeamsView', () => {
     await flushPromises()
 
     expect(card(wrapper, 1).find('[data-team-policy]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('renames a team from the dialog', async () => {
+    mocks.session.me = admin
+    mocks.api.renameTeam.mockResolvedValue({
+      id: 1,
+      name: 'Renombrado',
+      slug: 'renombrado',
+      repository_count: 0,
+    })
+
+    const wrapper = mountTeams()
+    await flushPromises()
+    mocks.api.teams.mockClear()
+
+    await card(wrapper, 1).get('[data-rename-team]').trigger('click')
+    const input = wrapper.get('[data-rename-dialog] input[data-rename-name]')
+    expect((input.element as HTMLInputElement).value).toBe('T1')
+    await input.setValue('Renombrado')
+    await wrapper.get('[data-rename-dialog] form').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.api.renameTeam).toHaveBeenCalledWith(1, 'Renombrado')
+    expect(mocks.api.teams).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-rename-dialog]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('blocks deletion while a repository is assigned', async () => {
+    mocks.session.me = admin
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    expect(card(wrapper, 2).text()).toContain('1 repo · 1 miembro')
+
+    await card(wrapper, 2).get('[data-delete-team]').trigger('click')
+    await flushPromises()
+
+    expect(mocks.api.repos).toHaveBeenCalledTimes(1)
+    const dialog = wrapper.get('[data-delete-dialog]')
+    expect(dialog.text()).toContain('acme/api')
+    expect(dialog.text()).not.toContain('acme/web')
+
+    await dialog.get('input[data-delete-confirm]').setValue('T2')
+    expect(dialog.get('[data-delete-submit]').attributes('disabled')).toBeDefined()
+    await dialog.get('form').trigger('submit')
+    await flushPromises()
+    expect(mocks.api.deleteTeam).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('reassigns a repository before deleting', async () => {
+    mocks.session.me = admin
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    await card(wrapper, 2).get('[data-delete-team]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-delete-repo="30"]').setValue('1')
+    await flushPromises()
+    expect(mocks.api.patchRepo).toHaveBeenCalledWith(30, { team_id: 1 })
+    expect(wrapper.find('[data-delete-repo="30"]').exists()).toBe(false)
+
+    await wrapper.get('[data-delete-dialog] input[data-delete-confirm]').setValue('T2')
+    await wrapper.get('[data-delete-dialog] form').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.api.deleteTeam).toHaveBeenCalledWith(2)
+    wrapper.unmount()
+  })
+
+  it('deletes a team without repositories', async () => {
+    mocks.session.me = admin
+
+    const wrapper = mountTeams()
+    await flushPromises()
+    mocks.api.teams.mockClear()
+
+    await card(wrapper, 1).get('[data-delete-team]').trigger('click')
+    await flushPromises()
+    expect(mocks.api.repos).not.toHaveBeenCalled()
+
+    const dialog = wrapper.get('[data-delete-dialog]')
+    await dialog.get('input[data-delete-confirm]').setValue('T')
+    expect(dialog.get('[data-delete-submit]').attributes('disabled')).toBeDefined()
+
+    await dialog.get('input[data-delete-confirm]').setValue('T1')
+    await dialog.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.api.deleteTeam).toHaveBeenCalledWith(1)
+    expect(mocks.api.teams).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-delete-dialog]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows the 409 repositories when the server refuses', async () => {
+    mocks.session.me = admin
+    mocks.api.deleteTeam.mockRejectedValue(
+      new ApiError(409, 'conflict', {
+        error: 'team has repositories',
+        repositories: [{ id: 40, full_name: 'acme/late-repo' }],
+      }),
+    )
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    await card(wrapper, 1).get('[data-delete-team]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-delete-dialog] input[data-delete-confirm]').setValue('T1')
+    await wrapper.get('[data-delete-dialog] form').trigger('submit')
+    await flushPromises()
+
+    expect(mocks.api.deleteTeam).toHaveBeenCalledWith(1)
+    expect(wrapper.get('[data-delete-dialog]').text()).toContain('acme/late-repo')
+    wrapper.unmount()
+  })
+
+  it('hides rename and delete from non-admins', async () => {
+    mocks.session.me = leadT1
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    expect(card(wrapper, 1).find('[data-rename-team]').exists()).toBe(false)
+    expect(card(wrapper, 1).find('[data-delete-team]').exists()).toBe(false)
     wrapper.unmount()
   })
 })

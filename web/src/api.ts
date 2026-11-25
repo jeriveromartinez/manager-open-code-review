@@ -360,7 +360,16 @@ export type Team = {
   id: number
   name: string
   slug: string
+  repository_count: number
   members: TeamMember[]
+}
+
+/** Response of PATCH /api/teams/{id}: no members. */
+export interface TeamSummary {
+  id: number
+  name: string
+  slug: string
+  repository_count: number
 }
 
 export type User = {
@@ -681,11 +690,14 @@ export type ReviewEvent = {
 
 export class ApiError extends Error {
   status: number
+  /** JSON body of the error when the server sent one. */
+  payload?: unknown
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, payload?: unknown) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.payload = payload
   }
 }
 
@@ -721,7 +733,15 @@ async function request<T>(path: string, init: RequestOptions = {}): Promise<T> {
 
   if (!res.ok) {
     const detail = await res.text().catch(() => '')
-    throw new ApiError(res.status, detail || res.statusText || `HTTP ${res.status}`)
+    let payload: unknown
+    if (detail) {
+      try {
+        payload = JSON.parse(detail)
+      } catch {
+        payload = undefined
+      }
+    }
+    throw new ApiError(res.status, detail || res.statusText || `HTTP ${res.status}`, payload)
   }
 
   if (res.status === 204) {
@@ -781,6 +801,9 @@ export const api = {
     request<void>(`/api/repos/${id}`, { method: 'PATCH', body: patch }),
   teams: () => request<Team[]>('/api/teams'),
   createTeam: (name: string) => request<Team>('/api/teams', { method: 'POST', body: { name } }),
+  renameTeam: (id: number, name: string) =>
+    request<TeamSummary>(`/api/teams/${id}`, { method: 'PATCH', body: { name } }),
+  deleteTeam: (id: number) => request<void>(`/api/teams/${id}`, { method: 'DELETE' }),
   setMember: (teamId: number, userId: number, role: TeamRole) =>
     request<void>(`/api/teams/${teamId}/members/${userId}`, { method: 'PUT', body: { role } }),
   removeMember: (teamId: number, userId: number) =>

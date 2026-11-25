@@ -66,8 +66,8 @@ const repos = [
 ] as Repository[]
 
 const teams: Team[] = [
-  { id: 1, name: 'T1', slug: 't1', members: [] },
-  { id: 2, name: 'T2', slug: 't2', members: [] },
+  { id: 1, name: 'T1', slug: 't1', repository_count: 0, members: [] },
+  { id: 2, name: 'T2', slug: 't2', repository_count: 0, members: [] },
 ]
 
 function basePolicy(overrides: Partial<QAPolicy> = {}): QAPolicy {

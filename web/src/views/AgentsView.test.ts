@@ -142,8 +142,8 @@ const profiles: LLMProfile[] = [
 ]
 
 const teams: Team[] = [
-  { id: 1, name: 'Plataforma', slug: 'plataforma', members: [] },
-  { id: 2, name: 'Mobile', slug: 'mobile', members: [] },
+  { id: 1, name: 'Plataforma', slug: 'plataforma', repository_count: 0, members: [] },
+  { id: 2, name: 'Mobile', slug: 'mobile', repository_count: 0, members: [] },
 ]
 
 const policy: QAPolicy = {

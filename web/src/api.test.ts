@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api, LIVE_EVENT_TYPES, openEventStream } from './api'
+import { ApiError, api, LIVE_EVENT_TYPES, openEventStream } from './api'
 
 describe('api.llmModels', () => {
   afterEach(() => {
@@ -25,6 +25,54 @@ describe('api.llmModels', () => {
         body: JSON.stringify({ provider: 'anthropic', api_key: 'sk-ant' }),
       }),
     )
+  })
+})
+
+describe('api team mutations', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('renames a team with PATCH and returns its summary', async () => {
+    const summary = { id: 7, name: 'Nuevo', slug: 'nuevo', repository_count: 2 }
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(summary), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(api.renameTeam(7, 'Nuevo')).resolves.toEqual(summary)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/teams/7',
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ name: 'Nuevo' }) }),
+    )
+  })
+
+  it('deletes a team with DELETE', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(api.deleteTeam(7)).resolves.toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/teams/7',
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+  })
+
+  it('exposes the parsed JSON body on ApiError', async () => {
+    const body = { error: 'conflict', repositories: [{ id: 30, full_name: 'acme/api' }] }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 409 })),
+    )
+
+    const error = await api.deleteTeam(7).catch((err: unknown) => err)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(409)
+    expect((error as ApiError).payload).toEqual(body)
   })
 })
 
