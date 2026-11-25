@@ -2234,6 +2234,15 @@ func TestRunInvalidConfigIsFailed(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	assertRunTerminal(t, f, store.RunFailed, "config")
+	// The failure happened before SetPRMergeBase, so the run carries its reviewed
+	// base while the PR's merge base is still unresolved. An unknown merge base
+	// is not a mismatch: the terminal status must still be recorded.
+	if run := f.loadRun(t); run.BaseSHA == "" {
+		t.Fatal("run has no reviewed base; the test no longer covers an unresolved comparison")
+	}
+	if pr := f.loadPR(t); pr.MergeBaseSHA != "" {
+		t.Fatalf("pr merge base = %q, want it still unresolved", pr.MergeBaseSHA)
+	}
 	if pr := f.loadPR(t); pr.QAStatus != store.StatusInconclusive {
 		t.Errorf("qa_status = %q, want %q", pr.QAStatus, store.StatusInconclusive)
 	}

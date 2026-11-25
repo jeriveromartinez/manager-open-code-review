@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -1054,6 +1055,9 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 			"verify_session_id":  c.VerifySessionID,
 			"verify_usage":       verifyUsage,
 			"clone_token_enc":    "",
+			// The delivery is owed from the moment the result is durable, so a
+			// crash before the worker enqueues the publish job cannot lose it.
+			"publish_pending": true,
 			// A finished run has no phase: keeping the last one would make the
 			// panel show a step that is no longer running.
 			"phase":            "",
@@ -1124,7 +1128,8 @@ UPDATE review_runs
 SET status = ?, error_code = ?, error_message = CASE
         WHEN heartbeat_at IS NULL OR heartbeat_at < ? THEN ?
         ELSE ? END,
-    clone_token_enc = '', phase = '', phase_started_at = NULL, finished_at = ?, updated_at = ?
+    clone_token_enc = '', phase = '', phase_started_at = NULL, finished_at = ?, updated_at = ?,
+    publish_pending = true
 WHERE status = ? AND COALESCE(started_at, created_at) < ?
 RETURNING *`
 
@@ -1170,6 +1175,44 @@ func (s *Store) ListReviewRuns(ctx context.Context, prID uint) ([]ReviewRun, err
 		return nil, fmt.Errorf("list review runs of pull request %d: %w", prID, err)
 	}
 	return runs, nil
+}
+
+// CurrentVerdictRun returns the latest terminal run of the pull request's
+// current head, and false when that comparison has no verdict yet (a newer run
+// is queued or running). A run of another head or base branch never owns the
+// shared check or QA status (#141). An empty current merge base is unknown, not
+// a mismatch: a run that finished before the base was resolved still owns the
+// status, exactly like comparisonMovedAfterReview's rule.
+func (s *Store) CurrentVerdictRun(ctx context.Context, pr PullRequest) (ReviewRun, bool, error) {
+	if pr.HeadSHA == "" {
+		return ReviewRun{}, false, nil
+	}
+	runs, err := s.ListReviewRuns(ctx, pr.ID)
+	if err != nil {
+		return ReviewRun{}, false, err
+	}
+	for i := len(runs) - 1; i >= 0; i-- {
+		run := runs[i]
+		if !strings.EqualFold(run.HeadSHA, pr.HeadSHA) {
+			continue
+		}
+		switch run.Status {
+		case RunSucceeded, RunInconclusive, RunFailed:
+			if run.BaseRef != "" && run.BaseRef != pr.BaseRef {
+				return ReviewRun{}, false, nil
+			}
+			if run.BaseTipSHA != "" && pr.BaseSHA != "" && !strings.EqualFold(run.BaseTipSHA, pr.BaseSHA) {
+				return ReviewRun{}, false, nil
+			}
+			// Only two known merge bases can disagree.
+			if run.BaseSHA != "" && pr.MergeBaseSHA != "" && !strings.EqualFold(run.BaseSHA, pr.MergeBaseSHA) {
+				return ReviewRun{}, false, nil
+			}
+			return run, true, nil
+		}
+		return ReviewRun{}, false, nil
+	}
+	return ReviewRun{}, false, nil
 }
 
 // SetPRStatus changes only the QA workflow status of a pull request.

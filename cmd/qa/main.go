@@ -135,6 +135,9 @@ func runServe() error {
 	// after start and must never observe a trigger with a nil Jobs field.
 	enqueuer := jobs.NewEnqueuer(client)
 	trigger.Jobs = enqueuer
+	// The reconciliation sweep enqueues the publication of terminal runs whose
+	// job was lost, so the publisher needs the enqueuer before Start.
+	publisherWorker.Jobs = enqueuer
 
 	if err := client.Start(ctx); err != nil {
 		return fmt.Errorf("start control client: %w", err)

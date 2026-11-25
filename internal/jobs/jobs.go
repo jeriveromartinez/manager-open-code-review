@@ -111,7 +111,25 @@ type PublishReviewArgs struct {
 func (PublishReviewArgs) Kind() string { return "publish_review" }
 
 func (PublishReviewArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{Queue: publishQueue, MaxAttempts: 5}
+	return river.InsertOpts{
+		Queue: publishQueue,
+		// The terminal write, the reconciler and the adoption trigger can all
+		// enqueue the same run. Uniqueness keeps a second live job from racing
+		// the one already queued, but finalized states are excluded: a publish
+		// that returns without settling (an unresolved comparison) completes its
+		// job, and the later delivery must still be schedulable.
+		UniqueOpts: river.UniqueOpts{
+			ByArgs: true,
+			ByState: []rivertype.JobState{
+				rivertype.JobStateAvailable,
+				rivertype.JobStatePending,
+				rivertype.JobStateRunning,
+				rivertype.JobStateScheduled,
+				rivertype.JobStateRetryable,
+			},
+		},
+		MaxAttempts: 5,
+	}
 }
 
 // LLMHealthArgs verifies one configured LLM profile.
@@ -149,6 +167,13 @@ type CloneTokenRefresher interface {
 	RefreshQueuedTokens(ctx context.Context, limit int) (int, error)
 }
 
+// PublishReconciler recovers terminal runs whose publication was never
+// enqueued, for example because the worker crashed right after committing the
+// result. It is implemented by the publisher.
+type PublishReconciler interface {
+	ReconcilePendingPublishes(ctx context.Context, limit int) (int, error)
+}
+
 // ControlDeps are optional dependencies of the control client. The review and
 // health workers belong to the review process; the control process only
 // enqueues their jobs and runs publication itself.
@@ -169,9 +194,10 @@ func (w *reviewTriggerWorker) Work(ctx context.Context, job *river.Job[ReviewTri
 
 type reconcileWorker struct {
 	river.WorkerDefaults[ReconcileArgs]
-	syncer  *syncer.Syncer
-	trigger ReviewTrigger
-	tokens  CloneTokenRefresher
+	syncer    *syncer.Syncer
+	trigger   ReviewTrigger
+	tokens    CloneTokenRefresher
+	publishes PublishReconciler
 }
 
 func (w *reconcileWorker) Work(ctx context.Context, _ *river.Job[ReconcileArgs]) error {
@@ -186,6 +212,16 @@ func (w *reconcileWorker) Work(ctx context.Context, _ *river.Job[ReconcileArgs])
 			slog.Error("refresh clone tokens", "error", err)
 		} else if refreshed > 0 {
 			slog.Info("refreshed clone tokens", "count", refreshed)
+		}
+	}
+	if w.publishes != nil {
+		enqueued, err := w.publishes.ReconcilePendingPublishes(ctx, pendingBatchSize)
+		if err != nil {
+			// The durable intent stays pending, so the next reconciliation
+			// retries the delivery.
+			slog.Error("reconcile pending publications", "error", err)
+		} else if enqueued > 0 {
+			slog.Info("enqueued pending publications", "count", enqueued)
 		}
 	}
 	if w.trigger == nil {
@@ -322,7 +358,11 @@ func NewControlClient(pool *pgxpool.Pool, s *syncer.Syncer, deps ...ControlDeps)
 
 	workers := river.NewWorkers()
 	river.AddWorker[SyncInstallationArgs](workers, &syncInstallationWorker{syncer: s})
-	river.AddWorker[ReconcileArgs](workers, &reconcileWorker{syncer: s, trigger: d.Trigger, tokens: d.Tokens})
+	var publishes PublishReconciler
+	if d.Publisher != nil {
+		publishes = d.Publisher
+	}
+	river.AddWorker[ReconcileArgs](workers, &reconcileWorker{syncer: s, trigger: d.Trigger, tokens: d.Tokens, publishes: publishes})
 	if d.Trigger != nil {
 		river.AddWorker[ReviewTriggerArgs](workers, &reviewTriggerWorker{trigger: d.Trigger})
 	}

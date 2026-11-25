@@ -41,6 +41,7 @@ func (e2eTriggerJobs) EnqueueReviewTrigger(context.Context, uint, string, time.D
 
 func TestE2EFlow(t *testing.T) {
 	t.Run("success publishes summary, inline comments, check and status", testE2ESuccess)
+	t.Run("a partial inline response is recovered without a second review", testE2ERecoversInlineReview)
 	t.Run("mixed coverage reports pending files and keeps the finding open", testE2EMixedCoverage)
 	t.Run("timeout ends inconclusive without resolving findings", testE2ETimeout)
 	t.Run("invalid config fails and the retry publishes", testE2EFailedThenRetry)
@@ -66,6 +67,7 @@ type e2eReviewComment struct {
 type e2eReview struct {
 	ID       int64              `json:"id"`
 	Event    string             `json:"event"`
+	Body     string             `json:"body"`
 	Comments []e2eReviewComment `json:"comments"`
 	Posted   []e2ePostedComment `json:"-"`
 }
@@ -111,6 +113,9 @@ type e2eGitHub struct {
 	nextCommentID      int64
 	nextReviewID       int64
 	nextCheckID        int64
+	// failReviewCommentsOnce drops one per-review comments response, emulating a
+	// review created on GitHub whose coordinates never reached the caller.
+	failReviewCommentsOnce bool
 }
 
 func newE2EGitHub(t *testing.T) *e2eGitHub {
@@ -207,6 +212,31 @@ func (g *e2eGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			},
 		}, http.StatusOK)
 
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/origin/pulls/1/reviews":
+		// The publisher lists the PR reviews before posting so a retry can recover
+		// the review created by a previous attempt through its run marker.
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		if perPage < 1 {
+			perPage = 30
+		}
+		out := make([]map[string]any, 0, len(g.reviews))
+		for _, review := range g.reviews {
+			out = append(out, map[string]any{"id": review.ID, "body": review.Body})
+		}
+		start := (page - 1) * perPage
+		if start > len(out) {
+			start = len(out)
+		}
+		end := start + perPage
+		if end > len(out) {
+			end = len(out)
+		}
+		writeJSON(out[start:end], http.StatusOK)
+
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/origin/pulls/1/reviews":
 		var review e2eReview
 		_ = json.Unmarshal(body, &review)
@@ -223,6 +253,11 @@ func (g *e2eGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(map[string]any{"id": review.ID}, http.StatusOK)
 
 	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/origin/pulls/1/reviews/"):
+		if g.failReviewCommentsOnce {
+			g.failReviewCommentsOnce = false
+			http.Error(w, "review comments temporarily unavailable", http.StatusInternalServerError)
+			return
+		}
 		posted := []e2ePostedComment{}
 		if len(g.reviews) > 0 {
 			posted = g.reviews[len(g.reviews)-1].Posted
@@ -304,6 +339,12 @@ func (g *e2eGitHub) reviewList() []e2eReview {
 	out := make([]e2eReview, len(g.reviews))
 	copy(out, g.reviews)
 	return out
+}
+
+func (g *e2eGitHub) failNextReviewComments() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.failReviewCommentsOnce = true
 }
 
 func (g *e2eGitHub) checkPatchList() []e2eCheckPatch {
@@ -885,6 +926,35 @@ func testE2EMixedCoverage(t *testing.T) {
 	}
 }
 
+func testE2ERecoversInlineReview(t *testing.T) {
+	f := newE2EFixture(t)
+	runID := f.enqueue(t, false)
+	if err := f.runner.Run(f.ctx, runID); err != nil {
+		t.Fatalf("review run %d: %v", runID, err)
+	}
+
+	// The review lands on GitHub, but the response listing its comments is lost,
+	// so the first delivery fails after creating it.
+	f.gh.failNextReviewComments()
+	if err := f.worker.Publish(f.ctx, runID); err == nil {
+		t.Fatal("first Publish() error = nil, want the injected comment-listing failure")
+	}
+	if got := len(f.gh.reviewList()); got != 1 {
+		t.Fatalf("reviews after the partial delivery = %d, want 1", got)
+	}
+
+	if err := f.worker.Publish(f.ctx, runID); err != nil {
+		t.Fatalf("retry Publish() error = %v", err)
+	}
+	if got := len(f.gh.reviewList()); got != 1 {
+		t.Errorf("reviews after recovery = %d, want no duplicate", got)
+	}
+	findings := f.findings(t)
+	if len(findings) != 1 || findings[0].GithubCommentID == 0 ||
+		findings[0].GithubCommentNodeID == "" {
+		t.Errorf("findings = %+v, want the recovered review linked", findings)
+	}
+}
 func testE2ETimeout(t *testing.T) {
 	f := newE2EFixture(t)
 	// The OCR double sleeps far longer than the deadline, so the timeout always

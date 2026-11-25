@@ -110,8 +110,43 @@ type postedReviewComment struct {
 	StartLine    int    `json:"start_line"`
 }
 
+// inlineReviewMarker identifies the review a run posted. Listing the pull
+// request's reviews before posting lets a retry recover the review when the
+// first attempt was created on GitHub but failed before its coordinates were
+// stored locally.
+func inlineReviewMarker(runID uint) string {
+	return fmt.Sprintf("<!-- qa-control-center:inline %d -->", runID)
+}
+
+type postedReview struct {
+	ID   int64  `json:"id"`
+	Body string `json:"body"`
+}
+
+// findInlineReview returns the review created by this run, if any.
+func (p *publishContext) findInlineReview(ctx context.Context, marker string) (int64, error) {
+	base := p.repoPath(fmt.Sprintf("pulls/%d/reviews", p.pr.Number))
+	for page := 1; ; page++ {
+		var reviews []postedReview
+		path := fmt.Sprintf("%s?per_page=100&page=%d", base, page)
+		if err := p.request(ctx, http.MethodGet, path, nil, &reviews); err != nil {
+			return 0, fmt.Errorf("list pull request reviews: %w", err)
+		}
+		for _, review := range reviews {
+			if strings.Contains(review.Body, marker) {
+				return review.ID, nil
+			}
+		}
+		if len(reviews) < 100 {
+			return 0, nil
+		}
+	}
+}
+
 // publishInlineComments posts one COMMENT review with only findings that do
-// not have a GitHub comment yet and whose start line is in a diff hunk.
+// not have a GitHub comment yet and whose start line is in a diff hunk. A run
+// posts at most one review: a retry finds it by marker instead of creating a
+// duplicate.
 func (p *publishContext) publishInlineComments(ctx context.Context, added addedLines, findings []store.Finding) error {
 	candidates := make([]store.Finding, 0)
 	for _, f := range findings {
@@ -125,7 +160,12 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 			candidates = append(candidates, f)
 		}
 	}
-	if len(candidates) == 0 {
+	marker := inlineReviewMarker(p.run.ID)
+	reviewID, err := p.findInlineReview(ctx, marker)
+	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 && reviewID == 0 {
 		return nil
 	}
 
@@ -156,26 +196,29 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 		comments = append(comments, comment)
 	}
 
-	var created struct {
-		ID int64 `json:"id"`
-	}
-	payload := map[string]any{
-		"event":    "COMMENT",
-		"body":     p.sanitize("Comentarios automáticos de QA Control Center"),
-		"comments": comments,
-	}
-	path := p.repoPath(fmt.Sprintf("pulls/%d/reviews", p.pr.Number))
-	if err := p.request(ctx, http.MethodPost, path, payload, &created); err != nil {
-		return fmt.Errorf("create review: %w", err)
-	}
-	if created.ID == 0 {
-		return fmt.Errorf("create review: GitHub returned no review id")
+	if reviewID == 0 {
+		var created struct {
+			ID int64 `json:"id"`
+		}
+		payload := map[string]any{
+			"event":    "COMMENT",
+			"body":     p.sanitize("Comentarios automáticos de QA Control Center") + "\n\n" + marker,
+			"comments": comments,
+		}
+		path := p.repoPath(fmt.Sprintf("pulls/%d/reviews", p.pr.Number))
+		if err := p.request(ctx, http.MethodPost, path, payload, &created); err != nil {
+			return fmt.Errorf("create review: %w", err)
+		}
+		if created.ID == 0 {
+			return fmt.Errorf("create review: GitHub returned no review id")
+		}
+		reviewID = created.ID
 	}
 
 	// The review object does not include its comments; fetch them so each
 	// finding can be linked to its comment and, later, to its thread.
 	var posted []postedReviewComment
-	listPath := p.repoPath(fmt.Sprintf("pulls/%d/reviews/%d/comments", p.pr.Number, created.ID))
+	listPath := p.repoPath(fmt.Sprintf("pulls/%d/reviews/%d/comments", p.pr.Number, reviewID))
 	for page := 1; ; page++ {
 		var batch []postedReviewComment
 		path := fmt.Sprintf("%s?per_page=100&page=%d", listPath, page)
@@ -217,11 +260,11 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 		}
 	}
 
-	_, err := p.w.Store.UpsertArtifact(ctx, store.GitHubArtifact{
+	_, err = p.w.Store.UpsertArtifact(ctx, store.GitHubArtifact{
 		PullRequestID: p.pr.ID,
 		Kind:          store.ArtifactReview,
 		HeadSHA:       p.run.HeadSHA,
-		ExternalID:    strconv.FormatInt(created.ID, 10),
+		ExternalID:    strconv.FormatInt(reviewID, 10),
 		URL:           p.pr.HTMLURL,
 	})
 	if err != nil {

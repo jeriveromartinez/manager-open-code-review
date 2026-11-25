@@ -60,6 +60,14 @@ const (
 	ArtifactSummary = "summary_comment"
 	ArtifactReview  = "review"
 	ArtifactCheck   = "check_run"
+
+	// Publish steps recorded in review_runs.publish_state. A retry of a
+	// partially delivered run resumes only the steps that are still missing.
+	PublishStepInline      = "inline"
+	PublishStepSummary     = "summary"
+	PublishStepResolutions = "resolutions"
+	PublishStepCheck       = "check"
+	PublishStepStatus      = "status"
 )
 
 // AppConfig is the single-row instance configuration (id = 1) that holds the
@@ -378,6 +386,12 @@ type ReviewRun struct {
 	// traceability and its consumption so the panel can show the extra cost.
 	VerifySessionID string         `gorm:"column:verify_session_id"`
 	VerifyUsage     datatypes.JSON `gorm:"column:verify_usage"`
+	// PublishPending records, in the same transaction that finishes the run,
+	// that its GitHub delivery is still owed. The reconciler enqueues a publish
+	// job for it if the worker never managed to (#138). PublishState stores the
+	// steps already delivered so a retry resumes only the missing ones.
+	PublishPending bool           `gorm:"column:publish_pending"`
+	PublishState   datatypes.JSON `gorm:"column:publish_state"`
 	// HeartbeatAt is refreshed by the executing worker every minute. Nil on
 	// runs claimed before the heartbeat existed (#130).
 	HeartbeatAt *time.Time `gorm:"column:heartbeat_at"`

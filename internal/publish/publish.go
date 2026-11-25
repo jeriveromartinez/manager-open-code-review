@@ -39,25 +39,56 @@ type publishContext struct {
 	redacted        bool
 	runNumber       int
 	findingSnapshot []store.Finding
+	// progress records the delivery steps already settled for this run, so a
+	// retry only performs the missing ones.
+	progress publishProgress
 }
 
 // Publish applies the phase-2 publication matrix to a terminal review run. It
-// is idempotent: comments are edited by marker, inline reviews only contain
-// findings without a GitHub comment id, resolutions are attempted once, and
-// artifacts are upserted.
+// is idempotent and resumable: comments are edited by marker, inline reviews
+// are found by their run marker, findings without a GitHub comment id are the
+// only ones posted again, resolutions are attempted once, and artifacts are
+// upserted. The steps already delivered are recorded so a retry resumes only
+// the missing ones, and every shared write re-checks the run is still current.
 func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
+	// The queue normally delivers one job per run, but reconciliation, redelivery
+	// and two runs of the same pull request can overlap. The lock serializes them;
+	// the recorded steps make the second one a no-op.
+	run, err := w.Store.ReviewRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	unlock, err := w.Store.LockPublishPR(ctx, run.PullRequestID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	p, err := w.loadPublishContext(ctx, runID)
 	if err != nil {
 		return err
+	}
+	p.loadProgress()
+	if p.progress.Completed {
+		// A redelivery of a settled publication owes nothing.
+		return nil
 	}
 	// A run of another comparison must not publish: the QA check is shared by
 	// every comparison of the same head, so cancelling or completing it would
 	// overwrite the state of the run that actually belongs to the current one.
 	// A superseded run of a previous head owns a different check, so cancelling
 	// it is still safe.
-	if !p.pr.CoveredBy(p.run) &&
-		!(p.run.Status == store.RunSuperseded && !strings.EqualFold(p.run.HeadSHA, p.pr.HeadSHA)) {
-		return nil
+	if !p.pr.CoveredBy(p.run) {
+		if p.run.Status == store.RunSuperseded && !strings.EqualFold(p.run.HeadSHA, p.pr.HeadSHA) {
+			// Fall through: cancel the old head's check.
+		} else if p.comparisonStale() {
+			return p.settle(ctx)
+		} else {
+			// The head and base branch still match but the merge base is not
+			// resolved yet. The trigger can adopt this run once Compare resolves
+			// it, so the delivery must stay pending instead of settling.
+			return nil
+		}
 	}
 	defer func() {
 		if err == nil && p.redacted && w.Events != nil {
@@ -87,31 +118,87 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 		return err
 	}
 	p.findingSnapshot = findings
-	open := make([]store.Finding, 0, len(findings))
-	for _, f := range findings {
-		if f.Status == store.FindingOpen {
-			open = append(open, f)
-		}
-	}
+	open := openFindings(findings)
 
 	switch p.run.Status {
 	case store.RunSuperseded:
-		return w.CancelCheck(ctx, runID)
-	case store.RunFailed:
-		if err := p.completeCheck(ctx, "action_required", open); err != nil {
-			return err
+		if !p.stepDone(store.PublishStepCheck) {
+			// A run superseded before StartCheck never created one, so GitHub
+			// has nothing to cancel. Settling it instead of failing keeps the
+			// reconciler from retrying that run forever.
+			if err := w.CancelCheck(ctx, runID); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			if err := p.markStep(ctx, store.PublishStepCheck); err != nil {
+				return err
+			}
 		}
-		return p.setPRStatus(ctx, store.StatusInconclusive)
+		return p.settle(ctx)
+	case store.RunFailed:
+		if !p.stepDone(store.PublishStepCheck) {
+			if ok, err := p.guard(ctx); err != nil {
+				return err
+			} else if !ok {
+				return nil
+			}
+			// ErrNotFound means the failure happened before StartCheck, so there
+			// is no check run to close; the QA status is still updated.
+			if err := p.completeCheck(ctx, "action_required", open); err != nil &&
+				!errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+			if err := p.markStep(ctx, store.PublishStepCheck); err != nil {
+				return err
+			}
+		}
+		if !p.stepDone(store.PublishStepStatus) {
+			if ok, err := p.guard(ctx); err != nil {
+				return err
+			} else if !ok {
+				return nil
+			}
+			if err := p.setPRStatus(ctx, store.StatusInconclusive); err != nil {
+				return err
+			}
+			if err := p.markStep(ctx, store.PublishStepStatus); err != nil {
+				return err
+			}
+		}
+		return p.settle(ctx)
 	case store.RunSucceeded, store.RunInconclusive:
 		// Continue with the full publication below.
 	default:
 		return nil
 	}
 
-	added, err := p.fetchAddedLines(ctx)
+	// Inline comments are published first so the summary lists only findings
+	// that are genuinely left without one; reloading the snapshot afterwards
+	// keeps a retried publish from re-listing findings that already have a
+	// comment, and from posting a second review for the same run.
+	if !p.stepDone(store.PublishStepInline) {
+		if ok, err := p.guard(ctx); err != nil {
+			return err
+		} else if !ok {
+			return nil
+		}
+		added, err := p.fetchAddedLines(ctx)
+		if err != nil {
+			return err
+		}
+		if err := p.publishInlineComments(ctx, added, findings); err != nil {
+			return err
+		}
+		if err := p.markStep(ctx, store.PublishStepInline); err != nil {
+			return err
+		}
+	}
+	findings, err = w.Store.FindingsForPR(ctx, p.pr.ID)
 	if err != nil {
 		return err
 	}
+	p.findingSnapshot = findings
+	open = openFindings(findings)
+
 	ci, ciErr := p.ciVerdict(ctx)
 	if ciErr != nil {
 		slog.Warn("read CI gate at publish", "pull_request_id", p.pr.ID, "run_id", p.run.ID, "error", ciErr)
@@ -125,7 +212,6 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 			conclusion = "success"
 		}
 	}
-
 	resolvedSincePrevious := 0
 	for _, f := range findings {
 		if f.Status == store.FindingResolved && f.LastSeenRunID == p.run.ID {
@@ -133,43 +219,86 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 		}
 	}
 
-	// Inline comments are published first so the summary lists only findings
-	// that are genuinely left without one; reloading the snapshot keeps a
-	// retried publish from re-listing findings that already have a comment.
-	if err := p.publishInlineComments(ctx, added, findings); err != nil {
-		return err
-	}
-	findings, err = w.Store.FindingsForPR(ctx, p.pr.ID)
-	if err != nil {
-		return err
-	}
-	p.findingSnapshot = findings
-	if err := p.publishSummary(ctx, findings, resolvedSincePrevious); err != nil {
-		return err
-	}
-	if p.run.Status == store.RunSucceeded {
-		if err := p.publishResolutions(ctx, findings); err != nil {
+	if !p.stepDone(store.PublishStepSummary) {
+		if ok, err := p.guard(ctx); err != nil {
+			return err
+		} else if !ok {
+			return nil
+		}
+		if err := p.publishSummary(ctx, findings, resolvedSincePrevious); err != nil {
+			return err
+		}
+		if err := p.markStep(ctx, store.PublishStepSummary); err != nil {
 			return err
 		}
 	}
-	if err := p.completeCheck(ctx, conclusion, open); err != nil {
-		return err
-	}
-
-	status := store.StatusInconclusive
-	if p.run.Status == store.RunSucceeded {
-		switch conclusion {
-		case "failure":
-			status = store.StatusChangesRequested
-		case "success":
-			status = store.StatusReadyForHuman
-		default:
-			// The review concluded but the required checks did not: the head is
-			// still waiting for a CI verdict, not for a person.
-			status = store.StatusWaitingCI
+	if p.run.Status == store.RunSucceeded && !p.stepDone(store.PublishStepResolutions) {
+		if ok, err := p.guard(ctx); err != nil {
+			return err
+		} else if !ok {
+			return nil
+		}
+		if err := p.publishResolutions(ctx, findings); err != nil {
+			return err
+		}
+		if err := p.markStep(ctx, store.PublishStepResolutions); err != nil {
+			return err
 		}
 	}
-	return p.setPRStatus(ctx, status)
+	if !p.stepDone(store.PublishStepCheck) {
+		if ok, err := p.guard(ctx); err != nil {
+			return err
+		} else if !ok {
+			return nil
+		}
+		// A head without a check run has nothing to close; the status below is
+		// still written so the panel and GitHub agree.
+		if err := p.completeCheck(ctx, conclusion, open); err != nil &&
+			!errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if err := p.markStep(ctx, store.PublishStepCheck); err != nil {
+			return err
+		}
+	}
+
+	if !p.stepDone(store.PublishStepStatus) {
+		if ok, err := p.guard(ctx); err != nil {
+			return err
+		} else if !ok {
+			return nil
+		}
+		status := store.StatusInconclusive
+		if p.run.Status == store.RunSucceeded {
+			switch conclusion {
+			case "failure":
+				status = store.StatusChangesRequested
+			case "success":
+				status = store.StatusReadyForHuman
+			default:
+				// The review concluded but the required checks did not: the head is
+				// still waiting for a CI verdict, not for a person.
+				status = store.StatusWaitingCI
+			}
+		}
+		if err := p.setPRStatus(ctx, status); err != nil {
+			return err
+		}
+		if err := p.markStep(ctx, store.PublishStepStatus); err != nil {
+			return err
+		}
+	}
+	return p.settle(ctx)
+}
+
+func openFindings(findings []store.Finding) []store.Finding {
+	open := make([]store.Finding, 0, len(findings))
+	for _, f := range findings {
+		if f.Status == store.FindingOpen {
+			open = append(open, f)
+		}
+	}
+	return open
 }
 
 func (w *Worker) loadPublishContext(ctx context.Context, runID uint) (*publishContext, error) {
