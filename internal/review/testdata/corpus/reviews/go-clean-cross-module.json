@@ -1,0 +1,29 @@
+{
+  "status": "complete",
+  "llm": {"model": "fake-model"},
+  "message": "Review complete: 0 finding(s) across 2 selected item(s).",
+  "comments": [],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "terminal_state": "complete",
+    "input": {
+      "resolved_base": "1111111111111111111111111111111111111111",
+      "resolved_head": "2222222222222222222222222222222222222222"
+    },
+    "execution": {"ocr_version": "v1.14.0", "model": "fake-model", "provider": "fake", "effort": "low"},
+    "coverage": {
+      "selected": [
+        {"item_id": "c1-1", "path": "pkg/orders/order.go"},
+        {"item_id": "c1-2", "path": "pkg/billing/invoice.go"}
+      ],
+      "completed": [
+        {"item_id": "c1-1", "path": "pkg/orders/order.go"},
+        {"item_id": "c1-2", "path": "pkg/billing/invoice.go"}
+      ],
+      "reused": [],
+      "failed": [],
+      "waived": [],
+      "excluded": []
+    }
+  }
+}

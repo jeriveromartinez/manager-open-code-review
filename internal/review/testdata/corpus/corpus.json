@@ -1,0 +1,648 @@
+{
+  "corpus_version": "2026-11-24.1",
+  "ocr_version": "v1.14.0",
+  "harness_version": "1.0.0",
+  "profile": {
+    "provider": "fake",
+    "model": "fake-model",
+    "effort": "low"
+  },
+  "autonomy_criteria": {
+    "min_coverage": 1.0,
+    "max_false_positives": 0,
+    "max_missed_severe_defects": 0,
+    "max_clean_prs_classified_defective": 0,
+    "max_delivery_failures": 0,
+    "max_eligible_prs_without_result": 0,
+    "max_unnecessary_escalations": 0,
+    "min_citation_accuracy": 1.0,
+    "min_independent_prs": 300,
+    "false_positive_upper_bound_reference": 0.01
+  },
+  "entries": [
+    {
+      "id": "go-clean-cross-module",
+      "language": "go",
+      "change_type": "cross_module",
+      "comparison": {
+        "base": "1111111111111111111111111111111111111111",
+        "head": "2222222222222222222222222222222222222222"
+      },
+      "head_files": {
+        "pkg/orders/order.go": [
+          "package orders",
+          "",
+          "import \"example/pkg/billing\"",
+          "",
+          "func Total(amount int) int {",
+          "\treturn billing.WithTax(amount)",
+          "}"
+        ],
+        "pkg/billing/invoice.go": [
+          "package billing",
+          "",
+          "func WithTax(amount int) int {",
+          "\treturn amount + amount/10",
+          "}"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "pkg/orders/order.go",
+          "pkg/billing/invoice.go"
+        ],
+        "findings": []
+      },
+      "observation": {
+        "review": "reviews/go-clean-cross-module.json",
+        "delivery": "published"
+      },
+      "must_match": true
+    },
+    {
+      "id": "go-defect-auth-citation",
+      "language": "go",
+      "change_type": "code",
+      "comparison": {
+        "base": "3333333333333333333333333333333333333333",
+        "head": "4444444444444444444444444444444444444444"
+      },
+      "head_files": {
+        "auth.go": [
+          "package auth",
+          "",
+          "import \"strings\"",
+          "",
+          "func CheckPassword(stored, provided string) bool {",
+          "\t// EqualFold hides case-only differences.",
+          "\treturn strings.ToLower(stored) == strings.ToLower(provided)",
+          "}"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "auth.go"
+        ],
+        "findings": [
+          {
+            "path": "auth.go",
+            "category": "security",
+            "severity": "major",
+            "start_line": 7,
+            "end_line": 7,
+            "cited_code": "return strings.ToLower(stored) == strings.ToLower(provided)"
+          }
+        ]
+      },
+      "observation": {
+        "review": "reviews/go-defect-auth-citation.json",
+        "delivery": "published"
+      },
+      "must_match": true
+    },
+    {
+      "id": "go-missed-severe",
+      "language": "go",
+      "change_type": "code",
+      "comparison": {
+        "base": "5555555555555555555555555555555555555555",
+        "head": "6666666666666666666666666666666666666666"
+      },
+      "head_files": {
+        "service/handler.go": [
+          "package service",
+          "",
+          "import \"log\"",
+          "",
+          "type Request struct {",
+          "\tUserID string",
+          "}",
+          "",
+          "type Handler struct {",
+          "\tusers map[string]*User",
+          "}",
+          "",
+          "type User struct {",
+          "\tName string",
+          "}",
+          "",
+          "func (h *Handler) lookup(id string) *User {",
+          "\treturn h.users[id]",
+          "}",
+          "",
+          "func (h *Handler) Serve(req *Request) {",
+          "\tuser := h.lookup(req.UserID)",
+          "\tlog.Printf(\"user %s\", user.Name)",
+          "}"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "service/handler.go"
+        ],
+        "findings": [
+          {
+            "path": "service/handler.go",
+            "category": "bug",
+            "severity": "major",
+            "start_line": 23,
+            "end_line": 23,
+            "cited_code": "log.Printf(\"user %s\", user.Name)"
+          }
+        ]
+      },
+      "observation": {
+        "review": "reviews/go-missed-severe.json",
+        "delivery": "published"
+      },
+      "must_match": false
+    },
+    {
+      "id": "typescript-clean",
+      "language": "typescript",
+      "change_type": "code",
+      "comparison": {
+        "base": "7777777777777777777777777777777777777777",
+        "head": "8888888888888888888888888888888888888888"
+      },
+      "head_files": {
+        "web/src/utils/format.ts": [
+          "export function formatAmount(cents: number): string {",
+          "  return (cents / 100).toFixed(2)",
+          "}"
+        ],
+        "web/src/utils/format.test.ts": [
+          "import { formatAmount } from './format'",
+          "",
+          "test('formats cents', () => {",
+          "  expect(formatAmount(1234)).toBe('12.34')",
+          "})"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "web/src/utils/format.ts",
+          "web/src/utils/format.test.ts"
+        ],
+        "findings": []
+      },
+      "observation": {
+        "review": "reviews/typescript-clean.json",
+        "delivery": "published"
+      },
+      "must_match": true
+    },
+    {
+      "id": "typescript-false-positive",
+      "language": "typescript",
+      "change_type": "code",
+      "comparison": {
+        "base": "9999999999999999999999999999999999999999",
+        "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "head_files": {
+        "web/src/components/StatusBadge.ts": [
+          "export function badgeClass(status: string): string {",
+          "  return `badge badge-${status}`",
+          "}"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "web/src/components/StatusBadge.ts"
+        ],
+        "findings": []
+      },
+      "observation": {
+        "review": "reviews/typescript-false-positive.json",
+        "delivery": "published"
+      },
+      "must_match": false
+    },
+    {
+      "id": "python-defect-test",
+      "language": "python",
+      "change_type": "test",
+      "comparison": {
+        "base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "head": "cccccccccccccccccccccccccccccccccccccccc"
+      },
+      "head_files": {
+        "tests/test_price.py": [
+          "def test_price_includes_tax():",
+          "    price = 100",
+          "    tax = 10",
+          "    total = price + tax",
+          "    assert total == 110 or True"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "tests/test_price.py"
+        ],
+        "findings": [
+          {
+            "path": "tests/test_price.py",
+            "category": "test",
+            "severity": "major",
+            "start_line": 5,
+            "end_line": 5,
+            "cited_code": "assert total == 110 or True"
+          }
+        ]
+      },
+      "observation": {
+        "review": "reviews/python-defect-test.json",
+        "delivery": "published"
+      },
+      "must_match": true
+    },
+    {
+      "id": "config-defect-docker",
+      "language": "dockerfile",
+      "change_type": "config",
+      "comparison": {
+        "base": "dddddddddddddddddddddddddddddddddddddddd",
+        "head": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      "head_files": {
+        "Dockerfile": [
+          "FROM golang:1.27 AS build",
+          "WORKDIR /src",
+          "COPY . .",
+          "RUN go build -o /app ./cmd/app",
+          "",
+          "FROM ubuntu:24.04",
+          "USER root",
+          "COPY --from=build /app /app",
+          "ENTRYPOINT [\"/app\"]"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "Dockerfile"
+        ],
+        "findings": [
+          {
+            "path": "Dockerfile",
+            "category": "security",
+            "severity": "major",
+            "start_line": 7,
+            "end_line": 7,
+            "cited_code": "USER root"
+          }
+        ]
+      },
+      "observation": {
+        "review": "reviews/config-defect-docker.json",
+        "delivery": "published"
+      },
+      "must_match": true
+    },
+    {
+      "id": "infra-defect-k8s",
+      "language": "yaml",
+      "change_type": "infra",
+      "comparison": {
+        "base": "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0",
+        "head": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
+      },
+      "head_files": {
+        "deploy/app.yaml": [
+          "apiVersion: apps/v1",
+          "kind: Deployment",
+          "metadata:",
+          "  name: api",
+          "spec:",
+          "  template:",
+          "    spec:",
+          "      containers:",
+          "        - name: api",
+          "          image: example/api:1.0",
+          "          securityContext:",
+          "            privileged: true"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "deploy/app.yaml"
+        ],
+        "findings": [
+          {
+            "path": "deploy/app.yaml",
+            "category": "security",
+            "severity": "major",
+            "start_line": 12,
+            "end_line": 12,
+            "cited_code": "privileged: true"
+          }
+        ]
+      },
+      "observation": {
+        "review": "reviews/infra-defect-k8s.json",
+        "delivery": "published"
+      },
+      "must_match": true
+    },
+    {
+      "id": "go-useful-escalation",
+      "language": "go",
+      "change_type": "code",
+      "comparison": {
+        "base": "1212121212121212121212121212121212121212",
+        "head": "1313131313131313131313131313131313131313"
+      },
+      "head_files": {
+        "internal/boundary/parse.go": [
+          "package boundary",
+          "",
+          "func Parse(input string) (string, error) {",
+          "\treturn input, nil",
+          "}"
+        ],
+        "internal/boundary/parse_test.go": [
+          "package boundary",
+          "",
+          "import \"testing\"",
+          "",
+          "func TestParse(t *testing.T) {",
+          "\tif _, err := Parse(\"x\"); err != nil {",
+          "\t\tt.Fatal(err)",
+          "\t}",
+          "}"
+        ]
+      },
+      "expected": {
+        "result": "inconclusive",
+        "escalation": true,
+        "escalation_reason": "coverage_incomplete",
+        "reviewable_files": [
+          "internal/boundary/parse.go",
+          "internal/boundary/parse_test.go"
+        ],
+        "findings": []
+      },
+      "observation": {
+        "review": "reviews/go-useful-escalation.json",
+        "delivery": "not_applicable"
+      },
+      "must_match": true
+    },
+    {
+      "id": "go-no-result",
+      "language": "go",
+      "change_type": "code",
+      "comparison": {
+        "base": "1414141414141414141414141414141414141414",
+        "head": "1515151515151515151515151515151515151515"
+      },
+      "head_files": {
+        "cmd/tool/main.go": [
+          "package main",
+          "",
+          "func main() {",
+          "\tprintln(\"tool\")",
+          "}"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "cmd/tool/main.go"
+        ],
+        "findings": []
+      },
+      "observation": {
+        "delivery": "not_applicable"
+      },
+      "must_match": false
+    },
+    {
+      "id": "go-delivery-failure",
+      "language": "go",
+      "change_type": "code",
+      "comparison": {
+        "base": "1616161616161616161616161616161616161616",
+        "head": "1717171717171717171717171717171717171717"
+      },
+      "head_files": {
+        "cmd/worker/main.go": [
+          "package main",
+          "",
+          "func main() {",
+          "\tconfig := load()",
+          "\tprintln(config.Timeout)",
+          "}"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "cmd/worker/main.go"
+        ],
+        "findings": [
+          {
+            "path": "cmd/worker/main.go",
+            "category": "bug",
+            "severity": "major",
+            "start_line": 5,
+            "end_line": 5,
+            "cited_code": "println(config.Timeout)"
+          }
+        ]
+      },
+      "observation": {
+        "review": "reviews/go-delivery-failure.json",
+        "delivery": "failed"
+      },
+      "must_match": true
+    },
+    {
+      "id": "go-unnecessary-escalation",
+      "language": "go",
+      "change_type": "code",
+      "comparison": {
+        "base": "1818181818181818181818181818181818181818",
+        "head": "1919191919191919191919191919191919191919"
+      },
+      "head_files": {
+        "internal/cache/cache.go": [
+          "package cache",
+          "",
+          "func Key(id string) string {",
+          "\treturn \"cache:\" + id",
+          "}"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "internal/cache/cache.go"
+        ],
+        "findings": []
+      },
+      "observation": {
+        "review": "reviews/go-unnecessary-escalation.json",
+        "delivery": "not_applicable"
+      },
+      "must_match": false
+    },
+    {
+      "id": "go-citation-invalid",
+      "language": "go",
+      "change_type": "code",
+      "comparison": {
+        "base": "2020202020202020202020202020202020202020",
+        "head": "2121212121212121212121212121212121212121"
+      },
+      "head_files": {
+        "cmd/report/main.go": [
+          "package main",
+          "",
+          "func main() {",
+          "\tvalue := compute()",
+          "\tprintln(value)",
+          "}"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "cmd/report/main.go"
+        ],
+        "findings": [
+          {
+            "path": "cmd/report/main.go",
+            "category": "bug",
+            "severity": "major",
+            "start_line": 4,
+            "end_line": 4,
+            "cited_code": "value := compute()"
+          }
+        ]
+      },
+      "observation": {
+        "review": "reviews/go-citation-invalid.json",
+        "delivery": "published"
+      },
+      "must_match": true
+    },
+    {
+      "id": "sql-defect-migration",
+      "language": "sql",
+      "change_type": "data",
+      "comparison": {
+        "base": "2222222222222222222222222222222222222223",
+        "head": "2323232323232323232323232323232323232323"
+      },
+      "head_files": {
+        "migrations/20261124_drop_user_email.sql": [
+          "-- Remove the unused column.",
+          "",
+          "ALTER TABLE users",
+          "    DROP COLUMN email;"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "migrations/20261124_drop_user_email.sql"
+        ],
+        "findings": [
+          {
+            "path": "migrations/20261124_drop_user_email.sql",
+            "category": "bug",
+            "severity": "major",
+            "start_line": 4,
+            "end_line": 4,
+            "cited_code": "DROP COLUMN email;"
+          }
+        ]
+      },
+      "observation": {
+        "review": "reviews/sql-defect-migration.json",
+        "delivery": "published"
+      },
+      "must_match": true
+    },
+    {
+      "id": "go-defect-boundary",
+      "language": "go",
+      "change_type": "cross_module",
+      "comparison": {
+        "base": "2424242424242424242424242424242424242424",
+        "head": "2525252525252525252525252525252525252525"
+      },
+      "head_files": {
+        "internal/orders/service.go": [
+          "package orders",
+          "",
+          "import (",
+          "\t\"example/internal/billing/db\"",
+          ")",
+          "",
+          "func Total(id string) int {",
+          "\treturn db.Lookup(id)",
+          "}"
+        ]
+      },
+      "expected": {
+        "result": "succeeded",
+        "escalation": false,
+        "escalation_reason": "",
+        "reviewable_files": [
+          "internal/orders/service.go"
+        ],
+        "findings": [
+          {
+            "path": "internal/orders/service.go",
+            "category": "maintainability",
+            "severity": "major",
+            "start_line": 4,
+            "end_line": 4,
+            "cited_code": "\"example/internal/billing/db\""
+          }
+        ]
+      },
+      "observation": {
+        "review": "reviews/go-defect-boundary.json",
+        "delivery": "published"
+      },
+      "must_match": true
+    }
+  ]
+}

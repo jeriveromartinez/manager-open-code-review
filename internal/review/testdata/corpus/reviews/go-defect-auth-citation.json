@@ -1,0 +1,34 @@
+{
+  "status": "complete",
+  "llm": {"model": "fake-model"},
+  "message": "Review complete: 1 finding(s) across 1 selected item(s).",
+  "comments": [
+    {
+      "path": "auth.go",
+      "content": "Case-insensitive password comparison accepts different passwords. Compare the exact values and use a constant-time comparison.",
+      "suggestion_code": "\treturn subtle.ConstantTimeCompare([]byte(stored), []byte(provided)) == 1",
+      "existing_code": "\treturn strings.ToLower(stored) == strings.ToLower(provided)",
+      "start_line": 7,
+      "end_line": 7,
+      "category": "security",
+      "severity": "high"
+    }
+  ],
+  "manifest": {
+    "schema_version": "ocr.run-manifest/v1",
+    "terminal_state": "complete",
+    "input": {
+      "resolved_base": "3333333333333333333333333333333333333333",
+      "resolved_head": "4444444444444444444444444444444444444444"
+    },
+    "execution": {"ocr_version": "v1.14.0", "model": "fake-model", "provider": "fake", "effort": "low"},
+    "coverage": {
+      "selected": [{"item_id": "c2-1", "path": "auth.go"}],
+      "completed": [{"item_id": "c2-1", "path": "auth.go"}],
+      "reused": [],
+      "failed": [],
+      "waived": [],
+      "excluded": []
+    }
+  }
+}
