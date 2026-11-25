@@ -560,6 +560,10 @@ func (s *server) patchRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasTeam {
 		if err := s.Store.AssignRepositoryTeam(r.Context(), id, teamValue); err != nil {
+			if errors.Is(err, store.ErrTeamNotFound) {
+				writeAPIError(w, http.StatusConflict, "team no longer exists")
+				return
+			}
 			writeAPIError(w, http.StatusInternalServerError, "assign repository team")
 			return
 		}
@@ -645,16 +649,8 @@ func (s *server) patchTeam(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-
-	// The audit records the previous name, which the rename result no longer
-	// carries.
-	var previous store.Team
-	if err := s.Store.DB.WithContext(r.Context()).Take(&previous, uint(teamID)).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			writeAPIError(w, http.StatusNotFound, "team not found")
-			return
-		}
-		writeAPIError(w, http.StatusInternalServerError, "load team")
+	if store.Slugify(name) == "" {
+		writeAPIError(w, http.StatusBadRequest, "name must contain letters or digits")
 		return
 	}
 
@@ -664,7 +660,7 @@ func (s *server) patchTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	renamed, err := s.Store.RenameTeam(r.Context(), uint(teamID), name)
+	renamed, previousName, err := s.Store.RenameTeam(r.Context(), uint(teamID), name)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrNotFound):
@@ -679,7 +675,7 @@ func (s *server) patchTeam(w http.ResponseWriter, r *http.Request) {
 
 	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(teamID, 10)})
 	actor, _ := auth.UserFrom(r.Context())
-	data := map[string]string{"from": previous.Name, "to": renamed.Name}
+	data := map[string]string{"from": previousName, "to": renamed.Name}
 	if err := s.Store.Audit(r.Context(), &actor.ID, "team.updated", "team", strconv.FormatUint(teamID, 10), data); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "write audit log")
 		return

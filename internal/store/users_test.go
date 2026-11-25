@@ -438,12 +438,15 @@ func TestRenameTeam(t *testing.T) {
 		t.Fatalf("create other team: %v", err)
 	}
 
-	renamed, err := s.RenameTeam(ctx, team.ID, "Renamed Equipo")
+	renamed, previous, err := s.RenameTeam(ctx, team.ID, "Renamed Equipo")
 	if err != nil {
 		t.Fatalf("RenameTeam: %v", err)
 	}
 	if renamed.Name != "Renamed Equipo" || renamed.Slug != "renamed-equipo" {
 		t.Errorf("renamed team = %+v, want name=Renamed Equipo slug=renamed-equipo", renamed)
+	}
+	if previous != "Original Name" {
+		t.Errorf("previous name = %q, want Original Name", previous)
 	}
 	var stored store.Team
 	if err := s.DB.WithContext(ctx).Take(&stored, team.ID).Error; err != nil {
@@ -453,18 +456,21 @@ func TestRenameTeam(t *testing.T) {
 		t.Errorf("stored team = %+v, want the new name and slug", stored)
 	}
 
-	same, err := s.RenameTeam(ctx, team.ID, renamed.Name)
+	same, previous, err := s.RenameTeam(ctx, team.ID, renamed.Name)
 	if err != nil {
 		t.Fatalf("RenameTeam with the same name: %v", err)
+	}
+	if previous != "Renamed Equipo" {
+		t.Errorf("same-name previous name = %q, want Renamed Equipo", previous)
 	}
 	if !same.UpdatedAt.Equal(stored.UpdatedAt) {
 		t.Errorf("same-name rename updated_at = %v, want unchanged %v", same.UpdatedAt, stored.UpdatedAt)
 	}
 
-	if _, err := s.RenameTeam(ctx, team.ID, other.Name); !errors.Is(err, store.ErrTeamNameTaken) {
+	if _, _, err := s.RenameTeam(ctx, team.ID, other.Name); !errors.Is(err, store.ErrTeamNameTaken) {
 		t.Errorf("rename to another team's name error = %v, want ErrTeamNameTaken", err)
 	}
-	if _, err := s.RenameTeam(ctx, team.ID, "Alpha  BETA!"); !errors.Is(err, store.ErrTeamNameTaken) {
+	if _, _, err := s.RenameTeam(ctx, team.ID, "Alpha  BETA!"); !errors.Is(err, store.ErrTeamNameTaken) {
 		t.Errorf("rename to another team's slug error = %v, want ErrTeamNameTaken", err)
 	}
 
@@ -475,8 +481,36 @@ func TestRenameTeam(t *testing.T) {
 		t.Errorf("team after rejected renames = %+v, want unchanged name and slug", stored)
 	}
 
-	if _, err := s.RenameTeam(ctx, 999999, "Ghost Team"); !errors.Is(err, store.ErrNotFound) {
+	if _, _, err := s.RenameTeam(ctx, 999999, "Ghost Team"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("rename missing team error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestAssignRepositoryTeamAfterTeamDeleted guards the delete race: an
+// assignment that reaches the database after its team was removed violates the
+// foreign key and must be reported as ErrTeamNotFound, not as a generic error.
+func TestAssignRepositoryTeamAfterTeamDeleted(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+
+	if err := s.UpsertInstallation(ctx, store.Installation{ID: 90, AccountLogin: "acme", AccountType: "Organization"}); err != nil {
+		t.Fatalf("create installation: %v", err)
+	}
+	if err := s.UpsertRepository(ctx, store.Repository{ID: 801, InstallationID: 90, FullName: "acme/orphan", DefaultBranch: "main"}); err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+
+	missing := uint(999999)
+	if err := s.AssignRepositoryTeam(ctx, 801, &missing); !errors.Is(err, store.ErrTeamNotFound) {
+		t.Fatalf("AssignRepositoryTeam with a deleted team = %v, want ErrTeamNotFound", err)
+	}
+
+	var repo store.Repository
+	if err := s.DB.WithContext(ctx).Take(&repo, 801).Error; err != nil {
+		t.Fatalf("reload repository: %v", err)
+	}
+	if repo.TeamID != nil {
+		t.Errorf("repository team_id = %v, want nil after the failed assignment", repo.TeamID)
 	}
 }
 
@@ -741,7 +775,7 @@ func TestRenameTeamMapsUniqueViolationToNameTaken(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.RenameTeam(context.Background(), target.ID, "Collision")
+		_, _, err := s.RenameTeam(context.Background(), target.ID, "Collision")
 		done <- err
 	}()
 	waitForLockedQuery(t, s, ctx, `UPDATE "teams"`)
@@ -789,7 +823,7 @@ func TestRenameTeamAfterConcurrentDelete(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.RenameTeam(context.Background(), team.ID, "New Name")
+		_, _, err := s.RenameTeam(context.Background(), team.ID, "New Name")
 		done <- err
 	}()
 	waitForLockedQuery(t, s, ctx, `UPDATE "teams"`)

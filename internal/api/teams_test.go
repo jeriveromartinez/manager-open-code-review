@@ -147,6 +147,26 @@ func TestPatchTeamRejectsEmptyNameAndMissingTeam(t *testing.T) {
 	}
 }
 
+func TestPatchTeamRejectsNameWithoutSlug(t *testing.T) {
+	f := newAPIFixture(t)
+	team := f.team("qa-pilot")
+	cookie := f.session(f.user("admin", true))
+
+	rec := f.request(http.MethodPatch, fmt.Sprintf("/api/teams/%d", team.ID), map[string]any{"name": "!!!"}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+
+	var got store.Team
+	if err := f.st.DB.WithContext(f.ctx).Take(&got, team.ID).Error; err != nil {
+		t.Fatalf("reload team: %v", err)
+	}
+	if got.Name != "qa-pilot" || got.Slug != "qa-pilot" {
+		t.Errorf("team = %+v, want the original qa-pilot name and slug", got)
+	}
+	if rows := auditRows(t, f, "team.updated"); len(rows) != 0 {
+		t.Errorf("audit rows = %d, want 0 for a rejected name", len(rows))
+	}
+}
+
 func TestPatchTeamReportsNameCollision(t *testing.T) {
 	f := newAPIFixture(t)
 	team := f.team("alpha")
@@ -293,6 +313,27 @@ func TestDeleteTeamRejectsInvalidIDAndMissingTeam(t *testing.T) {
 
 	rec = f.request(http.MethodDelete, "/api/teams/999999", nil, cookie)
 	assertStatus(t, rec, http.StatusNotFound)
+}
+
+// TestPatchRepoRejectsMissingTeam covers the delete race from the assignment
+// side: pointing a repository at a team that no longer exists is a conflict,
+// not an internal error.
+func TestPatchRepoRejectsMissingTeam(t *testing.T) {
+	f := newAPIFixture(t)
+	installation := f.installation(f.nextID())
+	repo := f.repo(7301, installation.ID, "acme/orphan", nil, true)
+	cookie := f.session(f.user("admin", true))
+
+	rec := f.request(http.MethodPatch, fmt.Sprintf("/api/repos/%d", repo.ID), map[string]any{"team_id": 999999}, cookie)
+	assertStatus(t, rec, http.StatusConflict)
+
+	var stored store.Repository
+	if err := f.st.DB.WithContext(f.ctx).Take(&stored, repo.ID).Error; err != nil {
+		t.Fatalf("reload repository: %v", err)
+	}
+	if stored.TeamID != nil {
+		t.Errorf("repository team_id = %v, want nil after the rejected assignment", stored.TeamID)
+	}
 }
 
 func TestTeamsReportRepositoryCount(t *testing.T) {
