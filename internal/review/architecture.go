@@ -687,62 +687,428 @@ func containsAny(value string, needles []string) bool {
 	return false
 }
 
-// architectureCitationPattern finds the path:line references the analysis
-// report already writes in its evidence. Only paths with a source or document
-// extension match, and the prefix keeps URLs and prose like "note:3" out.
-var architectureCitationPattern = regexp.MustCompile(
-	`(?:^|[\s(\x60"'\[])([A-Za-z0-9_./-]+\.(?:go|ts|tsx|js|jsx|mjs|cjs|vue|svelte|py|rs|java|kt|kts|rb|php|cs|c|cc|cpp|h|hpp|swift|scala|ex|exs|dart|sql|yaml|yml|json|toml|mod|sum|proto|graphql|gql|md|sh)):(\d+)(?:-(\d+))?`)
+// architectureReportCitation is one source location parsed from the report's
+// prose before the analysed scope decides which side it belongs to. The report
+// has no structured citation field, so its own wording is the source; a side
+// marker in the same clause (old/new, before/after, base/head) keeps a
+// previous-side line from being published as current code.
+type architectureReportCitation struct {
+	Path      string
+	StartLine int
+	EndLine   int
+	Side      string
+}
 
-// architectureEvidenceCitations extracts every path:line reference from the
-// accepted report. The analysis has no structured citation field, so the
-// report's own wording is the source; findings whose evidence spans files get
-// scope files and no single-path assumption.
+var (
+	architectureCitationExtensions = []string{
+		"go", "ts", "tsx", "js", "jsx", "mjs", "cjs", "vue", "svelte", "py",
+		"rs", "java", "kt", "kts", "rb", "php", "cs", "c", "cc", "cpp", "h",
+		"hpp", "swift", "scala", "ex", "exs", "dart", "sql", "yaml", "yml",
+		"json", "toml", "mod", "sum", "proto", "graphql", "gql", "md", "sh",
+	}
+	architectureCitationPathPattern = `[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.(?:` +
+		strings.Join(architectureCitationExtensions, "|") + `)`
+	architectureCitationQuotedPathPattern = `[\x60"'\[]?` + architectureCitationPathPattern + `[\x60"'\]]?`
+	architectureCitationSideWords         = `previous|prev|old|older|base|before|deleted|removed|left|` +
+		`antes|anteriores|anterior|previos|previas|previo|previa|` +
+		`eliminados|eliminadas|eliminado|eliminada|borrados|borradas|borrado|borrada|` +
+		`new|newer|current|head|after|now|right|added|` +
+		`ahora|actuales|actual|nuevos|nuevas|nuevo|nueva|despu[eé]s|despues|` +
+		`agregados|agregadas|agregado|agregada`
+	architectureCitationSidePattern = `(?:` + architectureCitationSideWords + `)`
+	// Side qualifiers sit next to the location they qualify. A qualifier that
+	// is not immediately followed by a path ("the old behavior ...") is prose,
+	// not a side marker, and must not relabel a citation.
+	architectureCitationPrefixPattern = `(?:(?:(?:en|in|on)\s+)?(?:(?:el|la|the)\s+)?` +
+		`(?:(?:lado|side)\s+)?` + architectureCitationSidePattern +
+		`(?:\s+(?:side|lado))?\s*(?:\s*[:,]\s*|\s+))`
+	architectureCitationSuffixPattern = `(?:\s*[\(\[]\s*` + architectureCitationSidePattern +
+		`(?:\s+(?:side|lado))?\s*[\)\]])?`
+	architectureCitationLocationPattern = `(?:\s*:\s*\d+(?:\s*[-–—]\s*\d+)?(?::\s*\d+)?` +
+		`|#L\d+(?:-L?\d+)?` +
+		`|[ \t]*[\(\[]\s*(?:lines?|l[ií]neas?|ln)\s*[:#]?\s*\d+(?:\s*[-–—]\s*\d+)?\s*[\)\]])`
+	architectureCitationPathSeparator = `(?:[ \t]*,[ \t]*|[ \t]+(?:y|and)[ \t]+)`
+
+	// A leading boundary keeps URLs, absolute paths and prose tokens out. The
+	// grouped form exists because one citation can cover several files that
+	// share a single location.
+	architectureCitationPattern = regexp.MustCompile(
+		`(?i)(?:^|[^\w/.-])(?P<prefix>` + architectureCitationPrefixPattern + `)?` +
+			`[\x60"'\[]?(?P<path>` + architectureCitationPathPattern + `)[\x60"'\]]?[ \t]*` +
+			`(?P<loc>` + architectureCitationLocationPattern + `)[\x60"'\]]?` +
+			`(?P<suffix>` + architectureCitationSuffixPattern + `)`)
+	architectureGroupedCitationPattern = regexp.MustCompile(
+		`(?i)(?:^|[^\w/.-])(?P<prefix>` + architectureCitationPrefixPattern + `)?` +
+			`(?P<paths>` + architectureCitationQuotedPathPattern +
+			`(?:` + architectureCitationPathSeparator + architectureCitationQuotedPathPattern + `)+)` +
+			`[ \t]*(?P<loc>` + architectureCitationLocationPattern + `)[\x60"'\]]?` +
+			`(?P<suffix>` + architectureCitationSuffixPattern + `)`)
+	architectureCitationPathSplitPattern      = regexp.MustCompile(architectureCitationPathSeparator)
+	architectureCitationSideWordPattern       = regexp.MustCompile(`(?i)\b(?:` + architectureCitationSideWords + `)\b`)
+	architectureCitationStandaloneSidePattern = regexp.MustCompile(
+		`(?i)^(?:(?:en|in|on)\s+)?(?:(?:el|la|the)\s+)?(?:(?:lado|side)\s+)?(` +
+			architectureCitationSideWords + `)(?:\s+(?:side|lado|version|versión|revision|revisión))?$`)
+
+	architectureCitationColonLocation  = regexp.MustCompile(`^\s*:\s*(\d+)(?:\s*[-–—]\s*(\d+))?(?::\s*\d+)?$`)
+	architectureCitationAnchorLocation = regexp.MustCompile(`^#L(\d+)(?:-L?(\d+))?$`)
+	architectureCitationWordsLocation  = regexp.MustCompile(
+		`(?i)^[ \t]*[\(\[]\s*(?:lines?|l[ií]neas?|ln)\s*[:#]?\s*(\d+)(?:\s*[-–—]\s*(\d+))?\s*[\)\]]$`)
+
+	architectureCitationBaseWords = map[string]bool{
+		"previous": true, "prev": true, "old": true, "older": true, "base": true,
+		"before": true, "deleted": true, "removed": true, "left": true,
+		"antes": true, "anteriores": true, "anterior": true, "previos": true,
+		"previas": true, "previo": true, "previa": true, "eliminados": true,
+		"eliminadas": true, "eliminado": true, "eliminada": true, "borrados": true,
+		"borradas": true, "borrado": true, "borrada": true,
+	}
+	architectureCitationHeadWords = map[string]bool{
+		"new": true, "newer": true, "current": true, "head": true, "after": true,
+		"now": true, "right": true, "added": true, "ahora": true, "actuales": true,
+		"actual": true, "nuevos": true, "nuevas": true, "nuevo": true, "nueva": true,
+		"después": true, "despues": true, "agregados": true, "agregadas": true,
+		"agregado": true, "agregada": true,
+	}
+)
+
+// architectureEvidenceCitations extracts the structured citations from the
+// accepted report. Each citation is anchored to the analysed scope and to its
+// own side, so a previous-side line and a current line of the same path stay
+// distinct. Citations outside the compared scope are evidence about code this
+// verdict cannot vouch for and are dropped.
 func architectureEvidenceCitations(verdict store.ArchitectureVerdict) []store.FindingCitation {
-	var text strings.Builder
-	text.WriteString(verdict.Evidence.Markdown)
-	for _, dimension := range verdict.Dimensions {
-		text.WriteString("\n")
-		text.WriteString(dimension.Name)
-		text.WriteString("\n")
-		text.WriteString(dimension.Content)
+	sides := architectureCitationSides(verdict)
+	added := architectureAddedScopePaths(verdict)
+	var citations []store.FindingCitation
+	for _, text := range architectureCitationTexts(verdict) {
+		for _, parsed := range parseArchitectureReportCitations(text) {
+			defaultSide, ok := sides[parsed.Path]
+			if !ok {
+				continue
+			}
+			side := defaultSide
+			switch parsed.Side {
+			case store.FindingCitationBase:
+				// The previous revision of a path that still exists at head is
+				// real evidence, even though the default side is the head. An
+				// added file has no previous revision to cite.
+				if !added[parsed.Path] {
+					side = store.FindingCitationBase
+				}
+			case store.FindingCitationHead:
+				// A deleted path has no head side; its only comparable code is
+				// the previous revision.
+				if defaultSide != store.FindingCitationBase {
+					side = store.FindingCitationHead
+				}
+			}
+			citations = append(citations, store.FindingCitation{
+				Path: parsed.Path, StartLine: parsed.StartLine, EndLine: parsed.EndLine, Side: side,
+			})
+		}
+	}
+	return store.NormalizeFindingCitations(citations)
+}
+
+// architectureAddedScopePaths records the files that only exist at head, so a
+// previous-side qualifier cannot invent a base citation for them.
+func architectureAddedScopePaths(verdict store.ArchitectureVerdict) map[string]bool {
+	added := make(map[string]bool)
+	add := func(file store.ArchitectureScopeFile) {
+		if !strings.EqualFold(file.Kind, "added") {
+			return
+		}
+		if path := normalizeCoveragePath(file.Path); path != "" {
+			added[path] = true
+		}
+	}
+	for _, file := range verdict.Scope.Included {
+		add(file)
+	}
+	for _, file := range verdict.Scope.Excluded {
+		add(file)
+	}
+	for _, file := range verdict.Evidence.EngineScope {
+		add(file)
+	}
+	return added
+}
+
+// architectureCitationTexts returns each report unit separately so a path list
+// never joins the end of one unit with the start of the next. Dimensions hold
+// the full section prose; the extracted items are only a fallback for verdicts
+// that carry no dimensions, because losing their surrounding qualifier would
+// publish the same line as both sides.
+func architectureCitationTexts(verdict store.ArchitectureVerdict) []string {
+	texts := []string{verdict.Evidence.Markdown}
+	if len(verdict.Dimensions) > 0 {
+		for _, dimension := range verdict.Dimensions {
+			texts = append(texts, dimension.Content)
+		}
+		return texts
 	}
 	for _, items := range [][]string{
 		verdict.BehaviorChanges, verdict.Risks, verdict.Alternatives,
 		verdict.AcceptanceConditions, verdict.Uncertainties,
 	} {
-		for _, item := range items {
-			text.WriteString("\n")
-			text.WriteString(item)
-		}
+		texts = append(texts, items...)
 	}
+	return texts
+}
 
-	matches := architectureCitationPattern.FindAllStringSubmatch(text.String(), -1)
-	sides := architectureCitationSides(verdict)
-	citations := make([]store.FindingCitation, 0, len(matches))
+func parseArchitectureReportCitations(text string) []architectureReportCitation {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	var citations []architectureReportCitation
+	state := ""
+	for _, line := range strings.Split(text, "\n") {
+		if architectureCitationSectionBreak(line) {
+			state = ""
+		}
+		if side := architectureStandaloneSide(line); side != "" {
+			// "Antes:" on its own line qualifies the list that follows.
+			state = side
+			continue
+		}
+		parsed, next := parseArchitectureCitationLine(line, state)
+		citations = append(citations, parsed...)
+		state = next
+	}
+	return citations
+}
+
+// architectureCitationSectionBreak starts a new unit whose prose must not
+// inherit the previous section's side.
+func architectureCitationSectionBreak(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "#")
+}
+
+// architectureStandaloneSide returns the side of a line that only holds a
+// qualifier ("Antes:", "**Old side:**", "- Base version:"). The pattern is
+// anchored, so prose that merely contains a side word does not qualify.
+func architectureStandaloneSide(line string) string {
+	text := strings.TrimSpace(line)
+	if text == "" {
+		return ""
+	}
+	text = strings.TrimLeft(text, "#-+>*_ \t")
+	text = strings.Trim(text, "*_ \t")
+	text = strings.TrimRight(text, ":：-–— \t")
+	match := architectureCitationStandaloneSidePattern.FindStringSubmatch(strings.TrimSpace(text))
+	if match == nil {
+		return ""
+	}
+	return architectureCitationSide(match[1])
+}
+
+type architectureCitationMatch struct {
+	start, end int
+	paths      []string
+	loc        string
+	side       string
+}
+
+// parseArchitectureCitationLine keeps the side state of a clause: in "Antes
+// a.go:5 y b.go:7; ahora c.go:9" both paths before the semicolon are previous
+// side even though only the first one carries the qualifier.
+func parseArchitectureCitationLine(line, state string) ([]architectureReportCitation, string) {
+	if strings.TrimSpace(line) == "" {
+		return nil, state
+	}
+	matches := architectureCitationLineMatches(line)
+	var citations []architectureReportCitation
+	lastEnd := 0
 	for _, match := range matches {
-		start, err := strconv.Atoi(match[2])
-		if err != nil || start <= 0 {
-			continue
-		}
-		// A citation is only anchored to the current comparison when the path
-		// belongs to the analysed scope. Without scope evidence there is no
-		// reliable side to publish.
-		path := normalizeCoveragePath(match[1])
-		side, ok := sides[path]
-		if !ok {
-			continue
-		}
-		end := start
-		if match[3] != "" {
-			if parsed, parseErr := strconv.Atoi(match[3]); parseErr == nil {
-				end = parsed
+		// The leading boundary is consumed by the match, so include it in the
+		// gap: otherwise a ';' immediately before the next citation is unseen
+		// and the previous clause's side leaks into it.
+		if lastEnd <= match.start {
+			gapEnd := match.start + 1
+			if gapEnd > len(line) {
+				gapEnd = len(line)
+			}
+			if architectureCitationClauseBreak(line[lastEnd:gapEnd]) {
+				state = ""
 			}
 		}
-		citations = append(citations, store.FindingCitation{
-			Path: path, StartLine: start, EndLine: end, Side: side,
+		if match.side != "" {
+			state = match.side
+		}
+		side := match.side
+		if side == "" {
+			side = state
+		}
+		for _, rawPath := range match.paths {
+			path := normalizeArchitectureCitationPath(rawPath)
+			if path == "" {
+				continue
+			}
+			start, end, ok := parseArchitectureCitationLocation(match.loc)
+			if !ok {
+				continue
+			}
+			citations = append(citations, architectureReportCitation{
+				Path: path, StartLine: start, EndLine: end, Side: side,
+			})
+		}
+		if match.end > lastEnd {
+			lastEnd = match.end
+		}
+	}
+	return citations, state
+}
+
+func architectureCitationLineMatches(line string) []architectureCitationMatch {
+	var matches []architectureCitationMatch
+	for _, index := range architectureGroupedCitationPattern.FindAllStringSubmatchIndex(line, -1) {
+		paths := architectureCitationSubmatch(architectureGroupedCitationPattern, line, index, "paths")
+		if paths == "" {
+			continue
+		}
+		matches = append(matches, architectureCitationMatch{
+			start: index[0], end: index[1],
+			paths: splitArchitectureCitationPaths(paths),
+			loc:   architectureCitationSubmatch(architectureGroupedCitationPattern, line, index, "loc"),
+			side:  architectureCitationMatchSide(architectureGroupedCitationPattern, line, index),
 		})
 	}
-	return store.NormalizeFindingCitations(citations)
+	for _, index := range architectureCitationPattern.FindAllStringSubmatchIndex(line, -1) {
+		path := architectureCitationSubmatch(architectureCitationPattern, line, index, "path")
+		if path == "" {
+			continue
+		}
+		matches = append(matches, architectureCitationMatch{
+			start: index[0], end: index[1],
+			paths: []string{path},
+			loc:   architectureCitationSubmatch(architectureCitationPattern, line, index, "loc"),
+			side:  architectureCitationMatchSide(architectureCitationPattern, line, index),
+		})
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].start != matches[j].start {
+			return matches[i].start < matches[j].start
+		}
+		return matches[i].end > matches[j].end
+	})
+	return matches
+}
+
+func architectureCitationSubmatch(re *regexp.Regexp, line string, index []int, name string) string {
+	position := re.SubexpIndex(name)
+	if position < 0 {
+		return ""
+	}
+	start, end := index[2*position], index[2*position+1]
+	if start < 0 || end < 0 || end > len(line) {
+		return ""
+	}
+	return line[start:end]
+}
+
+func architectureCitationMatchSide(re *regexp.Regexp, line string, index []int) string {
+	for _, name := range []string{"prefix", "suffix"} {
+		raw := architectureCitationSubmatch(re, line, index, name)
+		if raw == "" {
+			continue
+		}
+		if side := architectureCitationSide(raw); side != "" {
+			return side
+		}
+	}
+	return ""
+}
+
+func architectureCitationSide(text string) string {
+	word := architectureCitationSideWordPattern.FindString(text)
+	if word == "" {
+		return ""
+	}
+	lower := strings.ToLower(word)
+	switch {
+	case architectureCitationBaseWords[lower]:
+		return store.FindingCitationBase
+	case architectureCitationHeadWords[lower]:
+		return store.FindingCitationHead
+	default:
+		return ""
+	}
+}
+
+func architectureCitationClauseBreak(text string) bool {
+	return strings.ContainsAny(text, ";!?") ||
+		strings.Contains(text, ". ") ||
+		strings.HasSuffix(strings.TrimSpace(text), ".")
+}
+
+func splitArchitectureCitationPaths(raw string) []string {
+	parts := architectureCitationPathSplitPattern.Split(raw, -1)
+	paths := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			paths = append(paths, part)
+		}
+	}
+	return paths
+}
+
+func normalizeArchitectureCitationPath(raw string) string {
+	raw = strings.TrimSpace(raw)
+	raw = strings.Trim(raw, "\x60'\"()[]{}<>,.;:")
+	if raw == "" || strings.Contains(raw, "://") || strings.HasPrefix(raw, "/") ||
+		strings.HasPrefix(raw, "~") || strings.ContainsAny(raw, " \t") {
+		return ""
+	}
+	// Reject parent segments before path.Clean can resolve them away.
+	raw = strings.ReplaceAll(raw, `\`, "/")
+	for _, part := range strings.Split(raw, "/") {
+		if part == ".." {
+			return ""
+		}
+	}
+	path := normalizeCoveragePath(raw)
+	if path == "" {
+		return ""
+	}
+	extension := strings.ToLower(fileExtension(path))
+	for _, allowed := range architectureCitationExtensions {
+		if extension == "."+allowed {
+			return path
+		}
+	}
+	return ""
+}
+
+func parseArchitectureCitationLocation(raw string) (int, int, bool) {
+	raw = strings.TrimSpace(raw)
+	for _, pattern := range []*regexp.Regexp{
+		architectureCitationColonLocation,
+		architectureCitationAnchorLocation,
+		architectureCitationWordsLocation,
+	} {
+		match := pattern.FindStringSubmatch(raw)
+		if match == nil {
+			continue
+		}
+		start, err := strconv.Atoi(match[1])
+		if err != nil || start <= 0 {
+			return 0, 0, false
+		}
+		end := start
+		if match[2] != "" {
+			parsed, parseErr := strconv.Atoi(match[2])
+			if parseErr != nil {
+				return 0, 0, false
+			}
+			end = parsed
+		}
+		// A reversed range is malformed: publishing its start line would claim
+		// a location the report never stated.
+		if end < start {
+			return 0, 0, false
+		}
+		return start, end, true
+	}
+	return 0, 0, false
 }
 
 // architectureCitationSides maps every comparable path of the verdict to the
