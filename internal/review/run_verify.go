@@ -215,6 +215,11 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 	verdicts := make(map[string]Verification, len(out.findings))
 	pending := make([]store.Finding, 0, len(out.findings))
 	for _, f := range out.findings {
+		// Advisory architecture evidence has no QA verdict to confirm or refute;
+		// spending verifier budget on it would also contradict observation mode.
+		if f.Advisory {
+			continue
+		}
 		if reused, ok := reusedVerdict(openByID[f.ID], f, headSHA); ok {
 			verdicts[f.ID] = reused
 			continue

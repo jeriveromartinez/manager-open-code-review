@@ -217,3 +217,63 @@ func TestRetryCreatesRunAndEnqueues(t *testing.T) {
 	rec = f.request(http.MethodPost, path, nil, f.session(admin))
 	assertStatus(t, rec, http.StatusServiceUnavailable)
 }
+
+func TestPRDetailExposesFindingCitationsForThePanel(t *testing.T) {
+	f := newSecureFixture(t)
+	inst := f.installation(2001)
+	team := f.team("citations-team")
+	repo := f.repo(7001, inst.ID, "acme/citations", &team.ID, true)
+	pr := f.pr(repo.ID, 43, store.StatusChangesRequested)
+	dev := f.user("citations-dev", false)
+	f.member(team.ID, dev.ID, "developer")
+	profile, err := f.st.CreateLLMProfile(f.ctx, store.LLMProfile{
+		Name: "citations", Provider: "openai", Model: "gpt-4o-mini", APIKeyEnc: "sealed", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateLLMProfile: %v", err)
+	}
+	run, err := f.st.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: pr.ID, ProfileID: profile.ID, HeadSHA: "def456", Status: store.RunSucceeded,
+	})
+	if err != nil {
+		t.Fatalf("CreateReviewRun: %v", err)
+	}
+	if _, err := f.st.UpsertFinding(f.ctx, store.Finding{
+		ID: "finding-citations", PullRequestID: pr.ID, Fingerprint: "fp-citations",
+		Path: "src/a.go", StartLine: 2, EndLine: 2, Severity: "minor",
+		Category: "design", Title: "Límite entre módulos", Status: store.FindingOpen,
+		Scope: store.FindingScopeFiles,
+		Citations: store.EncodeFindingCitations([]store.FindingCitation{
+			{Path: "src/a.go", StartLine: 2, EndLine: 2, Side: store.FindingCitationHead},
+			{Path: "src/b.go", StartLine: 10, EndLine: 10, Side: store.FindingCitationBase},
+		}),
+		Advisory:       true,
+		FirstSeenRunID: run.ID, LastSeenRunID: run.ID,
+	}); err != nil {
+		t.Fatalf("UpsertFinding: %v", err)
+	}
+
+	rec := f.request(http.MethodGet, fmt.Sprintf("/api/prs/%d", pr.ID), nil, f.session(dev))
+	assertStatus(t, rec, http.StatusOK)
+
+	var raw struct {
+		Findings []struct {
+			ID        string                  `json:"id"`
+			Scope     string                  `json:"scope"`
+			Citations []store.FindingCitation `json:"citations"`
+			Advisory  bool                    `json:"advisory"`
+		} `json:"findings"`
+	}
+	decodeJSON(t, rec, &raw)
+	if len(raw.Findings) != 1 {
+		t.Fatalf("findings = %d, want one", len(raw.Findings))
+	}
+	finding := raw.Findings[0]
+	if finding.ID != "finding-citations" || finding.Scope != store.FindingScopeFiles || !finding.Advisory {
+		t.Errorf("finding = %+v, want citations/files/advisory", finding)
+	}
+	if len(finding.Citations) != 2 || finding.Citations[0].Path != "src/a.go" ||
+		finding.Citations[1].Path != "src/b.go" || finding.Citations[1].Side != store.FindingCitationBase {
+		t.Errorf("citations = %+v, want both sides of the finding", finding.Citations)
+	}
+}

@@ -1,7 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import PrDetailView from './PrDetailView.vue'
-import type { PRDetail } from '../api'
+import type { Finding, PRDetail } from '../api'
 
 const mocks = vi.hoisted(() => ({
   api: {
@@ -286,6 +286,60 @@ describe('PrDetailView', () => {
     expect(mocks.api.retryPR).toHaveBeenCalledWith(42)
     expect(mocks.api.prDetail).toHaveBeenCalledTimes(2)
 
+    wrapper.unmount()
+  })
+
+  it('shows a multi-file finding once with every citation and labels advisory evidence', async () => {
+    const multi: Finding = {
+      ...detail.findings[0],
+      id: 'multi',
+      fingerprint: 'fp-multi',
+      title: 'Límite entre módulos',
+      path: 'src/a.go',
+      start_line: 2,
+      end_line: 2,
+      severity: 'minor',
+      category: 'design',
+      scope: 'files',
+      citations: [
+        { path: 'src/a.go', start_line: 2, end_line: 2, side: 'RIGHT' },
+        { path: 'src/b.go', start_line: 10, end_line: 12, side: 'LEFT' },
+      ],
+      advisory: false,
+    }
+    const advisory: Finding = {
+      ...detail.findings[0],
+      id: 'advisory',
+      fingerprint: 'fp-advisory',
+      title: 'Observación arquitectónica',
+      path: '',
+      start_line: 0,
+      end_line: 0,
+      severity: 'minor',
+      category: 'design',
+      scope: 'pr',
+      citations: [],
+      advisory: true,
+    }
+    mocks.api.prDetail.mockResolvedValue({ ...detail, findings: [multi, advisory] })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const cards = wrapper.findAll('[data-finding]')
+    expect(cards).toHaveLength(2)
+    const multiCard = cards.find((card) => card.text().includes('Límite entre módulos'))
+    expect(multiCard).toBeDefined()
+    expect(cards.filter((card) => card.text().includes('Límite entre módulos'))).toHaveLength(1)
+    expect(multiCard!.get('.finding__location code').text()).toBe(
+      'src/a.go:2–2 · src/b.go:10–12 (código anterior)',
+    )
+
+    const advisoryCard = cards.find((card) => card.text().includes('Observación arquitectónica'))
+    expect(advisoryCard).toBeDefined()
+    expect(cards.filter((card) => card.text().includes('Observación arquitectónica'))).toHaveLength(1)
+    expect(advisoryCard!.get('.finding__location code').text()).toBe('todo el PR')
+    expect(advisoryCard!.get('.finding__label').text()).toBe('observación')
     wrapper.unmount()
   })
 

@@ -282,3 +282,14 @@ func TestDecideOffNeverApplies(t *testing.T) {
 		t.Fatalf("decision = %+v, want a recorded but unapplied verdict", d)
 	}
 }
+
+func TestDecideSkipsAdvisoryFindings(t *testing.T) {
+	advisory := testFinding("f_advisory", "minor", "")
+	advisory.Advisory = true
+	got := Decide([]store.Finding{advisory}, map[string]Verification{
+		"f_advisory": verified(VerdictUncertain, ""),
+	}, testFiles("guard()"), verifyHead, applyPolicy())
+	if len(got) != 0 {
+		t.Fatalf("decisions = %+v, want none for advisory evidence", got)
+	}
+}

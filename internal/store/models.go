@@ -642,7 +642,16 @@ type Finding struct {
 	Confidence      string `gorm:"column:confidence"`
 	// ExistingCode is the code OCR cited when reporting the finding. It decides
 	// whether a stored verdict still refers to the same code.
-	ExistingCode string         `gorm:"column:existing_code"`
+	ExistingCode string `gorm:"column:existing_code"`
+	// Scope is the span the finding describes: one file, several files or the
+	// whole pull request (#162). Citations are the verified path:line
+	// references that anchor that span to the compared code.
+	Scope     string         `gorm:"column:scope;not null;default:file"`
+	Citations datatypes.JSON `gorm:"column:citations"`
+	// Advisory findings are evidence only: the publisher shows them in the
+	// summary but never blocks the check or posts them inline. The architectural
+	// verdict stays observational (#157).
+	Advisory     bool           `gorm:"column:advisory;not null;default:false"`
 	Verification datatypes.JSON `gorm:"column:verification"`
 	// TriageSource is who produced the last triage: human or verifier.
 	TriageSource        string `gorm:"column:triage_source"`

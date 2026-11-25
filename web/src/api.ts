@@ -204,6 +204,15 @@ export type FindingVerification = {
   reason?: string
 }
 
+export type FindingCitation = {
+  path: string
+  start_line: number
+  end_line: number
+  /** RIGHT cita el head; LEFT cita el código eliminado de la base. */
+  side?: 'RIGHT' | 'LEFT'
+  existing_code?: string
+}
+
 export type Finding = {
   id: string
   fingerprint: string
@@ -219,6 +228,12 @@ export type Finding = {
   status: string
   first_seen_run_id: number
   last_seen_run_id: number
+  /** Alcance del hallazgo: un archivo, varios o todo el PR. */
+  scope?: 'file' | 'files' | 'pr'
+  /** Citas verificadas que anclan el hallazgo a la comparación vigente. */
+  citations?: FindingCitation[]
+  /** Evidencia del análisis arquitectónico: no bloquea el check ni se publica inline. */
+  advisory?: boolean
   /** QA verdict from the panel; a review run or /qa moving the status leaves it unchanged. */
   triage_verdict: '' | 'confirmed' | 'false_positive'
   triaged_by: string

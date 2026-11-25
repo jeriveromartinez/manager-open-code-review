@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -192,7 +193,14 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 			return err
 		}
 		if err := p.publishInlineComments(ctx, added, findings); err != nil {
-			return err
+			if !errors.Is(err, errInlineRejected) {
+				return err
+			}
+			// GitHub refused the whole review: no finding was lost. Settle the
+			// step so a retry does not resend a review that will be refused
+			// again, and let the summary carry them once.
+			slog.Warn("inline review rejected; findings move to the summary",
+				"pull_request_id", p.pr.ID, "run_id", p.run.ID, "error", err)
 		}
 		if err := p.markStep(ctx, store.PublishStepInline); err != nil {
 			return err
@@ -456,7 +464,9 @@ func (p *publishContext) hasBlocking(findings []store.Finding) bool {
 		minimum = severityRank[defaultBlockingThreshold]
 	}
 	for _, f := range findings {
-		if severityRank[f.Severity] < minimum || !p.blocksOnVerification(f) {
+		// Advisory evidence never blocks the gate: the architectural verdict it
+		// comes from is observational (#157).
+		if f.Advisory || severityRank[f.Severity] < minimum || !p.blocksOnVerification(f) {
 			continue
 		}
 		return true
@@ -506,6 +516,39 @@ func (p *publishContext) setPRStatus(ctx context.Context, status string) error {
 	return nil
 }
 
+// githubStatusError is a non-2xx GitHub response. The publisher needs the
+// status to tell a rejected inline comment, which must fall back to the
+// summary, from a transient failure that a retry can resolve.
+type githubStatusError struct {
+	Method     string
+	Path       string
+	StatusCode int
+	Body       string
+}
+
+func (e *githubStatusError) Error() string {
+	if e.Body == "" {
+		return fmt.Sprintf("%s %s: GitHub API returned status %d", e.Method, e.Path, e.StatusCode)
+	}
+	return fmt.Sprintf("%s %s: GitHub API returned status %d: %s", e.Method, e.Path, e.StatusCode, e.Body)
+}
+
+// isRejectedResponse reports a client error that a retry cannot fix. GitHub
+// also uses 403 for secondary rate limits, so only validation failures are
+// permanent.
+func isRejectedResponse(err error) bool {
+	var statusErr *githubStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	switch statusErr.StatusCode {
+	case http.StatusBadRequest, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
 // request performs a REST call against the configured API URL using the
 // installation client, which supplies the Authorization header.
 func (p *publishContext) request(ctx context.Context, method, path string, in, out any) error {
@@ -533,10 +576,11 @@ func (p *publishContext) request(ctx context.Context, method, path string, in, o
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		payload, readErr := io.ReadAll(io.LimitReader(resp.Body, cancelErrorBodyLimit))
-		if readErr != nil {
-			return fmt.Errorf("%s %s: GitHub API returned status %d", method, path, resp.StatusCode)
+		statusErr := &githubStatusError{Method: method, Path: path, StatusCode: resp.StatusCode}
+		if readErr == nil {
+			statusErr.Body = string(payload)
 		}
-		return fmt.Errorf("%s %s: GitHub API returned status %d: %s", method, path, resp.StatusCode, payload)
+		return statusErr
 	}
 	if out != nil && resp.StatusCode != http.StatusNoContent {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
@@ -582,12 +626,12 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 
 	annotations := make([]checkAnnotation, 0, len(open))
 	for _, f := range open {
-		if f.Path == "" || f.StartLine <= 0 {
+		// An annotation belongs to one file; a design finding that spans files
+		// or only cites removed code is represented in the summary instead of
+		// being pinned to an arbitrary path (#162).
+		path, start, end, ok := singleHeadAnchor(f)
+		if !ok || f.Advisory {
 			continue
-		}
-		end := f.EndLine
-		if end < f.StartLine {
-			end = f.StartLine
 		}
 		level := "warning"
 		if p.hasBlocking([]store.Finding{f}) {
@@ -605,7 +649,7 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 			message = "Revisar el hallazgo en el panel de QA"
 		}
 		annotations = append(annotations, checkAnnotation{
-			Path: f.Path, StartLine: f.StartLine, EndLine: end,
+			Path: path, StartLine: start, EndLine: end,
 			AnnotationLevel: level, Title: title, Message: message,
 		})
 	}

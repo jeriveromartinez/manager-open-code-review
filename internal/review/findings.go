@@ -58,6 +58,29 @@ func Fingerprint(prID uint, f AgentFinding, lines []string, ordinal int) string 
 	return fingerprintFor(prID, f, Anchor(f, lines), ordinal)
 }
 
+// identityCitations removes the single head citation that only restates the
+// finding's primary range. Every finding now carries that citation, but rows
+// written before #162 have none; ignoring the restatement keeps their identity,
+// comments, threads and audit attached.
+func identityCitations(f AgentFinding) []store.FindingCitation {
+	citations := store.NormalizeFindingCitations(f.Citations)
+	if len(citations) != 1 {
+		return citations
+	}
+	citation := citations[0]
+	start, end := f.StartLine, f.EndLine
+	if end < start {
+		end = start
+	}
+	if citation.Side == store.FindingCitationHead &&
+		citation.Path == normalizeCoveragePath(f.Path) &&
+		citation.StartLine == start && citation.EndLine == end &&
+		citation.ExistingCode == "" {
+		return nil
+	}
+	return citations
+}
+
 func fingerprintFor(prID uint, f AgentFinding, anchor string, ordinal int) string {
 	h := sha256.New()
 	parts := []string{
@@ -67,6 +90,14 @@ func fingerprintFor(prID uint, f AgentFinding, anchor string, ordinal int) strin
 		normalizeTitle(f.Title),
 		anchor,
 		strconv.Itoa(ordinal),
+	}
+	// Findings written before #162 keep exactly the old hash. A scope or a
+	// citation set that adds evidence extends it, so the identity distinguishes
+	// design findings across files without re-keying any existing row.
+	citations := identityCitations(f)
+	scope := store.NormalizeFindingScope(f.Scope, citations)
+	if identity := store.FindingCitationIdentity(citations); scope != store.FindingScopeFile || identity != "" {
+		parts = append(parts, scope, identity)
 	}
 	for _, part := range parts {
 		h.Write([]byte(part))
@@ -158,7 +189,7 @@ type identifiedFinding struct {
 // identityGroupKey is the identity without its ordinal. Occurrences that share
 // it are ordered by (StartLine, EndLine, Body) to assign the ordinal.
 type identityGroupKey struct {
-	path, category, title, anchor string
+	path, category, title, anchor, scope, citations string
 }
 
 type identityEntry struct {
@@ -167,11 +198,14 @@ type identityEntry struct {
 }
 
 func identityKey(f AgentFinding, anchor string) identityGroupKey {
+	citations := identityCitations(f)
 	return identityGroupKey{
-		path:     normalizeCoveragePath(f.Path),
-		category: strings.TrimSpace(f.Category),
-		title:    normalizeTitle(f.Title),
-		anchor:   anchor,
+		path:      normalizeCoveragePath(f.Path),
+		category:  strings.TrimSpace(f.Category),
+		title:     normalizeTitle(f.Title),
+		anchor:    anchor,
+		scope:     store.NormalizeFindingScope(f.Scope, citations),
+		citations: store.FindingCitationIdentity(citations),
 	}
 }
 
@@ -367,6 +401,12 @@ func occurrenceLess(a, b AgentFinding) bool {
 	if a.Body != b.Body {
 		return a.Body < b.Body
 	}
+	if a.Scope != b.Scope {
+		return a.Scope < b.Scope
+	}
+	if ca, cb := store.FindingCitationIdentity(identityCitations(a)), store.FindingCitationIdentity(identityCitations(b)); ca != cb {
+		return ca < cb
+	}
 	// Deterministic tie-breaks for rows that share the documented order keys.
 	if a.Severity != b.Severity {
 		return a.Severity < b.Severity
@@ -397,6 +437,9 @@ func findingFromStore(f store.Finding) AgentFinding {
 		ExistingCode: f.ExistingCode,
 		StartLine:    f.StartLine,
 		EndLine:      f.EndLine,
+		Scope:        f.Scope,
+		Citations:    store.DecodeFindingCitations(f.Citations),
+		Advisory:     f.Advisory,
 	}
 }
 
@@ -416,12 +459,7 @@ func dedupeNearbyFindings(findings []AgentFinding) []AgentFinding {
 				continue
 			}
 			// Preferir el rango que empieza primero sin perder el primer cuerpo.
-			if finding.StartLine < kept[i].StartLine {
-				kept[i].StartLine = finding.StartLine
-				kept[i].EndLine = finding.EndLine
-			} else if finding.StartLine == kept[i].StartLine && finding.EndLine > kept[i].EndLine {
-				kept[i].EndLine = finding.EndLine
-			}
+			mergeNearbyFinding(&kept[i], finding)
 			merged = true
 			break
 		}
@@ -432,7 +470,65 @@ func dedupeNearbyFindings(findings []AgentFinding) []AgentFinding {
 	return kept
 }
 
+// mergeNearbyFinding keeps the earliest range and the first body, preserves
+// the richer citation evidence and re-syncs a citation that only restated the
+// old primary range to the merged one.
+func mergeNearbyFinding(kept *AgentFinding, finding AgentFinding) {
+	keptEvidence := identityCitations(*kept)
+	findingEvidence := identityCitations(finding)
+	hadCitation := len(kept.Citations) > 0 || len(finding.Citations) > 0
+
+	// Keep the original canonical-range rule: the earliest range wins, and a
+	// same-start occurrence only extends the end. The dedupe contract expects
+	// chunk 20-20 and 21-21 to stay 20-20.
+	if finding.StartLine < kept.StartLine {
+		kept.StartLine, kept.EndLine = finding.StartLine, finding.EndLine
+	} else if finding.StartLine == kept.StartLine && finding.EndLine > kept.EndLine {
+		kept.EndLine = finding.EndLine
+	}
+	mergedStart, mergedEnd := kept.StartLine, findingEnd(*kept)
+
+	var citations []store.FindingCitation
+	switch {
+	case len(keptEvidence) == 0 && len(findingEvidence) == 0:
+		// Both only restate their own range: keep one canonical citation on
+		// the merged range so a wider finding never cites the old one.
+		if hadCitation && normalizeCoveragePath(kept.Path) != "" && mergedStart > 0 {
+			citations = []store.FindingCitation{{
+				Path: normalizeCoveragePath(kept.Path), StartLine: mergedStart,
+				EndLine: mergedEnd, Side: store.FindingCitationHead,
+			}}
+		}
+	case len(keptEvidence) == 0:
+		citations = findingEvidence
+	case len(findingEvidence) == 0:
+		citations = keptEvidence
+	default:
+		citations = append(append([]store.FindingCitation(nil), keptEvidence...), findingEvidence...)
+	}
+
+	scope := kept.Scope
+	if scope == "" || scope == store.FindingScopeFile {
+		scope = finding.Scope
+	}
+	if kept.Scope == store.FindingScopePR || finding.Scope == store.FindingScopePR {
+		scope = store.FindingScopePR
+	}
+	kept.Scope = store.NormalizeFindingScope(scope, citations)
+	kept.Citations = store.NormalizeFindingCitations(citations)
+}
+
+func findingEnd(f AgentFinding) int {
+	if f.EndLine < f.StartLine {
+		return f.StartLine
+	}
+	return f.EndLine
+}
+
 func sameNearbyFinding(a, b AgentFinding) bool {
+	if a.Advisory != b.Advisory {
+		return false
+	}
 	if normalizeCoveragePath(a.Path) != normalizeCoveragePath(b.Path) ||
 		strings.TrimSpace(a.Category) != strings.TrimSpace(b.Category) {
 		return false
@@ -442,6 +538,12 @@ func sameNearbyFinding(a, b AgentFinding) bool {
 	}
 	aCode, bCode := normalizeAnchor(a.ExistingCode), normalizeAnchor(b.ExistingCode)
 	if aCode != "" && bCode != "" && aCode != bCode {
+		return false
+	}
+	// Two chunks can report the same design finding, but citations that name
+	// different files or different cited code are not the same finding.
+	aCitations, bCitations := store.FindingCitationIdentity(identityCitations(a)), store.FindingCitationIdentity(identityCitations(b))
+	if aCitations != "" && bCitations != "" && aCitations != bCitations {
 		return false
 	}
 	return rangesNearby(a, b, contextRadius)
@@ -524,6 +626,9 @@ func ReconcileScoped(open []store.Finding, out AgentOutput, runID uint, complete
 			Suggestion:          af.Suggestion,
 			Confidence:          af.Confidence,
 			ExistingCode:        af.ExistingCode,
+			Scope:               store.NormalizeFindingScope(af.Scope, af.Citations),
+			Citations:           store.EncodeFindingCitations(af.Citations),
+			Advisory:            af.Advisory,
 			Status:              store.FindingOpen,
 			FirstSeenRunID:      prev.FirstSeenRunID,
 			LastSeenRunID:       runID,
@@ -549,6 +654,19 @@ func ReconcileScoped(open []store.Finding, out AgentOutput, runID uint, complete
 		candidates := open
 		if resolvable != nil {
 			candidates = findingsInPaths(open, resolvable)
+			// Advisory evidence is not tied to one reviewed path (a PR-scope
+			// design finding has none). A complete run that did not produce it
+			// still resolves the previous comparison's verdict.
+			included := make(map[string]bool, len(candidates))
+			for _, f := range candidates {
+				included[f.ID] = true
+			}
+			for _, f := range open {
+				if f.Advisory && !included[f.ID] {
+					candidates = append(candidates, f)
+					included[f.ID] = true
+				}
+			}
 		}
 		for _, f := range candidates {
 			// Only an open finding can be resolved by its absence: withdrawn and

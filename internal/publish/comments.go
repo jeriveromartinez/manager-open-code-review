@@ -2,6 +2,7 @@ package publish
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -143,22 +144,89 @@ func (p *publishContext) findInlineReview(ctx context.Context, marker string) (i
 	}
 }
 
+// errInlineRejected reports that GitHub refused the whole review. The findings
+// are not lost: the caller publishes them in the summary instead.
+var errInlineRejected = errors.New("inline review rejected")
+
+type inlineCandidate struct {
+	finding store.Finding
+	path    string
+	start   int
+	end     int
+}
+
+// singleHeadAnchor resolves the one head-side range a finding can be pinned
+// to. A finding that spans files, that only cites removed code or whose
+// citations do not match its primary path has no single anchor (#162).
+func singleHeadAnchor(f store.Finding) (string, int, int, bool) {
+	citations := store.DecodeFindingCitations(f.Citations)
+	if store.NormalizeFindingScope(f.Scope, citations) != store.FindingScopeFile {
+		return "", 0, 0, false
+	}
+	paths := make(map[string]bool)
+	hasHead := len(citations) == 0
+	for _, citation := range citations {
+		paths[citation.Path] = true
+		if citation.Side != store.FindingCitationBase {
+			hasHead = true
+		}
+	}
+	if len(paths) > 1 || !hasHead {
+		return "", 0, 0, false
+	}
+	path, start, end := f.Path, f.StartLine, f.EndLine
+	if path == "" || start <= 0 {
+		for _, citation := range citations {
+			if citation.Side == store.FindingCitationBase {
+				continue
+			}
+			path, start, end = citation.Path, citation.StartLine, citation.EndLine
+			break
+		}
+	}
+	if path == "" || start <= 0 {
+		return "", 0, 0, false
+	}
+	// The citation set is the finding's evidence; it must not be published on
+	// a different file the producer happened to put in Path.
+	if len(paths) == 1 && !paths[path] {
+		return "", 0, 0, false
+	}
+	if end < start {
+		end = start
+	}
+	return path, start, end, true
+}
+
+// inlineAnchor is a singleHeadAnchor that also has to exist in the added lines
+// of the current comparison.
+func (p *publishContext) inlineAnchor(f store.Finding, added addedLines) (string, int, int, bool) {
+	path, start, end, ok := singleHeadAnchor(f)
+	if !ok || !added.has(path, start) {
+		return "", 0, 0, false
+	}
+	return path, start, end, true
+}
+
 // publishInlineComments posts one COMMENT review with only findings that do
-// not have a GitHub comment yet and whose start line is in a diff hunk. A run
-// posts at most one review: a retry finds it by marker instead of creating a
-// duplicate.
+// not have a GitHub comment yet and whose anchor is one added line of the
+// current comparison. A run posts at most one review: a retry finds it by
+// marker instead of creating a duplicate. A rejected review returns
+// errInlineRejected so the caller can deliver the findings in the summary.
 func (p *publishContext) publishInlineComments(ctx context.Context, added addedLines, findings []store.Finding) error {
-	candidates := make([]store.Finding, 0)
+	candidates := make([]inlineCandidate, 0)
 	for _, f := range findings {
-		if f.Status == store.FindingWithdrawn || f.GithubCommentID != 0 || f.StartLine <= 0 {
+		if f.Status == store.FindingWithdrawn || f.GithubCommentID != 0 || f.Advisory {
 			continue
 		}
 		if !p.inlineAllowed(f) {
 			continue
 		}
-		if added.has(f.Path, f.StartLine) {
-			candidates = append(candidates, f)
+		path, start, end, ok := p.inlineAnchor(f, added)
+		if !ok {
+			continue
 		}
+		candidates = append(candidates, inlineCandidate{finding: f, path: path, start: start, end: end})
 	}
 	marker := inlineReviewMarker(p.run.ID)
 	reviewID, err := p.findInlineReview(ctx, marker)
@@ -170,27 +238,27 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 	}
 
 	comments := make([]reviewCommentPayload, 0, len(candidates))
-	for _, f := range candidates {
+	for _, candidate := range candidates {
+		f := candidate.finding
 		body := p.sanitize(f.Title)
 		if f.Body != "" {
 			body += "\n\n" + p.sanitize(f.Body)
 		}
-		end := f.EndLine
-		if end < f.StartLine {
-			end = f.StartLine
+		if citations := store.DecodeFindingCitations(f.Citations); len(citations) > 0 {
+			body += "\n\nCitas: " + p.sanitize(p.citationLocations(citations))
 		}
 		if f.Suggestion != "" {
-			if wholeRangeAdded(added, f.Path, f.StartLine, end) {
+			if wholeRangeAdded(added, candidate.path, candidate.start, candidate.end) {
 				body += "\n\n```suggestion\n" + p.sanitize(f.Suggestion) + "\n```"
 			} else {
 				body += "\n\nSugerencia: " + p.sanitize(f.Suggestion)
 			}
 		}
 		comment := reviewCommentPayload{
-			Path: f.Path, Line: end, Side: "RIGHT", Body: body,
+			Path: candidate.path, Line: candidate.end, Side: "RIGHT", Body: body,
 		}
-		if end != f.StartLine {
-			comment.StartLine = f.StartLine
+		if candidate.end != candidate.start {
+			comment.StartLine = candidate.start
 			comment.StartSide = "RIGHT"
 		}
 		comments = append(comments, comment)
@@ -207,10 +275,13 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 		}
 		path := p.repoPath(fmt.Sprintf("pulls/%d/reviews", p.pr.Number))
 		if err := p.request(ctx, http.MethodPost, path, payload, &created); err != nil {
+			if isRejectedResponse(err) {
+				return fmt.Errorf("%w: %v", errInlineRejected, err)
+			}
 			return fmt.Errorf("create review: %w", err)
 		}
 		if created.ID == 0 {
-			return fmt.Errorf("create review: GitHub returned no review id")
+			return fmt.Errorf("%w: GitHub returned no review id", errInlineRejected)
 		}
 		reviewID = created.ID
 	}
@@ -232,14 +303,11 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 	}
 
 	used := make([]bool, len(posted))
-	for _, f := range candidates {
-		end := f.EndLine
-		if end < f.StartLine {
-			end = f.StartLine
-		}
-		match := findComment(posted, used, f.Path, end)
+	for _, candidate := range candidates {
+		f := candidate.finding
+		match := findComment(posted, used, candidate.path, candidate.end)
 		if match == nil {
-			match = findComment(posted, used, f.Path, f.StartLine)
+			match = findComment(posted, used, candidate.path, candidate.start)
 		}
 		// GitHub omits `line` on some review comments it returns for a review
 		// that was just created (the payload only carries `position`). The
@@ -247,7 +315,7 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 		// with the first unconsumed comment on the same path instead of losing
 		// its coordinates and, with them, the thread link resolutions need.
 		if match == nil {
-			match = findCommentByPath(posted, used, f.Path)
+			match = findCommentByPath(posted, used, candidate.path)
 		}
 		// Never invent a GitHub id: a fake value would silently suppress
 		// future publications. Coordinates stay unset when the API omits them.

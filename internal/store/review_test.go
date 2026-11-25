@@ -63,6 +63,15 @@ func TestMigrateCreatesPhase2Tables(t *testing.T) {
 	if !st.DB.Migrator().HasColumn(&store.QAPolicy{}, "architecture_analysis_mode") {
 		t.Fatal("qa_policies.architecture_analysis_mode missing")
 	}
+	if !st.DB.Migrator().HasColumn(&store.Finding{}, "scope") {
+		t.Fatal("findings.scope missing")
+	}
+	if !st.DB.Migrator().HasColumn(&store.Finding{}, "citations") {
+		t.Fatal("findings.citations missing")
+	}
+	if !st.DB.Migrator().HasColumn(&store.Finding{}, "advisory") {
+		t.Fatal("findings.advisory missing")
+	}
 }
 
 func TestCompleteReviewRunPersistsArchitectureAnalysis(t *testing.T) {

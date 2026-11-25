@@ -100,6 +100,12 @@ type findingDTO struct {
 	// answer with its cited evidence, empty on findings it never looked at.
 	TriageSource string          `json:"triage_source"`
 	Verification json.RawMessage `json:"verification"`
+	// Scope and Citations describe findings that span files or the whole pull
+	// request (#162). The panel reads every citation, not just the primary path.
+	Scope     string                  `json:"scope"`
+	Citations []store.FindingCitation `json:"citations"`
+	// Advisory marks evidence from the observational architectural analysis.
+	Advisory bool `json:"advisory"`
 	// GithubThreadResolved is GitHub's thread state, reported apart from the QA
 	// verdict and the finding status.
 	GithubThreadResolved bool   `json:"github_thread_resolved"`
@@ -108,6 +114,10 @@ type findingDTO struct {
 }
 
 func findingDTOOf(f store.Finding) findingDTO {
+	citations := store.DecodeFindingCitations(f.Citations)
+	if citations == nil {
+		citations = []store.FindingCitation{}
+	}
 	return findingDTO{
 		ID: f.ID, Fingerprint: f.Fingerprint, Path: f.Path,
 		StartLine: f.StartLine, EndLine: f.EndLine, Severity: f.Severity,
@@ -116,6 +126,8 @@ func findingDTOOf(f store.Finding) findingDTO {
 		FirstSeenRunID: f.FirstSeenRunID, LastSeenRunID: f.LastSeenRunID,
 		TriageVerdict: f.TriageVerdict, TriagedBy: f.TriagedBy, TriagedAt: formatTimePtr(f.TriagedAt),
 		TriageSource: f.TriageSource, Verification: jsonObject(f.Verification),
+		Scope: store.NormalizeFindingScope(f.Scope, citations), Citations: citations,
+		Advisory:             f.Advisory,
 		GithubThreadResolved: f.GithubThreadResolved,
 		CreatedAt:            f.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:            f.UpdatedAt.UTC().Format(time.RFC3339),
