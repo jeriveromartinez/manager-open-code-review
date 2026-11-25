@@ -580,9 +580,10 @@ func TestDeleteTeamGuardsRepositories(t *testing.T) {
 	}
 }
 
-// TestDeleteTeamRechecksInsideTheTransaction guards that DeleteTeam rechecks
-// the repository assignment itself instead of trusting the caller's pre-check.
-func TestDeleteTeamRechecksInsideTheTransaction(t *testing.T) {
+// TestDeleteTeamBlocksRepositoryAssignedAfterPrecheck guards that a repository
+// assigned after the caller's TeamRepositories pre-check still blocks deletion:
+// DeleteTeam's own atomic guard, not the caller's check, decides.
+func TestDeleteTeamBlocksRepositoryAssignedAfterPrecheck(t *testing.T) {
 	s := testutil.NewStore(t)
 	ctx := context.Background()
 
@@ -685,6 +686,185 @@ func TestListTeamsCountsRepositories(t *testing.T) {
 	}
 	if counts[idle.ID] != 0 {
 		t.Errorf("idle team RepositoryCount = %d, want 0", counts[idle.ID])
+	}
+}
+
+// waitForLockedQuery blocks until a query containing fragment waits on a lock,
+// so interleaving tests do not depend on sleeps.
+func waitForLockedQuery(t *testing.T, s *store.Store, ctx context.Context, fragment string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int64
+		err := s.DB.WithContext(ctx).Raw(
+			`SELECT count(*) FROM pg_stat_activity
+			 WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE ?`,
+			"%"+fragment+"%").Scan(&waiting).Error
+		if err != nil {
+			t.Fatalf("inspect pg_stat_activity: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no query containing %q blocked on a lock", fragment)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestRenameTeamMapsUniqueViolationToNameTaken guards that a collision only the
+// unique index can see, because the concurrent rename was still uncommitted
+// when the pre-check ran, still yields ErrTeamNameTaken.
+func TestRenameTeamMapsUniqueViolationToNameTaken(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+
+	target, err := s.CreateTeam(ctx, "Target Team")
+	if err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	blocker, err := s.CreateTeam(ctx, "Blocker Team")
+	if err != nil {
+		t.Fatalf("create blocker: %v", err)
+	}
+
+	tx := s.DB.WithContext(ctx).Begin()
+	if tx.Error != nil {
+		t.Fatalf("begin: %v", tx.Error)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := tx.Model(&store.Team{}).Where("id = ?", blocker.ID).
+		Updates(map[string]any{"name": "Collision", "slug": "collision"}).Error; err != nil {
+		t.Fatalf("hold conflicting name: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.RenameTeam(context.Background(), target.ID, "Collision")
+		done <- err
+	}()
+	waitForLockedQuery(t, s, ctx, `UPDATE "teams"`)
+	if err := tx.Commit().Error; err != nil {
+		t.Fatalf("commit blocker: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, store.ErrTeamNameTaken) {
+			t.Errorf("RenameTeam under unique conflict = %v, want ErrTeamNameTaken", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RenameTeam did not finish")
+	}
+
+	var stored store.Team
+	if err := s.DB.WithContext(ctx).Take(&stored, target.ID).Error; err != nil {
+		t.Fatalf("reload target: %v", err)
+	}
+	if stored.Name != "Target Team" || stored.Slug != "target-team" {
+		t.Errorf("target team after failed rename = %+v, want unchanged", stored)
+	}
+}
+
+// TestRenameTeamAfterConcurrentDelete guards that losing the team row to a
+// concurrent delete is reported as ErrNotFound instead of a successful rename.
+func TestRenameTeamAfterConcurrentDelete(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+
+	team, err := s.CreateTeam(ctx, "Vanishing Team")
+	if err != nil {
+		t.Fatalf("create team: %v", err)
+	}
+
+	tx := s.DB.WithContext(ctx).Begin()
+	if tx.Error != nil {
+		t.Fatalf("begin: %v", tx.Error)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := tx.Exec("DELETE FROM teams WHERE id = ?", team.ID).Error; err != nil {
+		t.Fatalf("hold team deletion: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.RenameTeam(context.Background(), team.ID, "New Name")
+		done <- err
+	}()
+	waitForLockedQuery(t, s, ctx, `UPDATE "teams"`)
+	if err := tx.Commit().Error; err != nil {
+		t.Fatalf("commit delete: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, store.ErrNotFound) {
+			t.Errorf("RenameTeam after concurrent delete = %v, want ErrNotFound", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("RenameTeam did not finish")
+	}
+}
+
+// TestDeleteTeamBlocksConcurrentAssignment guards the guarded-delete race: an
+// assignment committed while DeleteTeam waits for the team lock must still
+// block the deletion.
+func TestDeleteTeamBlocksConcurrentAssignment(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx := context.Background()
+
+	team, err := s.CreateTeam(ctx, "Race Team")
+	if err != nil {
+		t.Fatalf("create team: %v", err)
+	}
+	if err := s.UpsertInstallation(ctx, store.Installation{ID: 94, AccountLogin: "acme", AccountType: "Organization"}); err != nil {
+		t.Fatalf("create installation: %v", err)
+	}
+	repo := store.Repository{ID: 9401, InstallationID: 94, FullName: "acme/race", DefaultBranch: "main"}
+	if err := s.UpsertRepository(ctx, repo); err != nil {
+		t.Fatalf("create repository: %v", err)
+	}
+
+	tx := s.DB.WithContext(ctx).Begin()
+	if tx.Error != nil {
+		t.Fatalf("begin: %v", tx.Error)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := tx.Exec("UPDATE repositories SET team_id = ? WHERE id = ?", team.ID, repo.ID).Error; err != nil {
+		t.Fatalf("hold assignment: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.DeleteTeam(context.Background(), team.ID)
+		done <- err
+	}()
+	waitForLockedQuery(t, s, ctx, "FOR UPDATE")
+	if err := tx.Commit().Error; err != nil {
+		t.Fatalf("commit assignment: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, store.ErrTeamInUse) {
+			t.Errorf("DeleteTeam under concurrent assignment = %v, want ErrTeamInUse", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("DeleteTeam did not finish")
+	}
+
+	var teams int64
+	if err := s.DB.WithContext(ctx).Model(&store.Team{}).Where("id = ?", team.ID).Count(&teams).Error; err != nil {
+		t.Fatalf("count teams: %v", err)
+	}
+	var storedRepo store.Repository
+	if err := s.DB.WithContext(ctx).Take(&storedRepo, repo.ID).Error; err != nil {
+		t.Fatalf("reload repository: %v", err)
+	}
+	if teams != 1 || storedRepo.TeamID == nil || *storedRepo.TeamID != team.ID {
+		t.Errorf("after blocked delete teams=%d repository team=%v, want the team and assignment intact",
+			teams, storedRepo.TeamID)
 	}
 }
 
