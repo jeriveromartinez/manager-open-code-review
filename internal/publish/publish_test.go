@@ -947,6 +947,54 @@ func TestPublishArchitectureVerdictIsObservational(t *testing.T) {
 	}
 }
 
+func TestPublishArchitectureBaselineOnly(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, _ := seedPublishContext(t, st, store.RunSucceeded, "major")
+	verdict := store.ArchitectureVerdict{
+		Status:    store.ArchitectureNotRequested,
+		Requested: false,
+		Mode:      store.ArchitectureAnalysisObservation,
+		Baseline: &store.ArchitectureBaseline{
+			Status:    store.ArchitectureBaselinePass,
+			RulesPath: ".architecture/baseline.json",
+			Controls:  store.ArchitectureBaselineControls{BaseOnly: true},
+		},
+		Controls: store.ArchitectureControls{Observation: true, WritesDecision: false},
+	}
+	if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+		Update("architecture_analysis", datatypes.JSON(store.ArchitectureVerdictJSON(verdict))).Error; err != nil {
+		t.Fatal(err)
+	}
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	bodies := summaryBodies(t, gh)
+	if len(bodies) != 1 {
+		t.Fatalf("summary comments = %d, want 1", len(bodies))
+	}
+	if !strings.Contains(bodies[0], "Línea base de arquitectura") ||
+		!strings.Contains(bodies[0], "correcta") {
+		t.Errorf("summary %q does not carry the baseline", bodies[0])
+	}
+
+	gh.mu.Lock()
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	gh.mu.Unlock()
+	if len(patches) == 0 || patches[0].Conclusion != "success" {
+		t.Fatalf("check conclusion = %+v, want success", patches)
+	}
+	if !strings.Contains(patches[0].Output.Text, "Línea base de arquitectura: correcta") {
+		t.Errorf("check text %q does not carry the baseline", patches[0].Output.Text)
+	}
+	if strings.Contains(patches[0].Output.Text, store.ArchitectureNotRequested) {
+		t.Errorf("check text %q leaked the raw not_requested status", patches[0].Output.Text)
+	}
+}
+
 func TestPublishCheckConclusions(t *testing.T) {
 	cases := []struct {
 		name       string

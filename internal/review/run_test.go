@@ -1180,6 +1180,71 @@ func TestRunPipelineSucceeds(t *testing.T) {
 	}
 }
 
+// TestRunStoresArchitectureBaselineInObservationMode is the #158 acceptance
+// test: the baseline is resolved from the reviewed base, the violation is
+// cited with its rule and concrete import, and the controls are saved in the
+// verdict. The OCR binary is deliberately absent so the fixture does not
+// depend on a POSIX shell: the baseline runs before the invocation, and a
+// trusted violation never changes the review outcome.
+func TestRunStoresArchitectureBaselineInObservationMode(t *testing.T) {
+	f := newRunTestFixture(t)
+	work := filepath.Join(f.root, "work")
+
+	runGit(t, work, "checkout", "-q", "--detach", f.baseSHA)
+	if err := os.MkdirAll(filepath.Join(work, ".architecture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRunTestFile(t, filepath.Join(work, "go.mod"), "module example.com/app\n\ngo 1.22\n")
+	writeRunTestFile(t, filepath.Join(work, ".architecture", "baseline.json"),
+		`{"version":"1","rules":[{"id":"ARCH-001","version":"1",`+
+			`"from":"internal/store","to":"internal/review","reason":"store must not depend on review"}]}`)
+	runGit(t, work, "add", "-A")
+	runGit(t, work, "commit", "-qm", "trusted baseline")
+	baseSHA := runGit(t, work, "rev-parse", "HEAD")
+	runGit(t, work, "push", "-q", f.bare, "HEAD:refs/heads/main")
+
+	runGit(t, work, "checkout", "-qb", "crossed-layer")
+	if err := os.MkdirAll(filepath.Join(work, "internal", "store"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRunTestFile(t, filepath.Join(work, "internal", "store", "evil.go"),
+		"package store\n\nimport _ \"example.com/app/internal/review\"\n")
+	runGit(t, work, "add", "-A")
+	runGit(t, work, "commit", "-qm", "cross the layer")
+	headSHA := f.publishWorkHead(t)
+
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).Where("id = ?", f.runID).
+		Updates(map[string]any{"head_sha": headSHA, "base_sha": baseSHA}).Error; err != nil {
+		t.Fatal(err)
+	}
+	f.ocrBin = filepath.Join(f.root, "missing-ocr")
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := assertRunTerminal(t, f, store.RunInconclusive, "ocr_error")
+	verdict := store.DecodeArchitectureVerdict(run.ArchitectureAnalysis)
+	if verdict.Baseline == nil {
+		t.Fatal("architecture verdict has no baseline")
+	}
+	if verdict.Baseline.Status != store.ArchitectureBaselineViolation ||
+		verdict.Status != store.ArchitectureViolation {
+		t.Fatalf("status = %q baseline = %q, want violation (errors: %v)",
+			verdict.Status, verdict.Baseline.Status, verdict.Baseline.Errors)
+	}
+	if verdict.Baseline.BaseSHA != baseSHA {
+		t.Errorf("baseline base = %q, want %q", verdict.Baseline.BaseSHA, baseSHA)
+	}
+	if len(verdict.Baseline.Checks) != 1 ||
+		verdict.Baseline.Checks[0].RuleID != "ARCH-001" ||
+		verdict.Baseline.Checks[0].Import != "example.com/app/internal/review" {
+		t.Errorf("checks = %+v, want the cited rule and import", verdict.Baseline.Checks)
+	}
+	if verdict.Baseline.Controls.RulesChecked != 1 || verdict.Baseline.Controls.FilesChecked != 1 {
+		t.Errorf("controls = %+v, want the checks that actually ran", verdict.Baseline.Controls)
+	}
+}
+
 // TestRunUsesSingleOCRReview is the #71 acceptance test: one invocation covers
 // the whole pull request.
 func TestRunUsesSingleOCRReview(t *testing.T) {

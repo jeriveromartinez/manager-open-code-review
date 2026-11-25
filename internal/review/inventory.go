@@ -23,7 +23,11 @@ const (
 // binaries and submodules) from the ordinary changed paths.
 type changedFile struct {
 	Path string
-	Kind string
+	// OldPath is the source of a rename or copy. It lets the dependency check
+	// compare the head imports with the file's actual base content instead of
+	// treating every import as new.
+	OldPath string
+	Kind    string
 	// Renamed distinguishes a move from an in-place edit. It is a structural
 	// change signal for the architectural analysis.
 	Renamed bool
@@ -45,6 +49,7 @@ func gitChangedFiles(ctx context.Context, dir, baseRef, headRef string) ([]chang
 	files := parseRawDiff(raw)
 	for i := range files {
 		files[i].Path = normalizeCoveragePath(files[i].Path)
+		files[i].OldPath = normalizeCoveragePath(files[i].OldPath)
 		if files[i].Path == "" {
 			continue
 		}
@@ -91,7 +96,9 @@ func parseRawDiff(raw string) []changedFile {
 			if newMode == "160000" {
 				kind = changedSubmodule
 			}
-			files = append(files, changedFile{Path: tokens[i+1], Kind: kind, Renamed: status[0] == 'R'})
+			files = append(files, changedFile{
+				Path: tokens[i+1], OldPath: tokens[i], Kind: kind, Renamed: status[0] == 'R',
+			})
 			i += 2
 		default:
 			if i >= len(tokens) {

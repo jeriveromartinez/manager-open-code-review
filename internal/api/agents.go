@@ -448,42 +448,44 @@ func (s *server) enqueueLLMHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 type qaPolicyResponse struct {
-	ID                       uint                  `json:"id"`
-	TeamID                   uint                  `json:"team_id"`
-	LLMProfileID             uint                  `json:"llm_profile_id"`
-	FallbackProfileIDs       []uint                `json:"fallback_profile_ids"`
-	BlockingThreshold        string                `json:"blocking_threshold"`
-	ExtraInstructions        string                `json:"extra_instructions"`
-	ExcludeGlobs             []string              `json:"exclude_globs"`
-	MaxFiles                 int                   `json:"max_files"`
-	MaxDiffLines             int                   `json:"max_diff_lines"`
-	MaxPasses                int                   `json:"max_passes"`
-	RequireGreenCI           bool                  `json:"require_green_ci"`
-	RequiredChecks           []store.RequiredCheck `json:"required_checks"`
-	ReviewContextCeiling     *int                  `json:"review_context_ceiling"`
-	GlobalContextCeiling     int                   `json:"global_context_ceiling"`
-	EffectiveContextCeiling  int                   `json:"effective_context_ceiling"`
-	ReviewEffort             string                `json:"review_effort"`
-	ReviewTokenBudget        int64                 `json:"review_token_budget"`
-	AutoTriageMode           string                `json:"auto_triage_mode"`
-	AutoWithdraw             bool                  `json:"auto_withdraw"`
-	VerifyMaxFindings        int                   `json:"verify_max_findings"`
-	VerifyMaxFiles           int                   `json:"verify_max_files"`
-	VerifyTokenShare         int                   `json:"verify_token_share"`
-	VerifyTimeShare          int                   `json:"verify_time_share"`
-	VerifyTokenMax           int64                 `json:"verify_token_max"`
-	ReviewerLogin            string                `json:"reviewer_login"`
-	ReviewerTeam             string                `json:"reviewer_team"`
-	AllowExternalReviews     bool                  `json:"allow_external_reviews"`
-	ExternalAssociations     []string              `json:"external_trusted_associations"`
-	MaxExternalDiffLines     int                   `json:"max_external_diff_lines"`
-	MaxExternalRunsPerDay    int                   `json:"max_external_runs_per_day"`
-	ExternalDailyTokenBudget int64                 `json:"external_daily_token_budget"`
-	ArchitectureAnalysisMode string                `json:"architecture_analysis_mode"`
-	ArchitectureTokenShare   int                   `json:"architecture_token_share"`
-	ArchitectureTimeShare    int                   `json:"architecture_time_share"`
-	ArchitectureTokenMax     int64                 `json:"architecture_token_max"`
-	PromptCache              bool                  `json:"prompt_cache"`
+	ID                          uint                  `json:"id"`
+	TeamID                      uint                  `json:"team_id"`
+	LLMProfileID                uint                  `json:"llm_profile_id"`
+	FallbackProfileIDs          []uint                `json:"fallback_profile_ids"`
+	BlockingThreshold           string                `json:"blocking_threshold"`
+	ExtraInstructions           string                `json:"extra_instructions"`
+	ExcludeGlobs                []string              `json:"exclude_globs"`
+	MaxFiles                    int                   `json:"max_files"`
+	MaxDiffLines                int                   `json:"max_diff_lines"`
+	MaxPasses                   int                   `json:"max_passes"`
+	RequireGreenCI              bool                  `json:"require_green_ci"`
+	RequiredChecks              []store.RequiredCheck `json:"required_checks"`
+	ReviewContextCeiling        *int                  `json:"review_context_ceiling"`
+	GlobalContextCeiling        int                   `json:"global_context_ceiling"`
+	EffectiveContextCeiling     int                   `json:"effective_context_ceiling"`
+	ReviewEffort                string                `json:"review_effort"`
+	ReviewTokenBudget           int64                 `json:"review_token_budget"`
+	AutoTriageMode              string                `json:"auto_triage_mode"`
+	AutoWithdraw                bool                  `json:"auto_withdraw"`
+	VerifyMaxFindings           int                   `json:"verify_max_findings"`
+	VerifyMaxFiles              int                   `json:"verify_max_files"`
+	VerifyTokenShare            int                   `json:"verify_token_share"`
+	VerifyTimeShare             int                   `json:"verify_time_share"`
+	VerifyTokenMax              int64                 `json:"verify_token_max"`
+	ReviewerLogin               string                `json:"reviewer_login"`
+	ReviewerTeam                string                `json:"reviewer_team"`
+	AllowExternalReviews        bool                  `json:"allow_external_reviews"`
+	ExternalAssociations        []string              `json:"external_trusted_associations"`
+	MaxExternalDiffLines        int                   `json:"max_external_diff_lines"`
+	MaxExternalRunsPerDay       int                   `json:"max_external_runs_per_day"`
+	ExternalDailyTokenBudget    int64                 `json:"external_daily_token_budget"`
+	ArchitectureAnalysisMode    string                `json:"architecture_analysis_mode"`
+	ArchitectureTokenShare      int                   `json:"architecture_token_share"`
+	ArchitectureTimeShare       int                   `json:"architecture_time_share"`
+	ArchitectureTokenMax        int64                 `json:"architecture_token_max"`
+	ArchitectureBaselinePath    string                `json:"architecture_baseline_path"`
+	ArchitectureExceptionPolicy string                `json:"architecture_exception_policy"`
+	PromptCache                 bool                  `json:"prompt_cache"`
 	// Revision identifies the policy content; a review records it (#153).
 	Revision  string `json:"revision"`
 	UpdatedAt string `json:"updated_at"`
@@ -565,6 +567,14 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 	if architectureMode == "" {
 		architectureMode = store.ArchitectureAnalysisObservation
 	}
+	baselinePath := p.ArchitectureBaselinePath
+	if baselinePath == "" {
+		baselinePath = store.DefaultArchitectureBaselinePath
+	}
+	exceptionPolicy := p.ArchitectureExceptionPolicy
+	if exceptionPolicy == "" {
+		exceptionPolicy = store.DefaultArchitectureExceptionPolicy
+	}
 	return qaPolicyResponse{
 		ID: p.ID, TeamID: p.TeamID, LLMProfileID: p.LLMProfileID,
 		FallbackProfileIDs: fallbacks,
@@ -576,27 +586,29 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 		ReviewContextCeiling: p.ReviewContextCeiling,
 		GlobalContextCeiling: globalCeiling, EffectiveContextCeiling: effective,
 		ReviewEffort: effort, ReviewTokenBudget: p.ReviewTokenBudget,
-		AutoTriageMode:           mode,
-		AutoWithdraw:             p.AutoWithdraw,
-		VerifyMaxFindings:        verifyDefault(p.VerifyMaxFindings, store.DefaultVerifyMaxFindings),
-		VerifyMaxFiles:           verifyDefault(p.VerifyMaxFiles, store.DefaultVerifyMaxFiles),
-		VerifyTokenShare:         verifyDefault(p.VerifyTokenShare, store.DefaultVerifyTokenShare),
-		VerifyTimeShare:          verifyDefault(p.VerifyTimeShare, store.DefaultVerifyTimeShare),
-		VerifyTokenMax:           verifyDefault64(p.VerifyTokenMax, store.DefaultVerifyTokenMax),
-		ReviewerLogin:            p.ReviewerLogin,
-		ReviewerTeam:             p.ReviewerTeam,
-		AllowExternalReviews:     p.AllowExternalReviews,
-		ExternalAssociations:     associations,
-		MaxExternalDiffLines:     externalDiffLines,
-		MaxExternalRunsPerDay:    externalRuns,
-		ExternalDailyTokenBudget: p.ExternalDailyTokenBudget,
-		ArchitectureAnalysisMode: architectureMode,
-		ArchitectureTokenShare:   verifyDefault(p.ArchitectureTokenShare, store.DefaultArchitectureTokenShare),
-		ArchitectureTimeShare:    verifyDefault(p.ArchitectureTimeShare, store.DefaultArchitectureTimeShare),
-		ArchitectureTokenMax:     verifyDefault64(p.ArchitectureTokenMax, store.DefaultArchitectureTokenMax),
-		PromptCache:              promptCache,
-		Revision:                 store.PolicyRevision(p, false),
-		UpdatedAt:                p.UpdatedAt.UTC().Format(time.RFC3339),
+		AutoTriageMode:              mode,
+		AutoWithdraw:                p.AutoWithdraw,
+		VerifyMaxFindings:           verifyDefault(p.VerifyMaxFindings, store.DefaultVerifyMaxFindings),
+		VerifyMaxFiles:              verifyDefault(p.VerifyMaxFiles, store.DefaultVerifyMaxFiles),
+		VerifyTokenShare:            verifyDefault(p.VerifyTokenShare, store.DefaultVerifyTokenShare),
+		VerifyTimeShare:             verifyDefault(p.VerifyTimeShare, store.DefaultVerifyTimeShare),
+		VerifyTokenMax:              verifyDefault64(p.VerifyTokenMax, store.DefaultVerifyTokenMax),
+		ReviewerLogin:               p.ReviewerLogin,
+		ReviewerTeam:                p.ReviewerTeam,
+		AllowExternalReviews:        p.AllowExternalReviews,
+		ExternalAssociations:        associations,
+		MaxExternalDiffLines:        externalDiffLines,
+		MaxExternalRunsPerDay:       externalRuns,
+		ExternalDailyTokenBudget:    p.ExternalDailyTokenBudget,
+		ArchitectureAnalysisMode:    architectureMode,
+		ArchitectureTokenShare:      verifyDefault(p.ArchitectureTokenShare, store.DefaultArchitectureTokenShare),
+		ArchitectureTimeShare:       verifyDefault(p.ArchitectureTimeShare, store.DefaultArchitectureTimeShare),
+		ArchitectureTokenMax:        verifyDefault64(p.ArchitectureTokenMax, store.DefaultArchitectureTokenMax),
+		ArchitectureBaselinePath:    baselinePath,
+		ArchitectureExceptionPolicy: exceptionPolicy,
+		PromptCache:                 promptCache,
+		Revision:                    store.PolicyRevision(p, false),
+		UpdatedAt:                   p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -1010,6 +1022,20 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 				(policy.ArchitectureTokenMax < store.ArchitectureTokenMaxMin ||
 					policy.ArchitectureTokenMax > store.ReviewTokenBudgetMax)) {
 			writeAPIError(w, http.StatusBadRequest, "invalid architecture_token_max")
+			return
+		}
+	}
+	if value, present := raw["architecture_baseline_path"]; present {
+		if err := json.Unmarshal(value, &policy.ArchitectureBaselinePath); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid architecture_baseline_path")
+			return
+		}
+	}
+	if value, present := raw["architecture_exception_policy"]; present {
+		if err := json.Unmarshal(value, &policy.ArchitectureExceptionPolicy); err != nil ||
+			(policy.ArchitectureExceptionPolicy != "" &&
+				!store.ValidArchitectureExceptionPolicy(policy.ArchitectureExceptionPolicy)) {
+			writeAPIError(w, http.StatusBadRequest, "invalid architecture_exception_policy")
 			return
 		}
 	}

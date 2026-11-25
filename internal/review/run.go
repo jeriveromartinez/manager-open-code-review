@@ -866,6 +866,25 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		sortArchitectureSignals(signals)
 		scope = architectureScope(inventory, excludePatterns)
 	}
+	// The trusted baseline is deterministic and cheap, so it runs whenever the
+	// architecture mode observes, even when no OCR signal fired. It resolves
+	// rules from the reviewed base (ocrBase) and inventories its own full
+	// ocrBase..headSHA range, so an incremental review does not shrink the set
+	// of files the trusted rules are checked against.
+	baselineEvaluated := analysisMode == store.ArchitectureAnalysisObservation
+	var baseline store.ArchitectureBaseline
+	if baselineEvaluated {
+		baselineInventory, baselineInvErr := gitChangedFiles(runCtx, workDir, ocrBase, headSHA)
+		baseline = checkArchitectureBaseline(
+			gitBaselineTree{ctx: runCtx, dir: workDir, base: ocrBase, head: headSHA},
+			cfg.Policy, baselineInventory)
+		baseline.BaseSHA = ocrBase
+		if baselineInvErr != nil {
+			baseline.Status = store.ArchitectureBaselineUnknown
+			baseline.Errors = append(baseline.Errors,
+				fmt.Sprintf("no se pudo inventariar el cambio para la línea base: %v", baselineInvErr))
+		}
+	}
 	analysisRequested := architectureAnalysisRequested(analysisMode, invErr, signals)
 	analysisBudget := architectureBudget(cfg.Policy, timeout, reviewBudget)
 	// The analysis spends from the same aggregate budget. Carve its cap out
@@ -918,6 +937,16 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if invErr != nil {
 		architectureVerdict.Errors = append(architectureVerdict.Errors,
 			fmt.Sprintf("no se pudo inventariar el cambio: %v", invErr))
+	}
+	if baselineEvaluated {
+		architectureVerdict = applyArchitectureBaseline(architectureVerdict, baseline)
+		baselineLevel := "info"
+		if baseline.Status != store.ArchitectureBaselinePass {
+			baselineLevel = "warn"
+		}
+		log.Log(runCtx, "worker", "analysis", baselineLevel, logPhasePolicy,
+			fmt.Sprintf("línea base de arquitectura %s: %d regla(s), %d decisión(es), %d comprobación(es)",
+				baseline.Status, len(baseline.Rules), len(baseline.Decisions), len(baseline.Checks)))
 	}
 	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
 	switch {
@@ -1227,6 +1256,13 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		architectureVerdict.Status = store.ArchitectureInconclusive
 		architectureVerdict.Errors = append(architectureVerdict.Errors,
 			"analysis skipped: OCR resume is incompatible with --analysis")
+	}
+	// applyNativeArchitectureAnalysis rebuilds the dimensions from the report,
+	// so the trusted baseline dimension and its status are integrated again.
+	// The baseline is deterministic evidence, so its violation wins over the
+	// inconclusive status a skipped analysis leaves behind.
+	if baselineEvaluated {
+		architectureVerdict = applyArchitectureBaseline(architectureVerdict, baseline)
 	}
 	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
 	if analysisRequested {
@@ -1760,12 +1796,15 @@ func classifyNativeError(ctx context.Context, out runOutcome, err error) (runOut
 
 // markArchitectureInconclusive records that a requested observation could not
 // finish. It only touches the analysis field: the review outcome is never
-// derived from it.
+// derived from it. A trusted-baseline violation is deterministic evidence and
+// must not be downgraded by an unrelated OCR or budget failure.
 func markArchitectureInconclusive(out *runOutcome, verdict *store.ArchitectureVerdict, err error) {
 	if err == nil {
 		err = errors.New("analysis did not run")
 	}
-	verdict.Status = store.ArchitectureInconclusive
+	if verdict.Status != store.ArchitectureViolation {
+		verdict.Status = store.ArchitectureInconclusive
+	}
 	verdict.Errors = append(verdict.Errors, err.Error())
 	out.architecture = store.ArchitectureVerdictJSON(*verdict)
 }

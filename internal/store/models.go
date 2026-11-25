@@ -384,6 +384,13 @@ type QAPolicy struct {
 	ArchitectureTokenShare   int    `gorm:"column:architecture_token_share"`
 	ArchitectureTimeShare    int    `gorm:"column:architecture_time_share"`
 	ArchitectureTokenMax     int64  `gorm:"column:architecture_token_max"`
+	// ArchitectureBaselinePath is the repository file that declares ADRs and
+	// forbidden dependency rules. It is resolved from the trusted base commit,
+	// never from the pull request head.
+	ArchitectureBaselinePath string `gorm:"column:architecture_baseline_path;default:.architecture/baseline.json"`
+	// ArchitectureExceptionPolicy decides whether exceptions declared in the
+	// baseline are honored. Deny is the safe default.
+	ArchitectureExceptionPolicy string `gorm:"column:architecture_exception_policy;default:deny"`
 	// ReviewerLogin and ReviewerTeam are the GitHub review-request recipients
 	// of a run the engine cannot conclude, and of external contributions it
 	// escalates.

@@ -254,12 +254,16 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 // reads it. A run that did not ask for the analysis renders nothing.
 func (p *publishContext) buildArchitectureBlock() string {
 	verdict := store.DecodeArchitectureVerdict(p.run.ArchitectureAnalysis)
-	if !verdict.Requested || verdict.Status == "" || verdict.Status == store.ArchitectureNotRequested {
+	// The trusted baseline runs even when the OCR report was not requested, so
+	// its evidence is shown on its own.
+	if verdict.Baseline == nil && (!verdict.Requested || verdict.Status == "" || verdict.Status == store.ArchitectureNotRequested) {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n**Análisis arquitectónico:** %s · %s\n",
-		p.sanitize(architectureStatusLabel(verdict.Status)), p.sanitize(architectureModeLabel(verdict.Mode)))
+	if verdict.Requested && verdict.Status != "" && verdict.Status != store.ArchitectureNotRequested {
+		fmt.Fprintf(&b, "\n**Análisis arquitectónico:** %s · %s\n",
+			p.sanitize(architectureStatusLabel(verdict.Status)), p.sanitize(architectureModeLabel(verdict.Mode)))
+	}
 	if len(verdict.Signals) > 0 {
 		signals := make([]string, 0, len(verdict.Signals))
 		for _, signal := range verdict.Signals {
@@ -281,6 +285,7 @@ func (p *publishContext) buildArchitectureBlock() string {
 		}
 		fmt.Fprintf(&b, "\n**Dimensiones evaluadas:** %s\n", strings.Join(names, " · "))
 	}
+	writeArchitectureBaseline(&b, verdict.Baseline, p.sanitize)
 	writeArchitectureItems(&b, "Comportamiento antes/después", verdict.BehaviorChanges, p.sanitize)
 	writeArchitectureItems(&b, "Riesgos y compatibilidad", verdict.Risks, p.sanitize)
 	writeArchitectureItems(&b, "Alternativas", verdict.Alternatives, p.sanitize)
@@ -310,6 +315,56 @@ func writeArchitectureItems(b *strings.Builder, label string, items []string, sa
 	}
 }
 
+func writeArchitectureBaseline(b *strings.Builder, baseline *store.ArchitectureBaseline, sanitize func(string) string) {
+	if baseline == nil {
+		return
+	}
+	fmt.Fprintf(b, "\n**Línea base de arquitectura:** %s", sanitize(architectureBaselineStatusLabel(baseline.Status)))
+	if baseline.RulesPath != "" {
+		fmt.Fprintf(b, " · `%s`", sanitize(baseline.RulesPath))
+	}
+	if baseline.ChangedInPR {
+		b.WriteString(" · la regla cambió en el PR; se evaluó la versión de la base")
+	}
+	b.WriteString("\n")
+	for _, check := range baseline.Checks {
+		fmt.Fprintf(b, "- %s `%s`: `%s` → `%s` en `%s` (import `%s`)",
+			sanitize(architectureDependencyStatusLabel(check.Status)), sanitize(check.RuleID), sanitize(check.FromModule),
+			sanitize(check.ToModule), sanitize(check.File), sanitize(check.Import))
+		if check.ExceptionID != "" {
+			fmt.Fprintf(b, " [%s]", sanitize(check.ExceptionID))
+		}
+		b.WriteString("\n")
+	}
+	if len(baseline.Errors) > 0 {
+		fmt.Fprintf(b, "> Línea base: %s\n", sanitize(strings.Join(baseline.Errors, "; ")))
+	}
+}
+
+func architectureBaselineStatusLabel(status string) string {
+	switch status {
+	case store.ArchitectureBaselinePass:
+		return "correcta"
+	case store.ArchitectureBaselineViolation:
+		return "violación"
+	case store.ArchitectureBaselineUnknown:
+		return "desconocida"
+	default:
+		return status
+	}
+}
+
+func architectureDependencyStatusLabel(status string) string {
+	switch status {
+	case store.ArchitectureDependencyViolation:
+		return "violación"
+	case store.ArchitectureDependencyException:
+		return "excepción autorizada"
+	default:
+		return status
+	}
+}
+
 func architectureStatusLabel(status string) string {
 	switch status {
 	case store.ArchitectureComplete:
@@ -318,6 +373,8 @@ func architectureStatusLabel(status string) string {
 		return "parcial"
 	case store.ArchitectureInconclusive:
 		return "inconcluso"
+	case store.ArchitectureViolation:
+		return "violación de la línea base"
 	default:
 		return status
 	}
@@ -334,8 +391,16 @@ func architectureModeLabel(mode string) string {
 // It never changes the conclusion.
 func (p *publishContext) architectureCheckLine() string {
 	verdict := store.DecodeArchitectureVerdict(p.run.ArchitectureAnalysis)
-	if !verdict.Requested || verdict.Status == "" || verdict.Status == store.ArchitectureNotRequested {
+	hasAnalysis := verdict.Requested && verdict.Status != "" && verdict.Status != store.ArchitectureNotRequested
+	if !hasAnalysis && verdict.Baseline == nil {
 		return ""
+	}
+	if !hasAnalysis {
+		line := "Línea base de arquitectura: " + architectureBaselineStatusLabel(verdict.Baseline.Status)
+		if verdict.Baseline.RulesPath != "" {
+			line += " · `" + verdict.Baseline.RulesPath + "`"
+		}
+		return line
 	}
 	line := fmt.Sprintf("Análisis arquitectónico (observación): %s",
 		architectureStatusLabel(verdict.Status))
@@ -344,6 +409,9 @@ func (p *publishContext) architectureCheckLine() string {
 	}
 	if len(verdict.Dimensions) > 0 {
 		line += fmt.Sprintf(" · %d dimensión(es)", len(verdict.Dimensions))
+	}
+	if verdict.Baseline != nil {
+		line += " · línea base: " + architectureBaselineStatusLabel(verdict.Baseline.Status)
 	}
 	return line
 }

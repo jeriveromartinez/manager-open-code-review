@@ -655,11 +655,15 @@ func TestSavePolicyDefaults(t *testing.T) {
 	if got.ArchitectureAnalysisMode != store.ArchitectureAnalysisObservation ||
 		got.ArchitectureTokenShare != store.DefaultArchitectureTokenShare ||
 		got.ArchitectureTimeShare != store.DefaultArchitectureTimeShare ||
-		got.ArchitectureTokenMax != store.DefaultArchitectureTokenMax {
-		t.Errorf("architecture defaults = %q/%d/%d/%d, want observation/%d/%d/%d",
+		got.ArchitectureTokenMax != store.DefaultArchitectureTokenMax ||
+		got.ArchitectureBaselinePath != store.DefaultArchitectureBaselinePath ||
+		got.ArchitectureExceptionPolicy != store.DefaultArchitectureExceptionPolicy {
+		t.Errorf("architecture defaults = %q/%d/%d/%d/%q/%q, want observation/%d/%d/%d/%q/%q",
 			got.ArchitectureAnalysisMode, got.ArchitectureTokenShare, got.ArchitectureTimeShare,
-			got.ArchitectureTokenMax, store.DefaultArchitectureTokenShare,
-			store.DefaultArchitectureTimeShare, store.DefaultArchitectureTokenMax)
+			got.ArchitectureTokenMax, got.ArchitectureBaselinePath, got.ArchitectureExceptionPolicy,
+			store.DefaultArchitectureTokenShare, store.DefaultArchitectureTimeShare,
+			store.DefaultArchitectureTokenMax, store.DefaultArchitectureBaselinePath,
+			store.DefaultArchitectureExceptionPolicy)
 	}
 	assertJSONEqual(t, "exclude_globs", got.ExcludeGlobs, `[]`)
 

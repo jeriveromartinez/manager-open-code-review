@@ -65,8 +65,8 @@ func TestParseRawDiffHandlesRenamesAndCopies(t *testing.T) {
 		":100644 100644 aaa bbb C075\x00source.go\x00copy.go\x00"
 	files := parseRawDiff(raw)
 	want := []changedFile{
-		{Path: "new.go", Kind: changedModified, Renamed: true},
-		{Path: "copy.go", Kind: changedModified},
+		{Path: "new.go", OldPath: "old.go", Kind: changedModified, Renamed: true},
+		{Path: "copy.go", OldPath: "source.go", Kind: changedModified},
 	}
 	if !reflect.DeepEqual(files, want) {
 		t.Errorf("parseRawDiff = %+v, want %+v", files, want)

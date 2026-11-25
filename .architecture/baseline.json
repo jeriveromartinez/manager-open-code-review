@@ -1,0 +1,20 @@
+{
+  "version": "1",
+  "decisions": [
+    {
+      "id": "ADR-001",
+      "path": ".architecture/README.md",
+      "version": "1"
+    }
+  ],
+  "rules": [
+    {
+      "id": "ARCH-001",
+      "version": "1",
+      "from": "internal/store",
+      "to": "internal/review",
+      "reason": "The persistence layer must not depend on the review engine"
+    }
+  ],
+  "exceptions": []
+}
