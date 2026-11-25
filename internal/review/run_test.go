@@ -730,16 +730,33 @@ func (f *runTestFixture) ocrArgValue(t *testing.T, flag string) string {
 	return ""
 }
 
-// lastOCRArgValue returns the value of flag in the most recent OCR call. A test
-// with a first (full) run and a second (incremental) run needs the second one:
-// ocrArgValue would return the first match.
+// lastOCRArgValue returns the value of flag in the most recent OCR range call.
+// Chunk and text-route calls use --commit and carry no --from/--to, so they are
+// skipped instead of making the helper report an empty range.
 func (f *runTestFixture) lastOCRArgValue(t *testing.T, flag string) string {
 	t.Helper()
-	lines := f.ocrArgs(t)
-	if len(lines) == 0 {
-		return ""
+	return lastOCRArgValueIn(f.ocrArgs(t), flag)
+}
+
+// lastOCRArgValueIn applies the selection to raw argv lines so the helper's
+// behaviour is testable without a shell.
+func lastOCRArgValueIn(lines []string, flag string) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if !ocrLineHasArg(lines[i], flag) {
+			continue
+		}
+		return ocrArgInLine(lines[i], flag)
 	}
-	return ocrArgInLine(lines[len(lines)-1], flag)
+	return ""
+}
+
+func ocrLineHasArg(line, flag string) bool {
+	for _, arg := range strings.Fields(line) {
+		if arg == flag {
+			return true
+		}
+	}
+	return false
 }
 
 func ocrArgInLine(line, flag string) string {
@@ -750,6 +767,26 @@ func ocrArgInLine(line, flag string) string {
 		}
 	}
 	return ""
+}
+
+// TestLastOCRArgValueSkipsCommitInvocations pins the helper used by the
+// incremental tests: chunk and text-route calls review a single commit and do
+// not carry the range flags, so the helper must look past them.
+func TestLastOCRArgValueSkipsCommitInvocations(t *testing.T) {
+	lines := []string{
+		"review --from first-head --to second-head --format json",
+		"review --commit chunk-one --format json",
+		"review --commit chunk-two --format json",
+	}
+	if got := lastOCRArgValueIn(lines, "--from"); got != "first-head" {
+		t.Errorf("lastOCRArgValueIn(--from) = %q, want first-head", got)
+	}
+	if got := lastOCRArgValueIn(lines, "--to"); got != "second-head" {
+		t.Errorf("lastOCRArgValueIn(--to) = %q, want second-head", got)
+	}
+	if got := lastOCRArgValueIn([]string{"review --commit only --format json"}, "--from"); got != "" {
+		t.Errorf("lastOCRArgValueIn(--from) without a range call = %q, want empty", got)
+	}
 }
 
 // createRun queues another run for the fixture PR with the given head. An empty

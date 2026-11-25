@@ -268,11 +268,11 @@ func TestRunChunksTooLargeFile(t *testing.T) {
 		t.Errorf("coverage counters = %+v, want 2 reviewed / 0 skipped / 0 excluded", coverage)
 	}
 	big := coverageFileAt(t, coverage, "big.go")
-	if big.Status != coverageReviewedByParts || big.Chunks != 2 {
-		t.Errorf("big.go coverage = %+v, want reviewed_by_parts with 2 chunks", big)
+	if big.Status != coverageReviewedByParts || big.Chunks != 2 || big.Method != coverageMethodChunked {
+		t.Errorf("big.go coverage = %+v, want reviewed_by_parts/chunked with 2 chunks", big)
 	}
-	if auth := coverageFileAt(t, coverage, "auth.go"); auth.Status != coverageReviewed {
-		t.Errorf("auth.go coverage = %+v, want reviewed", auth)
+	if auth := coverageFileAt(t, coverage, "auth.go"); auth.Status != coverageReviewed || auth.Method != coverageMethodOCR {
+		t.Errorf("auth.go coverage = %+v, want reviewed/ocr", auth)
 	}
 
 	if run.TotalTokens == nil || *run.TotalTokens != 200 {
@@ -345,28 +345,85 @@ func TestRunChunkFailureKeepsRestOfRun(t *testing.T) {
 	}
 }
 
-func TestRunDoesNotChunkOtherExclusionReasons(t *testing.T) {
+// nativeTextRouteOutput is a valid answer for one text-route window: it
+// reports the synthetic path completed and places its finding inside it.
+func nativeTextRouteOutput(reviewPath string, line int, title string) string {
+	return fmt.Sprintf(`{
+	  "status": "complete",
+	  "summary": {"files_reviewed": 1, "comments": 1, "total_tokens": 50,
+	    "input_tokens": 40, "output_tokens": 10},
+	  "comments": [{
+	    "path": %q, "content": %q, "start_line": %d, "end_line": %d,
+	    "category": "maintainability", "severity": "low"
+	  }],
+	  "manifest": {
+	    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
+	    "coverage": {
+	      "selected": [{"path": %q}], "completed": [{"path": %q}],
+	      "reused": [], "failed": [], "waived": [], "excluded": []
+	    }
+	  }
+	}`, reviewPath, title+"\n\ncuerpo", line, line, reviewPath, reviewPath)
+}
+
+func TestRunRoutesUnsupportedExtThroughTextRoute(t *testing.T) {
 	f := newChunkRunFixture(t)
+	reviewPath := textReviewPath("big.go")
 	f.setOCRChunks(t, nativeChunkMainOutput("unsupported_ext"), []string{
-		nativeChunkOutput("big.go", 20, 20, "No debería ejecutarse", "cuerpo", 50),
+		nativeTextRouteOutput(reviewPath, 20, "Hallazgo de la ruta de texto uno"),
+		nativeTextRouteOutput(reviewPath, 24, "Hallazgo de la ruta de texto dos"),
+	})
+
+	if err := f.chunkRunner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+
+	if got := f.ocrCalls(t); got != 3 {
+		t.Errorf("ocr calls = %d, want 3 (main plus two text windows)", got)
+	}
+	args := f.ocrArgs(t)
+	if len(args) == 0 {
+		t.Fatal("no OCR invocations")
+	}
+	for i, line := range args[1:] {
+		if !strings.Contains(line, "--commit") {
+			t.Errorf("text route invocation %d = %q, want --commit", i+1, line)
+		}
+	}
+	coverage := decodeChunkCoverage(t, run)
+	big := coverageFileAt(t, coverage, "big.go")
+	if big.Status != coverageReviewedByParts || big.Method != coverageMethodText || big.Chunks != 2 {
+		t.Errorf("big.go coverage = %+v, want reviewed_by_parts/text with 2 windows", big)
+	}
+	if got := len(findingsForPath(t, f, "big.go")); got != 2 {
+		t.Errorf("big.go findings = %d, want the two text-route findings", got)
+	}
+}
+
+func TestRunTextRouteInvalidStaysPending(t *testing.T) {
+	f := newChunkRunFixture(t)
+	reviewPath := textReviewPath("big.go")
+	f.setOCRChunks(t, nativeChunkMainOutput("unsupported_ext"), []string{
+		// wrong path: the engine did not review the synthetic file it was given.
+		nativeTextRouteOutput("big.go", 20, "Hallazgo sin procedencia"),
+		nativeTextRouteOutput(reviewPath, 24, "Hallazgo válido pero parcial"),
 	})
 
 	if err := f.chunkRunner().Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	run := assertRunTerminal(t, f, store.RunInconclusive, "coverage_incomplete")
-	if got := f.ocrCalls(t); got != 1 {
-		t.Fatalf("ocr calls = %d, want only the main invocation", got)
-	}
-	for _, line := range f.ocrArgs(t) {
-		if strings.Contains(line, "--commit") {
-			t.Errorf("unexpected chunk invocation: %q", line)
-		}
-	}
 	coverage := decodeChunkCoverage(t, run)
 	big := coverageFileAt(t, coverage, "big.go")
-	if big.Status != coveragePending || big.Reason != "unsupported_ext" {
-		t.Errorf("big.go coverage = %+v, want pending/unsupported_ext", big)
+	if big.Status != coveragePending || big.Reason != "text_route_invalid" {
+		t.Errorf("big.go coverage = %+v, want pending/text_route_invalid", big)
+	}
+	if big.Method != coverageMethodText || !big.Human {
+		t.Errorf("big.go coverage = %+v, want the text method and a human flag", big)
+	}
+	if got := len(findingsForPath(t, f, "big.go")); got != 0 {
+		t.Errorf("big.go findings = %d, want none from an invalid text route", got)
 	}
 }
 
@@ -538,11 +595,11 @@ func TestNativeCoverageFilesAndCounts(t *testing.T) {
 
 	files := nativeCoverageFiles(res)
 	want := map[string]coverageFile{
-		"a.go": {Path: "a.go", Status: coverageReviewed},
-		"b.go": {Path: "b.go", Status: coverageReviewed},
-		"c.go": {Path: "c.go", Status: coverageNotReviewed, Reason: "provider"},
-		"d.go": {Path: "d.go", Status: coverageNotReviewed, Reason: "failed"},
-		"e.go": {Path: "e.go", Status: coverageNotReviewed, Reason: "policy"},
+		"a.go": {Path: "a.go", Status: coverageReviewed, Method: coverageMethodOCR},
+		"b.go": {Path: "b.go", Status: coverageReviewed, Method: coverageMethodOCR},
+		"c.go": {Path: "c.go", Status: coverageNotReviewed, Method: coverageMethodOCR, Reason: "provider"},
+		"d.go": {Path: "d.go", Status: coverageNotReviewed, Method: coverageMethodOCR, Reason: "failed"},
+		"e.go": {Path: "e.go", Status: coverageNotReviewed, Method: coverageMethodOCR, Reason: "policy"},
 		"f.go": {Path: "f.go", Status: coverageExcluded, Reason: "too_large"},
 		"g.go": {Path: "g.go", Status: coverageExcluded, Reason: "user_exclude"},
 	}
@@ -562,10 +619,10 @@ func TestNativeCoverageFilesAndCounts(t *testing.T) {
 	}
 
 	files = overlayCoverage(files, map[string]coverageFile{
-		"f.go": {Path: "f.go", Status: coverageReviewedByParts, Chunks: 3},
+		"f.go": {Path: "f.go", Status: coverageReviewedByParts, Method: coverageMethodChunked, Chunks: 3},
 	})
-	if got := coverageFileAt(t, chunkCoverage{Files: files}, "f.go"); got.Status != coverageReviewedByParts || got.Chunks != 3 {
-		t.Errorf("overlay = %+v, want f.go reviewed_by_parts with 3 chunks", got)
+	if got := coverageFileAt(t, chunkCoverage{Files: files}, "f.go"); got.Status != coverageReviewedByParts || got.Chunks != 3 || got.Method != coverageMethodChunked {
+		t.Errorf("overlay = %+v, want f.go reviewed_by_parts/chunked with 3 chunks", got)
 	}
 	if reviewed, skipped, excluded := coverageCountsFromFiles(files); reviewed != 3 || skipped != 3 || excluded != 1 {
 		t.Errorf("counts after overlay = %d/%d/%d, want 3/3/1", reviewed, skipped, excluded)
@@ -605,6 +662,43 @@ func TestChunkedRunStatus(t *testing.T) {
 			status, code := chunkedRunStatus(tt.mainStatus, tt.mainCode, tt.summary)
 			if status != tt.wantStatus || code != tt.wantCode {
 				t.Errorf("chunkedRunStatus() = %q/%q, want %q/%q", status, code, tt.wantStatus, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestSettledRunStatus(t *testing.T) {
+	reviewed := chunkSummary{statuses: map[string]coverageFile{
+		"notes.md": {Path: "notes.md", Status: coverageReviewed, Method: coverageMethodText},
+	}}
+	failed := chunkSummary{statuses: map[string]coverageFile{
+		"notes.md": {Path: "notes.md", Status: coverageNotReviewed, Method: coverageMethodText, Reason: "provider"},
+	}}
+	pending := []coverageFile{{Path: "c.go", Status: coveragePending, Reason: "provider"}}
+
+	tests := []struct {
+		name        string
+		status      string
+		code        string
+		pending     []coverageFile
+		routed      chunkSummary
+		inventoryOK bool
+		wantStatus  string
+		wantCode    string
+	}{
+		{"ruta cubre todo el hueco", store.RunInconclusive, "coverage_incomplete", nil, reviewed, true, store.RunSucceeded, ""},
+		{"no_coverage cubierto por la ruta", store.RunInconclusive, "no_coverage", nil, reviewed, true, store.RunSucceeded, ""},
+		{"queda un archivo pendiente", store.RunInconclusive, "coverage_incomplete", pending, reviewed, true, store.RunInconclusive, "coverage_incomplete"},
+		{"la ruta no terminó", store.RunInconclusive, "coverage_incomplete", nil, failed, true, store.RunInconclusive, "coverage_incomplete"},
+		{"sin inventario no se concluye", store.RunInconclusive, "coverage_incomplete", nil, reviewed, false, store.RunInconclusive, "coverage_incomplete"},
+		{"un fallo del proveedor no se convierte", store.RunInconclusive, "timeout", nil, reviewed, true, store.RunInconclusive, "timeout"},
+		{"un run fallido no cambia", store.RunFailed, "llm_error", nil, reviewed, true, store.RunFailed, "llm_error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, code := settledRunStatus(tt.status, tt.code, tt.pending, tt.routed, tt.inventoryOK)
+			if status != tt.wantStatus || code != tt.wantCode {
+				t.Errorf("settledRunStatus() = %q/%q, want %q/%q", status, code, tt.wantStatus, tt.wantCode)
 			}
 		})
 	}

@@ -99,10 +99,14 @@ export type RunTokenStats = {
 export type CoverageFile = {
   path: string
   status: string
+  /** Pasada que cubrió el archivo: ocr, chunked o text. */
+  method?: string
   /** Trozos en los que se partió un archivo revisado por partes. */
   chunks?: number
   /** Motivo por el que un archivo no se revisó o quedó excluido. */
   reason?: string
+  /** El archivo no tiene análisis automático comprobable y requiere criterio humano. */
+  human?: boolean
 }
 
 /**

@@ -817,6 +817,39 @@ func TestPublishMixedPRSurfacesPendingCoverage(t *testing.T) {
 	}
 }
 
+// TestPublishSummaryNamesFilesNeedingHumanReview pins #147: binaries and
+// submodules have no automatic analysis, so the summary names them instead of
+// letting them pass silently.
+func TestPublishSummaryNamesFilesNeedingHumanReview(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, _ := seedPublishContext(t, st, store.RunSucceeded, "major")
+	if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).Updates(map[string]any{
+		"coverage": datatypes.JSON([]byte(`{"reviewed_files":1,"skipped_files":0,"not_required_files":2,"files":[
+			{"path":"auth.go","status":"reviewed","method":"ocr"},
+			{"path":"logo.png","status":"binary","reason":"binary","human":true},
+			{"path":"vendor/lib","status":"submodule","reason":"submodule","human":true}]}`)),
+	}).Error; err != nil {
+		t.Fatalf("set coverage: %v", err)
+	}
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	bodies := summaryBodies(t, gh)
+	if len(bodies) != 1 {
+		t.Fatalf("summary comments = %d, want 1", len(bodies))
+	}
+	for _, want := range []string{"Revisión humana requerida", "`logo.png`", "`vendor/lib`", "binary", "submodule"} {
+		if !strings.Contains(bodies[0], want) {
+			t.Errorf("summary %q does not contain %q", bodies[0], want)
+		}
+	}
+}
+
 func TestPublishCheckConclusions(t *testing.T) {
 	cases := []struct {
 		name       string

@@ -351,7 +351,7 @@ describe('PrDetailView', () => {
             reviewed_files: 0,
             skipped_files: 1,
             files: [
-              { path: 'notes.md', status: 'pending', reason: 'unsupported_ext' },
+              { path: 'notes.md', status: 'pending', reason: 'text_route_invalid', human: true },
               { path: 'old.go', status: 'deleted' },
               { path: 'logo.png', status: 'binary' },
               { path: 'vendor/lib', status: 'submodule' },
@@ -366,10 +366,43 @@ describe('PrDetailView', () => {
 
     const rows = wrapper.findAll('[data-coverage-file]')
     expect(rows).toHaveLength(4)
-    expect(rows[0].get('[data-coverage-file-status]').text()).toBe('Pendiente: unsupported_ext')
+    expect(rows[0].get('[data-coverage-file-status]').text()).toBe('Pendiente: text_route_invalid — revisión humana')
     expect(rows[1].get('[data-coverage-file-status]').text()).toBe('Eliminado')
     expect(rows[2].get('[data-coverage-file-status]').text()).toBe('Binario')
     expect(rows[3].get('[data-coverage-file-status]').text()).toBe('Submódulo')
+
+    wrapper.unmount()
+  })
+
+  it('shows the coverage method and marks files that need a human', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      runs: [
+        {
+          ...detail.runs[0],
+          coverage: {
+            reviewed_files: 2,
+            skipped_files: 0,
+            files: [
+              { path: 'auth.go', status: 'reviewed', method: 'ocr' },
+              { path: 'notes.md', status: 'reviewed', method: 'text' },
+              { path: 'logo.png', status: 'binary', reason: 'binary', human: true },
+              { path: 'vendor/lib', status: 'submodule', reason: 'submodule', human: true },
+            ],
+          },
+        },
+      ],
+    })
+
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    const rows = wrapper.findAll('[data-coverage-file]')
+    expect(rows).toHaveLength(4)
+    expect(rows[0].get('[data-coverage-file-status]').text()).toBe('Revisado (OCR)')
+    expect(rows[1].get('[data-coverage-file-status]').text()).toBe('Revisado (ruta de texto)')
+    expect(rows[2].get('[data-coverage-file-status]').text()).toBe('Binario — revisión humana')
+    expect(rows[3].get('[data-coverage-file-status]').text()).toBe('Submódulo — revisión humana')
 
     wrapper.unmount()
   })

@@ -462,6 +462,201 @@ func TestChunkFileDiffPathWithComma(t *testing.T) {
 	}
 }
 
+func TestWindowHunksSplitsOversizedHunkWithoutDuplication(t *testing.T) {
+	lines := make([]string, 24)
+	for i := range lines {
+		lines[i] = "+" + strings.Repeat("x", 300) + fmt.Sprint(i)
+	}
+	hunk := diffHunk{OldStart: 0, OldCount: 0, NewStart: 1, NewCount: len(lines), Lines: lines}
+	if hunkSize(hunk) <= 2<<10 {
+		t.Fatalf("hunk size = %d, want it above the window budget", hunkSize(hunk))
+	}
+
+	windows := windowHunks([]diffHunk{hunk}, 2<<10)
+	if len(windows) < 2 {
+		t.Fatalf("windows = %d, want the oversized hunk split", len(windows))
+	}
+	seen := make(map[string]int, len(lines))
+	var flat []string
+	nextNew := 1
+	for _, window := range windows {
+		if got := hunkSize(window); got > 2<<10 {
+			t.Errorf("window size = %d, want <= 2048", got)
+		}
+		if window.NewStart != nextNew {
+			t.Errorf("window NewStart = %d, want %d", window.NewStart, nextNew)
+		}
+		if window.NewCount != len(window.Lines) {
+			t.Errorf("window NewCount = %d, want %d", window.NewCount, len(window.Lines))
+		}
+		if window.OldStart != 0 || window.OldCount != 0 {
+			t.Errorf("window old side = %d,%d, want 0,0", window.OldStart, window.OldCount)
+		}
+		nextNew += window.NewCount
+		for _, line := range window.Lines {
+			seen[line]++
+			flat = append(flat, line)
+		}
+	}
+	if !reflect.DeepEqual(flat, lines) {
+		t.Fatalf("flattened windows = %#v, want the original lines in order", flat)
+	}
+	for line, count := range seen {
+		if count != 1 {
+			t.Errorf("line %q appears %d times, want exactly once", line, count)
+		}
+	}
+}
+
+func TestChunkFileDiffWindowsOversizedHunk(t *testing.T) {
+	dir := newChunkRepo(t)
+	path := "big.txt"
+	base := numberedLines(160)
+	head := append([]string(nil), base...)
+	for i := 40; i < 120; i++ {
+		head[i] = fmt.Sprintf("%s%03d", strings.Repeat("x", 40), i)
+	}
+
+	baseSHA := commitChunkFiles(t, dir, "base", map[string]string{path: textLines(base)})
+	headSHA := commitChunkFiles(t, dir, "head", map[string]string{path: textLines(head)})
+
+	raw := mustGitRaw(t, dir, "test-diff", "diff", "-U0", "--no-color", "--no-renames", baseSHA, headSHA, "--", path)
+	all, err := parseFileDiff(raw)
+	if err != nil {
+		t.Fatalf("parseFileDiff() error = %v", err)
+	}
+	if len(all) != 1 || hunkSize(all[0]) <= 2<<10 {
+		t.Fatalf("diff has %d hunk(s) of size %d, want one oversized hunk", len(all), hunkSize(all[0]))
+	}
+
+	chunks, err := chunkFileDiff(context.Background(), dir, baseSHA, headSHA, path, 2<<10)
+	if err != nil {
+		t.Fatalf("chunkFileDiff() error = %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("chunkFileDiff() returned %d chunks, want the hunk windowed", len(chunks))
+	}
+	var flat []string
+	for _, ch := range chunks {
+		assertChunkMatches(t, dir, baseSHA, headSHA, path, ch)
+		for _, window := range ch.Hunks {
+			flat = append(flat, window.Lines...)
+		}
+	}
+	if !reflect.DeepEqual(flat, all[0].Lines) {
+		t.Fatalf("windows lose or duplicate lines: %d vs %d", len(flat), len(all[0].Lines))
+	}
+}
+
+func TestChunkFileDiffDeletedFileKeepsBaseSide(t *testing.T) {
+	dir := newChunkRepo(t)
+	path := "gone.txt"
+	base := numberedLines(400)
+	baseContent := textLines(base)
+	lineNumber := make(map[string]int, len(base))
+	for i, line := range base {
+		lineNumber[line] = i + 1
+	}
+	baseSHA := commitChunkFiles(t, dir, "base", map[string]string{path: baseContent})
+	runGit(t, dir, "rm", "-q", path)
+	headSHA := commitChunkFiles(t, dir, "head", map[string]string{"keep.txt": "keep\n"})
+
+	chunks, err := chunkFileDiff(context.Background(), dir, baseSHA, headSHA, path, 2<<10)
+	if err != nil {
+		t.Fatalf("chunkFileDiff() error = %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("chunkFileDiff() returned %d chunks, want the deletion windowed", len(chunks))
+	}
+
+	seen := make(map[string]bool, len(base))
+	for i, ch := range chunks {
+		// Every window keeps the full base as the parent side, so the old line
+		// numbers are the real ones and no window depends on another.
+		parentContent, mode, exists, err := blobAt(context.Background(), dir, ch.Parent, path)
+		if err != nil || !exists {
+			t.Fatalf("window %d P is missing %s: exists=%v err=%v", i+1, path, exists, err)
+		}
+		if mode != "100644" || string(parentContent) != baseContent {
+			t.Fatalf("window %d P = mode %q content %q, want the full base", i+1, mode, parentContent)
+		}
+		if parent := strings.TrimSpace(string(mustGitRaw(t, dir, "test-rev-parse", "rev-parse", ch.Parent+"^"))); parent != baseSHA {
+			t.Errorf("window %d P^ = %q, want base %q", i+1, parent, baseSHA)
+		}
+
+		raw := mustGitRaw(t, dir, "test-diff", "diff", "-U0", "--no-color", "--no-renames", ch.Parent, ch.Commit, "--", path)
+		got, err := parseFileDiff(raw)
+		if err != nil {
+			t.Fatalf("window %d parseFileDiff(P C): %v", i+1, err)
+		}
+		if len(got) != len(ch.Hunks) {
+			t.Fatalf("window %d P..C has %d hunks, want %d", i+1, len(got), len(ch.Hunks))
+		}
+		for j, hunk := range got {
+			if hunk.NewCount != 0 || hunk.OldCount != len(hunk.Lines) {
+				t.Fatalf("window %d hunk %d = %+v, want a pure deletion", i+1, j+1, hunk)
+			}
+			if !reflect.DeepEqual(hunk.Lines, ch.Hunks[j].Lines) {
+				t.Fatalf("window %d hunk %d = %#v, want %#v", i+1, j+1, hunk.Lines, ch.Hunks[j].Lines)
+			}
+			first := strings.TrimPrefix(hunk.Lines[0], "-")
+			if hunk.OldStart != lineNumber[first] {
+				t.Errorf("window %d hunk %d OldStart = %d, want the base line %d",
+					i+1, j+1, hunk.OldStart, lineNumber[first])
+			}
+			for _, line := range hunk.Lines {
+				if !strings.HasPrefix(line, "-") {
+					t.Fatalf("line %q is not a deletion", line)
+				}
+				text := strings.TrimPrefix(line, "-")
+				if seen[text] {
+					t.Fatalf("base line %q appears in more than one window", text)
+				}
+				seen[text] = true
+			}
+		}
+	}
+	if len(seen) != len(base) {
+		t.Errorf("windows deleted %d base lines, want %d", len(seen), len(base))
+	}
+}
+
+func TestChunkFileDiffRenameKeepsHeadSide(t *testing.T) {
+	dir := newChunkRepo(t)
+	baseSHA := commitChunkFiles(t, dir, "base", map[string]string{"old.txt": "one\ntwo\nthree\n"})
+	runGit(t, dir, "mv", "old.txt", "new.txt")
+	headSHA := commitChunkFiles(t, dir, "head", map[string]string{"new.txt": "one\nTWO\nthree\n"})
+
+	// The test must exercise a real rename, not a copy plus an addition.
+	nameStatus := strings.TrimSpace(string(mustGitRaw(t, dir, "test-name-status",
+		"diff", "--name-status", "-M", baseSHA, headSHA)))
+	if !strings.HasPrefix(nameStatus, "R") ||
+		!strings.Contains(nameStatus, "old.txt") || !strings.Contains(nameStatus, "new.txt") {
+		t.Fatalf("git diff --name-status = %q, want a rename old.txt -> new.txt", nameStatus)
+	}
+	if _, _, exists, err := blobAt(context.Background(), dir, baseSHA, "new.txt"); err != nil || exists {
+		t.Fatalf("base records new.txt (exists=%v, err=%v), want the old path only", exists, err)
+	}
+	if _, exists, err := fileModeAt(context.Background(), dir, headSHA, "old.txt"); err != nil || exists {
+		t.Fatalf("head records old.txt (exists=%v, err=%v), want the new path only", exists, err)
+	}
+
+	chunks, err := chunkFileDiff(context.Background(), dir, baseSHA, headSHA, "new.txt", 1<<20)
+	if err != nil {
+		t.Fatalf("chunkFileDiff() error = %v", err)
+	}
+	if len(chunks) != 1 {
+		t.Fatalf("chunkFileDiff() returned %d chunks, want 1", len(chunks))
+	}
+	ch := chunks[0]
+	// The new path is reviewed as an addition on the head side, so every
+	// reported line belongs to the file that exists at head.
+	if len(ch.Hunks) != 1 || ch.Hunks[0].NewStart != 1 || ch.Hunks[0].NewCount != 3 {
+		t.Fatalf("rename hunk = %+v, want the head side starting at line 1", ch.Hunks)
+	}
+	assertChunkMatches(t, dir, baseSHA, headSHA, "new.txt", ch)
+}
+
 func TestBuildReviewArgsCommit(t *testing.T) {
 	base := nativeInvocation{
 		RepoDir:        "/work/run-1",

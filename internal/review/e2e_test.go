@@ -852,7 +852,9 @@ func testE2ESuccess(t *testing.T) {
 
 // testE2EMixedCoverage is the #135 end-to-end regression: the diff inventory
 // sees a second changed file that OCR excludes internally, so the run cannot
-// claim completeness even though the engine returned complete.
+// claim completeness even though the engine returned complete. #147's text
+// route is attempted but this fake OCR answers for the whole range instead of
+// the synthetic file, so the result fails validation and the file stays pending.
 func testE2EMixedCoverage(t *testing.T) {
 	f := newE2EFixture(t)
 	head := f.push(t, "notes.md")
@@ -893,7 +895,7 @@ func testE2EMixedCoverage(t *testing.T) {
 		t.Errorf("check output %q does not list the pending file", check.Output.Text)
 	}
 	body := assertE2ESummary(t, f,
-		"Archivos pendientes de revisión", "`notes.md`", "unsupported_ext")
+		"Archivos pendientes de revisión", "`notes.md`", "text_route_invalid")
 	if strings.Contains(body, "Revisión completada") {
 		t.Errorf("summary claims completion with pending coverage: %q", body)
 	}
@@ -908,8 +910,8 @@ func testE2EMixedCoverage(t *testing.T) {
 	for _, file := range coverage.Files {
 		if file.Path == "notes.md" {
 			found = true
-			if file.Status != coveragePending || file.Reason != "unsupported_ext" {
-				t.Errorf("notes.md coverage = %+v, want pending/unsupported_ext", file)
+			if file.Status != coveragePending || file.Reason != "text_route_invalid" {
+				t.Errorf("notes.md coverage = %+v, want pending/text_route_invalid", file)
 			}
 		}
 	}
