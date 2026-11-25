@@ -25,7 +25,12 @@ func runMonitor(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg, _ := monitorConfig(ctx, strings.TrimSpace(os.Getenv("QA_DATABASE_URL")))
+	dsn := strings.TrimSpace(os.Getenv("QA_DATABASE_URL"))
+	cfg, _ := monitorConfig(ctx, dsn)
+	deliveries, closeDeliveries := monitorDeliveries(ctx, dsn, logger)
+	if closeDeliveries != nil {
+		defer closeDeliveries()
+	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	notifiers := monitor.MultiNotifier{monitor.NewLogNotifier(logger)}
@@ -34,10 +39,11 @@ func runMonitor(logger *slog.Logger) error {
 	}
 
 	poller := &monitor.Poller{
-		Source:   monitor.NewFetcher(cfg.WorkerHealthURL, client),
-		Notifier: notifiers,
-		Tracker:  monitor.NewTracker(cfg.MonitorRenotifyAfter),
-		Logger:   logger,
+		Source:     monitor.NewFetcher(cfg.WorkerHealthURL, client),
+		Notifier:   notifiers,
+		Tracker:    monitor.NewTracker(cfg.MonitorRenotifyAfter),
+		Deliveries: deliveries,
+		Logger:     logger,
 	}
 
 	logger.Info("worker monitor started",
@@ -82,6 +88,21 @@ func monitorConfig(ctx context.Context, dsn string) (config.Config, error) {
 			"settings", adjusted)
 	}
 	return cfg, nil
+}
+
+// monitorDeliveries opens the durable alert outbox. Without a reachable
+// database the monitor still runs, but pending alerts only survive until the
+// process exits.
+func monitorDeliveries(ctx context.Context, dsn string, logger *slog.Logger) (monitor.DeliveryStore, func()) {
+	if dsn == "" {
+		return monitor.NewMemoryDeliveryStore(), nil
+	}
+	st, err := store.Open(ctx, dsn)
+	if err != nil {
+		logger.Warn("alert deliveries will not survive a restart", "error", err)
+		return monitor.NewMemoryDeliveryStore(), nil
+	}
+	return monitor.NewPGDeliveryStore(st.Pool), st.Close
 }
 
 // healthcheckURL resolves the target of `qa healthcheck`. The default is the

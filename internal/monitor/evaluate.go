@@ -3,6 +3,8 @@ package monitor
 import (
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 )
 
 // Evaluate turns one observation into the problems it proves. It is a pure
@@ -43,21 +45,19 @@ func Evaluate(obs Observation) []Problem {
 
 	// A stalled queue is only proven by /metrics: a failed read is not a
 	// stall, it is a broken metrics endpoint, reported below.
-	if obs.MetricsError == nil && obs.Metrics.Stalled {
-		q := obs.Metrics.Queue
-		problems = append(problems, Problem{
-			Code: CodeQueueStalled,
-			Message: fmt.Sprintf(
-				"review queue stalled: %d waiting jobs, %d running, oldest waiting %ds",
-				q.Available, q.Running, q.OldestAvailableSeconds),
-			Values: map[string]any{
-				"available":                q.Available,
-				"running":                  q.Running,
-				"scheduled":                q.Scheduled,
-				"discarded":                q.Discarded,
-				"oldest_available_seconds": q.OldestAvailableSeconds,
-			},
-		})
+	if obs.MetricsError == nil {
+		if len(obs.Metrics.Stages) > 0 {
+			// Each stage is observed separately, so a publish queue stopped
+			// behind a healthy sync or review still alerts (#154).
+			for _, stage := range obs.Metrics.Stages {
+				if stage.Stalled {
+					problems = append(problems, stageProblem(stage))
+				}
+			}
+		} else if obs.Metrics.Stalled {
+			// Older workers only report the aggregate.
+			problems = append(problems, queueStalled(obs.Metrics.Queue))
+		}
 	}
 
 	if len(problems) > 0 {
@@ -81,6 +81,69 @@ func Evaluate(obs Observation) []Problem {
 
 func degraded(reason string) Problem {
 	return Problem{Code: CodeWorkerDegraded, Message: "worker is degraded: " + reason}
+}
+
+func queueStalled(q Queue) Problem {
+	return Problem{
+		Code: CodeQueueStalled,
+		Message: fmt.Sprintf(
+			"review queue stalled: %d waiting jobs, %d running, oldest waiting %ds",
+			q.Available, q.Running, q.OldestAvailableSeconds),
+		Values: map[string]any{
+			"available":                q.Available,
+			"running":                  q.Running,
+			"scheduled":                q.Scheduled,
+			"retryable":                q.Retryable,
+			"discarded":                q.Discarded,
+			"oldest_available_seconds": q.OldestAvailableSeconds,
+		},
+	}
+}
+
+// stageProblem states the observed evidence and, when it is known, why the
+// stage is not moving: nothing consuming a queue, retries waiting, or attempts
+// already discarded.
+func stageProblem(stage Stage) Problem {
+	var causes []string
+	if stage.Kind == "run" {
+		causes = append(causes, fmt.Sprintf(
+			"%d run(s) active, last progress %s ago",
+			stage.Running, seconds(stage.LastProgressSeconds)))
+	} else {
+		if stage.Running == 0 {
+			causes = append(causes, "nothing is consuming the queue")
+		}
+		causes = append(causes, fmt.Sprintf(
+			"%d job(s) waiting, oldest pending %s",
+			stage.Available, seconds(stage.OldestPendingSeconds)))
+	}
+	if stage.Retryable > 0 {
+		causes = append(causes, fmt.Sprintf("%d job(s) waiting for a retry", stage.Retryable))
+	}
+	if stage.Discarded > 0 {
+		causes = append(causes, fmt.Sprintf("%d job(s) discarded after exhausting attempts", stage.Discarded))
+	}
+
+	return Problem{
+		Code:    CodeStageStalled,
+		Subject: stage.Name,
+		Message: fmt.Sprintf("%s stage stalled: %s", stage.Name, strings.Join(causes, "; ")),
+		Values: map[string]any{
+			"stage":                  stage.Name,
+			"kind":                   stage.Kind,
+			"available":              stage.Available,
+			"running":                stage.Running,
+			"scheduled":              stage.Scheduled,
+			"retryable":              stage.Retryable,
+			"discarded":              stage.Discarded,
+			"oldest_pending_seconds": stage.OldestPendingSeconds,
+			"last_progress_seconds":  stage.LastProgressSeconds,
+		},
+	}
+}
+
+func seconds(value int) string {
+	return (time.Duration(value) * time.Second).String()
 }
 
 func describeDependency(summary string, dep DependencyStatus) string {

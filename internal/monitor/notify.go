@@ -21,6 +21,7 @@ type Notifier interface {
 // is a generic JSON document on purpose: no vendor-specific envelope, so any
 // receiver can consume it.
 type webhookPayload struct {
+	ID        string         `json:"id"`
 	Severity  string         `json:"severity"`
 	Code      string         `json:"code"`
 	Message   string         `json:"message"`
@@ -48,6 +49,7 @@ func (w *WebhookNotifier) Notify(ctx context.Context, alert Alert) error {
 		values = map[string]any{}
 	}
 	body, err := json.Marshal(webhookPayload{
+		ID:        alert.ID,
 		Severity:  alert.Severity(),
 		Code:      alert.Code,
 		Message:   alert.Message,
@@ -63,6 +65,12 @@ func (w *WebhookNotifier) Notify(ctx context.Context, alert Alert) error {
 		return fmt.Errorf("build alert request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if alert.ID != "" {
+		// A retry of the same event keeps the same key, so a receiver that
+		// deduplicates on it never turns a lost acknowledgement into a double
+		// page.
+		req.Header.Set("Idempotency-Key", alert.ID)
+	}
 
 	resp, err := w.Client.Do(req)
 	if err != nil {

@@ -27,6 +27,23 @@ func NewTracker(renotifyAfter time.Duration) *Tracker {
 	return &Tracker{renotifyAfter: renotifyAfter, active: map[string]tracked{}}
 }
 
+// Restore seeds the state machine from the outbox so a restarted monitor does
+// not fire a new incident (with a new event id) for a problem it already
+// paged. Only the latest event of a problem is meaningful: a warning means the
+// problem is still open, a recovery means it is clear.
+func (t *Tracker) Restore(alerts []Alert) {
+	for _, alert := range alerts {
+		if alert.Recovered {
+			continue
+		}
+		key := alert.Problem.key()
+		if prev, seen := t.active[key]; seen && !alert.At.After(prev.alertedAt) {
+			continue
+		}
+		t.active[key] = tracked{problem: alert.Problem, alertedAt: alert.At}
+	}
+}
+
 // Sync compares the current problems with the previous tick and returns the
 // alerts to deliver at now: new problems, problems due for a reminder, and one
 // recovery per problem that disappeared.
