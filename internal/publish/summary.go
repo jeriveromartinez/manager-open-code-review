@@ -256,40 +256,47 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 }
 
 // buildArchitectureBlock renders the observational architectural verdict of
-// the comparison. It is evidence only: no check, status or inline decision
-// reads it. A run that did not ask for the analysis renders nothing.
+// the comparison plus the trusted baseline and the deterministic operational
+// evidence. It is evidence only: no check, status or inline decision reads it.
+// Nothing is rendered when neither an analysis, nor a baseline, nor an
+// applicable operational dimension exists. When the advisory finding already
+// carries the verdict's items, only the surrounding evidence is rendered so the
+// same risks and conditions are not repeated.
 func (p *publishContext) buildArchitectureBlock(itemsRendered bool) string {
 	verdict := store.DecodeArchitectureVerdict(p.run.ArchitectureAnalysis)
-	// The trusted baseline runs even when the OCR report was not requested, so
-	// its evidence is shown on its own.
-	if verdict.Baseline == nil && (!verdict.Requested || verdict.Status == "" || verdict.Status == store.ArchitectureNotRequested) {
+	analysis := verdict.Requested && verdict.Status != "" && verdict.Status != store.ArchitectureNotRequested
+	ops := verdict.OpsEvidence
+	opsShown := ops != nil && ops.HasContent()
+	// The trusted baseline and the operational dimensions run even when the OCR
+	// report was not requested, so their evidence is shown on its own.
+	if !analysis && !opsShown && verdict.Baseline == nil {
 		return ""
 	}
 	var b strings.Builder
-	if verdict.Requested && verdict.Status != "" && verdict.Status != store.ArchitectureNotRequested {
+	if analysis {
 		fmt.Fprintf(&b, "\n**Análisis arquitectónico:** %s · %s\n",
 			p.sanitize(architectureStatusLabel(verdict.Status)), p.sanitize(architectureModeLabel(verdict.Mode)))
-	}
-	if len(verdict.Signals) > 0 {
-		signals := make([]string, 0, len(verdict.Signals))
-		for _, signal := range verdict.Signals {
-			signals = append(signals, "`"+p.sanitize(signal)+"`")
+		if len(verdict.Signals) > 0 {
+			signals := make([]string, 0, len(verdict.Signals))
+			for _, signal := range verdict.Signals {
+				signals = append(signals, "`"+p.sanitize(signal)+"`")
+			}
+			fmt.Fprintf(&b, "\n**Señales:** %s\n", strings.Join(signals, ", "))
 		}
-		fmt.Fprintf(&b, "\n**Señales:** %s\n", strings.Join(signals, ", "))
-	}
-	if included, excluded := len(verdict.Scope.Included), len(verdict.Scope.Excluded); included+excluded > 0 {
-		fmt.Fprintf(&b, "\n**Alcance:** %d archivo(s) incluido(s), %d fuera del análisis", included, excluded)
-		if len(verdict.Scope.OutOfScope) > 0 {
-			fmt.Fprintf(&b, " (%s)", p.sanitize(strings.Join(verdict.Scope.OutOfScope, ", ")))
+		if included, excluded := len(verdict.Scope.Included), len(verdict.Scope.Excluded); included+excluded > 0 {
+			fmt.Fprintf(&b, "\n**Alcance:** %d archivo(s) incluido(s), %d fuera del análisis", included, excluded)
+			if len(verdict.Scope.OutOfScope) > 0 {
+				fmt.Fprintf(&b, " (%s)", p.sanitize(strings.Join(verdict.Scope.OutOfScope, ", ")))
+			}
+			b.WriteString("\n")
 		}
-		b.WriteString("\n")
-	}
-	if len(verdict.Dimensions) > 0 {
-		names := make([]string, 0, len(verdict.Dimensions))
-		for _, dimension := range verdict.Dimensions {
-			names = append(names, p.sanitize(dimension.Name))
+		if len(verdict.Dimensions) > 0 {
+			names := make([]string, 0, len(verdict.Dimensions))
+			for _, dimension := range verdict.Dimensions {
+				names = append(names, p.sanitize(dimension.Name))
+			}
+			fmt.Fprintf(&b, "\n**Dimensiones evaluadas:** %s\n", strings.Join(names, " · "))
 		}
-		fmt.Fprintf(&b, "\n**Dimensiones evaluadas:** %s\n", strings.Join(names, " · "))
 	}
 	writeArchitectureBaseline(&b, verdict.Baseline, p.sanitize)
 	if !itemsRendered {
@@ -309,8 +316,74 @@ func (p *publishContext) buildArchitectureBlock(itemsRendered bool) string {
 	if len(verdict.Errors) > 0 {
 		fmt.Fprintf(&b, "\n> Análisis incompleto: %s\n", p.sanitize(strings.Join(verdict.Errors, "; ")))
 	}
+	if opsShown {
+		b.WriteString(p.buildOpsEvidenceBlock())
+	}
 	b.WriteString("\n> Modo observación: el dictamen no cambia el check, el estado de QA ni los comentarios inline.\n")
 	return b.String()
+}
+
+// buildOpsEvidenceBlock renders the per-dimension operational verdict: what the
+// change touches, what evidence it carries and what is still missing. The head
+// SHA ties the evidence to the change that was actually reviewed.
+func (p *publishContext) buildOpsEvidenceBlock() string {
+	ops := store.DecodeArchitectureVerdict(p.run.ArchitectureAnalysis).OpsEvidence
+	if ops == nil {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n**Evidencia operativa:** %s · modo observación · `%s`\n",
+		opsStatusLabel(ops.Status), shortSHA(p.run.HeadSHA))
+	if errorText := strings.TrimSpace(ops.Error); errorText != "" {
+		fmt.Fprintf(&b, "\n> Evidencia operativa incompleta: %s\n", p.sanitize(errorText))
+	}
+	for _, dimension := range ops.Dimensions {
+		if !dimension.Applies {
+			continue
+		}
+		fmt.Fprintf(&b, "\n- **%s:** %s", opsDimensionLabel(dimension.Name), opsStatusLabel(dimension.Status))
+		if dimension.Reason != "" {
+			fmt.Fprintf(&b, " — %s", p.sanitize(dimension.Reason))
+		}
+		if len(dimension.Missing) > 0 {
+			fmt.Fprintf(&b, " · falta: %s", p.sanitize(strings.Join(dimension.Missing, ", ")))
+		}
+		b.WriteString("\n")
+		if len(dimension.Evidence) > 0 {
+			fmt.Fprintf(&b, "  Evidencia: %s\n", p.sanitize(strings.Join(dimension.Evidence, " · ")))
+		}
+	}
+	return b.String()
+}
+
+func opsStatusLabel(status string) string {
+	switch status {
+	case store.OpsStatusSatisfied:
+		return "satisfecha"
+	case store.OpsStatusUnknown:
+		return "desconocida"
+	case store.OpsStatusRisk:
+		return "riesgo"
+	case store.OpsStatusNotApplicable:
+		return "no aplica"
+	default:
+		return status
+	}
+}
+
+func opsDimensionLabel(name string) string {
+	switch name {
+	case store.OpsDimensionSchema:
+		return "Migraciones y datos"
+	case store.OpsDimensionTopology:
+		return "Despliegue y topología"
+	case store.OpsDimensionPermissions:
+		return "Permisos"
+	case store.OpsDimensionLoad:
+		return "Carga y operación"
+	default:
+		return name
+	}
 }
 
 func writeArchitectureItems(b *strings.Builder, label string, items []string, sanitize func(string) string) {
@@ -399,24 +472,37 @@ func architectureModeLabel(mode string) string {
 // It never changes the conclusion.
 func (p *publishContext) architectureCheckLine() string {
 	verdict := store.DecodeArchitectureVerdict(p.run.ArchitectureAnalysis)
-	hasAnalysis := verdict.Requested && verdict.Status != "" && verdict.Status != store.ArchitectureNotRequested
-	if !hasAnalysis && verdict.Baseline == nil {
+	analysis := verdict.Requested && verdict.Status != "" && verdict.Status != store.ArchitectureNotRequested
+	ops := verdict.OpsEvidence
+	opsShown := ops != nil && ops.HasContent()
+	if !analysis && !opsShown && verdict.Baseline == nil {
 		return ""
 	}
-	if !hasAnalysis {
+	// The baseline can be the only architecture evidence when neither the OCR
+	// report nor the operational dimensions produced anything to show.
+	if !analysis && !opsShown {
 		line := "Línea base de arquitectura: " + architectureBaselineStatusLabel(verdict.Baseline.Status)
 		if verdict.Baseline.RulesPath != "" {
 			line += " · `" + verdict.Baseline.RulesPath + "`"
 		}
 		return line
 	}
-	line := fmt.Sprintf("Análisis arquitectónico (observación): %s",
-		architectureStatusLabel(verdict.Status))
-	if len(verdict.Signals) > 0 {
-		line += " · señales: " + strings.Join(verdict.Signals, ", ")
+	line := ""
+	if analysis {
+		line = fmt.Sprintf("Análisis arquitectónico (observación): %s",
+			architectureStatusLabel(verdict.Status))
+		if len(verdict.Signals) > 0 {
+			line += " · señales: " + strings.Join(verdict.Signals, ", ")
+		}
+		if len(verdict.Dimensions) > 0 {
+			line += fmt.Sprintf(" · %d dimensión(es)", len(verdict.Dimensions))
+		}
 	}
-	if len(verdict.Dimensions) > 0 {
-		line += fmt.Sprintf(" · %d dimensión(es)", len(verdict.Dimensions))
+	if opsShown {
+		if line != "" {
+			line += " · "
+		}
+		line += "Evidencia operativa (observación): " + opsStatusLabel(ops.Status)
 	}
 	if verdict.Baseline != nil {
 		line += " · línea base: " + architectureBaselineStatusLabel(verdict.Baseline.Status)
