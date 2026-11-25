@@ -214,6 +214,10 @@ type PullRequest struct {
 	// ValidationsDetail is the named observation behind the counters: which
 	// checks GitHub reported, from which origin and in which state (#143).
 	ValidationsDetail datatypes.JSON `gorm:"column:validations_detail"`
+	// ValidationsObservedAt and ValidationsSource say when and from which path
+	// the observation was read. A write older than the stored one is ignored.
+	ValidationsObservedAt time.Time `gorm:"column:validations_observed_at"`
+	ValidationsSource     string    `gorm:"column:validations_source"`
 	// Maintained by a database trigger whenever qa_status changes, so GORM
 	// must never write it.
 	QAStatusChangedAt time.Time `gorm:"column:qa_status_changed_at;<-:false"`

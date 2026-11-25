@@ -205,7 +205,8 @@ func TestPendingReviewPRsAppliesRequiredChecksBeforeLimit(t *testing.T) {
 	setObservation := func(pr store.PullRequest, legacy store.PRValidations, checks ...store.CheckObservation) {
 		t.Helper()
 		if _, err := f.s.SetPRValidationObservation(f.ctx, pr.ID, pr.HeadSHA, legacy,
-			store.ValidationObservation{Result: store.ObservationOK, Checks: checks}); err != nil {
+			store.ValidationObservation{Result: store.ObservationOK, Checks: checks},
+			store.ObservationStamp{At: time.Now().UTC(), Source: store.ObservationSourcePublish}); err != nil {
 			t.Fatalf("SetPRValidationObservation(#%d): %v", pr.Number, err)
 		}
 	}

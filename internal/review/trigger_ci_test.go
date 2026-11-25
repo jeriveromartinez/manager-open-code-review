@@ -396,7 +396,8 @@ func (f *triggerFixture) setObservation(pr store.PullRequest, checks ...store.Ch
 			counters.Failed++
 		}
 	}
-	if _, err := f.st.SetPRValidationObservation(f.ctx, pr.ID, pr.HeadSHA, counters, observation); err != nil {
+	if _, err := f.st.SetPRValidationObservation(f.ctx, pr.ID, pr.HeadSHA, counters, observation,
+		store.ObservationStamp{At: time.Now().UTC(), Source: store.ObservationSourcePolling}); err != nil {
 		f.t.Fatalf("SetPRValidationObservation: %v", err)
 	}
 }
@@ -442,7 +443,8 @@ func TestTriggerCIGateSelectsRequiredCheckByNameAndOrigin(t *testing.T) {
 func TestTriggerCILookupFailureNeverOpensTheGate(t *testing.T) {
 	f := newTriggerFixture(t)
 	pr := f.seed("gated-lookup", gatedOpts())
-	if _, err := f.st.SetPRValidationLookupFailure(f.ctx, pr.ID, pr.HeadSHA); err != nil {
+	if _, err := f.st.SetPRValidationLookupFailure(f.ctx, pr.ID, pr.HeadSHA,
+		store.ObservationStamp{At: time.Now().UTC(), Source: store.ObservationSourcePolling}); err != nil {
 		t.Fatalf("SetPRValidationLookupFailure: %v", err)
 	}
 

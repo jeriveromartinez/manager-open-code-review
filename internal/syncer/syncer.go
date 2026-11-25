@@ -29,6 +29,10 @@ type Syncer struct {
 	Apps   github.AppProvider
 	Events events.Publisher
 	Checks ChecksRefresher
+	// CIGate re-evaluates a pull request whose checks changed. Polling has no
+	// webhook delivery, so without it a required check that turns red is stored
+	// but the App check run keeps its previous conclusion.
+	CIGate CIGateEvaluator
 	// ReviewRequests handles external contributions the engine may not review.
 	// Polling mode has no webhook delivery, so the syncer is the only path that
 	// can hand those pull requests to a person.
@@ -39,7 +43,13 @@ type Syncer struct {
 // Reconciliation uses it so polling mode gates reviews on the same verdict a
 // webhook delivery would have stored.
 type ChecksRefresher interface {
-	RefreshPRWith(ctx context.Context, client *gh.Client, pr store.PullRequest) (store.PRValidations, bool, error)
+	RefreshPRWith(ctx context.Context, client *gh.Client, pr store.PullRequest, source string) (store.PRValidations, bool, error)
+}
+
+// CIGateEvaluator recomputes the gate and the published check of a pull
+// request after its required CI state changed.
+type CIGateEvaluator interface {
+	OnChecksUpdated(ctx context.Context, prID uint) error
 }
 
 // SyncInstallation reconciles the repositories visible to an installation and,
@@ -397,15 +407,26 @@ func (s *Syncer) refreshChecks(ctx context.Context, client *gh.Client, pr store.
 	if s.Checks == nil || pr.HeadSHA == "" {
 		return nil
 	}
-	_, changed, err := s.Checks.RefreshPRWith(ctx, client, pr)
+	_, changed, err := s.Checks.RefreshPRWith(ctx, client, pr, store.ObservationSourcePolling)
 	if err != nil {
 		return err
 	}
-	if changed {
-		return s.publish(ctx, events.Event{
-			Type: "pr.updated",
-			ID:   strconv.FormatUint(uint64(pr.ID), 10),
-		})
+	if !changed {
+		return nil
+	}
+	if err := s.publish(ctx, events.Event{
+		Type: "pr.updated",
+		ID:   strconv.FormatUint(uint64(pr.ID), 10),
+	}); err != nil {
+		return err
+	}
+	// The counters moved but the App check run still shows the previous
+	// conclusion. Without a webhook delivery, this is the only path that can
+	// correct it, so the same gate the delivery uses is re-evaluated here.
+	if s.CIGate != nil && !pr.Draft {
+		if err := s.CIGate.OnChecksUpdated(ctx, pr.ID); err != nil {
+			return fmt.Errorf("re-evaluate CI gate of pull request %d: %w", pr.ID, err)
+		}
 	}
 	return nil
 }

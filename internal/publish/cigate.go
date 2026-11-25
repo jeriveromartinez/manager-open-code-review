@@ -3,6 +3,7 @@ package publish
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	appgithub "github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
@@ -17,13 +18,16 @@ func (p *publishContext) ciVerdict(ctx context.Context) (store.CIVerdict, error)
 	if !p.policy.RequireGreenCI {
 		return store.CIVerdict{State: store.CIGreen, Reason: "CI gate disabled"}, nil
 	}
+	// The stamp is taken before the lookup so this reading cannot claim to be
+	// newer than a delivery that arrived while it was in flight.
+	stamp := store.ObservationStamp{At: time.Now().UTC(), Source: store.ObservationSourcePublish}
 	validations, observation, err := appgithub.ReadObservation(
 		ctx, p.client, p.owner, p.name, p.run.HeadSHA, p.app.Creds.AppID,
 	)
 	if err != nil {
 		// Do not leave the previous verdict behind: the trigger must not use a
 		// green observation this publication could not confirm.
-		if _, markErr := p.w.Store.SetPRValidationLookupFailure(ctx, p.pr.ID, p.run.HeadSHA); markErr != nil {
+		if _, markErr := p.w.Store.SetPRValidationLookupFailure(ctx, p.pr.ID, p.run.HeadSHA, stamp); markErr != nil {
 			slog.Warn("store validation lookup failure", "pull_request_id", p.pr.ID, "error", markErr)
 		}
 		return store.CIVerdict{State: store.CIUnknown, Reason: "CI lookup failed"}, err
@@ -31,7 +35,7 @@ func (p *publishContext) ciVerdict(ctx context.Context) (store.CIVerdict, error)
 	// Keep the stored observation current so the panel and the trigger use the
 	// same verdict this publication saw. The write is head-conditional.
 	if _, storeErr := p.w.Store.SetPRValidationObservation(
-		ctx, p.pr.ID, p.run.HeadSHA, validations, observation,
+		ctx, p.pr.ID, p.run.HeadSHA, validations, observation, stamp,
 	); storeErr != nil {
 		slog.Warn("store validations at publish", "pull_request_id", p.pr.ID, "error", storeErr)
 	}
