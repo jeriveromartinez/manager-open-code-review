@@ -1,7 +1,9 @@
 package review
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -63,6 +65,27 @@ func nativeChunkMainOutput(excludeReason string) string {
 	  "status": "complete",
 	  "summary": {"files_reviewed": 1, "comments": 1, "total_tokens": 100,
 	    "input_tokens": 80, "output_tokens": 20},
+	  "comments": [{
+	    "path": "auth.go", "content": "Hallazgo principal\n\ncuerpo principal",
+	    "start_line": 1, "end_line": 1, "category": "bug", "severity": "medium"
+	  }],
+	  "manifest": {
+	    "schema_version": "ocr.run-manifest/v1", "terminal_state": "complete",
+	    "coverage": {
+	      "selected": [{"path": "auth.go"}, {"path": "big.go"}],
+	      "completed": [{"path": "auth.go"}],
+	      "reused": [], "failed": [], "waived": [],
+	      "excluded": [{"path": "big.go", "exclude_reason": %q}]
+	    }
+	  }
+	}`, excludeReason)
+}
+
+// nativeChunkMainOutputWithoutSummary is the same review without a summary, so
+// the run cannot know what the first pass spent.
+func nativeChunkMainOutputWithoutSummary(excludeReason string) string {
+	return fmt.Sprintf(`{
+	  "status": "complete",
 	  "comments": [{
 	    "path": "auth.go", "content": "Hallazgo principal\n\ncuerpo principal",
 	    "start_line": 1, "end_line": 1, "category": "bug", "severity": "medium"
@@ -191,6 +214,28 @@ func findingsForPath(t *testing.T, f *runTestFixture, path string) []store.Findi
 		}
 	}
 	return matched
+}
+
+func TestFinishChunkMarksUsageUnknownWithoutSummary(t *testing.T) {
+	summary := newChunkSummary()
+	failures, reason := 0, ""
+	finishChunk(context.Background(), &summary, "big.go",
+		nativeReview{Status: "complete"}, nil, &failures, &reason)
+	if summary.usageKnown {
+		t.Error("usageKnown = true, want unknown after a chunk without a summary")
+	}
+	if failures != 0 || reason != "" || summary.tokens.Total != 0 {
+		t.Errorf("summary = %+v/%d/%q, want a successful chunk with zero logged spend",
+			summary.tokens, failures, reason)
+	}
+
+	// A failed chunk may have spent tokens before failing.
+	failed := newChunkSummary()
+	finishChunk(context.Background(), &failed, "big.go", nativeReview{},
+		errors.New("provider down"), &failures, &reason)
+	if failed.usageKnown {
+		t.Error("usageKnown = true, want unknown after a failed chunk")
+	}
 }
 
 func TestRunChunksTooLargeFile(t *testing.T) {
@@ -354,6 +399,61 @@ func TestRunChunkStopsWhenTokenBudgetExhausted(t *testing.T) {
 	}
 	if got := len(findingsForPath(t, f, "auth.go")); got != 1 {
 		t.Errorf("auth.go findings = %d, want 1", got)
+	}
+}
+
+func TestRunChunkReceivesTheRemainingMainBudget(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newChunkRunFixture(t)
+	f.setOCRChunks(t, nativeChunkMainOutput("too_large"), []string{
+		nativeChunkOutput("big.go", 20, 20, "Primer trozo", "cuerpo", 50),
+		nativeChunkOutput("big.go", 24, 24, "Segundo trozo", "cuerpo", 50),
+	})
+	// 1000 for the run, 100 spent by the main pass and 50 by each chunk.
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).Update("review_token_budget", int64(1000)).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.chunkRunner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	lines := f.ocrArgs(t)
+	if len(lines) < 3 {
+		t.Fatalf("ocr calls = %d, want the main run and two chunks", len(lines))
+	}
+	if got := ocrArgInLine(lines[0], "--max-tokens-budget"); got != "1000" {
+		t.Errorf("main --max-tokens-budget = %q, want 1000", got)
+	}
+	if got := ocrArgInLine(lines[1], "--max-tokens-budget"); got != "900" {
+		t.Errorf("first chunk --max-tokens-budget = %q, want 900 left of the main budget", got)
+	}
+	if got := ocrArgInLine(lines[2], "--max-tokens-budget"); got != "850" {
+		t.Errorf("second chunk --max-tokens-budget = %q, want 850 after the first chunk", got)
+	}
+}
+
+func TestRunDoesNotChunkWhenMainUsageIsUnknown(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newChunkRunFixture(t)
+	f.setOCRChunks(t, nativeChunkMainOutputWithoutSummary("too_large"), []string{
+		nativeChunkOutput("big.go", 20, 20, "No debería ejecutarse", "cuerpo", 50),
+	})
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).Update("review_token_budget", int64(100000)).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.chunkRunner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got := f.ocrCalls(t); got != 1 {
+		t.Errorf("ocr calls = %d, want only the main run: without usage data no chunk budget is proven", got)
+	}
+	run := assertRunTerminal(t, f, store.RunInconclusive, "coverage_incomplete")
+	big := coverageFileAt(t, decodeChunkCoverage(t, run), "big.go")
+	if big.Status != coveragePending || big.Reason != "token_budget" {
+		t.Errorf("big.go coverage = %+v, want pending/token_budget", big)
 	}
 }
 

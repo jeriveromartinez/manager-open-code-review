@@ -765,9 +765,20 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if !store.ValidReviewEffort(effort) {
 		effort = store.ReviewEffortLow
 	}
+	// The verifier's share is carved out before the main pass starts, so the
+	// first pass (and its chunks) cannot spend the budget reserved for it.
+	triage := verifyPolicy(cfg.Policy)
+	reserved := reserveVerification(cfg.Policy, triage, timeout)
 	budget := cfg.Policy.ReviewTokenBudget
 	if budget < 0 {
 		budget = 0
+	}
+	if reserved.enabled {
+		budget = reserved.mainTokens
+		timeout = reserved.mainTime
+		if timeout < 0 {
+			timeout = 0
+		}
 	}
 	budgetText := "sin tope"
 	if budget > 0 {
@@ -776,6 +787,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	log.Log(runCtx, "worker", "", "info", logPhasePolicy, fmt.Sprintf(
 		"política: esfuerzo %s, max_tokens %d, presupuesto %s, timeout %s",
 		effort, ceiling, budgetText, timeout.Round(time.Second)))
+	if reserved.enabled {
+		log.Log(runCtx, "worker", "", "info", logPhasePolicy, fmt.Sprintf(
+			"verificación: cuota de %d tokens y %s; solo se reserva si puede iniciarse",
+			reserved.tokens, reserved.timeout.Round(time.Second)))
+	}
 	reviewer := &NativeReviewer{
 		Bin:         r.Cfg.OCRBin,
 		RepoDir:     workDir,
@@ -830,8 +846,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		r.setPhase(runCtx, run.ID, store.RunPhaseChunking, log)
 		log.Log(runCtx, "worker", "", "info", logPhaseChunks, fmt.Sprintf(
 			"%d archivo(s) demasiado grandes para el run principal; se revisan por partes", len(paths)))
-		chunked = r.reviewTooLargeFiles(runCtx, run.ID, cfg.Profile.ID, reviewer, headSHA, paths, budget, out.tokens, log)
+		chunked = r.reviewTooLargeFiles(runCtx, run.ID, cfg.Profile.ID, reviewer, headSHA, paths, budget, out.tokens, out.tokensKnown, log)
 		out.tokens.add(chunked.tokens)
+		if !chunked.usageKnown {
+			out.tokensKnown = false
+		}
 		if len(chunked.comments) > 0 {
 			comments = append(comments, chunked.comments...)
 			out.merged = mergeNativeFindings(run.PullRequestID, comments, out.anchors)
@@ -886,7 +905,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		// Verification runs against the checkout before it is deleted. It only
 		// annotates the findings; applying the decisions happens after they are
 		// persisted, so a crash here loses verdicts but never corrupts state.
-		r.verifyFindings(runCtx, run, cfg, key, workDir, headSHA, &out, log)
+		r.verifyFindings(runCtx, run, cfg, key, workDir, headSHA, &out, reserved, log)
 		r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
 		return out, nil
 	case store.RunInconclusive:

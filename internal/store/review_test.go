@@ -690,6 +690,8 @@ func TestSavePolicyReviewControls(t *testing.T) {
 		{"budget above max", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ReviewTokenBudget: store.ReviewTokenBudgetMax + 1}},
 		{"ceiling below min", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ReviewContextCeiling: intPtr(store.ReviewContextCeilingMin - 1)}},
 		{"ceiling above max", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ReviewContextCeiling: intPtr(store.ReviewContextCeilingMax + 1)}},
+		{"token share leaves no main pass", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, AutoTriageMode: store.AutoTriageApply, VerifyTokenShare: 100}},
+		{"time share leaves no main pass", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, AutoTriageMode: store.AutoTriageApply, VerifyTimeShare: 100}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := f.s.SaveQAPolicy(f.ctx, tc.policy); err == nil {
