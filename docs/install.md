@@ -137,6 +137,8 @@ Un run `inconclusive` indica que no se completó la revisión con cobertura comp
 
 Para reintentar, abre el detalle del PR y pulsa **Reintentar** (admin o lead del equipo). Se crea un run `retry` para el mismo SHA, se reactiva el check y se encola de nuevo. Revisa antes la causa: un modelo inválido, por ejemplo, seguirá fallando hasta corregir el perfil. La reconciliación no reencola automáticamente un SHA que ya terminó en `failed` o `inconclusive`.
 
+Si la automatización no puede cubrir el diff, un admin, el lead o QA del equipo puede registrar el resultado humano en el detalle del PR: decisión (aprobado o cambios requeridos), conclusión, motivo y alcance revisado (archivos/rangos y hallazgos pendientes, o todo el alcance). La decisión se ata a la comparación vigente y se muestra aparte del run automático; el check `QA Control Center` conserva el resultado automático y añade un bloque **Resultado humano**. Una aprobación genérica de GitHub, una de otro SHA o una resolución parcial no cierran pendientes por sí solas. Un push o retarget invalida la decisión y el PR vuelve a solicitar revisión humana si sigue haciendo falta.
+
 ## Verificación manual de extremo a extremo
 
 Con una API key real y un repositorio de prueba:

@@ -61,6 +61,19 @@ const (
 	TriageSourceHuman    = "human"
 	TriageSourceVerifier = "verifier"
 
+	// Human verdicts of an inconclusive review (#146). A decision is either an
+	// approval or a request for changes; the automated run keeps its own result.
+	HumanVerdictApproved         = "approved"
+	HumanVerdictChangesRequested = "changes_requested"
+
+	// Sources of a human verdict. Only the panel creates one today; the source
+	// column keeps room for a future GitHub review path without mixing them.
+	HumanVerdictSourcePanel = "panel"
+
+	HumanVerdictInvalidatedHeadMoved = "head_moved"
+	HumanVerdictInvalidatedRetarget  = "retarget"
+	HumanVerdictInvalidatedReplaced  = "superseded"
+
 	ArtifactSummary = "summary_comment"
 	ArtifactReview  = "review"
 	ArtifactCheck   = "check_run"
@@ -667,6 +680,61 @@ type FindingEvent struct {
 	Actor       string         `gorm:"column:actor"`
 	Data        datatypes.JSON `gorm:"column:data"`
 	CreatedAt   time.Time      `gorm:"column:created_at"`
+}
+
+// HumanVerdictRange is one file range a human reviewer examined.
+type HumanVerdictRange struct {
+	Path      string `json:"path"`
+	StartLine int    `json:"start_line,omitempty"`
+	EndLine   int    `json:"end_line,omitempty"`
+}
+
+// HumanVerdictScope is the part of the comparison the human reviewer covered:
+// file ranges and the pending findings they checked. Complete says whether the
+// scope the engine could not cover was fully examined, which separates a full
+// resolution from a partial one in the gate.
+type HumanVerdictScope struct {
+	Files           []HumanVerdictRange `json:"files,omitempty"`
+	PendingFindings []string            `json:"pending_findings,omitempty"`
+	Complete        bool                `json:"complete"`
+}
+
+// HumanVerdict is a person's decision about an inconclusive review. It belongs
+// to the comparison identity of the pull request (#141): a push or retarget
+// invalidates the row, and only an active row may influence the gate.
+type HumanVerdict struct {
+	ID            uint   `gorm:"column:id;primaryKey"`
+	PullRequestID uint   `gorm:"column:pull_request_id"`
+	HeadSHA       string `gorm:"column:head_sha"`
+	BaseRef       string `gorm:"column:base_ref"`
+	MergeBaseSHA  string `gorm:"column:merge_base_sha"`
+	Decision      string `gorm:"column:decision"`
+	Conclusion    string `gorm:"column:conclusion"`
+	Reason        string `gorm:"column:reason"`
+	// Scope is the encoded HumanVerdictScope. ScopeComplete mirrors it for the
+	// gate so it never has to decode JSON on the publication path.
+	Scope         datatypes.JSON `gorm:"column:scope"`
+	ScopeComplete bool           `gorm:"column:scope_complete"`
+	ActorLogin    string         `gorm:"column:actor_login"`
+	ActorUserID   *uint          `gorm:"column:actor_user_id"`
+	Source        string         `gorm:"column:source"`
+	// InvalidatedAt is when a newer decision replaced this one or the comparison
+	// moved. An invalidated row is history: no gate or panel may apply it.
+	InvalidatedAt     *time.Time `gorm:"column:invalidated_at"`
+	InvalidatedReason string     `gorm:"column:invalidated_reason"`
+	CreatedAt         time.Time  `gorm:"column:created_at"`
+	UpdatedAt         time.Time  `gorm:"column:updated_at"`
+}
+
+// Comparison returns the comparison identity this verdict was recorded for.
+func (v HumanVerdict) Comparison() Comparison {
+	return Comparison{HeadSHA: v.HeadSHA, BaseRef: v.BaseRef, MergeBaseSHA: v.MergeBaseSHA}
+}
+
+// Covers reports whether the verdict still describes the given pull request's
+// current comparison.
+func (v HumanVerdict) Covers(pr PullRequest) bool {
+	return v.Comparison().Covers(pr.Comparison())
 }
 
 // GitHubArtifact tracks a comment, review or check run published for a PR.

@@ -232,11 +232,60 @@ export type Finding = {
 
 /**
  * El detalle reparte los campos del PR en la raíz de la respuesta (el DTO de
- * Go está incrustado), junto a `runs` y `findings`.
+ * Go está incrustado), junto a `runs`, `findings` y el resultado humano.
  */
 export type PRDetail = PRView & {
   runs: ReviewRun[]
   findings: Finding[]
+  /** Decisión humana de una revisión inconclusa; null si nadie la registró. */
+  human_verdict: HumanVerdict | null
+}
+
+/** Un rango de archivo que una persona revisó. */
+export type HumanVerdictFile = {
+  path: string
+  start_line: number
+  end_line: number
+}
+
+/**
+ * Alcance de la decisión humana: qué archivos/rangos y hallazgos pendientes se
+ * revisaron, y si se cubrió todo lo que el motor no pudo cubrir.
+ */
+export type HumanVerdictScope = {
+  files: HumanVerdictFile[]
+  pending_findings: string[]
+  complete: boolean
+}
+
+/**
+ * Resultado humano de una revisión inconclusa. Se muestra aparte del run
+ * automático; `current` es false cuando un push o retarget lo invalidó.
+ */
+export type HumanVerdict = {
+  decision: 'approved' | 'changes_requested'
+  conclusion: string
+  reason: string
+  actor_login: string
+  scope: HumanVerdictScope
+  head_sha: string
+  base_ref: string
+  merge_base_sha: string
+  current: boolean
+  invalidated_at: string | null
+  invalidated_reason: string
+  created_at: string
+}
+
+export type HumanVerdictInput = {
+  decision: 'approved' | 'changes_requested'
+  conclusion: string
+  reason?: string
+  scope: {
+    files: HumanVerdictFile[]
+    pending_findings?: string[]
+    complete: boolean
+  }
 }
 
 /** Un eslabón de configuración que falta para que se ejecute una revisión. */
@@ -619,6 +668,8 @@ export const api = {
     request<ReviewRunLogPage>(`/api/review-runs/${id}/logs?after=${after}&limit=${limit}`),
   retryPR: (id: number) =>
     request<{ status: string }>(`/api/prs/${id}/retry`, { method: 'POST' }),
+  recordHumanVerdict: (id: number, body: HumanVerdictInput) =>
+    request<HumanVerdict>(`/api/prs/${id}/human-verdict`, { method: 'POST', body }),
   withdrawFinding: (prId: number, findingId: string, reason?: string) =>
     request<Finding>(`/api/prs/${prId}/findings/${encodeURIComponent(findingId)}/withdraw`, {
       method: 'POST',

@@ -193,6 +193,10 @@ Cada run nace con un token de instalación de solo lectura que vive una hora. Mi
 
 Para reintentar, abre el detalle del PR y pulsa **Reintentar** (admin o lead del equipo). Se crea un run con trigger `retry` para el mismo SHA, se reactiva el check y se encola de nuevo. Comprueba antes la causa (por ejemplo, un modelo inválido en el perfil): la reconciliación no reencola automáticamente un SHA que ya terminó en `failed` o `inconclusive`.
 
+### Resultado humano de una revisión inconclusa
+
+Cuando la automatización no cubre el diff, un admin, el lead o QA del equipo puede cerrar el caso desde `/prs/:id` con **Registrar resultado humano**: elige aprobado o cambios requeridos, escribe la conclusión y el motivo, y declara qué archivos/rangos y hallazgos pendientes revisó (o marca que cubrió todo el alcance pendiente). La decisión se guarda con el actor y la comparación vigente (`head`, rama base y merge base de #141) y se muestra aparte del run automático. El check `QA Control Center` sigue publicando el resultado automático (`action_required` si el run fue inconcluso) y añade un bloque **Resultado humano**; el panel hace lo mismo. El estado del PR solo pasa a `ready_for_human` o `changes_requested` cuando la decisión humana es completa y no quedan bloqueantes. Una aprobación genérica de GitHub, una de otro SHA o una resolución parcial no cierran pendientes por sí solas. Un push o un retarget invalida la decisión (la tarjeta del panel la marca como obsoleta) y, si sigue haciendo falta, el PR vuelve a solicitar la revisión humana.
+
 ### Reinicio y despliegue del worker
 
 Un `docker compose up -d` o un `docker stop` del worker inicia un apagado ordenado: deja de reclamar runs nuevos, espera hasta 45 s (`jobs.ReviewDrainTimeout`) a que terminen las revisiones en curso y, si alguna no termina, cancela el trabajo y la devuelve a la cola antes de salir. El run vuelve a `queued` con código `interrupted` («el worker se detuvo durante la revisión; el run vuelve a la cola») y el worker nuevo lo retoma al arrancar, sin esperar los 45 min del watchdog ni tocar el PR. Los tokens consumidos por el intento interrumpido no se recuperan: esa revisión se repite desde el principio.
@@ -214,7 +218,7 @@ El binario admite `qa serve`, `qa worker`, `qa migrate`, `qa monitor` y `qa heal
 
 ## Rutas principales
 
-`GET /healthz` · `GET /api/setup/status` · `POST /api/setup/manifest` · `/setup` · `/auth/login` · `/auth/callback` · `/api/me` · `/api/stats` · `/api/prs` · `GET /api/prs/{id}` · `GET /api/review-runs` · `GET /api/review-runs/{id}/logs` · `POST /api/prs/{id}/retry` · `/api/teams` · `GET|PUT /api/teams/{id}/policy` · `GET|POST /api/llm-profiles` · `GET /api/llm-profiles/usage` · `POST /api/llm-profiles/{id}/health` · `GET /api/installations` · `POST /api/installations/{id}/sync` · `/agents` · `/runs` · `/prs/:id` · `GET /api/events` (SSE) · `POST /webhooks/github`. Cualquier otra ruta sirve la SPA.
+`GET /healthz` · `GET /api/setup/status` · `POST /api/setup/manifest` · `/setup` · `/auth/login` · `/auth/callback` · `/api/me` · `/api/stats` · `/api/prs` · `GET /api/prs/{id}` · `GET /api/review-runs` · `GET /api/review-runs/{id}/logs` · `POST /api/prs/{id}/retry` · `POST /api/prs/{id}/human-verdict` · `/api/teams` · `GET|PUT /api/teams/{id}/policy` · `GET|POST /api/llm-profiles` · `GET /api/llm-profiles/usage` · `POST /api/llm-profiles/{id}/health` · `GET /api/installations` · `POST /api/installations/{id}/sync` · `/agents` · `/runs` · `/prs/:id` · `GET /api/events` (SSE) · `POST /webhooks/github`. Cualquier otra ruta sirve la SPA.
 
 ## Hojas de ruta
 

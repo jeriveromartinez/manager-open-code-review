@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { api, type CoverageFile, type Finding, type PRDetail, type ReviewRun } from '../api'
+import { api, type CoverageFile, type Finding, type HumanVerdict, type HumanVerdictFile, type PRDetail, type ReviewRun } from '../api'
 import RunLogPanel from '../components/RunLogPanel.vue'
 import { formatElapsed, phaseLabel } from '../runPhase'
 import { cacheShare, formatTokens } from '../tokens'
@@ -20,6 +20,18 @@ const refreshError = ref<string | null>(null)
 const acting = ref<string | null>(null)
 const confirming = ref<{ finding: Finding; action: 'withdraw' | 'confirm' } | null>(null)
 const reason = ref('')
+// Resultado humano de una revisión inconclusa: se registra aparte del run
+// automático y queda atado a la comparación vigente.
+const humanForm = ref({
+  decision: 'approved',
+  conclusion: '',
+  reason: '',
+  scope: '',
+  pending: '',
+  complete: false,
+})
+const recordingHuman = ref(false)
+const humanError = ref<string | null>(null)
 // Solo una ejecución muestra su log a la vez: el panel crece y se reinicia al
 // abrir otra, así el detalle del PR no se llena de historiales.
 const openLogRunId = ref<number | null>(null)
@@ -71,6 +83,11 @@ const latestRun = computed(() => {
   const runs = detail.value?.runs ?? []
   return runs.length > 0 ? runs[runs.length - 1] : null
 })
+// El resultado humano se pinta como una tarjeta aparte del run automático.
+const humanVerdict = computed(() => detail.value?.human_verdict ?? null)
+const canRecordHumanVerdict = computed(
+  () => latestRun.value?.status === 'inconclusive' || latestRun.value?.status === 'failed',
+)
 const status = computed(() =>
   detail.value ? prStatusLabel(detail.value) : statusLabel('pending'),
 )
@@ -265,6 +282,90 @@ async function retry(): Promise<void> {
   }
 }
 
+function humanDecisionLabel(verdict: HumanVerdict): string {
+  return verdict.decision === 'changes_requested' ? 'Cambios requeridos' : 'Aprobado'
+}
+
+function humanInvalidationLabel(verdict: HumanVerdict): string {
+  if (verdict.invalidated_reason === 'head_moved') return 'un push cambió el commit revisado'
+  if (verdict.invalidated_reason === 'retarget') return 'la rama base o el merge base cambiaron'
+  if (verdict.invalidated_reason === 'superseded') return 'se registró otra decisión'
+  return 'la comparación revisada ya no está vigente'
+}
+
+function humanScopeFileLabel(file: HumanVerdictFile): string {
+  if (file.start_line <= 0) return file.path
+  if (file.end_line > 0 && file.end_line !== file.start_line) {
+    return `${file.path}:${file.start_line}-${file.end_line}`
+  }
+  return `${file.path}:${file.start_line}`
+}
+
+function parseHumanScope(text: string): { files: HumanVerdictFile[]; error: string | null } {
+  const files: HumanVerdictFile[] = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    const match = /^(.+?):(\d+)(?:-(\d+))?$/.exec(line)
+    if (match) {
+      const start = Number(match[2])
+      const end = match[3] ? Number(match[3]) : start
+      if (end < start) return { files, error: `Rango inválido en ${line}` }
+      files.push({ path: match[1], start_line: start, end_line: end })
+      continue
+    }
+    files.push({ path: line, start_line: 0, end_line: 0 })
+  }
+  return { files, error: null }
+}
+
+/**
+ * Registra la decisión humana de una revisión inconclusa. El alcance se escribe
+ * como una línea por archivo (`ruta` o `ruta:inicio-fin`) y los pendientes por
+ * su id; el backend lo ata a la comparación vigente.
+ */
+async function recordHumanVerdict(): Promise<void> {
+  const conclusion = humanForm.value.conclusion.trim()
+  if (!conclusion) {
+    humanError.value = 'Escribe la conclusión de la revisión'
+    return
+  }
+  const parsed = parseHumanScope(humanForm.value.scope)
+  if (parsed.error) {
+    humanError.value = parsed.error
+    return
+  }
+  const pending = humanForm.value.pending
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value !== '')
+  if (!humanForm.value.complete && parsed.files.length === 0 && pending.length === 0) {
+    humanError.value = 'Indica qué archivos o hallazgos revisaste, o marca el alcance como completo'
+    return
+  }
+
+  recordingHuman.value = true
+  humanError.value = null
+  try {
+    await api.recordHumanVerdict(prId.value, {
+      decision: humanForm.value.decision === 'changes_requested' ? 'changes_requested' : 'approved',
+      conclusion,
+      reason: humanForm.value.reason.trim() || undefined,
+      scope: { files: parsed.files, pending_findings: pending, complete: humanForm.value.complete },
+    })
+    humanForm.value = { decision: 'approved', conclusion: '', reason: '', scope: '', pending: '', complete: false }
+    await load()
+  } catch (err) {
+    humanError.value = isForbidden(err)
+      ? 'Solo un admin, el lead o QA del equipo pueden registrar el resultado humano'
+      : isConflict(err)
+        ? 'La revisión automática ya no está inconclusa'
+        : 'No se pudo registrar el resultado humano'
+  } finally {
+    recordingHuman.value = false
+  }
+}
+
 function askWithdraw(finding: Finding): void {
   confirming.value = { finding, action: 'withdraw' }
   reason.value = ''
@@ -433,6 +534,84 @@ onBeforeUnmount(() => {
               }}
             </li>
           </ul>
+        </section>
+
+        <section v-if="humanVerdict" class="tile human-result" aria-labelledby="human-result-title" data-human-verdict>
+          <div class="human-result__head">
+            <div>
+              <h2 id="human-result-title" class="tile__title">Resultado humano</h2>
+              <p class="caption">Decisión de una persona, aparte de la revisión automática</p>
+            </div>
+            <span class="badge" :class="humanVerdict.current ? 'badge--ok' : 'badge--muted'" data-human-verdict-state>
+              {{ humanVerdict.current ? humanDecisionLabel(humanVerdict) : 'Obsoleta' }}
+            </span>
+          </div>
+          <p v-if="!humanVerdict.current" class="human-result__stale" data-human-verdict-stale>
+            Invalidada porque {{ humanInvalidationLabel(humanVerdict) }}. La revisión automática vuelve a contar.
+          </p>
+          <p class="human-result__meta">
+            <code>{{ humanVerdict.actor_login }}</code> ·
+            {{ humanVerdict.scope.complete ? 'alcance completo' : 'alcance parcial' }} ·
+            <code>{{ humanVerdict.head_sha }}</code>
+          </p>
+          <ul v-if="humanVerdict.scope.files.length > 0" class="human-result__scope" data-human-verdict-scope>
+            <li v-for="file in humanVerdict.scope.files" :key="humanScopeFileLabel(file)">
+              <code>{{ humanScopeFileLabel(file) }}</code>
+            </li>
+          </ul>
+          <ul v-if="humanVerdict.scope.pending_findings.length > 0" class="human-result__scope">
+            <li v-for="id in humanVerdict.scope.pending_findings" :key="id">
+              hallazgo <code>{{ id }}</code>
+            </li>
+          </ul>
+          <p class="human-result__conclusion"><strong>Conclusión:</strong> {{ humanVerdict.conclusion }}</p>
+          <p v-if="humanVerdict.reason" class="caption">Motivo: {{ humanVerdict.reason }}</p>
+        </section>
+
+        <section v-if="canRecordHumanVerdict" class="tile human-form" aria-labelledby="human-form-title" data-human-verdict-form>
+          <div class="human-result__head">
+            <div>
+              <h2 id="human-form-title" class="tile__title">Registrar resultado humano</h2>
+              <p class="caption">La automatización no concluyó. Registra qué revisaste y tu decisión.</p>
+            </div>
+          </div>
+          <p v-if="humanError" class="form-error" role="alert" data-human-verdict-error>{{ humanError }}</p>
+          <label class="field human-form__field">
+            <span class="field__label">Decisión</span>
+            <select v-model="humanForm.decision" class="field__input" data-human-verdict-decision>
+              <option value="approved">Aprobado</option>
+              <option value="changes_requested">Cambios requeridos</option>
+            </select>
+          </label>
+          <label class="field human-form__field">
+            <span class="field__label">Conclusión (obligatoria)</span>
+            <textarea v-model="humanForm.conclusion" class="field__input" rows="2" data-human-verdict-conclusion />
+          </label>
+          <label class="field human-form__field">
+            <span class="field__label">Archivos o rangos revisados (uno por línea: ruta o ruta:inicio-fin)</span>
+            <textarea v-model="humanForm.scope" class="field__input" rows="3" data-human-verdict-scope-input />
+          </label>
+          <label class="field human-form__field">
+            <span class="field__label">Hallazgos pendientes revisados (ids separados por coma)</span>
+            <input v-model="humanForm.pending" class="field__input" type="text" data-human-verdict-pending />
+          </label>
+          <label class="human-form__check">
+            <input v-model="humanForm.complete" type="checkbox" data-human-verdict-complete />
+            <span>Cubrí todo el alcance que quedó pendiente</span>
+          </label>
+          <label class="field human-form__field">
+            <span class="field__label">Motivo (opcional)</span>
+            <input v-model="humanForm.reason" class="field__input" type="text" data-human-verdict-reason />
+          </label>
+          <button
+            class="button button--primary"
+            type="button"
+            data-human-verdict-submit
+            :disabled="recordingHuman"
+            @click="recordHumanVerdict"
+          >
+            {{ recordingHuman ? 'Registrando…' : 'Registrar resultado' }}
+          </button>
         </section>
 
         <section class="pr-section" aria-label="Ejecuciones">
@@ -1167,6 +1346,56 @@ onBeforeUnmount(() => {
 
 .qa-check__list .is-bad::before {
   background: var(--accent);
+}
+
+.human-result__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.human-result__stale {
+  color: var(--bad);
+  font-size: 15px;
+}
+
+.human-result__meta {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.human-result__scope {
+  margin: var(--space-2) 0;
+  padding-left: var(--space-5);
+  font-size: 14px;
+}
+
+.human-result__conclusion {
+  max-width: 72ch;
+  overflow-wrap: anywhere;
+}
+
+.human-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.human-form__field {
+  margin: 0;
+}
+
+.human-form__field .field__input {
+  width: 100%;
+}
+
+.human-form__check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 14px;
 }
 
 .severity--withdrawn .severity__title {

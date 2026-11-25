@@ -82,7 +82,7 @@ func (p *publishContext) pendingCoverageLine() string {
 // publishSummary creates the single summary comment of the pull request or
 // edits the one carrying the marker. It never posts a second summary.
 func (p *publishContext) publishSummary(ctx context.Context, findings []store.Finding, resolvedSincePrevious int) error {
-	body := p.buildSummary(findings, resolvedSincePrevious)
+	body := p.buildSummary(ctx, findings, resolvedSincePrevious)
 
 	var existingID int64
 	commentsPath := p.issueCommentsPath()
@@ -144,12 +144,13 @@ func (p *publishContext) publishSummary(ctx context.Context, findings []store.Fi
 	return nil
 }
 
-func (p *publishContext) buildSummary(findings []store.Finding, resolvedSincePrevious int) string {
+func (p *publishContext) buildSummary(ctx context.Context, findings []store.Finding, resolvedSincePrevious int) string {
 	var b strings.Builder
 	b.WriteString(summaryMarker)
 	b.WriteString("\n")
 
-	if p.run.Status == store.RunInconclusive || p.run.Status == store.RunFailed {
+	automatedInconclusive := p.run.Status == store.RunInconclusive || p.run.Status == store.RunFailed
+	if automatedInconclusive {
 		reason := p.run.ErrorMessage
 		if reason == "" {
 			reason = p.run.ErrorCode
@@ -163,6 +164,17 @@ func (p *publishContext) buildSummary(findings []store.Finding, resolvedSincePre
 	}
 
 	fmt.Fprintf(&b, "\n### Revisión #%d · %s\n\n", p.runNumber, shortSHA(p.run.HeadSHA))
+
+	// The human outcome is a different result from the automated one and is
+	// rendered as its own section, so the comment never claims the engine
+	// completed the coverage.
+	if automatedInconclusive {
+		if human := p.humanVerdictBlock(ctx); human != "" {
+			b.WriteString("\n")
+			b.WriteString(human)
+			b.WriteString("\n")
+		}
+	}
 
 	counts := map[string]int{"blocker": 0, "major": 0, "minor": 0, "nit": 0}
 	// Severity counts describe the current open findings of the PR.
