@@ -128,8 +128,9 @@ func runServe() error {
 		Compare:   &github.Compare{Apps: apps},
 	}
 	trigger.Debounce = cfg.ReviewDebounce
+	objectionSweeper := &review.ObjectionSweeper{Store: st}
 	client, err := jobs.NewControlClient(st.Pool, s, jobs.ControlDeps{
-		Trigger: trigger, Publisher: publisherWorker, Tokens: trigger,
+		Trigger: trigger, Publisher: publisherWorker, Tokens: trigger, Objections: objectionSweeper,
 	})
 	if err != nil {
 		return fmt.Errorf("create control client: %w", err)
@@ -141,6 +142,7 @@ func runServe() error {
 	// The reconciliation sweep enqueues the publication of terminal runs whose
 	// job was lost, so the publisher needs the enqueuer before Start.
 	publisherWorker.Jobs = enqueuer
+	objectionSweeper.Jobs = enqueuer
 
 	if err := client.Start(ctx); err != nil {
 		return fmt.Errorf("start control client: %w", err)
@@ -183,6 +185,7 @@ func runServe() error {
 	webhooks := &github.WebhookHandler{
 		Store: st, Apps: apps, Events: publisher, Jobs: enqueuer, Reviews: trigger,
 		Findings: publisherWorker, Comments: publisherWorker, Checks: checks,
+		ObjectionJobs: enqueuer, Box: workerBox,
 	}
 	router := api.NewRouter(api.Deps{
 		Cfg:        cfg,
@@ -280,6 +283,7 @@ func runWorker() error {
 			WorkspaceDir:   cfg.WorkspaceDir,
 			OCRBin:         cfg.OCRBin,
 			GitBaseURL:     cfg.GitBaseURL,
+			GitHubAPIURL:   cfg.GitHubAPIURL,
 			FetchDepthMax:  cfg.FetchDepthMax,
 			ContextCeiling: cfg.ReviewContextCeiling,
 			Timeout:        cfg.ReviewTimeout,

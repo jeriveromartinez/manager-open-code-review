@@ -580,6 +580,46 @@ type Finding struct {
 	TriagedAt     *time.Time `gorm:"column:triaged_at"`
 }
 
+// FindingObjection is a reply on a published finding's review thread. The app
+// records it, the worker evaluates it and the publisher writes the reply back;
+// State makes the three steps resumable.
+type FindingObjection struct {
+	ID            uint   `gorm:"column:id;primaryKey"`
+	FindingID     string `gorm:"column:finding_id"`
+	PullRequestID uint   `gorm:"column:pull_request_id"`
+	HeadSHA       string `gorm:"column:head_sha"`
+	// CommentID is the reply's GitHub review comment id and makes a redelivery
+	// the same objection.
+	CommentID  int64  `gorm:"column:comment_id"`
+	DeliveryID string `gorm:"column:delivery_id"`
+	Actor      string `gorm:"column:actor"`
+	ActorID    *uint  `gorm:"column:actor_id"`
+	Authorized bool   `gorm:"column:authorized"`
+	Body       string `gorm:"column:body"`
+	// FilePath is the cited path. FileContent is the file at HeadSHA, fetched by
+	// the app at webhook time; the worker verifies those bytes and never needs a
+	// fresh token. ReadTokenEnc is a sealed read-only fallback for when the app
+	// could not fetch the file.
+	FilePath     string `gorm:"column:file_path"`
+	FileContent  []byte `gorm:"column:file_content"`
+	ReadTokenEnc string `gorm:"column:read_token_enc"`
+	// State is queued, evaluated or published. Action, Status, Apply, Reason,
+	// Evidence and Verification are the evaluation's outcome.
+	State        string         `gorm:"column:state"`
+	Action       string         `gorm:"column:action"`
+	Status       string         `gorm:"column:status"`
+	Apply        bool           `gorm:"column:apply"`
+	Reason       string         `gorm:"column:reason"`
+	Evidence     string         `gorm:"column:evidence"`
+	Verification datatypes.JSON `gorm:"column:verification"`
+	// Failure is the terminal publication error; a failed intent is not
+	// re-enqueued and waits for a human.
+	Failure   string     `gorm:"column:failure"`
+	RepliedAt *time.Time `gorm:"column:replied_at"`
+	CreatedAt time.Time  `gorm:"column:created_at"`
+	UpdatedAt time.Time  `gorm:"column:updated_at"`
+}
+
 // FindingEvent records a lifecycle transition of a finding.
 type FindingEvent struct {
 	ID          uint           `gorm:"column:id;primaryKey"`

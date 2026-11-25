@@ -16,6 +16,7 @@ import (
 	gh "github.com/google/go-github/v93/github"
 	"gorm.io/gorm"
 
+	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -89,6 +90,11 @@ type WebhookHandler struct {
 	Findings FindingsReconciler
 	Comments PRCommenter
 	Checks   ChecksRefresher
+	// ObjectionJobs queues the worker evaluation and the publisher reply of a
+	// reply on a finding's thread. The app has no OCR, so it never evaluates.
+	ObjectionJobs ObjectionEnqueuer
+	// Box seals the read-only token the worker uses to fetch the cited file.
+	Box *crypto.Box
 }
 
 // ServeHTTP verifies and dispatches a webhook delivery. Events this phase does
@@ -144,6 +150,8 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleCheckEvent(r.Context(), w, p.GetRepo(), p.GetSHA())
 	case *gh.PullRequestReviewThreadEvent:
 		h.handleReviewThread(r.Context(), w, p, r.Header.Get("X-GitHub-Delivery"), reviewThreadEventTime(body))
+	case *gh.PullRequestReviewCommentEvent:
+		h.handleReviewComment(r.Context(), w, p, r.Header.Get("X-GitHub-Delivery"))
 	case *gh.IssueCommentEvent:
 		h.handleIssueComment(r.Context(), w, p)
 	default:

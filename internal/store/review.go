@@ -1753,6 +1753,30 @@ func (s *Store) FindingForThread(ctx context.Context, prID uint, threadID string
 	}
 }
 
+// FindingForReviewComment resolves the finding a reply belongs to. A reply
+// carries the id of the root review comment it answers, which is the coordinate
+// a published finding stores.
+func (s *Store) FindingForReviewComment(ctx context.Context, prID uint, commentID int64) (Finding, error) {
+	if commentID == 0 {
+		return Finding{}, fmt.Errorf("finding for review comment: %w", ErrNotFound)
+	}
+	var findings []Finding
+	err := quietDB(s.DB.WithContext(ctx)).
+		Where("pull_request_id = ? AND github_comment_id = ?", prID, commentID).
+		Order("id").Limit(2).Find(&findings).Error
+	if err != nil {
+		return Finding{}, fmt.Errorf("find finding for review comment %d: %w", commentID, err)
+	}
+	switch len(findings) {
+	case 0:
+		return Finding{}, fmt.Errorf("finding for review comment %d: %w", commentID, ErrNotFound)
+	case 1:
+		return findings[0], nil
+	default:
+		return Finding{}, fmt.Errorf("finding for review comment %d: %w", commentID, ErrFindingThreadAmbiguous)
+	}
+}
+
 // SetFindingStatusIfChanged transitions a finding and reports whether the row
 // actually changed, so replaying the same webhook delivery is a no-op.
 func (s *Store) SetFindingStatusIfChanged(ctx context.Context, id, status string) (bool, error) {
@@ -1888,6 +1912,13 @@ type FindingAudit struct {
 	// Source is who took the decision: TriageSourceHuman when empty, or
 	// TriageSourceVerifier when the second OCR pass triages.
 	Source string
+	// Evidence and HeadSHA are the verifier's quote and the revision it proved,
+	// so a reevaluation of an objection keeps what the decision rested on.
+	Evidence string
+	HeadSHA  string
+	// Objection is the reply that motivated the decision. Audit rows of an
+	// objection store it so the history survives even when the finding changes.
+	Objection string
 }
 
 // TriageFinding records a panel decision on a finding: status is FindingOpen
@@ -2072,6 +2103,15 @@ func writeFindingAudit(tx *gorm.DB, findingID string, entry FindingAudit) error 
 	}
 	if entry.DeliveryID != "" {
 		data["delivery_id"] = entry.DeliveryID
+	}
+	if entry.Evidence != "" {
+		data["evidence"] = entry.Evidence
+	}
+	if entry.HeadSHA != "" {
+		data["head_sha"] = entry.HeadSHA
+	}
+	if entry.Objection != "" {
+		data["objection"] = entry.Objection
 	}
 	raw, err := json.Marshal(data)
 	if err != nil {

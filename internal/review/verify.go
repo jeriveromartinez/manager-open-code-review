@@ -31,6 +31,10 @@ type Verification struct {
 	// degrades the answer, so the panel and the summary can show why the
 	// finding is still the human's call.
 	Reason string `json:"reason,omitempty"`
+	// DowngradeTo is an optional lower severity the verifier proposes for the
+	// finding. Objection reevaluation records it but never applies it: the gate
+	// severity only changes with a human decision.
+	DowngradeTo string `json:"downgrade_to,omitempty"`
 }
 
 // VerifyPolicy is the deterministic policy applied to the verifier's answers.
@@ -84,13 +88,17 @@ func ParseVerdicts(comments []nativeComment) map[string]Verification {
 			continue
 		}
 		verification := Verification{Verdict: verdict}
+		evidenceSet := false
 		for _, line := range lines[1:] {
 			trimmed := strings.TrimSpace(line)
-			if !strings.HasPrefix(strings.ToUpper(trimmed), "EVIDENCE:") {
-				continue
+			upper := strings.ToUpper(trimmed)
+			switch {
+			case !evidenceSet && strings.HasPrefix(upper, "EVIDENCE:"):
+				verification.Evidence = strings.TrimSpace(trimmed[len("EVIDENCE:"):])
+				evidenceSet = true
+			case strings.HasPrefix(upper, "SEVERITY:"):
+				verification.DowngradeTo = strings.ToLower(strings.TrimSpace(trimmed[len("SEVERITY:"):]))
 			}
-			verification.Evidence = strings.TrimSpace(trimmed[len("EVIDENCE:"):])
-			break
 		}
 		verdicts[id] = verification
 	}

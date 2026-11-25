@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -149,5 +150,28 @@ func (p *publishContext) lookupThreadIn(ctx context.Context, commentNodeID strin
 			return "", nil
 		}
 		after = threads.PageInfo.EndCursor
+	}
+}
+
+// markerPresent reports whether any review comment of the pull request carries
+// the given hidden marker. It pages the review comments so a long thread cannot
+// hide an earlier reply and make a crash-retry post twice.
+func (p *publishContext) markerPresent(ctx context.Context, marker string) (bool, error) {
+	for page := 1; ; page++ {
+		var comments []struct {
+			Body string `json:"body"`
+		}
+		path := p.repoPath(fmt.Sprintf("pulls/%d/comments?per_page=100&page=%d", p.pr.Number, page))
+		if err := p.request(ctx, http.MethodGet, path, nil, &comments); err != nil {
+			return false, fmt.Errorf("list review comments: %w", err)
+		}
+		for _, comment := range comments {
+			if strings.Contains(comment.Body, marker) {
+				return true, nil
+			}
+		}
+		if len(comments) < 100 {
+			return false, nil
+		}
 	}
 }

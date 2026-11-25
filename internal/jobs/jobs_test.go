@@ -129,6 +129,29 @@ func TestControlClientEnqueuesWorkerOwnedKinds(t *testing.T) {
 	if err := enqueuer.EnqueueReview(ctx, 2); err != nil {
 		t.Errorf("EnqueueReview() error = %v", err)
 	}
+	if err := enqueuer.EnqueueObjection(ctx, 3); err != nil {
+		t.Errorf("EnqueueObjection() error = %v", err)
+	}
+	if err := enqueuer.EnqueueObjectionPublish(ctx, 4); err != nil {
+		t.Errorf("EnqueueObjectionPublish() error = %v", err)
+	}
+}
+
+func TestObjectionJobArgs(t *testing.T) {
+	run := jobs.ObjectionRunArgs{ObjectionID: 5}
+	if run.Kind() != "objection_run" {
+		t.Errorf("Kind() = %q, want objection_run", run.Kind())
+	}
+	if opts := run.InsertOpts(); opts.Queue != "review" || opts.MaxAttempts != 3 {
+		t.Errorf("InsertOpts() = queue %q attempts %d, want review/3", opts.Queue, opts.MaxAttempts)
+	}
+	publish := jobs.ObjectionPublishArgs{ObjectionID: 6}
+	if publish.Kind() != "objection_publish" {
+		t.Errorf("Kind() = %q, want objection_publish", publish.Kind())
+	}
+	if opts := publish.InsertOpts(); opts.Queue != "publish" || opts.MaxAttempts != 5 {
+		t.Errorf("InsertOpts() = queue %q attempts %d, want publish/5", opts.Queue, opts.MaxAttempts)
+	}
 }
 
 func TestReviewJobArgs(t *testing.T) {

@@ -202,16 +202,50 @@ func (r *recordingReconciler) threadSnapshot() []threadSync {
 	return append([]threadSync(nil), r.threads...)
 }
 
+type recordingObjectionJobs struct {
+	mu        sync.Mutex
+	evaluated []uint
+	published []uint
+	err       error
+}
+
+func (j *recordingObjectionJobs) EnqueueObjection(_ context.Context, id uint) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.evaluated = append(j.evaluated, id)
+	return j.err
+}
+
+func (j *recordingObjectionJobs) EnqueueObjectionPublish(_ context.Context, id uint) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.published = append(j.published, id)
+	return j.err
+}
+
+func (j *recordingObjectionJobs) evaluatedSnapshot() []uint {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]uint(nil), j.evaluated...)
+}
+
+func (j *recordingObjectionJobs) publishedSnapshot() []uint {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return append([]uint(nil), j.published...)
+}
+
 type webhookFixture struct {
-	t        *testing.T
-	ctx      context.Context
-	st       *store.Store
-	handler  *ghapp.WebhookHandler
-	jobs     *recordingJobs
-	pub      *recordingPublisher
-	reviews  *recordingReviews
-	findings *recordingReconciler
-	comments *recordingComments
+	t          *testing.T
+	ctx        context.Context
+	st         *store.Store
+	handler    *ghapp.WebhookHandler
+	jobs       *recordingJobs
+	pub        *recordingPublisher
+	reviews    *recordingReviews
+	findings   *recordingReconciler
+	comments   *recordingComments
+	objections *recordingObjectionJobs
 }
 
 func newWebhookFixture(t *testing.T) *webhookFixture {
@@ -223,21 +257,23 @@ func newWebhookFixture(t *testing.T) *webhookFixture {
 	reviews := &recordingReviews{}
 	findings := &recordingReconciler{}
 	comments := &recordingComments{}
+	objections := &recordingObjectionJobs{}
 	h := &ghapp.WebhookHandler{
 		Store: st,
 		Apps: fakeAppProvider{app: &ghapp.App{
 			Creds: ghapp.AppCredentials{WebhookSecret: webhookTestSecret},
 		}},
-		Events:   pub,
-		Jobs:     jobs,
-		Reviews:  reviews,
-		Findings: findings,
-		Comments: comments,
+		Events:        pub,
+		Jobs:          jobs,
+		Reviews:       reviews,
+		Findings:      findings,
+		Comments:      comments,
+		ObjectionJobs: objections,
 	}
 	return &webhookFixture{
 		t: t, ctx: context.Background(), st: st,
 		handler: h, jobs: jobs, pub: pub, reviews: reviews,
-		findings: findings, comments: comments,
+		findings: findings, comments: comments, objections: objections,
 	}
 }
 
