@@ -3,6 +3,8 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +39,10 @@ var (
 	// matches more than one finding. Picking one would change a finding the
 	// event did not target.
 	ErrFindingThreadAmbiguous = errors.New("review thread matches several findings")
+	// ErrStaleHealthCheck is returned when a health check finishes after the
+	// profile's credentials, endpoint or model changed: its verdict describes a
+	// configuration that no longer exists and must not be recorded.
+	ErrStaleHealthCheck = errors.New("health check predates a profile change")
 )
 
 // Defaults applied by SaveQAPolicy when an administrator leaves a field at its
@@ -120,33 +126,93 @@ func (s *Store) CreateLLMProfile(ctx context.Context, p LLMProfile) (LLMProfile,
 	return p, nil
 }
 
-// UpdateLLMProfile replaces the editable fields of a profile, leaving its
-// health state and timestamps alone. APIKeyEnc is the worker-sealed value; an
-// empty value keeps the stored ciphertext instead of wiping it.
-func (s *Store) UpdateLLMProfile(ctx context.Context, p LLMProfile) error {
-	updates := map[string]any{
-		"name":        p.Name,
-		"provider":    p.Provider,
-		"model":       p.Model,
-		"variant":     p.Variant,
-		"mode":        p.Mode,
-		"base_url":    p.BaseURL,
-		"concurrency": p.Concurrency,
-		"enabled":     p.Enabled,
-		"updated_at":  time.Now().UTC(),
+// ProfileConfigRevision fingerprints the fields that decide where a request
+// goes and which credential signs it. A health check captures it at start and
+// records its verdict only while it still matches, so a rotation during the
+// probe cannot publish a verdict for the previous configuration.
+func ProfileConfigRevision(p LLMProfile) string {
+	baseURL, variant := "", ""
+	if p.BaseURL != nil {
+		baseURL = *p.BaseURL
 	}
-	if p.APIKeyEnc != "" {
-		updates["api_key_enc"] = p.APIKeyEnc
+	if p.Variant != nil {
+		variant = *p.Variant
 	}
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		strconv.FormatUint(uint64(p.ID), 10),
+		p.Provider, p.Model, variant, p.Mode, baseURL, p.APIKeyEnc,
+	}, "\x00")))
+	return hex.EncodeToString(sum[:])[:16]
+}
 
-	res := s.DB.WithContext(ctx).Model(&LLMProfile{}).Where("id = ?", p.ID).Updates(updates)
-	if res.Error != nil {
-		return fmt.Errorf("update llm profile %d: %w", p.ID, res.Error)
-	}
-	if res.RowsAffected == 0 {
-		return fmt.Errorf("update llm profile %d: %w", p.ID, ErrNotFound)
+// UpdateLLMProfile replaces the editable fields of a profile. APIKeyEnc is the
+// worker-sealed value; an empty value keeps the stored ciphertext instead of
+// wiping it. Changing the provider, model, variant, mode, base URL or key
+// invalidates the stored health verdict, because it was measured against a
+// destination that no longer exists.
+func (s *Store) UpdateLLMProfile(ctx context.Context, p LLMProfile) error {
+	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current LLMProfile
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&current, p.ID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("load llm profile %d: %w", p.ID, err)
+		}
+
+		keyEnc := current.APIKeyEnc
+		updates := map[string]any{
+			"name":               p.Name,
+			"provider":           p.Provider,
+			"model":              p.Model,
+			"variant":            p.Variant,
+			"mode":               p.Mode,
+			"base_url":           p.BaseURL,
+			"concurrency":        p.Concurrency,
+			"enabled":            p.Enabled,
+			"allow_private_data": p.AllowPrivateData,
+			"updated_at":         time.Now().UTC(),
+		}
+		if p.APIKeyEnc != "" {
+			keyEnc = p.APIKeyEnc
+			updates["api_key_enc"] = p.APIKeyEnc
+		}
+		changed := current.Provider != p.Provider ||
+			current.Model != p.Model ||
+			derefOrEmpty(current.Variant) != derefOrEmpty(p.Variant) ||
+			current.Mode != p.Mode ||
+			derefOrEmpty(current.BaseURL) != derefOrEmpty(p.BaseURL) ||
+			current.APIKeyEnc != keyEnc
+		if changed {
+			updates["health_status"] = HealthUnknown
+			updates["health_checked_at"] = nil
+			updates["health_error"] = ""
+		}
+
+		res := tx.Model(&LLMProfile{}).Where("id = ?", p.ID).Updates(updates)
+		if res.Error != nil {
+			return fmt.Errorf("update llm profile %d: %w", p.ID, res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("update llm profile %d: %w", p.ID, err)
+		}
+		return err
 	}
 	return nil
+}
+
+func derefOrEmpty(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 // DeleteLLMProfile removes a profile unless a QA policy still references it.
@@ -155,7 +221,9 @@ func (s *Store) UpdateLLMProfile(ctx context.Context, p LLMProfile) error {
 func (s *Store) DeleteLLMProfile(ctx context.Context, id uint) error {
 	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var policies int64
-		if err := tx.Model(&QAPolicy{}).Where("llm_profile_id = ?", id).Count(&policies).Error; err != nil {
+		if err := tx.Model(&QAPolicy{}).
+			Where("llm_profile_id = ? OR fallback_profile_ids @> ?::jsonb", id, fmt.Sprintf("[%d]", id)).
+			Count(&policies).Error; err != nil {
 			return fmt.Errorf("count qa policies: %w", err)
 		}
 		if policies > 0 {
@@ -232,8 +300,29 @@ type HealthUsage struct {
 // the history in one transaction. Usage is stored as NULL when nil, so the
 // check is visible but excluded from token averages.
 func (s *Store) RecordLLMHealth(ctx context.Context, id uint, status, message string, usage *HealthUsage) error {
+	return s.RecordLLMHealthAt(ctx, id, "", status, message, usage)
+}
+
+// RecordLLMHealthAt is RecordLLMHealth with a configuration guard: when
+// expectedRevision is not empty, the verdict is discarded with
+// ErrStaleHealthCheck if the profile changed while the check ran. The row is
+// locked, so a concurrent UpdateLLMProfile cannot slip between the comparison
+// and the write.
+func (s *Store) RecordLLMHealthAt(ctx context.Context, id uint, expectedRevision, status, message string, usage *HealthUsage) error {
 	checkedAt := time.Now().UTC()
 	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var current LLMProfile
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&current, id).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("set llm profile %d health: %w", id, ErrNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("load llm profile %d: %w", id, err)
+		}
+		if expectedRevision != "" && ProfileConfigRevision(current) != expectedRevision {
+			return ErrStaleHealthCheck
+		}
+
 		res := tx.Model(&LLMProfile{}).Where("id = ?", id).Updates(map[string]any{
 			"health_status":     status,
 			"health_checked_at": checkedAt,
@@ -377,6 +466,39 @@ func (s *Store) LockPR(ctx context.Context, prID uint) (unlock func(), err error
 	return unlock, nil
 }
 
+// FallbackProfileIDs decodes the ordered fallback destinations of a policy. An
+// absent or invalid list yields no fallback.
+func FallbackProfileIDs(p QAPolicy) []uint {
+	if len(bytes.TrimSpace(p.FallbackProfileIDs)) == 0 {
+		return nil
+	}
+	var ids []uint
+	if err := json.Unmarshal(p.FallbackProfileIDs, &ids); err != nil {
+		return nil
+	}
+	return ids
+}
+
+// NormalizeFallbackProfileIDs encodes an ordered, explicitly authorized list:
+// zero IDs are dropped and a repeated destination keeps its first position, so
+// the stored order is the one the worker will try.
+func NormalizeFallbackProfileIDs(ids []uint) (datatypes.JSON, error) {
+	kept := make([]uint, 0, len(ids))
+	seen := make(map[uint]bool, len(ids))
+	for _, id := range ids {
+		if id == 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		kept = append(kept, id)
+	}
+	encoded, err := json.Marshal(kept)
+	if err != nil {
+		return nil, fmt.Errorf("encode fallback profiles: %w", err)
+	}
+	return datatypes.JSON(encoded), nil
+}
+
 // QAPolicyForTeam loads the policy of a team. A missing policy is ErrNotFound.
 func (s *Store) QAPolicyForTeam(ctx context.Context, teamID uint) (QAPolicy, error) {
 	var policy QAPolicy
@@ -456,6 +578,11 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid verify token max %d",
 			p.TeamID, p.VerifyTokenMax)
 	}
+	fallbacks, err := NormalizeFallbackProfileIDs(FallbackProfileIDs(p))
+	if err != nil {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: %w", p.TeamID, err)
+	}
+	p.FallbackProfileIDs = fallbacks
 	globs := bytes.TrimSpace(p.ExcludeGlobs)
 	if len(globs) == 0 || bytes.Equal(globs, []byte("null")) {
 		p.ExcludeGlobs = datatypes.JSON([]byte(`[]`))
@@ -486,10 +613,10 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 	p.CreatedAt = time.Time{}
 	p.UpdatedAt = time.Time{}
 
-	err := s.DB.WithContext(ctx).Clauses(clause.OnConflict{
+	err = s.DB.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "team_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
-			"llm_profile_id", "blocking_threshold", "extra_instructions", "exclude_globs",
+			"llm_profile_id", "fallback_profile_ids", "blocking_threshold", "extra_instructions", "exclude_globs",
 			"max_files_per_pass", "max_diff_lines_per_pass", "max_passes",
 			"require_green_ci", "required_checks", "review_context_ceiling", "review_effort",
 			"review_token_budget", "auto_triage_mode", "auto_withdraw",
@@ -738,6 +865,9 @@ func (s *Store) CreateReviewRun(ctx context.Context, in ReviewRun) (ReviewRun, e
 	if in.Trigger == "" {
 		in.Trigger = "webhook"
 	}
+	if in.EnqueuedProfileID == 0 {
+		in.EnqueuedProfileID = in.ProfileID
+	}
 	in.ID = 0
 	in.CreatedAt = time.Time{}
 	in.UpdatedAt = time.Time{}
@@ -784,6 +914,91 @@ func (s *Store) HeartbeatReviewRun(ctx context.Context, id uint) error {
 	}
 	if res.RowsAffected == 0 {
 		return fmt.Errorf("heartbeat review run %d: %w", id, ErrRunNotActive)
+	}
+	return nil
+}
+
+// StartReviewAttempt records the profile that is about to execute one attempt
+// of a run and repoints the run at it. The enqueued profile stays in
+// enqueued_profile_id, so a policy change while the job waited remains visible.
+// The sequence is assigned under the run row lock; a retried run appends a new
+// attempt instead of reusing the previous one.
+func (s *Store) StartReviewAttempt(ctx context.Context, runID uint, profile LLMProfile, revision string) (ReviewAttempt, error) {
+	var attempt ReviewAttempt
+	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var run ReviewRun
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id", "status").Take(&run, runID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrRunNotActive
+		}
+		if err != nil {
+			return fmt.Errorf("load review run %d: %w", runID, err)
+		}
+		if run.Status != RunRunning {
+			return ErrRunNotActive
+		}
+		var last int
+		if err := tx.Raw("SELECT COALESCE(MAX(seq), 0) FROM review_attempts WHERE run_id = ?", runID).
+			Scan(&last).Error; err != nil {
+			return fmt.Errorf("read last attempt of run %d: %w", runID, err)
+		}
+		now := time.Now().UTC()
+		attempt = ReviewAttempt{
+			RunID: runID, Seq: last + 1, ProfileID: profile.ID,
+			Provider: profile.Provider, Model: profile.Model,
+			BaseURL: derefOrEmpty(profile.BaseURL), ConfigRevision: revision,
+			Status: AttemptRunning, StartedAt: now,
+		}
+		if err := tx.Create(&attempt).Error; err != nil {
+			return fmt.Errorf("create attempt %d of run %d: %w", attempt.Seq, runID, err)
+		}
+		if err := tx.Model(&ReviewRun{}).Where("id = ?", runID).
+			Update("profile_id", profile.ID).Error; err != nil {
+			return fmt.Errorf("attribute run %d to profile %d: %w", runID, profile.ID, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return ReviewAttempt{}, err
+	}
+	return attempt, nil
+}
+
+// FinishReviewAttempt closes one attempt with its own consumption. Usage stays
+// NULL when the engine reported none, so an unknown attempt is not counted as
+// a zero nor duplicated into the run total.
+func (s *Store) FinishReviewAttempt(ctx context.Context, id uint, status, code, message string, usage *RunUsage, known bool) error {
+	updates := map[string]any{
+		"status":        status,
+		"error_code":    code,
+		"error_message": message,
+		"finished_at":   time.Now().UTC(),
+		"updated_at":    time.Now().UTC(),
+	}
+	var input, output, reasoning, cacheRead, cacheWrite, total any
+	if known {
+		input, output, reasoning = usage.Input, usage.Output, usage.Reasoning
+		cacheRead, cacheWrite, total = usage.CacheRead, usage.CacheWrite, usage.Total
+	}
+	updates["input_tokens"] = input
+	updates["output_tokens"] = output
+	updates["reasoning_tokens"] = reasoning
+	updates["cache_read_tokens"] = cacheRead
+	updates["cache_write_tokens"] = cacheWrite
+	updates["total_tokens"] = total
+	if known && usage.MaxContext != nil {
+		updates["max_context_tokens"] = *usage.MaxContext
+	} else {
+		updates["max_context_tokens"] = nil
+	}
+	res := s.DB.WithContext(ctx).Model(&ReviewAttempt{}).
+		Where("id = ? AND status = ?", id, AttemptRunning).Updates(updates)
+	if res.Error != nil {
+		return fmt.Errorf("finish review attempt %d: %w", id, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("finish review attempt %d: %w", id, ErrNotFound)
 	}
 	return nil
 }
@@ -1106,6 +1321,20 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 			if err := updateFindingStatus(tx, findingID, FindingResolved, id, runStarted); err != nil {
 				return err
 			}
+		}
+		// A crash or an early return can leave an attempt open. The run is
+		// terminal now, so the attempt is closed as failed with no usage rather
+		// than staying "running" forever.
+		if err := tx.Model(&ReviewAttempt{}).
+			Where("run_id = ? AND status = ?", id, AttemptRunning).
+			Updates(map[string]any{
+				"status":        AttemptFailed,
+				"error_code":    "interrupted",
+				"error_message": "el intento no llegó a terminar",
+				"finished_at":   now,
+				"updated_at":    now,
+			}).Error; err != nil {
+			return fmt.Errorf("close open attempts of review run %d: %w", id, err)
 		}
 		return nil
 	})

@@ -267,21 +267,26 @@ type AuditLog struct {
 // LLMProfile is a configured LLM backend used by the review worker. Its API key
 // is encrypted with the worker key, separately from the app credentials.
 type LLMProfile struct {
-	ID              uint       `gorm:"column:id;primaryKey"`
-	Name            string     `gorm:"column:name;uniqueIndex"`
-	Provider        string     `gorm:"column:provider"`
-	Model           string     `gorm:"column:model"`
-	Variant         *string    `gorm:"column:variant"`
-	Mode            string     `gorm:"column:mode"`
-	APIKeyEnc       string     `gorm:"column:api_key_enc"`
-	BaseURL         *string    `gorm:"column:base_url"`
-	Concurrency     int        `gorm:"column:concurrency"`
-	Enabled         bool       `gorm:"column:enabled"`
-	HealthStatus    string     `gorm:"column:health_status"`
-	HealthCheckedAt *time.Time `gorm:"column:health_checked_at"`
-	HealthError     string     `gorm:"column:health_error"`
-	CreatedAt       time.Time  `gorm:"column:created_at"`
-	UpdatedAt       time.Time  `gorm:"column:updated_at"`
+	ID          uint    `gorm:"column:id;primaryKey"`
+	Name        string  `gorm:"column:name;uniqueIndex"`
+	Provider    string  `gorm:"column:provider"`
+	Model       string  `gorm:"column:model"`
+	Variant     *string `gorm:"column:variant"`
+	Mode        string  `gorm:"column:mode"`
+	APIKeyEnc   string  `gorm:"column:api_key_enc"`
+	BaseURL     *string `gorm:"column:base_url"`
+	Concurrency int     `gorm:"column:concurrency"`
+	Enabled     bool    `gorm:"column:enabled"`
+	// AllowPrivateData authorizes the profile to receive code from private
+	// repositories when it is used as a fallback destination (#150). It is an
+	// explicit opt-in; the primary profile is chosen per team, so this only
+	// gates backups.
+	AllowPrivateData bool       `gorm:"column:allow_private_data"`
+	HealthStatus     string     `gorm:"column:health_status"`
+	HealthCheckedAt  *time.Time `gorm:"column:health_checked_at"`
+	HealthError      string     `gorm:"column:health_error"`
+	CreatedAt        time.Time  `gorm:"column:created_at"`
+	UpdatedAt        time.Time  `gorm:"column:updated_at"`
 }
 
 // LLMHealthCheck is one append-only probe of an LLM profile. The profile row
@@ -306,9 +311,13 @@ type LLMHealthCheck struct {
 // QAPolicy holds the review settings of a team. ExcludeGlobs is a JSON array of
 // path patterns stored in a jsonb column.
 type QAPolicy struct {
-	ID                  uint           `gorm:"column:id;primaryKey"`
-	TeamID              uint           `gorm:"column:team_id;uniqueIndex"`
-	LLMProfileID        uint           `gorm:"column:llm_profile_id"`
+	ID           uint `gorm:"column:id;primaryKey"`
+	TeamID       uint `gorm:"column:team_id;uniqueIndex"`
+	LLMProfileID uint `gorm:"column:llm_profile_id"`
+	// FallbackProfileIDs is the ordered, explicitly authorized list of backup
+	// profiles. The worker tries them in order after a recoverable failure
+	// (#150); an empty list disables fallback.
+	FallbackProfileIDs  datatypes.JSON `gorm:"column:fallback_profile_ids;default:'[]'"`
 	BlockingThreshold   string         `gorm:"column:blocking_threshold"`
 	ExtraInstructions   string         `gorm:"column:extra_instructions"`
 	ExcludeGlobs        datatypes.JSON `gorm:"column:exclude_globs"`
@@ -366,11 +375,17 @@ type ReviewRequest struct {
 // ReviewRun is one execution of the review pipeline for a pull request. At
 // most one run per PR can be queued or running at a time.
 type ReviewRun struct {
-	ID            uint   `gorm:"column:id;primaryKey"`
-	PullRequestID uint   `gorm:"column:pull_request_id"`
-	ProfileID     uint   `gorm:"column:profile_id"`
-	HeadSHA       string `gorm:"column:head_sha"`
-	BaseSHA       string `gorm:"column:base_sha"`
+	ID            uint `gorm:"column:id;primaryKey"`
+	PullRequestID uint `gorm:"column:pull_request_id"`
+	// ProfileID is the profile that actually executed the run. It starts as the
+	// enqueued profile and is replaced by the fallback that ran, so token usage
+	// aggregates to the destination that spent it (#150).
+	ProfileID uint `gorm:"column:profile_id"`
+	// EnqueuedProfileID keeps the profile the policy selected when the run was
+	// created, so a policy change while the job waited stays traceable.
+	EnqueuedProfileID uint   `gorm:"column:enqueued_profile_id"`
+	HeadSHA           string `gorm:"column:head_sha"`
+	BaseSHA           string `gorm:"column:base_sha"`
 	// BaseRef and BaseTipSHA snapshot the comparison the run belongs to (#141).
 	// BaseSHA above is the merge base of that comparison; runs created before
 	// the comparison identity existed carry empty values and act as wildcards
@@ -423,6 +438,46 @@ type ReviewRun struct {
 	FinishedAt  *time.Time `gorm:"column:finished_at"`
 	CreatedAt   time.Time  `gorm:"column:created_at"`
 	UpdatedAt   time.Time  `gorm:"column:updated_at"`
+}
+
+// Review attempt states. An attempt is one model destination the run tried: it
+// becomes succeeded only when that destination produced the result the run
+// persisted, and failed when a recoverable error made the worker move on.
+const (
+	AttemptRunning   = "running"
+	AttemptSucceeded = "succeeded"
+	AttemptFailed    = "failed"
+)
+
+// ReviewAttempt records which profile, provider, model and configuration
+// revision executed one attempt of a run (#150). The run keeps its totals, and
+// the attempts carry the per-destination attribution, so a fallback after a
+// partial pass cannot be credited to the enqueued profile nor counted twice.
+type ReviewAttempt struct {
+	ID        uint   `gorm:"column:id;primaryKey"`
+	RunID     uint   `gorm:"column:run_id"`
+	Seq       int    `gorm:"column:seq"`
+	ProfileID uint   `gorm:"column:profile_id"`
+	Provider  string `gorm:"column:provider"`
+	Model     string `gorm:"column:model"`
+	BaseURL   string `gorm:"column:base_url"`
+	// ConfigRevision fingerprints the effective profile and policy the attempt
+	// ran with, so a policy edit while the job waited is visible after the fact.
+	ConfigRevision   string     `gorm:"column:config_revision"`
+	Status           string     `gorm:"column:status"`
+	ErrorCode        string     `gorm:"column:error_code"`
+	ErrorMessage     string     `gorm:"column:error_message"`
+	InputTokens      *int64     `gorm:"column:input_tokens"`
+	OutputTokens     *int64     `gorm:"column:output_tokens"`
+	ReasoningTokens  *int64     `gorm:"column:reasoning_tokens"`
+	CacheReadTokens  *int64     `gorm:"column:cache_read_tokens"`
+	CacheWriteTokens *int64     `gorm:"column:cache_write_tokens"`
+	TotalTokens      *int64     `gorm:"column:total_tokens"`
+	MaxContextTokens *int64     `gorm:"column:max_context_tokens"`
+	StartedAt        time.Time  `gorm:"column:started_at"`
+	FinishedAt       *time.Time `gorm:"column:finished_at"`
+	CreatedAt        time.Time  `gorm:"column:created_at"`
+	UpdatedAt        time.Time  `gorm:"column:updated_at"`
 }
 
 // ReviewRunLog is one line of a review run's live log. Seq orders the lines of

@@ -41,8 +41,8 @@ type QASummary struct {
 	AutoDismissed int
 	// Uncertain counts the open findings without a verdict in the queue that
 	// waits for a person: what is still left to review.
-	Uncertain int
-	Categories    []CategoryCount
+	Uncertain  int
+	Categories []CategoryCount
 	// ConfirmedByRepo counts confirmed findings per repository inside
 	// CategoryWindow, most first: where a lead's team keeps shipping defects.
 	ConfirmedByRepo []RepoCount
@@ -328,6 +328,14 @@ func (s *Store) ProfileTokenUsage(ctx context.Context, now time.Time) ([]Profile
 	var runRows []tokenRow
 	err = s.DB.WithContext(ctx).Table("review_runs").
 		Where("finished_at >= ? AND total_tokens IS NOT NULL", since).
+		// Runs with at least one usage-bearing attempt are attributed per attempt
+		// below; counting them here as well would double their consumption. A run
+		// whose attempts never reported tokens stays on the run row, so an
+		// interrupted attempt does not erase known run usage.
+		Where(`NOT EXISTS (
+			SELECT 1 FROM review_attempts a
+			WHERE a.run_id = review_runs.id AND a.total_tokens IS NOT NULL
+		)`).
 		Select(`profile_id, COUNT(*) AS n,
 			COALESCE(SUM(input_tokens), 0) AS input,
 			COALESCE(SUM(output_tokens), 0) AS output,
@@ -338,6 +346,24 @@ func (s *Store) ProfileTokenUsage(ctx context.Context, now time.Time) ([]Profile
 		Scan(&runRows).Error
 	if err != nil {
 		return nil, fmt.Errorf("count review tokens by profile: %w", err)
+	}
+
+	// When a fallback ran, each attempt carries its own destination and usage.
+	// The run itself is excluded above, so a partial pass and the retry are
+	// credited once each and never to the enqueued profile.
+	var attemptRows []tokenRow
+	err = s.DB.WithContext(ctx).Table("review_attempts").
+		Where("finished_at >= ? AND total_tokens IS NOT NULL", since).
+		Select(`profile_id, COUNT(DISTINCT run_id) AS n,
+			COALESCE(SUM(input_tokens), 0) AS input,
+			COALESCE(SUM(output_tokens), 0) AS output,
+			COALESCE(SUM(cache_read_tokens), 0) AS cache_read,
+			COALESCE(SUM(cache_write_tokens), 0) AS cache_write,
+			COALESCE(SUM(total_tokens), 0) AS total`).
+		Group("profile_id").
+		Scan(&attemptRows).Error
+	if err != nil {
+		return nil, fmt.Errorf("count review attempt tokens by profile: %w", err)
 	}
 
 	var checkRows []tokenRow
@@ -366,7 +392,7 @@ func (s *Store) ProfileTokenUsage(ctx context.Context, now time.Time) ([]Profile
 				continue
 			}
 			if runs {
-				stats.Runs = row.N
+				stats.Runs += row.N
 			} else {
 				stats.Checks = row.N
 			}
@@ -378,6 +404,7 @@ func (s *Store) ProfileTokenUsage(ctx context.Context, now time.Time) ([]Profile
 		}
 	}
 	add(runRows, true)
+	add(attemptRows, true)
 	add(checkRows, false)
 	return out, nil
 }

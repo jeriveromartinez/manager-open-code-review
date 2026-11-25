@@ -27,19 +27,22 @@ func llmProfileUpdated(id uint) events.Event {
 // is deliberately replaced by a boolean: neither the ciphertext nor the
 // plaintext ever leaves the server.
 type llmProfileResponse struct {
-	ID              uint    `json:"id"`
-	Name            string  `json:"name"`
-	Provider        string  `json:"provider"`
-	Model           string  `json:"model"`
-	Variant         *string `json:"variant"`
-	Mode            string  `json:"mode"`
-	BaseURL         *string `json:"base_url"`
-	Concurrency     int     `json:"concurrency"`
-	Enabled         bool    `json:"enabled"`
-	APIKeySet       bool    `json:"api_key_set"`
-	HealthStatus    string  `json:"health_status"`
-	HealthCheckedAt *string `json:"health_checked_at"`
-	HealthError     string  `json:"health_error"`
+	ID          uint    `json:"id"`
+	Name        string  `json:"name"`
+	Provider    string  `json:"provider"`
+	Model       string  `json:"model"`
+	Variant     *string `json:"variant"`
+	Mode        string  `json:"mode"`
+	BaseURL     *string `json:"base_url"`
+	Concurrency int     `json:"concurrency"`
+	Enabled     bool    `json:"enabled"`
+	// AllowPrivateData authorizes this profile as a fallback destination for
+	// private repositories.
+	AllowPrivateData bool    `json:"allow_private_data"`
+	APIKeySet        bool    `json:"api_key_set"`
+	HealthStatus     string  `json:"health_status"`
+	HealthCheckedAt  *string `json:"health_checked_at"`
+	HealthError      string  `json:"health_error"`
 	// HealthAgeSeconds is how old the verdict is; HealthStale says the worker
 	// stopped refreshing it, so "healthy" is not mistaken for current.
 	HealthAgeSeconds int    `json:"health_age_seconds"`
@@ -74,6 +77,7 @@ func llmProfileDTO(p store.LLMProfile, health store.LLMProfileHealth) llmProfile
 		BaseURL:          p.BaseURL,
 		Concurrency:      p.Concurrency,
 		Enabled:          p.Enabled,
+		AllowPrivateData: p.AllowPrivateData,
 		APIKeySet:        p.APIKeyEnc != "",
 		HealthStatus:     p.HealthStatus,
 		HealthCheckedAt:  formatTimePtr(p.HealthCheckedAt),
@@ -196,15 +200,16 @@ func (s *server) createLLMProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name        string  `json:"name"`
-		Provider    string  `json:"provider"`
-		Model       string  `json:"model"`
-		Variant     *string `json:"variant"`
-		Mode        string  `json:"mode"`
-		APIKey      string  `json:"api_key"`
-		BaseURL     *string `json:"base_url"`
-		Concurrency *int    `json:"concurrency"`
-		Enabled     *bool   `json:"enabled"`
+		Name             string  `json:"name"`
+		Provider         string  `json:"provider"`
+		Model            string  `json:"model"`
+		Variant          *string `json:"variant"`
+		Mode             string  `json:"mode"`
+		APIKey           string  `json:"api_key"`
+		BaseURL          *string `json:"base_url"`
+		Concurrency      *int    `json:"concurrency"`
+		Enabled          *bool   `json:"enabled"`
+		AllowPrivateData *bool   `json:"allow_private_data"`
 	}
 	encoded, err := json.Marshal(raw)
 	if err != nil {
@@ -240,10 +245,15 @@ func (s *server) createLLMProfile(w http.ResponseWriter, r *http.Request) {
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
+	allowPrivate := false
+	if body.AllowPrivateData != nil {
+		allowPrivate = *body.AllowPrivateData
+	}
 	created, err := s.Store.CreateLLMProfile(r.Context(), store.LLMProfile{
 		Name: name, Provider: body.Provider, Model: body.Model,
 		Variant: body.Variant, Mode: body.Mode, APIKeyEnc: sealed,
 		BaseURL: body.BaseURL, Concurrency: concurrency, Enabled: enabled,
+		AllowPrivateData: allowPrivate,
 	})
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "create llm profile")
@@ -341,6 +351,12 @@ func (s *server) patchLLMProfile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if value, present := raw["allow_private_data"]; present {
+		if err := json.Unmarshal(value, &current.AllowPrivateData); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid allow_private_data")
+			return
+		}
+	}
 	if value, present := raw["api_key"]; present && !isJSONNull(value) {
 		var key string
 		if err := json.Unmarshal(value, &key); err != nil {
@@ -435,6 +451,7 @@ type qaPolicyResponse struct {
 	ID                      uint                  `json:"id"`
 	TeamID                  uint                  `json:"team_id"`
 	LLMProfileID            uint                  `json:"llm_profile_id"`
+	FallbackProfileIDs      []uint                `json:"fallback_profile_ids"`
 	BlockingThreshold       string                `json:"blocking_threshold"`
 	ExtraInstructions       string                `json:"extra_instructions"`
 	ExcludeGlobs            []string              `json:"exclude_globs"`
@@ -517,9 +534,14 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 	if mode == "" {
 		mode = store.AutoTriageOff
 	}
+	fallbacks := store.FallbackProfileIDs(p)
+	if fallbacks == nil {
+		fallbacks = []uint{}
+	}
 	return qaPolicyResponse{
 		ID: p.ID, TeamID: p.TeamID, LLMProfileID: p.LLMProfileID,
-		BlockingThreshold: p.BlockingThreshold, ExtraInstructions: p.ExtraInstructions,
+		FallbackProfileIDs: fallbacks,
+		BlockingThreshold:  p.BlockingThreshold, ExtraInstructions: p.ExtraInstructions,
 		ExcludeGlobs: globs, MaxFiles: p.MaxFilesPerPass,
 		MaxDiffLines: p.MaxDiffLinesPerPass, MaxPasses: p.MaxPasses,
 		RequireGreenCI:       p.RequireGreenCI,
@@ -571,7 +593,8 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 		global := s.globalContextCeiling(r.Context())
 		writeJSON(w, http.StatusOK, qaPolicyResponse{
 			TeamID: teamID, BlockingThreshold: "major", ExcludeGlobs: []string{},
-			MaxFiles: 40, MaxDiffLines: 3000, MaxPasses: 4,
+			FallbackProfileIDs: []uint{},
+			MaxFiles:           40, MaxDiffLines: 3000, MaxPasses: 4,
 			GlobalContextCeiling: global, EffectiveContextCeiling: global,
 			ReviewEffort:      store.ReviewEffortLow,
 			AutoTriageMode:    store.AutoTriageOff,
@@ -625,6 +648,35 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, "invalid llm_profile_id")
 			return
 		}
+	}
+	if value, present := raw["fallback_profile_ids"]; present {
+		var ids []uint
+		if err := json.Unmarshal(value, &ids); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid fallback_profile_ids")
+			return
+		}
+		for _, id := range ids {
+			if id == 0 {
+				continue
+			}
+			if _, err := s.Store.LLMProfile(r.Context(), id); err != nil {
+				writeAPIError(w, http.StatusBadRequest, "invalid fallback_profile_ids")
+				return
+			}
+		}
+		encoded, err := store.NormalizeFallbackProfileIDs(ids)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid fallback_profile_ids")
+			return
+		}
+		policy.FallbackProfileIDs = encoded
+	} else if stored, err := s.Store.QAPolicyForTeam(r.Context(), teamID); err == nil {
+		// An older panel may not know the field; an omitted list keeps the
+		// authorized backups. An explicit [] clears them.
+		policy.FallbackProfileIDs = stored.FallbackProfileIDs
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeAPIError(w, http.StatusInternalServerError, "load qa policy")
+		return
 	}
 	if value, present := raw["blocking_threshold"]; present {
 		if err := json.Unmarshal(value, &policy.BlockingThreshold); err != nil {

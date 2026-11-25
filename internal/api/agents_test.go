@@ -222,6 +222,10 @@ func TestAgentCreateSealsKey(t *testing.T) {
 	if _, err := f.box.Open(stored.APIKeyEnc); err == nil {
 		t.Error("master box decrypted a worker-sealed key")
 	}
+	// Reaching private repositories is an explicit opt-in, off by default.
+	if stored.AllowPrivateData {
+		t.Error("a new profile defaults to allow_private_data")
+	}
 
 	rec = f.request(http.MethodPost, "/api/llm-profiles", map[string]any{
 		"name": "missing", "provider": "openai", "model": "gpt-4o-mini",
@@ -1196,5 +1200,69 @@ func TestPolicyDefaultsAutoTriageOff(t *testing.T) {
 		saved["verify_time_share"] != float64(store.DefaultVerifyTimeShare) ||
 		saved["verify_token_max"] != float64(store.DefaultVerifyTokenMax) {
 		t.Errorf("default auto-triage = %v", saved)
+	}
+}
+
+func TestPolicyFallbackProfilesRoundTrip(t *testing.T) {
+	f := newSecureFixture(t)
+	primary := seedProfile(t, f, "fallback-primary", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	first := seedProfile(t, f, "fallback-first", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	second := seedProfile(t, f, "fallback-second", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	team := f.team("fallback-team")
+	cookie := f.session(f.user("fallback-admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	body := map[string]any{
+		"llm_profile_id":       primary.ID,
+		"fallback_profile_ids": []uint{second.ID, first.ID},
+	}
+	rec := f.request(http.MethodPut, path, body, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var saved map[string]any
+	decodeJSON(t, rec, &saved)
+	assertFallbackOrder(t, saved["fallback_profile_ids"], second.ID, first.ID)
+
+	stored, err := f.st.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	got := store.FallbackProfileIDs(stored)
+	if len(got) != 2 || got[0] != second.ID || got[1] != first.ID {
+		t.Fatalf("stored fallbacks = %v, want [%d %d]", got, second.ID, first.ID)
+	}
+
+	// An omitted list keeps the authorized backups; an explicit empty list
+	// clears them.
+	rec = f.request(http.MethodPut, path, map[string]any{"llm_profile_id": primary.ID}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &saved)
+	assertFallbackOrder(t, saved["fallback_profile_ids"], second.ID, first.ID)
+
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": primary.ID, "fallback_profile_ids": []uint{},
+	}, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	decodeJSON(t, rec, &saved)
+	assertFallbackOrder(t, saved["fallback_profile_ids"])
+
+	rec = f.request(http.MethodPut, path, map[string]any{
+		"llm_profile_id": primary.ID, "fallback_profile_ids": []uint{999999},
+	}, cookie)
+	assertStatus(t, rec, http.StatusBadRequest)
+}
+
+func assertFallbackOrder(t *testing.T, value any, want ...uint) {
+	t.Helper()
+	items, ok := value.([]any)
+	if !ok {
+		t.Fatalf("fallback_profile_ids = %#v, want an array", value)
+	}
+	if len(items) != len(want) {
+		t.Fatalf("fallback_profile_ids = %v, want %v", items, want)
+	}
+	for i := range want {
+		if items[i] != float64(want[i]) {
+			t.Fatalf("fallback_profile_ids = %v, want %v", items, want)
+		}
 	}
 }

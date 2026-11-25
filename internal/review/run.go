@@ -117,8 +117,8 @@ func (e *CloneTokenStaleError) Error() string {
 
 // RunnerConfig holds the worker-side settings of the review pipeline.
 type RunnerConfig struct {
-	WorkspaceDir, OCRBin, OpencodeBin, GitBaseURL string
-	FetchDepthMax                                 int
+	WorkspaceDir, OCRBin, GitBaseURL string
+	FetchDepthMax                    int
 	// ContextCeiling is the global review_context_ceiling. A team policy can
 	// override it per run.
 	ContextCeiling int
@@ -177,6 +177,10 @@ type runOutcome struct {
 	verifyUsage         []byte
 	verifySessionID     string
 	verificationSkipped string
+	// executedProfile is the destination that actually produced the result,
+	// which may be a fallback rather than the profile the run was enqueued
+	// with. Verification and triage attribution use it (#150).
+	executedProfile store.LLMProfile
 
 	// Context needed to reconcile findings from passes that already completed
 	// when the run ends inconclusively.
@@ -241,13 +245,12 @@ func (r *Runner) setPhase(ctx context.Context, runID uint, phase string, log *ru
 	}
 }
 
-// CheckProfile verifies an LLM profile with one minimal provider request. The
-// review binary is only the fallback for providers outside the closed table.
+// CheckProfile verifies an LLM profile with one minimal provider request over
+// the same native endpoint OCR resolves for a review.
 func (r *Runner) CheckProfile(ctx context.Context, profileID uint) error {
 	return (&ProfileChecker{
 		Store:  r.Store,
 		Box:    r.Box,
-		Bin:    r.Cfg.OpencodeBin,
 		Events: r.Events,
 	}).Check(ctx, profileID)
 }
@@ -483,7 +486,7 @@ func (r *Runner) applyAutoTriage(ctx context.Context, run store.ReviewRun, cfg s
 		return
 	}
 
-	actor := "ocr-verify:" + cfg.Profile.Model
+	actor := "ocr-verify:" + out.executedProfile.Model
 	confirmed, withdrawn, skipped := 0, 0, 0
 	for _, decision := range out.decisions {
 		// A finding the verifier never answered gets an explicit uncertain
@@ -691,13 +694,6 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		log.Log(runCtx, "worker", "", "warn", logPhasePolicy,
 			fmt.Sprintf("exclusiones descartadas por contener comas: %s", strings.Join(dropped, ", ")))
 	}
-	key, err := r.boxOpen(cfg.Profile.APIKeyEnc)
-	if err != nil {
-		log.Log(runCtx, "worker", "", "error", logPhasePolicy,
-			fmt.Sprintf("no se pudo descifrar la clave del perfil %d: %v", cfg.Profile.ID, err))
-		return out.inconclusive(fmt.Errorf("descifrar clave del perfil %d: %w", cfg.Profile.ID, err), "llm_error"), nil
-	}
-	log.AddSecret(key)
 
 	// The first run has no BaseSHA, so Clone's merge-base is the reviewed base.
 	// It is already computed from the fetched refs and works on shallow clones.
@@ -795,39 +791,160 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			"verificación: cuota de %d tokens y %s; solo se reserva si puede iniciarse",
 			reserved.tokens, reserved.timeout.Round(time.Second)))
 	}
-	reviewer := &NativeReviewer{
-		Bin:         r.Cfg.OCRBin,
-		RepoDir:     workDir,
-		Home:        filepath.Join(workDir, "home-ocr"),
-		Profile:     cfg.Profile,
-		APIKey:      string(key),
-		Excludes:    excludes,
-		Background:  buildBackground(cfg.PR, cfg.Policy.ExtraInstructions),
-		BaseRef:     fromSHA,
-		HeadRef:     headSHA,
-		Effort:      effort,
-		MaxTokens:   ceiling,
-		TokenBudget: budget,
-		Timeout:     timeout,
-		OnLog:       log.OCRLogger(runCtx, "main"),
-	}
 
-	r.setPhase(runCtx, run.ID, store.RunPhaseReviewing, log)
-	slog.Info("native OCR review started", "run_id", run.ID, "profile_id", cfg.Profile.ID, "from", fromSHA)
-	log.Log(runCtx, "worker", "main", "info", logPhaseOCR,
-		fmt.Sprintf("iniciando OCR sobre %s..%s", fromSHA, headSHA))
-	started := time.Now()
-	res, _, err := r.runNativeReview(runCtx, cfg.Profile.ID, reviewer, log, "main")
-	if err != nil {
-		log.Log(runCtx, "worker", "main", "error", logPhaseOCR, fmt.Sprintf("OCR falló: %v", err))
-		var capacity *ProfileCapacityError
-		if errors.As(err, &capacity) {
-			return out, capacity
+	candidates := r.reviewProfiles(runCtx, cfg)
+	var (
+		res             nativeReview
+		status, code    string
+		activeProfile   store.LLMProfile
+		activeKey       []byte
+		nativeErr       error
+		activeAttemptID uint
+		attemptBase     tokenUsage
+		attemptKnown    bool
+		attemptSeq      int
+		attemptStarted  time.Time
+		resultReady     bool
+		reviewer        *NativeReviewer
+	)
+	// A return after an attempt started closes it with the work it actually did.
+	// Usage is the delta over the attempt's own snapshot, so the run total keeps
+	// the cumulative spend while each destination is credited once.
+	defer func() {
+		if activeAttemptID == 0 {
+			return
 		}
-		return classifyNativeError(runCtx, out, err)
+		attemptStatus := store.AttemptFailed
+		if out.status == store.RunSucceeded {
+			attemptStatus = store.AttemptSucceeded
+		}
+		usage, known := runUsageFromTokens(tokenDelta(out.tokens, attemptBase), attemptKnown || out.tokensKnown)
+		if err := r.Store.FinishReviewAttempt(context.WithoutCancel(ctx), activeAttemptID,
+			attemptStatus, out.code, out.message, usage, known); err != nil {
+			slog.Warn("finish review attempt", "run_id", run.ID, "attempt_id", activeAttemptID, "error", err)
+		}
+	}()
+
+	for index, candidate := range candidates {
+		if index > 0 {
+			if !canStartFallback(runCtx, budget, out.tokens) {
+				log.Log(runCtx, "worker", "", "warn", logPhaseOCR,
+					"no queda presupuesto ni tiempo para un perfil de respaldo")
+				break
+			}
+			log.Log(runCtx, "worker", "", "warn", logPhaseOCR, fmt.Sprintf(
+				"reintentando con el perfil de respaldo %d (%s/%s)",
+				candidate.ID, candidate.Provider, candidate.Model))
+		}
+
+		key, keyErr := r.boxOpen(candidate.APIKeyEnc)
+		if keyErr != nil {
+			if index == 0 {
+				log.Log(runCtx, "worker", "", "error", logPhasePolicy,
+					fmt.Sprintf("no se pudo descifrar la clave del perfil %d: %v", candidate.ID, keyErr))
+				return out.inconclusive(fmt.Errorf("descifrar clave del perfil %d: %w", candidate.ID, keyErr), "llm_error"), nil
+			}
+			log.Log(runCtx, "worker", "", "warn", logPhaseOCR, fmt.Sprintf(
+				"se omite el respaldo %d: no se pudo descifrar su clave: %v", candidate.ID, keyErr))
+			continue
+		}
+		log.AddSecret(key)
+
+		attempt, startErr := r.Store.StartReviewAttempt(runCtx, run.ID, candidate, attemptConfigRevision(cfg, candidate))
+		if startErr != nil {
+			log.Log(runCtx, "worker", "", "error", logPhasePolicy,
+				fmt.Sprintf("no se pudo registrar el intento con el perfil %d: %v", candidate.ID, startErr))
+			return out.failed(fmt.Errorf("registrar el intento con el perfil %d: %w", candidate.ID, startErr), "config"), nil
+		}
+		activeAttemptID = attempt.ID
+		attemptSeq = attempt.Seq
+		activeProfile, activeKey = candidate, key
+		attemptBase = out.tokens
+		attemptKnown = false
+
+		reviewer = &NativeReviewer{
+			Bin:         r.Cfg.OCRBin,
+			RepoDir:     workDir,
+			Home:        filepath.Join(workDir, "home-ocr"),
+			Profile:     cfg.Profile,
+			APIKey:      string(key),
+			Excludes:    excludes,
+			Background:  buildBackground(cfg.PR, cfg.Policy.ExtraInstructions),
+			BaseRef:     fromSHA,
+			HeadRef:     headSHA,
+			Effort:      effort,
+			MaxTokens:   ceiling,
+			TokenBudget: budget,
+			Timeout:     timeout,
+			OnLog:       log.OCRLogger(runCtx, "main"),
+		}
+
+		// The reviewer was built with the policy profile; point it at the
+		// attempt's own destination, isolated home and remaining budget.
+		reviewer.Home = filepath.Join(workDir, fmt.Sprintf("home-ocr-%d", attemptSeq))
+		reviewer.Profile = candidate
+		reviewer.TokenBudget = attemptFallbackBudget(budget, out.tokens)
+
+		r.setPhase(runCtx, run.ID, store.RunPhaseReviewing, log)
+		slog.Info("native OCR review started", "run_id", run.ID, "profile_id", candidate.ID,
+			"attempt", attemptSeq, "from", fromSHA)
+		log.Log(runCtx, "worker", "main", "info", logPhaseOCR,
+			fmt.Sprintf("iniciando OCR sobre %s..%s", fromSHA, headSHA))
+		attemptStarted = time.Now()
+		res, _, nativeErr = r.runNativeReview(runCtx, candidate.ID, reviewer, log, "main")
+		if nativeErr != nil {
+			log.Log(runCtx, "worker", "main", "error", logPhaseOCR, fmt.Sprintf("OCR falló: %v", nativeErr))
+			var capacity *ProfileCapacityError
+			if errors.As(nativeErr, &capacity) {
+				if err := r.Store.FinishReviewAttempt(runCtx, activeAttemptID,
+					store.AttemptFailed, "capacity", capacity.Error(), nil, false); err != nil {
+					slog.Warn("finish review attempt", "run_id", run.ID, "error", err)
+				}
+				activeAttemptID = 0
+				return out, capacity
+			}
+			if index+1 >= len(candidates) || !recoverableNativeFailure(nativeErr) ||
+				!canStartFallback(runCtx, budget, out.tokens) {
+				// The deferred close records the code the classifier assigns.
+				out, _ = classifyNativeError(runCtx, out, nativeErr)
+				return out, nil
+			}
+			if err := r.Store.FinishReviewAttempt(runCtx, activeAttemptID,
+				store.AttemptFailed, "llm_error", truncateRunMessage(nativeErr.Error()), nil, false); err != nil {
+				slog.Warn("finish review attempt", "run_id", run.ID, "error", err)
+			}
+			activeAttemptID = 0
+			continue
+		}
+
+		status, code = nativeOutcome(res)
+		if status != store.RunSucceeded && recoverableNativeResult(code) &&
+			index+1 < len(candidates) && canStartFallback(runCtx, budget, out.tokens) {
+			// The pass failed for a transient provider reason. Its spend is real
+			// and gets its own attempt; its partial result is discarded so the
+			// backup never inherits findings from a broken destination.
+			usage, known := attemptUsage(res)
+			if known {
+				out.tokens.add(nativeTokenUsage(res))
+			}
+			if err := r.Store.FinishReviewAttempt(runCtx, activeAttemptID, store.AttemptFailed,
+				code, truncateRunMessage(nativeStatusMessage(res, code)), usage, known); err != nil {
+				slog.Warn("finish review attempt", "run_id", run.ID, "error", err)
+			}
+			activeAttemptID = 0
+			continue
+		}
+		resultReady = true
+		break
+	}
+	if !resultReady {
+		if nativeErr == nil {
+			nativeErr = errors.New("ningún perfil apto pudo ejecutar la revisión")
+		}
+		out, _ = classifyNativeError(runCtx, out, nativeErr)
+		return out, nil
 	}
 
-	status, code := nativeOutcome(res)
 	reviewed, skipped, excluded := nativeCoverageCounts(res)
 	closeInfo := ""
 	if res.closeReason != "" {
@@ -839,11 +956,14 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	}
 	log.Log(runCtx, "worker", "main", "info", logPhaseOCR, fmt.Sprintf(
 		"OCR terminó en %s%s: estado %s%s, %d archivo(s) revisados, %d omitidos, %d excluidos, %d hallazgo(s)",
-		time.Since(started).Round(time.Second), closeInfo, status, terminalCodeSuffix(code),
+		time.Since(attemptStarted).Round(time.Second), closeInfo, status, terminalCodeSuffix(code),
 		reviewed, skipped, excluded, len(res.Comments)))
 	files := nativeCoverageFiles(res)
-	out.tokens = nativeTokenUsage(res)
+	out.tokens = attemptBase
+	out.tokens.add(nativeTokenUsage(res))
 	out.tokensKnown = res.hasSummary
+	attemptKnown = res.hasSummary
+	out.executedProfile = activeProfile
 	out.summary = nativeSummaryText(res, status)
 
 	comments := append([]nativeComment(nil), res.Comments...)
@@ -870,7 +990,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		r.setPhase(runCtx, run.ID, store.RunPhaseChunking, log)
 		log.Log(runCtx, "worker", "", "info", logPhaseChunks, fmt.Sprintf(
 			"%d archivo(s) demasiado grandes para el run principal; se revisan por partes", len(paths)))
-		chunked = r.reviewTooLargeFiles(runCtx, run.ID, cfg.Profile.ID, reviewer, headSHA, paths, budget, out.tokens, out.tokensKnown, log)
+		chunked = r.reviewTooLargeFiles(runCtx, run.ID, activeProfile.ID, reviewer, headSHA, paths, budget, out.tokens, out.tokensKnown, log)
 		out.tokens.add(chunked.tokens)
 		if !chunked.usageKnown {
 			out.tokensKnown = false
@@ -963,7 +1083,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		// Verification runs against the checkout before it is deleted. It only
 		// annotates the findings; applying the decisions happens after they are
 		// persisted, so a crash here loses verdicts but never corrupts state.
-		r.verifyFindings(runCtx, run, cfg, key, workDir, headSHA, &out, reserved, log)
+		r.verifyFindings(runCtx, run, cfg, activeProfile, activeKey, workDir, headSHA, &out, reserved, log)
 		r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
 		return out, nil
 	case store.RunInconclusive:
@@ -971,9 +1091,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		if coverageErr != nil {
 			message = coverageErr.Error()
 		}
-		return out.inconclusive(errors.New(message), code), nil
+		out = out.inconclusive(errors.New(message), code)
+		return out, nil
 	default:
-		return out.failed(errors.New(nativeStatusMessage(res, code)), code), nil
+		out = out.failed(errors.New(nativeStatusMessage(res, code)), code)
+		return out, nil
 	}
 }
 

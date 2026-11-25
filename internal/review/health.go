@@ -2,15 +2,11 @@ package review
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
@@ -20,9 +16,6 @@ import (
 )
 
 const (
-	// healthPrompt is only used by the agent fallback for providers outside the
-	// closed table. The normal probe sends a short ping through llmmodels.Ping.
-	healthPrompt         = `Responde solo con {"ok":true}`
 	defaultHealthTimeout = 2 * time.Minute
 	maxHealthMessage     = 500
 )
@@ -32,15 +25,9 @@ const (
 type ProfileChecker struct {
 	Store *store.Store
 	Box   *crypto.Box
-	// Bin runs the agent fallback for providers the closed table does not know
-	// and that have no base URL override. Empty means "opencode".
-	Bin string
 	// Timeout bounds one check. Zero means defaultHealthTimeout.
 	Timeout time.Duration
-	// Steps bounds the OpenCode fallback used for providers outside the closed
-	// table. Zero means defaultReviewerSteps.
-	Steps  int
-	Events events.Publisher
+	Events  events.Publisher
 }
 
 // Check decrypts the profile key, sends one minimal tool-free request and
@@ -58,6 +45,10 @@ func (c *ProfileChecker) Check(ctx context.Context, profileID uint) error {
 	if err != nil {
 		return fmt.Errorf("review: load llm profile %d: %w", profileID, err)
 	}
+	// Capture the configuration the probe measures. If the profile is rotated
+	// while the request is in flight, the verdict describes a destination that
+	// no longer exists and must be discarded instead of published.
+	revision := store.ProfileConfigRevision(profile)
 	key, err := c.Box.Open(profile.APIKeyEnc)
 	if err != nil {
 		return fmt.Errorf("review: decrypt key for llm profile %d: %w", profileID, err)
@@ -74,66 +65,52 @@ func (c *ProfileChecker) Check(ctx context.Context, profileID uint) error {
 	if cause != "" {
 		message := healthFailureMessage(profileID, profile, cause)
 		// A failed probe records no usage: NULL, never zero.
-		if saveErr := c.Store.RecordLLMHealth(ctx, profileID, store.HealthError, message, nil); saveErr != nil {
+		if saveErr := c.Store.RecordLLMHealthAt(ctx, profileID, revision, store.HealthError, message, nil); saveErr != nil {
+			if errors.Is(saveErr, store.ErrStaleHealthCheck) {
+				slog.Info("health check superseded by a profile change",
+					"profile_id", profileID)
+				return nil
+			}
 			return fmt.Errorf("review: health check profile %d: %s; record failure: %w", profileID, cause, saveErr)
 		}
 		c.notify(ctx, profileID)
 		return fmt.Errorf("review: health check profile %d: %s", profileID, cause)
 	}
 
-	if err := c.Store.RecordLLMHealth(ctx, profileID, store.HealthOK, "", usage); err != nil {
+	if err := c.Store.RecordLLMHealthAt(ctx, profileID, revision, store.HealthOK, "", usage); err != nil {
+		if errors.Is(err, store.ErrStaleHealthCheck) {
+			slog.Info("health check superseded by a profile change", "profile_id", profileID)
+			return nil
+		}
 		return fmt.Errorf("review: record ok health for profile %d: %w", profileID, err)
 	}
 	c.notify(ctx, profileID)
 	return nil
 }
 
-// probe returns the token usage of the request and an operator-facing cause, or
-// an empty cause when the provider answered. The direct request is the normal
-// path; the agent is only kept for providers OpenCode knows by name but this
-// package's closed table does not.
+// probe sends the profile through the same endpoint OCR resolves for a review,
+// so a profile the native engine would reject can never be marked healthy. The
+// probe speaks the protocol OCR configured: OpenAI-compatible for unknown or
+// Google-compatible destinations, Anthropic for the native API.
 func (c *ProfileChecker) probe(ctx context.Context, profile store.LLMProfile, key []byte) (*store.HealthUsage, string) {
-	client := llmmodels.New(nil)
-	baseURL := ""
-	if profile.BaseURL != nil {
-		baseURL = *profile.BaseURL
+	endpoint, protocol, err := nativeEndpoint(profile)
+	if err != nil {
+		return nil, "OCR no puede usar este perfil: " + err.Error()
 	}
-
-	usage, err := client.PingUsage(ctx, profile.Provider, baseURL, profile.Model, string(key))
-	switch {
-	case err == nil:
-		return healthUsage(usage), ""
-	case errors.Is(err, llmmodels.ErrUnknownProvider):
-		slog.Debug("health check falls back to opencode", "profile_id", profile.ID, "provider", profile.Provider)
-		return c.probeAgent(ctx, profile, key)
-	default:
+	providerID := ""
+	if protocol == "anthropic" {
+		providerID = "anthropic"
+	} else if provider, ok := llmmodels.DefaultProviders[profile.Provider]; ok &&
+		provider.Shape == llmmodels.OpenAICompatible {
+		// Keep the provider's own request shape (OpenAI rejects max_tokens on
+		// reasoning models); the endpoint is the one OCR will use.
+		providerID = profile.Provider
+	}
+	usage, err := llmmodels.New(nil).PingUsage(ctx, providerID, endpoint, profile.Model, string(key))
+	if err != nil {
 		return nil, describeProbeError(profile, err)
 	}
-}
-
-func (c *ProfileChecker) probeAgent(ctx context.Context, profile store.LLMProfile, key []byte) (*store.HealthUsage, string) {
-	work, err := os.MkdirTemp("", "qa-health-")
-	if err != nil {
-		return nil, fmt.Sprintf("no se pudo preparar el entorno de OpenCode: %v", err)
-	}
-	defer os.RemoveAll(work)
-
-	agent := &Agent{
-		Bin:     c.Bin,
-		Dir:     work,
-		Home:    filepath.Join(work, "home"),
-		Profile: profile,
-		APIKey:  string(key),
-		Steps:   c.Steps,
-	}
-	text, raw, err := agent.Run(ctx, healthPrompt, nil)
-	if err != nil {
-		return nil, err.Error()
-	}
-	if strings.TrimSpace(text) == "" {
-		return nil, "opencode returned no text"
-	}
-	return parseOpenCodeUsage(raw), ""
+	return healthUsage(usage), ""
 }
 
 // healthUsage maps the provider usage to the store shape. A nil result means
@@ -151,46 +128,6 @@ func healthUsage(usage *llmmodels.Usage) *store.HealthUsage {
 		Total:      usage.Total,
 		MaxContext: usage.MaxContext,
 	}
-}
-
-// parseOpenCodeUsage reads the aggregated JSON the agent emits. Unparseable or
-// empty usage is unknown, never a failed health check.
-func parseOpenCodeUsage(raw []byte) *store.HealthUsage {
-	if len(raw) == 0 {
-		return nil
-	}
-	var wire struct {
-		Input     int64 `json:"input"`
-		Output    int64 `json:"output"`
-		Reasoning int64 `json:"reasoning"`
-		Cache     struct {
-			Read  int64 `json:"read"`
-			Write int64 `json:"write"`
-		} `json:"cache"`
-		Total      int64 `json:"total"`
-		MaxContext int64 `json:"max_context"`
-	}
-	if err := json.Unmarshal(raw, &wire); err != nil {
-		return nil
-	}
-	usage := &store.HealthUsage{
-		Input: wire.Input, Output: wire.Output, Reasoning: wire.Reasoning,
-		CacheRead: wire.Cache.Read, CacheWrite: wire.Cache.Write,
-		Total: wire.Total, MaxContext: wire.MaxContext,
-	}
-	if usage.MaxContext == 0 {
-		usage.MaxContext = usage.Input + usage.CacheRead + usage.CacheWrite
-	}
-	// OpenCode can omit the total while still reporting its parts. Deriving it
-	// keeps the check out of the average as a zero-token one.
-	if usage.Total == 0 {
-		usage.Total = usage.Input + usage.Output + usage.Reasoning
-	}
-	if usage.Total == 0 && usage.Input == 0 && usage.Output == 0 && usage.Reasoning == 0 &&
-		usage.CacheRead == 0 && usage.CacheWrite == 0 {
-		return nil
-	}
-	return usage
 }
 
 // describeProbeError reuses the actionable sentences of describeAgentError so a
