@@ -871,6 +871,82 @@ func TestPublishSummaryNamesFilesNeedingHumanReview(t *testing.T) {
 	}
 }
 
+func TestPublishArchitectureVerdictIsObservational(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     string
+		wantLabel  string
+		wantDetail string
+	}{
+		{"complete", store.ArchitectureComplete, "completo", "Condiciones de aceptación"},
+		{"inconclusive", store.ArchitectureInconclusive, "inconcluso", "Análisis incompleto"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := testutil.NewStore(t)
+			ctx := context.Background()
+			run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+			verdict := store.ArchitectureVerdict{
+				Status:    tc.status,
+				Requested: true,
+				Mode:      store.ArchitectureAnalysisObservation,
+				Signals:   []string{"persistence", "public_interface"},
+				Scope: store.ArchitectureScope{
+					Included: []store.ArchitectureScopeFile{{Path: "src/a.go", Kind: "modified"}},
+					Excluded: []store.ArchitectureScopeFile{{Path: "assets/logo.png", Kind: "binary", Reason: "binary"}},
+				},
+				Dimensions:           []store.ArchitectureDimension{{Name: "Behavior Changes", Content: "- changed"}},
+				AcceptanceConditions: []string{"Run the migration test"},
+				Controls:             store.ArchitectureControls{Observation: true, WritesDecision: false},
+			}
+			if tc.status == store.ArchitectureInconclusive {
+				verdict.Errors = []string{"analysis failed"}
+			}
+			if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+				Update("architecture_analysis", datatypes.JSON(store.ArchitectureVerdictJSON(verdict))).Error; err != nil {
+				t.Fatal(err)
+			}
+			gh := newFakeGitHub(t)
+			w, _ := newPublishWorker(t, st, gh)
+
+			if err := w.Publish(ctx, run.ID); err != nil {
+				t.Fatalf("Publish() error = %v", err)
+			}
+
+			bodies := summaryBodies(t, gh)
+			if len(bodies) != 1 {
+				t.Fatalf("summary comments = %d, want 1", len(bodies))
+			}
+			for _, want := range []string{"Análisis arquitectónico", tc.wantLabel, "persistence", tc.wantDetail, "Modo observación"} {
+				if !strings.Contains(bodies[0], want) {
+					t.Errorf("summary %q does not contain %q", bodies[0], want)
+				}
+			}
+
+			gh.mu.Lock()
+			patches := append([]checkPatch(nil), gh.checkPatches...)
+			reviews := len(gh.reviews)
+			gh.mu.Unlock()
+			if len(patches) == 0 || patches[0].Conclusion != "success" {
+				t.Fatalf("check conclusion = %+v, want success", patches)
+			}
+			if !strings.Contains(patches[0].Output.Text, "Análisis arquitectónico") {
+				t.Errorf("check text %q does not carry the verdict", patches[0].Output.Text)
+			}
+			if reviews != 0 {
+				t.Errorf("inline reviews = %d, want 0", reviews)
+			}
+			var saved store.PullRequest
+			if err := st.DB.WithContext(ctx).Take(&saved, pr.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if saved.QAStatus != store.StatusReadyForHuman {
+				t.Errorf("qa_status = %q, want %q", saved.QAStatus, store.StatusReadyForHuman)
+			}
+		})
+	}
+}
+
 func TestPublishCheckConclusions(t *testing.T) {
 	cases := []struct {
 		name       string
