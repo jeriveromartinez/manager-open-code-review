@@ -148,6 +148,8 @@ func NewRouter(d Deps) http.Handler {
 				r.Get("/readiness", s.readiness)
 				r.Patch("/repos/{id}", s.patchRepo)
 				r.Post("/teams", s.createTeam)
+				r.Patch("/teams/{id}", s.patchTeam)
+				r.Delete("/teams/{id}", s.deleteTeam)
 
 				r.Get("/llm-profiles", s.llmProfiles)
 				r.Get("/llm-profiles/usage", s.llmProfileUsage)

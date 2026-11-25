@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -21,6 +22,17 @@ import (
 // saved yet.
 var ErrNotConfigured = errors.New("github app not configured")
 
+// ErrTeamNameTaken is returned when a rename would collide with another team's
+// name or slug.
+var ErrTeamNameTaken = errors.New("team name already taken")
+
+// ErrTeamInUse is returned when a team still has repositories assigned.
+var ErrTeamInUse = errors.New("team has repositories assigned")
+
+// ErrTeamNotFound is returned when a repository assignment references a team
+// that no longer exists, typically because it was deleted concurrently.
+var ErrTeamNotFound = errors.New("team not found")
+
 // TeamWithMembers is a team plus the users assigned to it and their roles.
 type TeamWithMembers struct {
 	Team
@@ -28,6 +40,7 @@ type TeamWithMembers struct {
 		User User
 		Role string
 	}
+	RepositoryCount int
 }
 
 // UpsertUserFromGitHub inserts a GitHub user or refreshes its profile. The
@@ -155,14 +168,142 @@ func (s *Store) UserByGitHubID(ctx context.Context, githubID int64) (User, error
 // CreateTeam inserts a team with a URL-safe slug derived from its name.
 // Unique name or slug violations are returned to the caller.
 func (s *Store) CreateTeam(ctx context.Context, name string) (Team, error) {
-	team := Team{Name: name, Slug: slugify(name)}
+	team := Team{Name: name, Slug: Slugify(name)}
 	if err := s.DB.WithContext(ctx).Create(&team).Error; err != nil {
 		return Team{}, fmt.Errorf("create team %q: %w", name, err)
 	}
 	return team, nil
 }
 
-func slugify(name string) string {
+// RenameTeam changes a team's name and the slug derived from it. It returns the
+// team as renamed and the name it had before, read inside the same transaction
+// so a concurrent rename cannot make the caller audit a stale previous name.
+// Renaming to the current name is a no-op; a name or slug already used by
+// another team is ErrTeamNameTaken, including when the collision is only
+// detected by the unique index at update time. A team deleted concurrently is
+// ErrNotFound.
+func (s *Store) RenameTeam(ctx context.Context, teamID uint, name string) (Team, string, error) {
+	var team Team
+	var previous string
+	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		err := quietDB(tx).Take(&team, teamID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("team %d: %w", teamID, ErrNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("find team %d: %w", teamID, err)
+		}
+		previous = team.Name
+		if name == team.Name {
+			return nil
+		}
+
+		slug := Slugify(name)
+		var taken int64
+		if err := tx.Model(&Team{}).
+			Where("id <> ? AND (name = ? OR slug = ?)", teamID, name, slug).
+			Count(&taken).Error; err != nil {
+			return fmt.Errorf("check team name %q: %w", name, err)
+		}
+		if taken > 0 {
+			return fmt.Errorf("rename team %d to %q: %w", teamID, name, ErrTeamNameTaken)
+		}
+
+		now := time.Now().UTC()
+		res := tx.Model(&Team{}).Where("id = ?", teamID).
+			Updates(map[string]any{"name": name, "slug": slug, "updated_at": now})
+		if res.Error != nil {
+			if isUniqueViolation(res.Error) {
+				return fmt.Errorf("rename team %d to %q: %w", teamID, name, ErrTeamNameTaken)
+			}
+			return fmt.Errorf("rename team %d to %q: %w", teamID, name, res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("rename team %d to %q: %w", teamID, name, ErrNotFound)
+		}
+		team.Name, team.Slug, team.UpdatedAt = name, slug, now
+		return nil
+	})
+	if err != nil {
+		return Team{}, "", err
+	}
+	return team, previous, nil
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503"
+}
+
+// TeamRepositories lists the repositories assigned to a team, ordered by name.
+func (s *Store) TeamRepositories(ctx context.Context, teamID uint) ([]Repository, error) {
+	var repos []Repository
+	err := s.DB.WithContext(ctx).Model(&Repository{}).
+		Select("id", "full_name").
+		Where("team_id = ?", teamID).
+		Order("full_name").
+		Find(&repos).Error
+	if err != nil {
+		return nil, fmt.Errorf("list team %d repositories: %w", teamID, err)
+	}
+	return repos, nil
+}
+
+// DeleteTeam removes a team and, through the database cascade, its members and
+// QA policy. It locks the team row first, which waits for an in-flight
+// repository assignment to finish and blocks new ones; the following count
+// therefore sees every committed assignment. A team that still owns
+// repositories is ErrTeamInUse and a missing team is ErrNotFound. It returns
+// the number of members that were removed.
+func (s *Store) DeleteTeam(ctx context.Context, teamID uint) (int64, error) {
+	var members int64
+	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Repository assignments take a key-share lock on the referenced team
+		// row, so this lock serializes them against the deletion.
+		var team Team
+		err := quietDB(tx).Clauses(clause.Locking{Strength: "UPDATE"}).Take(&team, teamID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("team %d: %w", teamID, ErrNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("lock team %d: %w", teamID, err)
+		}
+
+		if err := tx.Model(&TeamMember{}).Where("team_id = ?", teamID).Count(&members).Error; err != nil {
+			return fmt.Errorf("count team %d members: %w", teamID, err)
+		}
+
+		var repos int64
+		if err := tx.Model(&Repository{}).Where("team_id = ?", teamID).Count(&repos).Error; err != nil {
+			return fmt.Errorf("count team %d repositories: %w", teamID, err)
+		}
+		if repos > 0 {
+			return fmt.Errorf("delete team %d: %w", teamID, ErrTeamInUse)
+		}
+
+		res := tx.Delete(&Team{}, teamID)
+		if res.Error != nil {
+			return fmt.Errorf("delete team %d: %w", teamID, res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("delete team %d: %w", teamID, ErrNotFound)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return members, nil
+}
+
+// Slugify derives the URL-safe team slug from a name. It returns an empty
+// string when the name has no letters or digits, which callers must reject.
+func Slugify(name string) string {
 	var folded strings.Builder
 	for _, r := range strings.ToLower(name) {
 		folded.WriteString(foldLatin(r))
@@ -240,7 +381,8 @@ type teamMemberRow struct {
 	UpdatedAt time.Time
 }
 
-// ListTeams returns every team, with member roles, in a deterministic order.
+// ListTeams returns every team, with member roles and repository counts, in a
+// deterministic order.
 func (s *Store) ListTeams(ctx context.Context) ([]TeamWithMembers, error) {
 	var teams []Team
 	if err := s.DB.WithContext(ctx).Order("name, id").Find(&teams).Error; err != nil {
@@ -268,10 +410,29 @@ func (s *Store) ListTeams(ctx context.Context) ([]TeamWithMembers, error) {
 		return nil, fmt.Errorf("list team members: %w", err)
 	}
 
+	type teamRepositoryCount struct {
+		TeamID uint
+		Repos  int
+	}
+	var counts []teamRepositoryCount
+	err = s.DB.WithContext(ctx).Model(&Repository{}).
+		Select("team_id, count(*) AS repos").
+		Where("team_id IS NOT NULL").
+		Group("team_id").
+		Scan(&counts).Error
+	if err != nil {
+		return nil, fmt.Errorf("count team repositories: %w", err)
+	}
+	repositoryCount := make(map[uint]int, len(counts))
+	for _, c := range counts {
+		repositoryCount[c.TeamID] = c.Repos
+	}
+
 	result := make([]TeamWithMembers, 0, len(teams))
 	for _, team := range teams {
 		item := TeamWithMembers{
-			Team: team,
+			Team:            team,
+			RepositoryCount: repositoryCount[team.ID],
 			Members: []struct {
 				User User
 				Role string
@@ -388,6 +549,9 @@ func (s *Store) AssignRepositoryTeam(ctx context.Context, repoID int64, teamID *
 	}
 	res := s.DB.WithContext(ctx).Model(&Repository{}).Where("id = ?", repoID).Update("team_id", value)
 	if res.Error != nil {
+		if isForeignKeyViolation(res.Error) {
+			return fmt.Errorf("assign repository %d team: %w", repoID, ErrTeamNotFound)
+		}
 		return fmt.Errorf("assign repository %d team: %w", repoID, res.Error)
 	}
 	if res.RowsAffected == 0 {

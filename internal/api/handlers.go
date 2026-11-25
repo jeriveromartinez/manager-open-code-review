@@ -200,10 +200,11 @@ type teamMemberResponse struct {
 }
 
 type teamResponse struct {
-	ID      uint                 `json:"id"`
-	Name    string               `json:"name"`
-	Slug    string               `json:"slug"`
-	Members []teamMemberResponse `json:"members"`
+	ID              uint                 `json:"id"`
+	Name            string               `json:"name"`
+	Slug            string               `json:"slug"`
+	Members         []teamMemberResponse `json:"members"`
+	RepositoryCount int                  `json:"repository_count"`
 }
 
 func teamDTO(t store.TeamWithMembers) teamResponse {
@@ -216,7 +217,16 @@ func teamDTO(t store.TeamWithMembers) teamResponse {
 			Role:      m.Role,
 		})
 	}
-	return teamResponse{ID: t.ID, Name: t.Name, Slug: t.Slug, Members: members}
+	return teamResponse{ID: t.ID, Name: t.Name, Slug: t.Slug, Members: members, RepositoryCount: t.RepositoryCount}
+}
+
+// teamSummaryResponse is the rename result: the panel refetches the full team
+// list, so the response omits members rather than claiming an empty list.
+type teamSummaryResponse struct {
+	ID              uint   `json:"id"`
+	Name            string `json:"name"`
+	Slug            string `json:"slug"`
+	RepositoryCount int    `json:"repository_count"`
 }
 
 type userResponse struct {
@@ -550,6 +560,10 @@ func (s *server) patchRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	if hasTeam {
 		if err := s.Store.AssignRepositoryTeam(r.Context(), id, teamValue); err != nil {
+			if errors.Is(err, store.ErrTeamNotFound) {
+				writeAPIError(w, http.StatusConflict, "team no longer exists")
+				return
+			}
 			writeAPIError(w, http.StatusInternalServerError, "assign repository team")
 			return
 		}
@@ -614,6 +628,139 @@ func (s *server) createTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, teamResponse{ID: team.ID, Name: team.Name, Slug: team.Slug, Members: []teamMemberResponse{}})
+}
+
+func (s *server) patchTeam(w http.ResponseWriter, r *http.Request) {
+	teamID, err := strconv.ParseUint(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || teamID == 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid team id")
+		return
+	}
+
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		writeAPIError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if store.Slugify(name) == "" {
+		writeAPIError(w, http.StatusBadRequest, "name must contain letters or digits")
+		return
+	}
+
+	repositories, err := s.Store.TeamRepositories(r.Context(), uint(teamID))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "count team repositories")
+		return
+	}
+
+	renamed, previousName, err := s.Store.RenameTeam(r.Context(), uint(teamID), name)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeAPIError(w, http.StatusNotFound, "team not found")
+		case errors.Is(err, store.ErrTeamNameTaken):
+			writeAPIError(w, http.StatusConflict, "team name already taken")
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "rename team")
+		}
+		return
+	}
+
+	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(teamID, 10)})
+	actor, _ := auth.UserFrom(r.Context())
+	data := map[string]string{"from": previousName, "to": renamed.Name}
+	if err := s.Store.Audit(r.Context(), &actor.ID, "team.updated", "team", strconv.FormatUint(teamID, 10), data); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "write audit log")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, teamSummaryResponse{
+		ID:              renamed.ID,
+		Name:            renamed.Name,
+		Slug:            renamed.Slug,
+		RepositoryCount: len(repositories),
+	})
+}
+
+type teamRepositoryRef struct {
+	ID       int64  `json:"id"`
+	FullName string `json:"full_name"`
+}
+
+func writeTeamInUse(w http.ResponseWriter, repositories []store.Repository) {
+	refs := make([]teamRepositoryRef, 0, len(repositories))
+	for _, repository := range repositories {
+		refs = append(refs, teamRepositoryRef{ID: repository.ID, FullName: repository.FullName})
+	}
+	writeJSON(w, http.StatusConflict, struct {
+		Error        string              `json:"error"`
+		Repositories []teamRepositoryRef `json:"repositories"`
+	}{Error: "team has repositories assigned", Repositories: refs})
+}
+
+func (s *server) deleteTeam(w http.ResponseWriter, r *http.Request) {
+	teamID, err := strconv.ParseUint(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || teamID == 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid team id")
+		return
+	}
+
+	// Deletion removes the row, so keep the name the audit needs beforehand.
+	var team store.Team
+	if err := s.Store.DB.WithContext(r.Context()).Take(&team, uint(teamID)).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			writeAPIError(w, http.StatusNotFound, "team not found")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, "load team")
+		return
+	}
+
+	repositories, err := s.Store.TeamRepositories(r.Context(), uint(teamID))
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "list team repositories")
+		return
+	}
+	if len(repositories) > 0 {
+		writeTeamInUse(w, repositories)
+		return
+	}
+
+	members, err := s.Store.DeleteTeam(r.Context(), uint(teamID))
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeAPIError(w, http.StatusNotFound, "team not found")
+		case errors.Is(err, store.ErrTeamInUse):
+			// A repository was assigned after the pre-check; report the
+			// current set so the client can reassign it.
+			current, listErr := s.Store.TeamRepositories(r.Context(), uint(teamID))
+			if listErr != nil {
+				writeAPIError(w, http.StatusInternalServerError, "list team repositories")
+				return
+			}
+			writeTeamInUse(w, current)
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "delete team")
+		}
+		return
+	}
+
+	s.notify(r.Context(), events.Event{Type: "team.updated", ID: strconv.FormatUint(teamID, 10)})
+	actor, _ := auth.UserFrom(r.Context())
+	data := map[string]any{"name": team.Name, "members": members}
+	if err := s.Store.Audit(r.Context(), &actor.ID, "team.deleted", "team", strconv.FormatUint(teamID, 10), data); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "write audit log")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // canManageTeam allows administrators and leads of that particular team.
