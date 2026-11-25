@@ -220,6 +220,7 @@ func TestStatusFromManifestCoverage(t *testing.T) {
 		retryReport *nativeRetryReport
 		warnings    []nativeWarning
 		budget      bool
+		global      bool
 		want        string
 		code        string
 	}{
@@ -264,9 +265,35 @@ func TestStatusFromManifestCoverage(t *testing.T) {
 			want: store.RunInconclusive, code: "token_budget",
 		},
 		{
-			name: "failed timeout", status: "failed",
+			// No request-level reason: OCR's own per-group budget is the
+			// fallback used when the worker cannot close it progressively.
+			name: "failed per-group timeout", status: "failed",
 			failed: []nativeCoverageItem{{Classification: "timeout"}},
-			want:   store.RunInconclusive, code: "timeout",
+			want:   store.RunInconclusive, code: "timeout_group",
+		},
+		{
+			name: "failed request timeout", status: "failed",
+			failed: []nativeCoverageItem{{
+				Classification: "timeout",
+				Reason:         "LLM request timed out; configure OCR_LLM_TIMEOUT or provider timeout_sec",
+			}},
+			want: store.RunInconclusive, code: "timeout_http",
+		},
+		{
+			name: "failed global timeout", status: "failed", global: true,
+			failed: []nativeCoverageItem{{Classification: "timeout"}},
+			want:   store.RunInconclusive, code: "timeout_global",
+		},
+		{
+			// The deadline wins over whatever failure OCR reported alongside
+			// the close: findings of completed work must be preserved.
+			name: "failed provider after global close", status: "failed", global: true,
+			failed: []nativeCoverageItem{{Classification: "provider"}},
+			want:   store.RunInconclusive, code: "timeout_global",
+		},
+		{
+			name: "partial global timeout", status: "partial", global: true,
+			want: store.RunInconclusive, code: "timeout_global",
 		},
 		{
 			name: "failed configuration", status: "failed",
@@ -296,6 +323,9 @@ func TestStatusFromManifestCoverage(t *testing.T) {
 				Summary:     nativeSummary{BudgetExceeded: tt.budget},
 				Warnings:    tt.warnings,
 				RetryReport: tt.retryReport,
+			}
+			if tt.global {
+				res.closeReason = "global"
 			}
 			got, code := nativeOutcome(res)
 			if got != tt.want || code != tt.code {
@@ -625,6 +655,188 @@ func TestOCRBudget(t *testing.T) {
 	}
 }
 
+// TestOCRGlobalDeadlineIsSharedAcrossGroups pins that the deadline is an
+// absolute instant taken from the run, not a fresh per-group minute: the second
+// group gets what is left, never a full budget of its own.
+func TestOCRGlobalDeadlineIsSharedAcrossGroups(t *testing.T) {
+	runDeadline := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	ctx, cancel := context.WithDeadline(context.Background(), runDeadline)
+	defer cancel()
+
+	firstAt := time.Date(2029, 12, 31, 23, 40, 0, 0, time.UTC)
+	secondAt := firstAt.Add(10 * time.Minute)
+	first, ok := earliestDeadline(firstAt, ctx, 45*time.Minute)
+	if !ok || !first.Equal(runDeadline) {
+		t.Fatalf("first group deadline = %s (ok=%v), want the run deadline %s", first, ok, runDeadline)
+	}
+	second, ok := earliestDeadline(secondAt, ctx, 45*time.Minute)
+	if !ok || !second.Equal(runDeadline) {
+		t.Fatalf("second group deadline = %s (ok=%v), want the run deadline %s", second, ok, runDeadline)
+	}
+	if second.Sub(secondAt) >= first.Sub(firstAt) {
+		t.Errorf("second group budget = %s, want less than the first %s",
+			second.Sub(secondAt), first.Sub(firstAt))
+	}
+
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	if d, ok := earliestDeadline(now, context.Background(), 30*time.Minute); !ok || !d.Equal(now.Add(30*time.Minute)) {
+		t.Errorf("deadline without context = %s (ok=%v), want %s", d, ok, now.Add(30*time.Minute))
+	}
+	// OCR stops before the run deadline so parsing, chunking, verification and
+	// publishing keep their window.
+	if stop, ok := ocrStopDeadline(now, context.Background(), 30*time.Minute); !ok || !stop.Equal(now.Add(27*time.Minute)) {
+		t.Errorf("OCR stop deadline = %s (ok=%v), want %s", stop, ok, now.Add(27*time.Minute))
+	}
+}
+
+// TestOCRStopDeadlineReserveIsBounded pins that the reserve never consumes
+// more than half the invocation, so the OCR budget keeps growing with the time
+// left instead of collapsing around the 2m floor.
+func TestOCRStopDeadlineReserveIsBounded(t *testing.T) {
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	previous := time.Duration(0)
+	for _, remaining := range []time.Duration{
+		30 * time.Second, time.Minute, 119 * time.Second, 2 * time.Minute,
+		121 * time.Second, 3 * time.Minute, 4 * time.Minute, 10 * time.Minute,
+	} {
+		stop, ok := ocrStopDeadline(now, context.Background(), remaining)
+		if !ok {
+			t.Fatalf("ocrStopDeadline(%s) had no deadline", remaining)
+		}
+		window := stop.Sub(now)
+		if window < remaining/2 {
+			t.Errorf("OCR window for %s = %s, want at least half", remaining, window)
+		}
+		if window <= previous {
+			t.Errorf("OCR window for %s = %s, want more than the previous %s", remaining, window, previous)
+		}
+		previous = window
+	}
+}
+
+// TestVerifyStopDeadlineKeepsShare pins #151: the verifier's full share is
+// available to it even when it is smaller than the main run's 2m reserve.
+func TestVerifyStopDeadlineKeepsShare(t *testing.T) {
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	share := 2*time.Minute + 6*time.Second // 15% of ~14m
+	stop, ok := verifyStopDeadline(now, context.Background(), share)
+	if !ok || !stop.Equal(now.Add(share)) {
+		t.Errorf("verifier stop = %s (ok=%v), want its full share %s", stop, ok, now.Add(share))
+	}
+}
+
+func TestOCRLimitsGlobalMode(t *testing.T) {
+	tests := []struct {
+		name      string
+		remaining time.Duration
+		effort    string
+		global    bool
+		wantTask  time.Duration
+		wantReq   time.Duration
+	}{
+		{name: "global long run", remaining: 45 * time.Minute, effort: "low", global: true, wantTask: 0, wantReq: 300 * time.Second},
+		{name: "global half hour", remaining: 10*time.Minute + 30*time.Second, effort: "medium", global: true, wantTask: 0, wantReq: 160 * time.Second},
+		{name: "global short run", remaining: 3 * time.Minute, effort: "medium", global: true, wantTask: 0, wantReq: 60 * time.Second},
+		{name: "global without time", remaining: 0, global: true, wantTask: 0, wantReq: 0},
+		{name: "fallback keeps the per-group minute", remaining: 10*time.Minute + 30*time.Second, effort: "medium", wantTask: 4 * time.Minute, wantReq: 160 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task, request := ocrLimits(tt.remaining, tt.effort, tt.global)
+			if task != tt.wantTask || request != tt.wantReq {
+				t.Fatalf("ocrLimits(%s, %q, %v) = (%s, %s), want (%s, %s)",
+					tt.remaining, tt.effort, tt.global, task, request, tt.wantTask, tt.wantReq)
+			}
+		})
+	}
+}
+
+// TestOCRTaskBudgetDerivedFromStopWindow pins the non-graceful path: OCR's own
+// per-task deadline is computed from the window that ends at the hard stop, so
+// its fallback always fires inside it.
+func TestOCRTaskBudgetDerivedFromStopWindow(t *testing.T) {
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	stop, ok := ocrStopDeadline(now, context.Background(), 10*time.Minute+30*time.Second)
+	if !ok {
+		t.Fatal("ocrStopDeadline had no deadline")
+	}
+	task, request := ocrLimits(stop.Sub(now), "medium", false)
+	if task != 3*time.Minute || request != 120*time.Second {
+		t.Errorf("fallback task/request = %s/%s, want 3m0s/2m0s derived from the stop window",
+			task, request)
+	}
+}
+
+func TestBuildReviewArgsGlobalDeadline(t *testing.T) {
+	args := buildReviewArgs(nativeInvocation{
+		RepoDir: "/clone", BaseRef: "base", HeadRef: "head",
+		BackgroundFile: "/home/background.md", Profile: store.LLMProfile{Model: "m"},
+		Effort: "low", MaxTokens: 1000, GlobalDeadline: true,
+	})
+	if got, ok := argValue(args, "--timeout"); !ok || got != "0" {
+		t.Fatalf("--timeout = %q (present=%v), want 0 to disable the per-group deadline", got, ok)
+	}
+}
+
+func TestOCRCloserRequestsCloseBeforeHardStop(t *testing.T) {
+	var mu sync.Mutex
+	var events []string
+	hardStopped := make(chan struct{}, 1)
+	closer := &ocrCloser{
+		signalFn: func(*exec.Cmd) error {
+			mu.Lock()
+			events = append(events, "signal")
+			mu.Unlock()
+			return nil
+		},
+		killFn: func(*exec.Cmd) error {
+			mu.Lock()
+			events = append(events, "kill")
+			mu.Unlock()
+			hardStopped <- struct{}{}
+			return nil
+		},
+	}
+	closer.arm(400*time.Millisecond, 200*time.Millisecond, true)
+	defer closer.stop()
+
+	select {
+	case <-hardStopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the hard stop never fired")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 2 || events[0] != "signal" || events[1] != "kill" {
+		t.Fatalf("close sequence = %v, want signal before the hard stop", events)
+	}
+	if closer.closeElapsed() <= 0 {
+		t.Error("closeElapsed = 0, want the time between signal and hard stop")
+	}
+}
+
+func TestOCRCloserHardStopsWithoutGrace(t *testing.T) {
+	signalled := make(chan struct{}, 1)
+	hardStopped := make(chan struct{}, 1)
+	closer := &ocrCloser{
+		signalFn: func(*exec.Cmd) error { signalled <- struct{}{}; return nil },
+		killFn:   func(*exec.Cmd) error { hardStopped <- struct{}{}; return nil },
+	}
+	closer.arm(80*time.Millisecond, 50*time.Millisecond, false)
+	defer closer.stop()
+
+	select {
+	case <-hardStopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the hard stop never fired without a graceful close")
+	}
+	select {
+	case <-signalled:
+		t.Fatal("no signal must be sent when graceful close is unavailable")
+	default:
+	}
+}
+
 func TestNativeConfigRequestTimeout(t *testing.T) {
 	base := "https://provider.example/v1"
 	profile := store.LLMProfile{Provider: "custom", Model: "m", BaseURL: &base}
@@ -650,15 +862,21 @@ func TestNativeConfigRequestTimeout(t *testing.T) {
 // records its arguments, so the budget it receives is the one derived from the
 // context deadline at call time, not the run budget fixed before cloning.
 func TestReviewBudgetsFromRemainingTime(t *testing.T) {
+	skipWithoutShellFake(t)
 	tests := []struct {
 		name        string
 		deadline    time.Duration
 		effort      string
 		wantTimeout string
+		wantGlobal  string
 		wantRequest int
 	}{
-		{name: "context deadline wins over the run budget", deadline: 10*time.Minute + 30*time.Second, effort: "medium", wantTimeout: "4", wantRequest: 160},
-		{name: "run budget without a deadline", deadline: 0, effort: "low", wantTimeout: "18", wantRequest: 300},
+		// The context deadline wins over the run budget. On a platform that
+		// can close OCR gradually the per-task flag is explicitly disabled so
+		// the groups share the run's deadline; the fallback keeps the rounded
+		// per-group minute.
+		{name: "context deadline wins over the run budget", deadline: 10*time.Minute + 30*time.Second, effort: "medium", wantTimeout: "3", wantGlobal: "0", wantRequest: 120},
+		{name: "run budget without a context deadline", deadline: 0, effort: "low", wantTimeout: "16", wantGlobal: "0", wantRequest: 300},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -698,8 +916,12 @@ func TestReviewBudgetsFromRemainingTime(t *testing.T) {
 					got = args[i+1]
 				}
 			}
-			if got != tt.wantTimeout {
-				t.Errorf("--timeout = %q, want %q (args %q)", got, tt.wantTimeout, args)
+			want := tt.wantTimeout
+			if gracefulStopSupported() {
+				want = tt.wantGlobal
+			}
+			if got != want {
+				t.Errorf("--timeout = %q, want %q (args %q)", got, want, args)
 			}
 			if req := readNativeConfig(t, reviewer.Home).TimeoutSec; req != tt.wantRequest {
 				t.Errorf("timeout_sec = %d, want %d", req, tt.wantRequest)

@@ -905,8 +905,8 @@ func TestRunErrorClassification(t *testing.T) {
 
 	deadline, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
 	defer cancel()
-	if got, _ := classifyNativeError(deadline, out, context.DeadlineExceeded); got.status != store.RunInconclusive || got.code != "timeout" {
-		t.Errorf("deadline classification = %q/%q, want inconclusive/timeout", got.status, got.code)
+	if got, _ := classifyNativeError(deadline, out, context.DeadlineExceeded); got.status != store.RunInconclusive || got.code != "timeout_global" {
+		t.Errorf("deadline classification = %q/%q, want inconclusive/timeout_global", got.status, got.code)
 	}
 	if got, _ := classifyNativeError(ctx, out, errors.New("invalid JSON")); got.code != "ocr_error" {
 		t.Errorf("OCR classification code = %q, want ocr_error", got.code)
@@ -931,7 +931,7 @@ func TestRunStopsWhenBudgetIsExhausted(t *testing.T) {
 	if err := runner.Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	assertRunTerminal(t, f, store.RunInconclusive, "timeout")
+	assertRunTerminal(t, f, store.RunInconclusive, "timeout_global")
 	if got := f.ocrCalls(t); got != 1 {
 		t.Errorf("ocr calls = %d, want 1", got)
 	}
@@ -2115,7 +2115,7 @@ func TestRunOCRExit1Classification(t *testing.T) {
 			  "manifest":{"terminal_state":"failed",
 			    "coverage":{"selected":[{"path":"auth.go"}],"completed":[],"reused":[],
 			      "failed":[{"path":"auth.go","classification":"timeout"}],"waived":[],"excluded":[]}}}`,
-			status: store.RunInconclusive, code: "timeout",
+			status: store.RunInconclusive, code: "timeout_group",
 		},
 		{
 			name: "provider item",

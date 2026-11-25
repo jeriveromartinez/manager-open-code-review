@@ -33,7 +33,7 @@ type Config struct {
 	ReviewConcurrency    int           // review_concurrency, default 2
 	ReviewAgentSteps     int           // review_agent_steps, default 8
 	ReviewContextCeiling int           // review_context_ceiling, default 270000
-	ReviewTimeout        time.Duration // review_timeout, default 45m
+	ReviewTimeout        time.Duration // review_timeout, default 45m: finite deadline for the whole run
 	ReviewDebounce       time.Duration // review_debounce, default 2m
 	ReviewStaleAfter     time.Duration // review_stale_after, default 60m
 	LLMHealthInterval    time.Duration // llm_health_interval, default 6h

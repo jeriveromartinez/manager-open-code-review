@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,6 +28,8 @@ type NativeVerifier struct {
 	MaxTokens   int
 	TokenBudget int64
 	Timeout     time.Duration
+	// CloseMargin overrides ocrCloseMargin for tests; zero keeps the default.
+	CloseMargin time.Duration
 	OnLog       func(line string)
 }
 
@@ -151,13 +154,23 @@ func (v *NativeVerifier) Review(ctx context.Context) (nativeReview, []byte, erro
 	if err != nil {
 		return nativeReview{}, nil, err
 	}
-	remaining := v.Timeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if left := time.Until(deadline); remaining <= 0 || left < remaining {
-			remaining = left
-		}
+	now := time.Now()
+	// The verifier already received its share of the run (verify_time_share),
+	// so it must not lose part of it to the main run's post-processing
+	// reserve: its stop is the full share, bounded by the run context.
+	deadline, hasDeadline := verifyStopDeadline(now, ctx, v.Timeout)
+	remaining := time.Duration(0)
+	if hasDeadline {
+		remaining = deadline.Sub(now)
 	}
-	taskTimeout, requestTimeout := ocrBudget(remaining, store.ReviewEffortLow)
+	margin := v.CloseMargin
+	if margin <= 0 {
+		margin = ocrCloseMargin
+	}
+	graceful := gracefulStopSupported()
+	// `ocr scan --timeout 0` is not part of the spike that proved the gradual
+	// close for `ocr review`, so scan keeps its per-task fallback deadline.
+	taskTimeout, requestTimeout := ocrLimits(remaining, store.ReviewEffortLow, false)
 	if err := writeNativeConfig(home, v.Profile, keyPath, requestTimeout); err != nil {
 		return nativeReview{}, nil, err
 	}
@@ -181,7 +194,13 @@ func (v *NativeVerifier) Review(ctx context.Context) (nativeReview, []byte, erro
 		TaskTimeout: taskTimeout,
 	})
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmdCtx := ctx
+	if hasDeadline {
+		var cancel context.CancelFunc
+		cmdCtx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(cmdCtx, bin, args...)
 	cmd.Dir = v.RepoDir
 	cmd.Env = reviewEnv(os.Environ(), v.APIKey, home)
 	isolateProcessGroup(cmd)
@@ -190,22 +209,37 @@ func (v *NativeVerifier) Review(ctx context.Context) (nativeReview, []byte, erro
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 
-	var runErr error
-	if v.OnLog != nil {
-		runErr = runNativeStreaming(cmd, &stderr, v.OnLog)
-	} else {
-		cmd.Stderr = &stderr
-		runErr = cmd.Run()
-	}
-	if cause := ctx.Err(); cause != nil {
-		return nativeReview{}, nil, fmt.Errorf("ocr scan: %w", cause)
+	closer, runErr := execNative(cmd, &stderr, v.OnLog, deadline, graceful, margin)
+	signalled, _ := closer.result()
+	exitedAt := time.Now()
+	hardStopped := hasDeadline && !exitedAt.Before(deadline)
+	if cause := cmdCtx.Err(); cause != nil {
+		if errors.Is(cause, context.Canceled) {
+			return nativeReview{}, nil, fmt.Errorf("ocr scan: %w", cause)
+		}
+		if len(bytes.TrimSpace(stdout.Bytes())) == 0 {
+			return nativeReview{}, nil, &nativeTimeoutError{Kind: "global", Err: fmt.Errorf("ocr scan: %w", cause)}
+		}
 	}
 	if len(bytes.TrimSpace(stdout.Bytes())) == 0 {
-		return nativeReview{}, nil, nativeExecError(runErr, stderr.String())
+		runErr = nativeExecError(runErr, stderr.String())
+		if signalled || hardStopped {
+			return nativeReview{}, nil, &nativeTimeoutError{Kind: "global", Err: runErr}
+		}
+		return nativeReview{}, nil, runErr
 	}
 	res, err := parseNativeReview(stdout.Bytes())
 	if err != nil {
-		return nativeReview{}, stdout.Bytes(), nativeExecError(runErr, stderr.String())
+		runErr = nativeExecError(runErr, stderr.String())
+		if signalled || hardStopped {
+			return nativeReview{}, stdout.Bytes(), &nativeTimeoutError{Kind: "global", Err: runErr}
+		}
+		return nativeReview{}, stdout.Bytes(), runErr
+	}
+	if signalled || hardStopped {
+		res.closeReason = "global"
+		res.closeElapsed = closer.closeElapsed()
+		res.hardStopped = hardStopped
 	}
 	return res, stdout.Bytes(), nil
 }

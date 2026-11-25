@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/llmmodels"
@@ -56,6 +57,15 @@ type nativeReview struct {
 	RetryReport *nativeRetryReport `json:"retry_report"`
 	SessionID   string             `json:"session_id"`
 	Manifest    nativeManifest     `json:"manifest"`
+	// closeReason records the worker's gradual close when OCR overran the
+	// global deadline ("global"). Empty means OCR ended on its own. It is not
+	// part of the OCR JSON and never leaves the review package.
+	closeReason string
+	// closeElapsed is how long OCR took to exit after the gradual close started.
+	closeElapsed time.Duration
+	// hardStopped reports that OCR ignored the signal and the process tree had
+	// to be killed at the deadline.
+	hardStopped bool
 }
 
 type nativeGroup struct {
@@ -155,9 +165,13 @@ type nativeInvocation struct {
 	Effort         string
 	MaxTokens      int
 	TokenBudget    int64
-	// TaskTimeout is OCR's own per-subtask budget, already divided by the
+	// TaskTimeout is OCR's own per-task budget, already divided by the
 	// effort rounds (see ocrBudget). Zero leaves OCR's default.
 	TaskTimeout time.Duration
+	// GlobalDeadline passes `--timeout 0`: OCR imposes no per-task deadline
+	// and every group shares the run's time, which the worker closes
+	// gradually before the hard stop.
+	GlobalDeadline bool
 }
 
 func buildReviewArgs(in nativeInvocation) []string {
@@ -191,6 +205,11 @@ func buildReviewArgs(in nativeInvocation) []string {
 			minutes = 1
 		}
 		args = append(args, "--timeout", fmt.Sprint(minutes))
+	} else if in.GlobalDeadline {
+		// Zero disables OCR's per-task deadline: the groups share the run's
+		// time and the worker closes the process before the hard stop. It
+		// must be explicit; omitting the flag would leave OCR's 15m default.
+		args = append(args, "--timeout", "0")
 	}
 	if in.Excludes != "" {
 		args = append(args, "--exclude", in.Excludes)
@@ -208,15 +227,22 @@ const (
 	// the subtask budget instead of consuming it.
 	ocrRequestMin = time.Minute
 	ocrRequestMax = 300 * time.Second
+	// ocrCloseMargin is the bounded window before the global deadline in
+	// which OCR is asked to stop and write its partial JSON. The hard stop
+	// still lands on the deadline: a process that ignores the signal never
+	// outlives it.
+	ocrCloseMargin = 20 * time.Second
 )
 
-// ocrBudget turns the time the run has left into OCR's own limits. OCR's
-// --timeout is a per-subtask budget that OCR multiplies by the effort rounds,
-// and OCR only stops itself (and writes its JSON with the partial results) when
-// that budget runs out. It must therefore end before the run context: a run
-// cut by the context kills OCR before it writes anything, and every finding
-// and token of the review is lost (#128). task is the value for --timeout;
-// request bounds one model call. Both are zero when no time is known.
+// ocrBudget turns the time the run has left into OCR's own fallback limits.
+// OCR's --timeout is a per-task budget that OCR multiplies by the effort
+// rounds, and OCR only stops itself (and writes its JSON with the partial
+// results) when that budget runs out. It must therefore end before the run
+// context: a run cut by the context kills OCR before it writes anything, and
+// every finding and token of the review is lost (#128). task is the value for
+// --timeout; request bounds one model call. Both are zero when no time is
+// known. This is the fallback for platforms that cannot close OCR gradually;
+// see ocrLimits for the global mode.
 func ocrBudget(remaining time.Duration, effort string) (task, request time.Duration) {
 	if remaining <= 0 {
 		return 0, 0
@@ -239,6 +265,100 @@ func ocrBudget(remaining time.Duration, effort string) (task, request time.Durat
 		request = ocrRequestMax
 	}
 	return task, request
+}
+
+// ocrLimits resolves OCR's flags for the mode in use. In global mode the
+// per-task deadline is disabled (zero) and the request limit is independent:
+// it keeps the same bounded value, so a hung provider call still fails well
+// inside the run even when the groups share all the time.
+func ocrLimits(remaining time.Duration, effort string, global bool) (task, request time.Duration) {
+	fallbackTask, request := ocrBudget(remaining, effort)
+	if global {
+		return 0, request
+	}
+	return fallbackTask, request
+}
+
+// ocrStopDeadline returns the absolute instant at which OCR must stop. It is
+// the run deadline minus the reserve kept for parsing, chunking, verification
+// and publishing, so the gradual close never eats the post-processing window.
+// Every group of one run derives from the same context, so they share this
+// instant instead of each receiving a fresh, rounded per-group minute. When
+// there is no room for the reserve it falls back to the run deadline rather
+// than failing immediately.
+func ocrStopDeadline(now time.Time, ctx context.Context, timeout time.Duration) (time.Time, bool) {
+	runDeadline, ok := earliestDeadline(now, ctx, timeout)
+	if !ok {
+		return time.Time{}, false
+	}
+	remaining := runDeadline.Sub(now)
+	if remaining <= 0 {
+		return runDeadline, true
+	}
+	reserve := remaining / ocrReserveShare
+	if reserve < ocrReserveMin {
+		reserve = ocrReserveMin
+	}
+	// Cap the reserve at half the remaining time. A flat floor makes the OCR
+	// budget non-monotonic around the floor (2m01s left would yield 1s of OCR
+	// while 1m59s left yielded 1m59s).
+	if maxReserve := remaining / 2; reserve > maxReserve {
+		reserve = maxReserve
+	}
+	return now.Add(remaining - reserve), true
+}
+
+func earliestDeadline(now time.Time, ctx context.Context, timeout time.Duration) (time.Time, bool) {
+	var deadline time.Time
+	ok := false
+	if timeout > 0 {
+		deadline = now.Add(timeout)
+		ok = true
+	}
+	if ctxDeadline, has := ctx.Deadline(); has && (!ok || ctxDeadline.Before(deadline)) {
+		deadline = ctxDeadline
+		ok = true
+	}
+	return deadline, ok
+}
+
+// verifyStopDeadline is the verifier's stop. Its timeout is already a share of
+// the run (verify_time_share), so the main run's post-processing reserve must
+// not shrink it a second time; it only yields to the run context deadline.
+func verifyStopDeadline(now time.Time, ctx context.Context, timeout time.Duration) (time.Time, bool) {
+	return earliestDeadline(now, ctx, timeout)
+}
+
+// nativeTimeoutError identifies which deadline stopped OCR. Kind is "global"
+// for the run's total deadline (and its per-group fallback); OCR's own task
+// budget arrives as JSON instead of an error.
+type nativeTimeoutError struct {
+	Kind string
+	Err  error
+}
+
+func (e *nativeTimeoutError) Error() string {
+	switch e.Kind {
+	case "global":
+		return "deadline exceeded: " + e.Err.Error()
+	default:
+		return "per-group deadline exceeded: " + e.Err.Error()
+	}
+}
+
+func (e *nativeTimeoutError) Unwrap() error { return e.Err }
+
+// timeoutCodeFromKind maps the internal close kind onto the run error code the
+// panel and the log display.
+func timeoutCodeFromKind(kind string) string {
+	switch kind {
+	case "http":
+		return "timeout_http"
+	case "group":
+		return "timeout_group"
+	default:
+		return "timeout_global"
+	}
 }
 
 // effortRounds mirrors OCR's effort presets: low, medium and high run one, two
@@ -277,8 +397,11 @@ type NativeReviewer struct {
 	TokenBudget int64
 	// Timeout is the most this invocation may run. The context deadline wins
 	// when it is earlier, which is the case for chunks reviewed after the
-	// main run; ocrBudget derives OCR's own limits from whichever is shorter.
+	// main run; the invocation deadline is shared with OCR's gradual close.
 	Timeout time.Duration
+	// CloseMargin overrides ocrCloseMargin. Tests use a short window; zero
+	// keeps the production margin.
+	CloseMargin time.Duration
 	// OnLog receives every stderr line as OCR prints it, so the review log can
 	// stream progress live. Nil keeps the buffered path used elsewhere.
 	OnLog func(line string)
@@ -305,13 +428,24 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 	if err != nil {
 		return nativeReview{}, nil, err
 	}
-	remaining := n.Timeout
-	if deadline, ok := ctx.Deadline(); ok {
-		if left := time.Until(deadline); remaining <= 0 || left < remaining {
-			remaining = left
-		}
+	now := time.Now()
+	deadline, hasDeadline := ocrStopDeadline(now, ctx, n.Timeout)
+	remaining := time.Duration(0)
+	if hasDeadline {
+		remaining = deadline.Sub(now)
 	}
-	taskTimeout, requestTimeout := ocrBudget(remaining, n.Effort)
+	margin := n.CloseMargin
+	if margin <= 0 {
+		margin = ocrCloseMargin
+	}
+	graceful := gracefulStopSupported()
+	// With enough room for the signal, OCR gets no per-task deadline at all:
+	// every group shares this run's absolute deadline.
+	global := graceful && remaining > margin
+	// The fallback per-task budget derives from the stop window, so OCR's own
+	// deadline always lands before the hard stop on platforms without a
+	// graceful close.
+	taskTimeout, requestTimeout := ocrLimits(remaining, n.Effort, global)
 	if err := writeNativeConfig(home, n.Profile, keyPath, requestTimeout); err != nil {
 		return nativeReview{}, nil, err
 	}
@@ -336,9 +470,16 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 		MaxTokens:      n.MaxTokens,
 		TokenBudget:    n.TokenBudget,
 		TaskTimeout:    taskTimeout,
+		GlobalDeadline: global,
 	})
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmdCtx := ctx
+	if hasDeadline {
+		var cancel context.CancelFunc
+		cmdCtx, cancel = context.WithDeadline(ctx, deadline)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(cmdCtx, bin, args...)
 	cmd.Dir = n.RepoDir
 	cmd.Env = reviewEnv(os.Environ(), n.APIKey, home)
 	isolateProcessGroup(cmd)
@@ -347,22 +488,42 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 
-	var runErr error
-	if n.OnLog != nil {
-		runErr = runNativeStreaming(cmd, &stderr, n.OnLog)
-	} else {
-		cmd.Stderr = &stderr
-		runErr = cmd.Run()
-	}
-	if cause := ctx.Err(); cause != nil {
-		return nativeReview{}, nil, fmt.Errorf("ocr review: %w", cause)
+	closer, runErr := execNative(cmd, &stderr, n.OnLog, deadline, graceful, margin)
+	signalled, _ := closer.result()
+	exitedAt := time.Now()
+	// Decide from the exit instant, not from the timer race: an exit at or
+	// after the deadline is a hard stop even if the timer had not fired yet.
+	hardStopped := hasDeadline && !exitedAt.Before(deadline)
+	if cause := cmdCtx.Err(); cause != nil {
+		if errors.Is(cause, context.Canceled) {
+			return nativeReview{}, nil, fmt.Errorf("ocr review: %w", cause)
+		}
+		if len(bytes.TrimSpace(stdout.Bytes())) == 0 {
+			return nativeReview{}, nil, &nativeTimeoutError{Kind: "global", Err: fmt.Errorf("ocr review: %w", cause)}
+		}
 	}
 	if len(bytes.TrimSpace(stdout.Bytes())) == 0 {
-		return nativeReview{}, nil, nativeExecError(runErr, stderr.String())
+		runErr = nativeExecError(runErr, stderr.String())
+		if signalled || hardStopped {
+			return nativeReview{}, nil, &nativeTimeoutError{Kind: "global", Err: runErr}
+		}
+		return nativeReview{}, nil, runErr
 	}
 	res, err := parseNativeReview(stdout.Bytes())
 	if err != nil {
-		return nativeReview{}, stdout.Bytes(), nativeExecError(runErr, stderr.String())
+		runErr = nativeExecError(runErr, stderr.String())
+		if signalled || hardStopped {
+			return nativeReview{}, stdout.Bytes(), &nativeTimeoutError{Kind: "global", Err: runErr}
+		}
+		return nativeReview{}, stdout.Bytes(), runErr
+	}
+	if signalled || hardStopped || (hasDeadline && !time.Now().Before(deadline)) {
+		// OCR wrote a report after the worker asked it to close. Keep it: the
+		// caller persists its coverage, findings and usage even though the
+		// run ends inconclusive.
+		res.closeReason = "global"
+		res.closeElapsed = closer.closeElapsed()
+		res.hardStopped = hardStopped
 	}
 	return res, stdout.Bytes(), nil
 }
@@ -378,16 +539,128 @@ const (
 	maxNativeStderr = 64 << 10
 )
 
+// ocrCloser arms the gradual close of one OCR invocation. It asks the child
+// to finish with a signal a bounded margin before the deadline, then hard-stops
+// the process tree at the deadline if it ignored the signal.
+type ocrCloser struct {
+	cmd *exec.Cmd
+	// signalFn and killFn are the platform hooks; tests substitute them to
+	// exercise the timing on platforms without POSIX signals.
+	signalFn func(*exec.Cmd) error
+	killFn   func(*exec.Cmd) error
+
+	signalled   atomic.Bool
+	hardStopped atomic.Bool
+	closeAt     atomic.Int64
+	hardStopAt  atomic.Int64
+	timers      []*time.Timer
+}
+
+func newOCRCloser(cmd *exec.Cmd) *ocrCloser {
+	return &ocrCloser{cmd: cmd, signalFn: signalProcessGroup, killFn: killProcessGroup}
+}
+
+// arm schedules the close for the remaining time. It must run after Start, so
+// a timer never signals a process that does not exist yet. The hard stop is
+// always armed when there is a deadline: a process that ignores the graceful
+// signal must not outlive it.
+func (c *ocrCloser) arm(remaining, margin time.Duration, graceful bool) {
+	if c == nil || remaining <= 0 {
+		return
+	}
+	if graceful && remaining > margin {
+		c.timers = append(c.timers, time.AfterFunc(remaining-margin, c.requestClose))
+	}
+	c.timers = append(c.timers, time.AfterFunc(remaining, c.hardStop))
+}
+
+func (c *ocrCloser) requestClose() {
+	c.signalled.Store(true)
+	c.closeAt.Store(time.Now().UnixNano())
+	if c.signalFn != nil {
+		_ = c.signalFn(c.cmd)
+	}
+}
+
+func (c *ocrCloser) hardStop() {
+	c.hardStopped.Store(true)
+	c.hardStopAt.Store(time.Now().UnixNano())
+	if c.killFn != nil {
+		_ = c.killFn(c.cmd)
+	}
+}
+
+func (c *ocrCloser) stop() {
+	if c == nil {
+		return
+	}
+	for _, timer := range c.timers {
+		timer.Stop()
+	}
+}
+
+func (c *ocrCloser) result() (signalled, hardStopped bool) {
+	return c.signalled.Load(), c.hardStopped.Load()
+}
+
+// closeElapsed reports how long OCR took to exit after the worker started the
+// close, or zero when neither the signal nor the hard stop fired.
+func (c *ocrCloser) closeElapsed() time.Duration {
+	at := c.closeAt.Load()
+	if at == 0 {
+		at = c.hardStopAt.Load()
+	}
+	if at == 0 {
+		return 0
+	}
+	return time.Since(time.Unix(0, at))
+}
+
+// execNative runs a prepared OCR command and arms the gradual close for its
+// deadline. The closer is returned so the caller can tell a deadline close
+// from a normal exit.
+func execNative(cmd *exec.Cmd, stderr *bytes.Buffer, onLog func(string), deadline time.Time, graceful bool, margin time.Duration) (*ocrCloser, error) {
+	closer := newOCRCloser(cmd)
+	runErr := runNativeCommand(cmd, stderr, onLog, func() {
+		remaining := time.Duration(0)
+		if !deadline.IsZero() {
+			remaining = time.Until(deadline)
+		}
+		closer.arm(remaining, margin, graceful)
+	})
+	closer.stop()
+	return closer, runErr
+}
+
+// runNativeCommand starts the child and calls started immediately after Start,
+// when the process exists. Nil onLog keeps the buffered path used elsewhere.
+func runNativeCommand(cmd *exec.Cmd, stderr *bytes.Buffer, onLog func(string), started func()) error {
+	if onLog != nil {
+		return runNativeStreaming(cmd, stderr, onLog, started)
+	}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	if started != nil {
+		started()
+	}
+	return cmd.Wait()
+}
+
 // runNativeStreaming starts cmd with its stderr piped, feeds every line to
 // onLog as it arrives and keeps a copy for the error message. Reading happens
 // before Wait, which is the only safe order for StderrPipe.
-func runNativeStreaming(cmd *exec.Cmd, stderr *bytes.Buffer, onLog func(string)) error {
+func runNativeStreaming(cmd *exec.Cmd, stderr *bytes.Buffer, onLog func(string), started func()) error {
 	pipe, err := cmd.StderrPipe()
 	if err != nil {
 		return fmt.Errorf("ocr review: capturar stderr: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
 		return err
+	}
+	if started != nil {
+		started()
 	}
 	scanner := bufio.NewScanner(pipe)
 	scanner.Buffer(make([]byte, 0, 64<<10), stderrScannerLimit)
@@ -753,6 +1026,12 @@ func nativeOutcome(res nativeReview) (status, code string) {
 	if state == "" {
 		state = strings.ToLower(strings.TrimSpace(res.Manifest.TerminalState))
 	}
+	// The worker asked OCR to close because the run deadline arrived. Whatever
+	// failure OCR reported alongside the close, the run is inconclusive: it
+	// must keep the findings and coverage of the work that did finish.
+	if res.closeReason == "global" && (state == "failed" || state == "partial") {
+		return store.RunInconclusive, timeoutCodeFromKind("global")
+	}
 	switch state {
 	case "complete":
 		return store.RunSucceeded, ""
@@ -771,7 +1050,7 @@ func nativeOutcome(res nativeReview) (status, code string) {
 		case "budget":
 			return store.RunInconclusive, "token_budget"
 		case "timeout", "cancelled", "canceled":
-			return store.RunInconclusive, "timeout"
+			return store.RunInconclusive, nativeTimeoutCode(res)
 		case "input", "configuration", "config":
 			return store.RunFailed, "config"
 		default:
@@ -780,6 +1059,27 @@ func nativeOutcome(res nativeReview) (status, code string) {
 	default:
 		return store.RunFailed, "ocr_error"
 	}
+}
+
+// nativeTimeoutCode distinguishes the three timeouts the panel must not
+// conflate: the run's total deadline (the worker closed OCR), a bounded model
+// request, and OCR's own per-group fallback budget.
+func nativeTimeoutCode(res nativeReview) string {
+	if res.closeReason == "global" {
+		return timeoutCodeFromKind("global")
+	}
+	for _, item := range res.Manifest.Coverage.Failed {
+		class := strings.ToLower(strings.TrimSpace(item.Classification))
+		if class != "timeout" && class != "cancelled" && class != "canceled" {
+			continue
+		}
+		reason := strings.ToLower(item.Reason)
+		if strings.Contains(reason, "request") || strings.Contains(reason, "http") ||
+			strings.Contains(reason, "provider") || strings.Contains(reason, "timeout_sec") {
+			return timeoutCodeFromKind("http")
+		}
+	}
+	return timeoutCodeFromKind("group")
 }
 
 // nativeBudgetOnly reports whether every failure OCR recorded was caused by the
@@ -873,6 +1173,15 @@ func nativeStatusMessage(res nativeReview, code string) string {
 				"%d archivo(s) sin revisar (revisados: %d)", skipped, reviewed)
 	case "coverage_incomplete":
 		return fmt.Sprintf("cobertura incompleta: %d archivo(s) sin revisar de %d", skipped, reviewed+skipped)
+	case "timeout_global":
+		return "se agotó el plazo total de la revisión (deadline exceeded); " +
+			"se conservan los hallazgos y la cobertura disponibles"
+	case "timeout_group":
+		return "un grupo de archivos agotó su plazo de ejecución; " +
+			"se conservan los hallazgos y la cobertura disponibles"
+	case "timeout_http":
+		return "una petición al proveedor agotó su tiempo (timeout HTTP); " +
+			"se conservan los hallazgos y la cobertura disponibles"
 	case "timeout":
 		return "OCR agotó el tiempo de revisión; vuelve a intentarlo o aumenta review_timeout en Ajustes → Revisión"
 	case "config":

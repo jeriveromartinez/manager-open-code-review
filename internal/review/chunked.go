@@ -3,6 +3,7 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -248,9 +249,10 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 			continue
 		}
 		if ctx.Err() != nil {
-			summary.markNotReviewed(path, "timeout")
+			reason := chunkErrorReason(ctx, ctx.Err())
+			summary.markNotReviewed(path, reason)
 			log.Log(ctx, "worker", "", "warn", logPhaseChunks,
-				fmt.Sprintf("%s no se revisó: la revisión se agotó", path))
+				fmt.Sprintf("%s no se revisó (%s): la revisión se agotó", path, reason))
 			slog.Info("chunked too-large file", "run_id", runID, "path", path, "chunks", 0, "failures", 1)
 			continue
 		}
@@ -281,7 +283,7 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 			if ctx.Err() != nil {
 				failures++
 				if reason == "" {
-					reason = "timeout"
+					reason = chunkErrorReason(ctx, ctx.Err())
 				}
 				log.Log(ctx, "worker", invocation, "warn", logPhaseChunks,
 					fmt.Sprintf("trozo %d/%d de %s no ejecutado: la revisión se agotó", i+1, len(chunks), path))
@@ -354,8 +356,16 @@ func chunkLogLine(path string, index, total int, res nativeReview, reviewErr err
 	}
 	status, code := nativeOutcome(res)
 	suffix := terminalCodeSuffix(code)
-	return fmt.Sprintf("%sterminó en %s con estado %s%s y %d hallazgo(s)",
-		prefix, elapsed.Round(time.Second), status, suffix, len(res.Comments))
+	closeInfo := ""
+	if res.closeReason != "" {
+		reason := "cierre gradual"
+		if res.hardStopped {
+			reason = "parada dura"
+		}
+		closeInfo = fmt.Sprintf(", %s en %s", reason, res.closeElapsed.Round(time.Millisecond))
+	}
+	return fmt.Sprintf("%sterminó en %s con estado %s%s%s y %d hallazgo(s)",
+		prefix, elapsed.Round(time.Second), status, suffix, closeInfo, len(res.Comments))
 }
 
 // finishChunk records one chunk result: usage always counts, a successful chunk
@@ -382,7 +392,14 @@ func finishChunk(ctx context.Context, summary *chunkSummary, path string, res na
 }
 
 func chunkErrorReason(ctx context.Context, err error) string {
+	var timeout *nativeTimeoutError
+	if errors.As(err, &timeout) {
+		return timeoutCodeFromKind(timeout.Kind)
+	}
 	if truncatedContext(ctx, err) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return timeoutCodeFromKind("global")
+		}
 		return "timeout"
 	}
 	return "provider"
@@ -390,8 +407,8 @@ func chunkErrorReason(ctx context.Context, err error) string {
 
 func chunkFailureReason(code string, tooLarge bool) string {
 	switch code {
-	case "timeout":
-		return "timeout"
+	case "timeout", "timeout_global", "timeout_group", "timeout_http":
+		return code
 	case "token_budget":
 		return "token_budget"
 	}

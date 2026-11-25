@@ -122,8 +122,9 @@ type RunnerConfig struct {
 	// ContextCeiling is the global review_context_ceiling. A team policy can
 	// override it per run.
 	ContextCeiling int
-	// Timeout is the whole-run budget. It bounds the execution context and
-	// derives OCR's own concurrent-task timeout.
+	// Timeout is the whole-run budget. It bounds the execution context and is
+	// the global deadline OCR's groups share; when it approaches, the worker
+	// asks OCR to close gracefully before the hard stop.
 	Timeout time.Duration
 }
 
@@ -613,6 +614,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	r.setPhase(runCtx, run.ID, store.RunPhaseCloning, log)
 	log.Log(runCtx, "worker", "", "info", logPhaseClone,
 		fmt.Sprintf("clonando %s (%s → %s)", cfg.Repo.FullName, baseRef, headRef))
+	cloneStarted := time.Now()
 	mergeBase, err := Clone(runCtx, workDir, remote, baseRef, headRef, r.Cfg.FetchDepthMax)
 	if err != nil {
 		log.Log(runCtx, "worker", "", "error", logPhaseClone, fmt.Sprintf("falló el clonado: %v", err))
@@ -625,7 +627,8 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		return out.failed(fmt.Errorf("resolver HEAD del checkout: %w", err), "git_error"), nil
 	}
 	log.Log(runCtx, "worker", "", "info", logPhaseClone,
-		fmt.Sprintf("checkout listo: head %s, merge-base %s", headSHA, mergeBase))
+		fmt.Sprintf("checkout listo en %s: head %s, merge-base %s",
+			time.Since(cloneStarted).Round(time.Second), headSHA, mergeBase))
 	if run.HeadSHA != "" && !strings.EqualFold(headSHA, run.HeadSHA) {
 		// refs/pull/<n>/head is a moving ref: a push can land between the
 		// trigger and the clone. Reviewing that code and publishing it under
@@ -810,9 +813,18 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 	status, code := nativeOutcome(res)
 	reviewed, skipped, excluded := nativeCoverageCounts(res)
+	closeInfo := ""
+	if res.closeReason != "" {
+		reason := "cierre gradual"
+		if res.hardStopped {
+			reason = "cierre gradual sin respuesta; parada dura"
+		}
+		closeInfo = fmt.Sprintf(", %s en %s", reason, res.closeElapsed.Round(time.Millisecond))
+	}
 	log.Log(runCtx, "worker", "main", "info", logPhaseOCR, fmt.Sprintf(
-		"OCR terminó en %s: estado %s, %d archivo(s) revisados, %d omitidos, %d excluidos, %d hallazgo(s)",
-		time.Since(started).Round(time.Second), status, reviewed, skipped, excluded, len(res.Comments)))
+		"OCR terminó en %s%s: estado %s%s, %d archivo(s) revisados, %d omitidos, %d excluidos, %d hallazgo(s)",
+		time.Since(started).Round(time.Second), closeInfo, status, terminalCodeSuffix(code),
+		reviewed, skipped, excluded, len(res.Comments)))
 	files := nativeCoverageFiles(res)
 	out.tokens = nativeTokenUsage(res)
 	out.tokensKnown = res.hasSummary
@@ -1219,10 +1231,18 @@ func classifyCloneError(ctx context.Context, out runOutcome, err error) (runOutc
 }
 
 // classifyNativeError handles failures that produced no parseable OCR result.
-// A configuration failure is terminal; anything else that is not our own
-// deadline is reported as an OCR error and keeps the run inconclusive.
+// A configuration failure is terminal; a deadline is classified by its kind so
+// the panel can tell the run-wide deadline from OCR's own request or per-group
+// timeout.
 func classifyNativeError(ctx context.Context, out runOutcome, err error) (runOutcome, error) {
+	var timeout *nativeTimeoutError
+	if errors.As(err, &timeout) {
+		return out.inconclusive(err, timeoutCodeFromKind(timeout.Kind)), nil
+	}
 	if truncatedContext(ctx, err) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return out.inconclusive(err, timeoutCodeFromKind("global")), nil
+		}
 		return out.inconclusive(err, "timeout"), nil
 	}
 	message := strings.ToLower(err.Error())
