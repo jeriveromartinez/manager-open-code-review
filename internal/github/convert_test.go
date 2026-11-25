@@ -78,6 +78,7 @@ func newTestPR(state string, mergedAt, updatedAt time.Time, draft bool) *gh.Pull
 	p := &gh.PullRequest{
 		Number:            prInt(42),
 		Title:             prString("Ajustar pipeline de QA"),
+		Body:              prString("Cierra el bucle de reintentos."),
 		State:             prString(state),
 		User:              &gh.User{Login: prString("octocat")},
 		AuthorAssociation: prString("CONTRIBUTOR"),
@@ -134,6 +135,7 @@ func TestPRFromGitHub(t *testing.T) {
 				RepositoryID:      repoID,
 				Number:            42,
 				Title:             "Ajustar pipeline de QA",
+				Body:              "Cierra el bucle de reintentos.",
 				AuthorLogin:       "octocat",
 				AuthorAssociation: "CONTRIBUTOR",
 				HeadSHA:           "headsha",

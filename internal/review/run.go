@@ -17,7 +17,6 @@ import (
 
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
-	"github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
@@ -142,7 +141,6 @@ type Enqueuer interface {
 // Runner executes one queued review run end to end.
 type Runner struct {
 	Store  *store.Store
-	Apps   github.AppProvider
 	Box    *crypto.Box
 	Events events.Publisher
 	Jobs   Enqueuer
@@ -812,6 +810,31 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			reserved.tokens, reserved.timeout.Round(time.Second)))
 	}
 
+	// The review context is profile-independent, so it is built once and reused
+	// by every fallback attempt; each attempt still gets its own reviewer.
+	linked := linkedContext{}
+	if len(run.LinkedIssues) > 0 {
+		if err := json.Unmarshal(run.LinkedIssues, &linked); err != nil {
+			log.Log(runCtx, "worker", "", "warn", logPhasePrepare,
+				fmt.Sprintf("contexto: no se pudo leer el contexto de issues enlazados: %v", err))
+		}
+	}
+	if len(linked.Issues) > 0 {
+		log.Log(runCtx, "worker", "", "info", logPhasePrepare,
+			fmt.Sprintf("contexto: %d referencia(s) a issues enlazados", len(linked.Issues)))
+	}
+	changedFiles, err := changedPaths(runCtx, workDir, ocrBase, headSHA)
+	if err != nil {
+		log.Log(runCtx, "worker", "", "warn", logPhasePrepare,
+			fmt.Sprintf("contexto: no se pudo listar el diff para contexto del repositorio: %v", err))
+	}
+	contextBytes := backgroundContextBudget(ceiling, budget)
+	repoBudget := minInt(repositoryContextBudget(ceiling, budget), contextBytes/4)
+	repoCtx := buildRepositoryContext(workDir, headSHA, changedFiles, err, repoBudget)
+	for _, note := range repoCtx.Notes {
+		log.Log(runCtx, "worker", "", "info", logPhasePrepare, "contexto: "+note)
+	}
+
 	candidates := r.reviewProfiles(runCtx, cfg)
 	var (
 		res             nativeReview
@@ -883,13 +906,18 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		attemptKnown = false
 
 		reviewer = &NativeReviewer{
-			Bin:         r.Cfg.OCRBin,
-			RepoDir:     workDir,
-			Home:        filepath.Join(workDir, "home-ocr"),
-			Profile:     cfg.Profile,
-			APIKey:      string(key),
-			Excludes:    excludes,
-			Background:  buildBackground(cfg.PR, cfg.Policy.ExtraInstructions),
+			Bin:      r.Cfg.OCRBin,
+			RepoDir:  workDir,
+			Home:     filepath.Join(workDir, "home-ocr"),
+			Profile:  candidate,
+			APIKey:   string(key),
+			Excludes: excludes,
+			Background: buildBackground(cfg.PR, cfg.Policy.ExtraInstructions, backgroundExtras{
+				linked:          linked,
+				repo:            repoCtx,
+				contextBytes:    contextBytes,
+				contextBytesSet: true,
+			}),
 			BaseRef:     fromSHA,
 			HeadRef:     headSHA,
 			Effort:      effort,
@@ -899,10 +927,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			OnLog:       log.OCRLogger(runCtx, "main"),
 		}
 
-		// The reviewer was built with the policy profile; point it at the
-		// attempt's own destination, isolated home and remaining budget.
+		// Point the attempt at its own isolated home and remaining budget; the
+		// profile was already resolved to the candidate above.
 		reviewer.Home = filepath.Join(workDir, fmt.Sprintf("home-ocr-%d", attemptSeq))
-		reviewer.Profile = candidate
 		reviewer.TokenBudget = attemptFallbackBudget(budget, out.tokens)
 
 		r.setPhase(runCtx, run.ID, store.RunPhaseReviewing, log)

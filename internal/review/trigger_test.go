@@ -177,6 +177,16 @@ func newTriggerFixture(t *testing.T) *triggerFixture {
 		tokenExpires: expiresAt,
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/issues/") {
+			parts := strings.Split(r.URL.Path, "/")
+			if parts[len(parts)-1] != "12" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, `{"number":12,"title":"Retries","body":"## Acceptance criteria\n- [ ] backoff"}`)
+			return
+		}
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/compare/") {
 			f.mu.Lock()
 			f.compareCalls++
@@ -396,6 +406,31 @@ func TestTriggerEnqueuesReview(t *testing.T) {
 	}
 	if len(f.checks.cancelled) != 0 {
 		t.Errorf("CancelCheck calls = %v, want none", f.checks.cancelled)
+	}
+}
+
+func TestTriggerPersistsLinkedIssueContext(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.PullRequest{}).
+		Where("id = ?", pr.ID).Update("body", "Closes #12").Error; err != nil {
+		t.Fatalf("set PR body: %v", err)
+	}
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("runs = %v, err = %v", runs, err)
+	}
+	var linked linkedContext
+	if err := json.Unmarshal(runs[0].LinkedIssues, &linked); err != nil {
+		t.Fatalf("decode linked context %q: %v", runs[0].LinkedIssues, err)
+	}
+	if len(linked.Issues) != 1 || linked.Issues[0].Title != "Retries" ||
+		!strings.Contains(linked.Issues[0].Body, "backoff") {
+		t.Errorf("linked context = %+v, want the issue fetched in the control process", linked)
 	}
 }
 

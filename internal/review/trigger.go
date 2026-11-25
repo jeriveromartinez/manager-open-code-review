@@ -2,6 +2,7 @@ package review
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"gorm.io/datatypes"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/crypto"
 	"github.com/jeriveromartinez/qa-control-center/internal/events"
@@ -550,6 +552,13 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 		return false, fmt.Errorf("seal clone token: %w", err)
 	}
 
+	// Resolve linked issues here, in the control process, because the review
+	// worker deliberately has no master key to decrypt GitHub App credentials.
+	// The snapshot travels with the run so repairs and retries reuse it.
+	linkedIssues, err := json.Marshal(loadLinkedIssues(ctx, t.Apps, cfg.Installation.ID, cfg.Repo.FullName, cfg.PR.Body))
+	if err != nil {
+		return false, fmt.Errorf("encode linked issue context: %w", err)
+	}
 	run, err := t.Store.CreateReviewRun(ctx, store.ReviewRun{
 		PullRequestID:       prID,
 		ProfileID:           cfg.Profile.ID,
@@ -563,6 +572,7 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 		CloneTokenExpiresAt: &expiresAt,
 		PolicyRevision:      cfg.PolicyRevision,
 		PolicyObservation:   cfg.PolicyObservation,
+		LinkedIssues:        datatypes.JSON(linkedIssues),
 	})
 	if err != nil {
 		// The partial unique index allows only one active run per PR. If a

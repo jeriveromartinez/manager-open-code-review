@@ -598,7 +598,6 @@ func newE2EFixture(t *testing.T) *e2eFixture {
 		PublicURL: "https://qa.example",
 	}
 	runner := f.runner()
-	runner.Apps = apps
 	runner.Events = publisher
 	runner.Jobs = f.jobs
 

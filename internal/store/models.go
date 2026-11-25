@@ -152,10 +152,13 @@ type Repository struct {
 
 // PullRequest is a GitHub pull request with its QA workflow state.
 type PullRequest struct {
-	ID                uint   `gorm:"column:id;primaryKey"`
-	RepositoryID      int64  `gorm:"column:repository_id"`
-	Number            int    `gorm:"column:number"`
-	Title             string `gorm:"column:title"`
+	ID           uint   `gorm:"column:id;primaryKey"`
+	RepositoryID int64  `gorm:"column:repository_id"`
+	Number       int    `gorm:"column:number"`
+	Title        string `gorm:"column:title"`
+	// Body is the PR description as GitHub reports it. It is untrusted text and
+	// the review context fences and bounds it before sending it to the model.
+	Body              string `gorm:"column:body"`
 	AuthorLogin       string `gorm:"column:author_login"`
 	AuthorAssociation string `gorm:"column:author_association"`
 	HeadSHA           string `gorm:"column:head_sha"`
@@ -434,6 +437,11 @@ type ReviewRun struct {
 	// that waits in the queue longer than the token lives. Nil on runs created
 	// before the expiry was stored.
 	CloneTokenExpiresAt *time.Time `gorm:"column:clone_token_expires_at"`
+	// LinkedIssues is the bounded context the control process resolved for this
+	// run: the linked issues' titles, criteria and any inaccessible reference
+	// (#139). The worker process has no master key, so it cannot call GitHub
+	// itself and reads this snapshot instead.
+	LinkedIssues datatypes.JSON `gorm:"column:linked_issues"`
 	// Structured token consumption, summed over every model call of the run.
 	// Nil on runs created before consumption was recorded (#73).
 	InputTokens      *int64 `gorm:"column:input_tokens"`
