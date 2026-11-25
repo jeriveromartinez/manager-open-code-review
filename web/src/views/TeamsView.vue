@@ -24,6 +24,7 @@ const usersLoading = ref(false)
 const formError = ref<string | null>(null)
 const newTeamName = ref('')
 const drafts = ref<Record<number, { userId: number | null; role: TeamRole }>>({})
+const pageTitle = ref<HTMLElement | null>(null)
 
 type BlockingRepository = { id: number; full_name: string }
 
@@ -256,8 +257,11 @@ async function submitRename(): Promise<void> {
     await api.renameTeam(team.id, name)
     closeRename()
     await load()
-  } catch {
-    renameError.value = 'No se pudo renombrar el equipo'
+  } catch (err) {
+    renameError.value =
+      err instanceof ApiError && err.status === 409
+        ? 'Ya existe un equipo con ese nombre'
+        : 'No se pudo renombrar el equipo'
   } finally {
     renameSaving.value = false
   }
@@ -290,7 +294,7 @@ async function openDelete(team: Team): Promise<void> {
   if (team.repository_count > 0) await loadAssignedRepositories(team)
 }
 
-function closeDelete(): void {
+function closeDelete(restoreFocus = true): void {
   const returnTo = deleteReturnFocus
   deleteReturnFocus = null
   deleteTarget.value = null
@@ -298,7 +302,7 @@ function closeDelete(): void {
   deleteConfirmName.value = ''
   deleteError.value = null
   deleteBlocked.value = []
-  returnTo?.focus()
+  if (restoreFocus) returnTo?.focus()
 }
 
 async function reassignRepository(repo: Repository, event: Event): Promise<void> {
@@ -334,8 +338,9 @@ async function submitDelete(): Promise<void> {
   deleteBlocked.value = []
   try {
     await api.deleteTeam(team.id)
-    closeDelete()
+    closeDelete(false)
     await load()
+    pageTitle.value?.focus()
   } catch (err) {
     const repositories = conflictRepositories(err)
     if (repositories.length > 0) {
@@ -360,7 +365,7 @@ onMounted(() => {
   <section class="teams">
     <header class="page-header">
       <div>
-        <h1 class="page-title">Equipos</h1>
+        <h1 ref="pageTitle" class="page-title" tabindex="-1">Equipos</h1>
         <p class="page-subtitle">Equipos, miembros y responsabilidades</p>
       </div>
       <form v-if="isAdmin" class="create-team" @submit.prevent="createTeam">
@@ -571,7 +576,7 @@ onMounted(() => {
       </div>
     </div>
 
-    <div v-if="deleteTarget" class="modal-backdrop" @keydown.esc="closeDelete">
+    <div v-if="deleteTarget" class="modal-backdrop" @keydown.esc="closeDelete()">
       <div
         ref="deleteDialog"
         class="modal"
@@ -649,7 +654,7 @@ onMounted(() => {
             <p v-if="deleteError" class="form-error" role="alert">{{ deleteError }}</p>
           </div>
           <footer class="modal__actions">
-            <button class="button button--ghost" type="button" @click="closeDelete">
+            <button class="button button--ghost" type="button" @click="closeDelete()">
               Cancelar
             </button>
             <button

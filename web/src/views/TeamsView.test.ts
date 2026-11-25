@@ -356,6 +356,25 @@ describe('TeamsView', () => {
     wrapper.unmount()
   })
 
+  it('explains a name collision when renaming', async () => {
+    mocks.session.me = admin
+    mocks.api.renameTeam.mockRejectedValue(new ApiError(409, 'conflict', { error: 'name taken' }))
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    await card(wrapper, 1).get('[data-rename-team]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-rename-name]').setValue('T2')
+    await wrapper.get('[data-rename-dialog] form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('[data-rename-dialog]').text()).toContain(
+      'Ya existe un equipo con ese nombre',
+    )
+    wrapper.unmount()
+  })
+
   it('blocks deletion while a repository is assigned', async () => {
     mocks.session.me = admin
 
@@ -507,6 +526,27 @@ describe('TeamsView', () => {
     await flushPromises()
     expect(document.activeElement).toBe(opener.element)
 
+    wrapper.unmount()
+    host.remove()
+  })
+
+  it('moves focus to the page heading after deleting', async () => {
+    mocks.session.me = admin
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const wrapper = mount(TeamsView, { attachTo: host })
+    await flushPromises()
+
+    const opener = card(wrapper, 1).get('[data-delete-team]')
+    ;(opener.element as HTMLElement).focus()
+    await opener.trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-delete-confirm]').setValue('T1')
+    await wrapper.get('[data-delete-dialog] form').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.find('[data-delete-dialog]').exists()).toBe(false)
+    expect(document.activeElement).toBe(wrapper.get('.page-title').element)
     wrapper.unmount()
     host.remove()
   })
