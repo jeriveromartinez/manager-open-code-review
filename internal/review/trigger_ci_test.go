@@ -32,6 +32,154 @@ func gatedOpts() seedOpts {
 	return opts
 }
 
+func (f *triggerFixture) setRepoPolicy(pr store.PullRequest, policy store.RepositoryPolicy) store.RepositoryPolicy {
+	f.t.Helper()
+
+	policy.RepositoryID = pr.RepositoryID
+	saved, err := f.st.SaveRepositoryPolicy(f.ctx, policy)
+	if err != nil {
+		f.t.Fatalf("SaveRepositoryPolicy: %v", err)
+	}
+	return saved
+}
+
+func TestTriggerEnforcesRepositoryCIGateOverride(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("repo-gated", eligibleOpts())
+	f.setCI(pr, store.PRValidations{Passed: 0, Failed: 1, Total: 1})
+	requiredGreen := true
+	f.setRepoPolicy(pr, store.RepositoryPolicy{RequireGreenCI: &requiredGreen})
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	if runs := f.runsOf(pr); len(runs) != 0 {
+		t.Fatalf("runs = %+v, want none while the repository requires green CI", runs)
+	}
+
+	f.setCI(pr, store.PRValidations{Passed: 1, Total: 1})
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() after green error = %v", err)
+	}
+	runs := f.runsOf(pr)
+	if len(runs) != 1 || runs[0].Status != store.RunQueued {
+		t.Fatalf("runs = %+v, want one queued run once the override is green", runs)
+	}
+	if runs[0].PolicyObservation || runs[0].PolicyRevision == "" {
+		t.Errorf("run observation/revision = %v/%q, want enforced with a recorded revision",
+			runs[0].PolicyObservation, runs[0].PolicyRevision)
+	}
+}
+
+func TestTriggerObservationModeChangesNothing(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("repo-observe", eligibleOpts())
+	f.setCI(pr, store.PRValidations{Passed: 0, Failed: 1, Total: 1})
+	requiredGreen := true
+	f.setRepoPolicy(pr, store.RepositoryPolicy{
+		ObservationMode: true, RequireGreenCI: &requiredGreen,
+	})
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	runs := f.runsOf(pr)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %+v, want the review to proceed under the team policy", runs)
+	}
+	if !runs[0].PolicyObservation {
+		t.Error("PolicyObservation = false, want true for an observed override")
+	}
+	if runs[0].PolicyRevision == "" {
+		t.Error("PolicyRevision is empty, want the observed revision recorded with the run")
+	}
+}
+
+func TestEnqueuePendingHonoursRepositoryCIGateOverride(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("polling-override", eligibleOpts())
+	f.setCI(pr, store.PRValidations{Passed: 0, Failed: 1, Total: 1})
+	requiredGreen := true
+	f.setRepoPolicy(pr, store.RepositoryPolicy{RequireGreenCI: &requiredGreen})
+
+	created, err := f.trigger.EnqueuePending(f.ctx, 50)
+	if err != nil {
+		t.Fatalf("EnqueuePending() error = %v", err)
+	}
+	if created != 0 || len(f.runsOf(pr)) != 0 {
+		t.Fatalf("created = %d, runs = %+v; want none while the repository override is red",
+			created, f.runsOf(pr))
+	}
+
+	f.setCI(pr, store.PRValidations{Passed: 1, Total: 1})
+	created, err = f.trigger.EnqueuePending(f.ctx, 50)
+	if err != nil {
+		t.Fatalf("EnqueuePending() after green error = %v", err)
+	}
+	if created != 1 {
+		t.Fatalf("created = %d, want one run once the override is green", created)
+	}
+}
+
+func TestEnqueuePendingObservationModeIgnoresOverride(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("polling-observe", eligibleOpts())
+	f.setCI(pr, store.PRValidations{Passed: 0, Failed: 1, Total: 1})
+	requiredGreen := true
+	f.setRepoPolicy(pr, store.RepositoryPolicy{
+		ObservationMode: true, RequireGreenCI: &requiredGreen,
+	})
+
+	created, err := f.trigger.EnqueuePending(f.ctx, 50)
+	if err != nil {
+		t.Fatalf("EnqueuePending() error = %v", err)
+	}
+	if created != 1 {
+		t.Fatalf("created = %d, want one run because the override is only observed", created)
+	}
+	if runs := f.runsOf(pr); len(runs) != 1 || !runs[0].PolicyObservation {
+		t.Fatalf("runs = %+v, want one observation run", runs)
+	}
+}
+
+func TestEnqueuePendingHonoursRepositoryRequiredChecks(t *testing.T) {
+	f := newTriggerFixture(t)
+	checks, err := store.NormalizeRequiredChecks([]store.RequiredCheck{{Name: "build", Origin: "app:7"}})
+	if err != nil {
+		t.Fatalf("NormalizeRequiredChecks: %v", err)
+	}
+
+	// The team gate is on; the repository narrows the set to the named build,
+	// so another red check must not close it (#143 + #153).
+	listed := f.seed("repo-checks", gatedOpts())
+	f.setRepoPolicy(listed, store.RepositoryPolicy{RequiredChecks: checks})
+	f.setObservation(listed,
+		store.CheckObservation{Name: "build", Origin: "app:7", State: store.CheckPassed},
+		store.CheckObservation{Name: "other", Origin: "app:8", State: store.CheckFailed},
+	)
+
+	blocked := f.seed("repo-checks-pending", gatedOpts())
+	f.setRepoPolicy(blocked, store.RepositoryPolicy{RequiredChecks: checks})
+	f.setObservation(blocked,
+		store.CheckObservation{Name: "build", Origin: "app:7", State: store.CheckPending},
+		store.CheckObservation{Name: "other", Origin: "app:8", State: store.CheckPassed},
+	)
+
+	created, err := f.trigger.EnqueuePending(f.ctx, 50)
+	if err != nil {
+		t.Fatalf("EnqueuePending() error = %v", err)
+	}
+	if created != 1 {
+		t.Fatalf("created = %d, want only the PR whose required check is green", created)
+	}
+	if runs := f.runsOf(listed); len(runs) != 1 {
+		t.Errorf("listed runs = %+v, want one", runs)
+	}
+	if runs := f.runsOf(blocked); len(runs) != 0 {
+		t.Errorf("pending runs = %+v, want none while the required check is pending", runs)
+	}
+}
+
 func TestTriggerCIGateBlocksFailingChecks(t *testing.T) {
 	f := newTriggerFixture(t)
 	pr := f.seed("gated-red", gatedOpts())

@@ -414,17 +414,24 @@ func (s *Store) ListRepositories(ctx context.Context, u User) ([]Repository, err
 }
 
 // RepositoryWithPolicy is a repository plus whether its assigned team has a QA
-// policy. A repository without a team always reports false.
+// policy and whether the repository overrides it. A repository without a team
+// always reports false.
 type RepositoryWithPolicy struct {
 	Repository
-	TeamHasPolicy bool
+	TeamHasPolicy     bool
+	HasPolicyOverride bool
+	PolicyObservation bool
 }
 
 // ListRepositoriesWithPolicy applies the same visibility rules as
-// ListRepositories and annotates each row with its team policy status.
+// ListRepositories and annotates each row with its team policy status and the
+// presence of a repository override (#153).
 func (s *Store) ListRepositoriesWithPolicy(ctx context.Context, u User) ([]RepositoryWithPolicy, error) {
 	q := s.DB.WithContext(ctx).Model(&Repository{}).
-		Select("repositories.*, EXISTS (SELECT 1 FROM qa_policies p WHERE p.team_id = repositories.team_id) AS team_has_policy")
+		Select(`repositories.*,
+			EXISTS (SELECT 1 FROM qa_policies p WHERE p.team_id = repositories.team_id) AS team_has_policy,
+			EXISTS (SELECT 1 FROM repository_policies rp WHERE rp.repository_id = repositories.id) AS has_policy_override,
+			COALESCE((SELECT rp.observation_mode FROM repository_policies rp WHERE rp.repository_id = repositories.id), false) AS policy_observation`)
 	if !u.IsAdmin {
 		teams := s.DB.WithContext(ctx).Model(&TeamMember{}).
 			Select("team_id").Where("user_id = ?", u.ID)

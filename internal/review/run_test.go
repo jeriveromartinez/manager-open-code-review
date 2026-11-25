@@ -3225,3 +3225,34 @@ func TestRunHeartbeatOutlivesReviewTimeout(t *testing.T) {
 		t.Fatal("Run() kept executing after the sweep closed the run")
 	}
 }
+
+// A run can wait in the queue while the policy changes. The revision it records
+// must describe the policy it actually enforces, not the one it was enqueued
+// under (#153).
+func TestRunRecordsPolicyResolvedAtExecutionStart(t *testing.T) {
+	f := newRunTestFixture(t)
+	instructions := "reglas del repositorio"
+	if _, err := f.s.SaveRepositoryPolicy(f.ctx, store.RepositoryPolicy{
+		RepositoryID: f.pr.RepositoryID, ExtraInstructions: &instructions,
+	}); err != nil {
+		t.Fatalf("SaveRepositoryPolicy: %v", err)
+	}
+	resolved, err := f.s.ResolveReviewPolicy(f.ctx, f.pr.RepositoryID)
+	if err != nil {
+		t.Fatalf("ResolveReviewPolicy: %v", err)
+	}
+
+	// The fake ocr.sh cannot execute on every platform, but execution starts by
+	// recording the policy: that is the ordering this test pins down.
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	run := f.loadRun(t)
+	if run.PolicyRevision != resolved.Revision {
+		t.Errorf("policy revision = %q, want %q resolved at execution start",
+			run.PolicyRevision, resolved.Revision)
+	}
+	if run.PolicyObservation != resolved.Observation {
+		t.Errorf("policy observation = %v, want %v", run.PolicyObservation, resolved.Observation)
+	}
+}

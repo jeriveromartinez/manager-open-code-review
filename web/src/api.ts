@@ -145,6 +145,10 @@ export type ReviewRun = {
   /** Fase actual de un run en curso; vacía en cola, terminado o anterior a #123. */
   phase: string
   phase_started_at: string | null
+  /** Revisión de política efectiva bajo la que se ejecutó (#153); vacía en runs antiguos. */
+  policy_revision: string
+  /** El run solo observó los overrides del repositorio; aplicó la política del equipo. */
+  policy_observation: boolean
   started_at: string | null
   finished_at: string | null
   created_at: string
@@ -267,6 +271,10 @@ export type Repository = {
   enabled: boolean
   team_id: number | null
   has_policy: boolean
+  /** El repositorio tiene overrides propios sobre la política del equipo. */
+  has_policy_override: boolean
+  /** Los overrides se resuelven y registran, pero no se aplican (#153). */
+  policy_observation: boolean
   account_login: string
 }
 
@@ -450,6 +458,8 @@ export type QAPolicy = {
   verify_token_max: number
   /** Read-only: whether the profile accepts an explicit prompt cache key. */
   prompt_cache: boolean
+  /** Identifica el contenido de la política; se registra en cada revisión (#153). */
+  revision: string
   updated_at: string
 }
 
@@ -475,6 +485,70 @@ export type QAPolicyInput = Pick<
   | 'verify_time_share'
   | 'verify_token_max'
 >
+
+/**
+ * Overrides de revisión de un repositorio (#153). Solo se envían los campos
+ * que se quieren sobrescribir; `null` o ausente hereda el valor del equipo.
+ */
+export type RepositoryPolicyInput = {
+  observation_mode?: boolean
+  blocking_threshold?: string | null
+  extra_instructions?: string | null
+  exclude_globs?: string[] | null
+  max_files?: number | null
+  max_diff_lines?: number | null
+  max_passes?: number | null
+  require_green_ci?: boolean | null
+  required_checks?: RequiredCheck[] | null
+  review_context_ceiling?: number | null
+  review_effort?: ReviewEffort | null
+  review_token_budget?: number | null
+  auto_triage_mode?: AutoTriageMode | null
+  auto_withdraw?: boolean | null
+  verify_max_findings?: number | null
+  verify_max_files?: number | null
+  verify_token_share?: number | null
+  verify_time_share?: number | null
+  verify_token_max?: number | null
+}
+
+/** Overrides almacenados: `null` significa que el campo se hereda. */
+export type RepositoryPolicyOverrides = {
+  observation_mode: boolean
+  blocking_threshold: string | null
+  extra_instructions: string | null
+  exclude_globs: string[] | null
+  max_files: number | null
+  max_diff_lines: number | null
+  max_passes: number | null
+  require_green_ci: boolean | null
+  required_checks: RequiredCheck[] | null
+  review_context_ceiling: number | null
+  review_effort: ReviewEffort | null
+  review_token_budget: number | null
+  auto_triage_mode: AutoTriageMode | null
+  auto_withdraw: boolean | null
+  verify_max_findings: number | null
+  verify_max_files: number | null
+  verify_token_share: number | null
+  verify_time_share: number | null
+  verify_token_max: number | null
+}
+
+export type PolicySource = 'team' | 'repo' | 'global'
+
+/** Política efectiva de un repositorio con la procedencia de cada campo. */
+export type RepositoryPolicy = {
+  repository_id: number
+  team_id: number | null
+  inherited: boolean
+  revision: string
+  provenance: Record<string, PolicySource>
+  overrides: RepositoryPolicyOverrides
+  effective: QAPolicy
+  enforced: QAPolicy
+  updated_at: string | null
+}
 
 export type ReviewEvent = {
   type: string
@@ -570,6 +644,12 @@ export const api = {
   getPolicy: (teamId: number) => request<QAPolicy>(`/api/teams/${teamId}/policy`),
   savePolicy: (teamId: number, body: QAPolicyInput) =>
     request<QAPolicy>(`/api/teams/${teamId}/policy`, { method: 'PUT', body }),
+  getRepoPolicy: (repoId: number) =>
+    request<RepositoryPolicy>(`/api/repos/${repoId}/policy`),
+  saveRepoPolicy: (repoId: number, body: RepositoryPolicyInput) =>
+    request<RepositoryPolicy>(`/api/repos/${repoId}/policy`, { method: 'PUT', body }),
+  clearRepoPolicy: (repoId: number) =>
+    request<RepositoryPolicy>(`/api/repos/${repoId}/policy`, { method: 'DELETE' }),
   repos: () => request<Repository[]>('/api/repos'),
   patchRepo: (id: number, patch: RepoPatch) =>
     request<void>(`/api/repos/${id}`, { method: 'PATCH', body: patch }),

@@ -171,6 +171,7 @@ const policy: QAPolicy = {
   verify_time_share: 15,
   verify_token_max: 100000,
   prompt_cache: true,
+  revision: 'policy-revision',
   updated_at: '2026-11-19T10:00:00Z',
 }
 

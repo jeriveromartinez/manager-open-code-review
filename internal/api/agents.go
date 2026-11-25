@@ -475,7 +475,9 @@ type qaPolicyResponse struct {
 	ReviewerLogin           string                `json:"reviewer_login"`
 	ReviewerTeam            string                `json:"reviewer_team"`
 	PromptCache             bool                  `json:"prompt_cache"`
-	UpdatedAt               string                `json:"updated_at"`
+	// Revision identifies the policy content; a review records it (#153).
+	Revision  string `json:"revision"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // globalContextCeiling returns the global setting as the next start would load
@@ -559,6 +561,7 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 		ReviewerLogin:     p.ReviewerLogin,
 		ReviewerTeam:      p.ReviewerTeam,
 		PromptCache:       promptCache,
+		Revision:          store.PolicyRevision(p, false),
 		UpdatedAt:         p.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
@@ -616,10 +619,6 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, qaPolicyDTO(policy, s.globalContextCeiling(r.Context()), promptCache))
-}
-
-var validBlockingThresholds = map[string]bool{
-	"blocker": true, "major": true, "minor": true, "nit": true,
 }
 
 func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
@@ -683,7 +682,7 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, "invalid blocking_threshold")
 			return
 		}
-		if policy.BlockingThreshold != "" && !validBlockingThresholds[policy.BlockingThreshold] {
+		if policy.BlockingThreshold != "" && !store.ValidBlockingThreshold(policy.BlockingThreshold) {
 			writeAPIError(w, http.StatusBadRequest, "invalid blocking_threshold")
 			return
 		}
