@@ -297,26 +297,44 @@ func (p *publishContext) buildArchitectureBlock(itemsRendered bool) string {
 		if len(verdict.Dimensions) > 0 {
 			names := make([]string, 0, len(verdict.Dimensions))
 			for _, dimension := range verdict.Dimensions {
-				names = append(names, p.sanitize(dimension.Name))
+				name := p.sanitize(dimension.Name)
+				if dimension.Stale {
+					name += " (pendiente de revalidación)"
+				}
+				names = append(names, name)
 			}
 			fmt.Fprintf(&b, "\n**Dimensiones evaluadas:** %s\n", strings.Join(names, " · "))
 		}
 	}
 	writeArchitectureBaseline(&b, verdict.Baseline, p.sanitize)
-	if requested && !itemsRendered {
+	stale := verdict.Status == store.ArchitectureStale
+	if stale {
+		fmt.Fprintf(&b, "\n> Evidencia obsoleta: un push, un cambio de base o un cambio de reglas invalidó el dictamen. "+
+			"Las dimensiones afectadas no afirman su resultado anterior hasta que el análisis las vuelva a evidenciar; "+
+			"por eso no se publican sus conclusiones.\n")
+	}
+	if verdict.CarriedFrom != "" {
+		fmt.Fprintf(&b, "\n_Evidencia conservada desde %s._\n", p.sanitize(shortSHA(verdict.CarriedFrom)))
+	}
+	// Stale evidence publishes no conclusions; an advisory finding that already
+	// carries the verdict's items owns them, so the block does not repeat them.
+	switch {
+	case requested && !stale && !itemsRendered:
 		writeArchitectureItems(&b, "Comportamiento antes/después", verdict.BehaviorChanges, p.sanitize)
 		writeArchitectureItems(&b, "Riesgos y compatibilidad", verdict.Risks, p.sanitize)
 		writeArchitectureItems(&b, "Alternativas", verdict.Alternatives, p.sanitize)
 		writeArchitectureItems(&b, "Condiciones de aceptación", verdict.AcceptanceConditions, p.sanitize)
 		writeArchitectureItems(&b, "Incertidumbres", verdict.Uncertainties, p.sanitize)
-	} else if !requested {
+	case !requested && !stale:
 		// Without a requested analysis these sections hold only consumer impact.
 		writeArchitectureItems(&b, "Riesgos y compatibilidad", verdict.Risks, p.sanitize)
 		writeArchitectureItems(&b, "Incertidumbres", verdict.Uncertainties, p.sanitize)
 	}
 	b.WriteString(consumerBlock)
-	if recommendation := strings.TrimSpace(verdict.Recommendation); recommendation != "" && !itemsRendered {
-		fmt.Fprintf(&b, "\n**Recomendación original:** %s\n", p.sanitize(recommendation))
+	if requested && !stale && !itemsRendered {
+		if recommendation := strings.TrimSpace(verdict.Recommendation); recommendation != "" {
+			fmt.Fprintf(&b, "\n**Recomendación original:** %s\n", p.sanitize(recommendation))
+		}
 	}
 	if verdict.Evidence.SchemaVersion != "" || len(verdict.Evidence.CitedObservationIDs) > 0 {
 		fmt.Fprintf(&b, "\n_Evidencia: %s · %d cita(s)_\n",
@@ -543,6 +561,8 @@ func architectureStatusLabel(status string) string {
 		return "inconcluso"
 	case store.ArchitectureViolation:
 		return "violación de la línea base"
+	case store.ArchitectureStale:
+		return "obsoleto"
 	default:
 		return status
 	}

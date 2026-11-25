@@ -965,6 +965,8 @@ func architectureLogLevel(status string) string {
 		return "info"
 	case store.ArchitectureNotRequested:
 		return "info"
+	case store.ArchitectureStale:
+		return "warn"
 	default:
 		return "warn"
 	}

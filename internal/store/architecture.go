@@ -41,6 +41,11 @@ const (
 	// ones declared in the trusted baseline, with an approver and a reason.
 	ArchitectureExceptionsDeny     = "deny"
 	ArchitectureExceptionsBaseline = "baseline"
+
+	// ArchitectureStale marks evidence that a later push, base change or rule
+	// change invalidated. A stale verdict never counts as complete: its
+	// dimensions stay unknown until a review re-evidences them (#163).
+	ArchitectureStale = "stale"
 )
 
 // Versioned contract formats and their compatibility verdicts. The comparison
@@ -153,6 +158,10 @@ type ArchitectureVerdict struct {
 	Model              string   `json:"model,omitempty"`
 	SessionID          string   `json:"session_id,omitempty"`
 	Errors             []string `json:"errors,omitempty"`
+	// CarriedFrom is the head whose analysis still backs this verdict when the
+	// current run did not re-evidence it. Empty means the verdict was produced
+	// by this run.
+	CarriedFrom string `json:"carried_from,omitempty"`
 }
 
 type ArchitectureComparison struct {
@@ -180,6 +189,24 @@ type ArchitectureScopeFile struct {
 type ArchitectureDimension struct {
 	Name    string `json:"name"`
 	Content string `json:"content"`
+	// Sources binds the dimension's conclusion to the files whose content it
+	// relied on. A later change to one of them invalidates the dimension until
+	// the analysis runs again (#163).
+	Sources []ArchitectureEvidenceSource `json:"sources,omitempty"`
+	// Stale marks evidence that a later push, base change or rule change may
+	// have invalidated. A stale dimension never asserts its previous outcome.
+	Stale       bool   `json:"stale,omitempty"`
+	StaleReason string `json:"stale_reason,omitempty"`
+}
+
+// ArchitectureEvidenceSource is one input the analysis relied on: a cited file,
+// a contract, a baseline rule or a scope file. Digest is the content digest the
+// evidence was bound to, so a later push can detect a change without trusting
+// the model's wording (#163).
+type ArchitectureEvidenceSource struct {
+	Path   string `json:"path"`
+	Kind   string `json:"kind,omitempty"`
+	Digest string `json:"digest,omitempty"`
 }
 
 type ArchitectureEvidence struct {
@@ -189,6 +216,11 @@ type ArchitectureEvidence struct {
 	ObservationIDs      []string                `json:"observation_ids,omitempty"`
 	CitedObservationIDs []string                `json:"cited_observation_ids,omitempty"`
 	EngineScope         []ArchitectureScopeFile `json:"engine_scope,omitempty"`
+	// RuleVersion is the version of the rules the analysis checked. Evidence
+	// built under another version is stale and has to be re-evidenced (#163).
+	RuleVersion string `json:"rule_version,omitempty"`
+	// Sources is the union of the dimension sources, with their digests.
+	Sources []ArchitectureEvidenceSource `json:"sources,omitempty"`
 }
 
 // ArchitectureControls records what the analysis was allowed to do. On this
