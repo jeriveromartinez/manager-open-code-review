@@ -164,6 +164,9 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 				return err
 			}
 		}
+		if err := p.requestHumanReview(ctx, store.ReviewRequestCauseFailed); err != nil {
+			return err
+		}
 		return p.settle(ctx)
 	case store.RunSucceeded, store.RunInconclusive:
 		// Continue with the full publication below.
@@ -288,6 +291,9 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 			return err
 		}
 	}
+	if err := p.requestHumanReview(ctx, store.ReviewRequestCauseInconclusive); err != nil {
+		return err
+	}
 	return p.settle(ctx)
 }
 
@@ -299,6 +305,31 @@ func openFindings(findings []store.Finding) []store.Finding {
 		}
 	}
 	return open
+}
+
+// requestHumanReview asks GitHub for a person when the engine could not
+// conclude. The run must still cover the pull request's current comparison
+// (#141): a result of another base–head pair must not assign reviewers to code
+// it never saw. The request is deduplicated by pull request and head, so a
+// retried publish is harmless.
+func (p *publishContext) requestHumanReview(ctx context.Context, cause string) error {
+	if p.run.Status == store.RunSucceeded {
+		return nil
+	}
+	pr, err := loadPullRequest(ctx, p.w.Store, p.run.PullRequestID)
+	if err != nil {
+		return err
+	}
+	if !pr.CoveredBy(p.run) {
+		return nil
+	}
+	service := &appgithub.ReviewRequestService{
+		Store: p.w.Store, Apps: p.w.Apps, RetryDelay: appgithub.ReviewRequestRetryDelay,
+	}
+	_, err = service.Request(ctx, store.ReviewRequestConfig{
+		PR: pr, Repo: p.repo, Policy: p.policy, Installation: p.inst,
+	}, cause)
+	return err
 }
 
 func (w *Worker) loadPublishContext(ctx context.Context, runID uint) (*publishContext, error) {

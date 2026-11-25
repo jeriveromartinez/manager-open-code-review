@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -131,6 +133,16 @@ type triggerFixture struct {
 	mergeBase    string
 	compareErr   bool
 	compareCalls int
+	reviewReqs   []triggerReviewRequest
+}
+
+// triggerReviewRequest is one call the fake GitHub received on the review
+// request endpoint.
+type triggerReviewRequest struct {
+	Repo          string
+	Number        int
+	Reviewers     []string
+	TeamReviewers []string
 }
 
 type seedOpts struct {
@@ -142,6 +154,8 @@ type seedOpts struct {
 	headSHA        string
 	state          string
 	requireGreenCI bool
+	reviewerLogin  string
+	reviewerTeam   string
 }
 
 func newTriggerFixture(t *testing.T) *triggerFixture {
@@ -174,6 +188,31 @@ func newTriggerFixture(t *testing.T) *triggerFixture {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(w, `{"merge_base_commit":{"sha":%q}}`, mergeBase)
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/requested_reviewers") {
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			var in struct {
+				Reviewers     []string `json:"reviewers"`
+				TeamReviewers []string `json:"team_reviewers"`
+			}
+			raw, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(raw, &in)
+			number := 0
+			repo := ""
+			if len(parts) == 6 {
+				number, _ = strconv.Atoi(parts[4])
+				repo = parts[1] + "/" + parts[2]
+			}
+			f.mu.Lock()
+			f.reviewReqs = append(f.reviewReqs, triggerReviewRequest{
+				Repo: repo, Number: number,
+				Reviewers: in.Reviewers, TeamReviewers: in.TeamReviewers,
+			})
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"number":1}`))
 			return
 		}
 		if r.Method != http.MethodPost ||
@@ -271,6 +310,7 @@ func (f *triggerFixture) seed(name string, opts seedOpts) store.PullRequest {
 	if opts.withPolicy {
 		if _, err := f.st.SaveQAPolicy(f.ctx, store.QAPolicy{
 			TeamID: team.ID, LLMProfileID: profile.ID, RequireGreenCI: opts.requireGreenCI,
+			ReviewerLogin: opts.reviewerLogin, ReviewerTeam: opts.reviewerTeam,
 		}); err != nil {
 			f.t.Fatalf("SaveQAPolicy(%q): %v", name, err)
 		}
@@ -1264,5 +1304,94 @@ func TestFireDebouncedSkipsIneligiblePullRequests(t *testing.T) {
 				t.Errorf("unexpected enqueues/checks: %v / %v", f.jobs.reviews, f.checks.started)
 			}
 		})
+	}
+}
+
+func (f *triggerFixture) reviewRequests() []triggerReviewRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]triggerReviewRequest(nil), f.reviewReqs...)
+}
+
+// A fork never enters the engine, so the trigger hands it to a person through
+// the official review-request API. Repeating the delivery stays deduplicated
+// by pull request and head.
+func TestTriggerRequestsHumanReviewForFork(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("fork", seedOpts{
+		fork: true, repoEnabled: true, withPolicy: true, profileEnabled: true,
+		reviewerLogin: "human-qa", reviewerTeam: "qa-team",
+	})
+
+	for i := 0; i < 2; i++ {
+		if err := f.trigger.OnPullRequestIneligible(f.ctx, pr.ID); err != nil {
+			t.Fatalf("OnPullRequestIneligible() #%d error = %v", i+1, err)
+		}
+	}
+
+	calls := f.reviewRequests()
+	if len(calls) != 1 {
+		t.Fatalf("review requests = %+v, want one deduplicated call", calls)
+	}
+	got := calls[0]
+	if got.Repo != "acme/fork" || got.Number != pr.Number {
+		t.Errorf("review request target = %s#%d, want acme/fork#%d", got.Repo, got.Number, pr.Number)
+	}
+	if len(got.Reviewers) != 1 || got.Reviewers[0] != "human-qa" ||
+		len(got.TeamReviewers) != 1 || got.TeamReviewers[0] != "qa-team" {
+		t.Errorf("review request = %+v, want human-qa/qa-team", got)
+	}
+	saved, err := f.st.ReviewRequestFor(f.ctx, pr.ID, pr.HeadSHA)
+	if err != nil {
+		t.Fatalf("ReviewRequestFor() error = %v", err)
+	}
+	if saved.Status != store.ReviewRequestDelivered || saved.Cause != store.ReviewRequestCauseFork {
+		t.Errorf("request = %+v, want a delivered fork request", saved)
+	}
+}
+
+// A fork whose team has no policy still produces a queue item: the missing
+// target is recorded as rejected instead of silently dropping the PR.
+func TestTriggerRecordsForkWithoutPolicy(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("fork-no-policy", seedOpts{
+		fork: true, repoEnabled: true, withPolicy: false, profileEnabled: true,
+	})
+
+	if err := f.trigger.OnPullRequestIneligible(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequestIneligible() error = %v", err)
+	}
+	if calls := f.reviewRequests(); len(calls) != 0 {
+		t.Fatalf("review requests = %+v, want none without a target", calls)
+	}
+	saved, err := f.st.ReviewRequestFor(f.ctx, pr.ID, pr.HeadSHA)
+	if err != nil {
+		t.Fatalf("ReviewRequestFor() error = %v", err)
+	}
+	if saved.Status != store.ReviewRequestRejected || saved.ReviewerLogin != "" ||
+		!strings.Contains(saved.LastError, "no reviewer") {
+		t.Errorf("request = %+v, want a rejected row naming the missing target", saved)
+	}
+}
+
+// A draft fork is not ready for a person yet, and an ordinary pull request is
+// owned by the engine.
+func TestTriggerDoesNotRequestReviewForOtherIneligiblePRs(t *testing.T) {
+	f := newTriggerFixture(t)
+	draftFork := f.seed("draft-fork", seedOpts{
+		fork: true, draft: true, repoEnabled: true, withPolicy: true, profileEnabled: true,
+		reviewerLogin: "human-qa",
+	})
+	draft := f.seed("draft", seedOpts{
+		draft: true, repoEnabled: true, withPolicy: true, profileEnabled: true,
+		reviewerLogin: "human-qa",
+	})
+	for _, pr := range []store.PullRequest{draftFork, draft} {
+		if err := f.trigger.OnPullRequestIneligible(f.ctx, pr.ID); err != nil {
+			t.Fatalf("OnPullRequestIneligible(%d) error = %v", pr.ID, err)
+		}
+	}
+	if calls := f.reviewRequests(); len(calls) != 0 {
+		t.Fatalf("review requests = %+v, want none", calls)
 	}
 }

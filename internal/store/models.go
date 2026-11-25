@@ -328,15 +328,39 @@ type QAPolicy struct {
 	ReviewTokenBudget int64 `gorm:"column:review_token_budget"`
 	// AutoTriageMode turns the second OCR pass on. VerifyTokenMax is the token
 	// cap used when ReviewTokenBudget disables the run budget.
-	AutoTriageMode    string    `gorm:"column:auto_triage_mode;default:off"`
-	AutoWithdraw      bool      `gorm:"column:auto_withdraw"`
-	VerifyMaxFindings int       `gorm:"column:verify_max_findings"`
-	VerifyMaxFiles    int       `gorm:"column:verify_max_files"`
-	VerifyTokenShare  int       `gorm:"column:verify_token_share"`
-	VerifyTimeShare   int       `gorm:"column:verify_time_share"`
-	VerifyTokenMax    int64     `gorm:"column:verify_token_max"`
-	CreatedAt         time.Time `gorm:"column:created_at"`
-	UpdatedAt         time.Time `gorm:"column:updated_at"`
+	AutoTriageMode    string `gorm:"column:auto_triage_mode;default:off"`
+	AutoWithdraw      bool   `gorm:"column:auto_withdraw"`
+	VerifyMaxFindings int    `gorm:"column:verify_max_findings"`
+	VerifyMaxFiles    int    `gorm:"column:verify_max_files"`
+	VerifyTokenShare  int    `gorm:"column:verify_token_share"`
+	VerifyTimeShare   int    `gorm:"column:verify_time_share"`
+	VerifyTokenMax    int64  `gorm:"column:verify_token_max"`
+	// ReviewerLogin and ReviewerTeam are the GitHub review-request recipients
+	// of a run the engine cannot conclude, and of forks it does not review.
+	ReviewerLogin string    `gorm:"column:reviewer_login"`
+	ReviewerTeam  string    `gorm:"column:reviewer_team"`
+	CreatedAt     time.Time `gorm:"column:created_at"`
+	UpdatedAt     time.Time `gorm:"column:updated_at"`
+}
+
+// ReviewRequest is one GitHub review request for a pull request revision. The
+// (pull_request_id, head_sha) pair is unique, so a redelivery or a retried
+// publish cannot ask the same reviewers twice for the same head.
+type ReviewRequest struct {
+	ID            uint       `gorm:"column:id;primaryKey"`
+	PullRequestID uint       `gorm:"column:pull_request_id"`
+	HeadSHA       string     `gorm:"column:head_sha"`
+	BaseRef       string     `gorm:"column:base_ref"`
+	MergeBaseSHA  string     `gorm:"column:merge_base_sha"`
+	Cause         string     `gorm:"column:cause"`
+	ReviewerLogin string     `gorm:"column:reviewer_login"`
+	ReviewerTeam  string     `gorm:"column:reviewer_team"`
+	Status        string     `gorm:"column:status"`
+	Attempts      int        `gorm:"column:attempts"`
+	LastError     string     `gorm:"column:last_error"`
+	DeliveredAt   *time.Time `gorm:"column:delivered_at"`
+	CreatedAt     time.Time  `gorm:"column:created_at"`
+	UpdatedAt     time.Time  `gorm:"column:updated_at"`
 }
 
 // ReviewRun is one execution of the review pipeline for a pull request. At
