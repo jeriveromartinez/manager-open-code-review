@@ -226,6 +226,8 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 	b.WriteString(p.sanitize(p.run.Summary))
 	b.WriteString("\n")
 
+	b.WriteString(p.buildArchitectureBlock())
+
 	if missing := p.findingsWithoutInlineComment(findings); len(missing) > 0 {
 		b.WriteString(fmt.Sprintf("\n**Hallazgos sin comentario inline (%d):**\n", len(missing)))
 		for _, f := range missing {
@@ -245,6 +247,105 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 		fmt.Fprintf(&b, "\n[Ver en el panel](%s)\n", link)
 	}
 	return b.String()
+}
+
+// buildArchitectureBlock renders the observational architectural verdict of
+// the comparison. It is evidence only: no check, status or inline decision
+// reads it. A run that did not ask for the analysis renders nothing.
+func (p *publishContext) buildArchitectureBlock() string {
+	verdict := store.DecodeArchitectureVerdict(p.run.ArchitectureAnalysis)
+	if !verdict.Requested || verdict.Status == "" || verdict.Status == store.ArchitectureNotRequested {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n**Análisis arquitectónico:** %s · %s\n",
+		p.sanitize(architectureStatusLabel(verdict.Status)), p.sanitize(architectureModeLabel(verdict.Mode)))
+	if len(verdict.Signals) > 0 {
+		signals := make([]string, 0, len(verdict.Signals))
+		for _, signal := range verdict.Signals {
+			signals = append(signals, "`"+p.sanitize(signal)+"`")
+		}
+		fmt.Fprintf(&b, "\n**Señales:** %s\n", strings.Join(signals, ", "))
+	}
+	if included, excluded := len(verdict.Scope.Included), len(verdict.Scope.Excluded); included+excluded > 0 {
+		fmt.Fprintf(&b, "\n**Alcance:** %d archivo(s) incluido(s), %d fuera del análisis", included, excluded)
+		if len(verdict.Scope.OutOfScope) > 0 {
+			fmt.Fprintf(&b, " (%s)", p.sanitize(strings.Join(verdict.Scope.OutOfScope, ", ")))
+		}
+		b.WriteString("\n")
+	}
+	if len(verdict.Dimensions) > 0 {
+		names := make([]string, 0, len(verdict.Dimensions))
+		for _, dimension := range verdict.Dimensions {
+			names = append(names, p.sanitize(dimension.Name))
+		}
+		fmt.Fprintf(&b, "\n**Dimensiones evaluadas:** %s\n", strings.Join(names, " · "))
+	}
+	writeArchitectureItems(&b, "Comportamiento antes/después", verdict.BehaviorChanges, p.sanitize)
+	writeArchitectureItems(&b, "Riesgos y compatibilidad", verdict.Risks, p.sanitize)
+	writeArchitectureItems(&b, "Alternativas", verdict.Alternatives, p.sanitize)
+	writeArchitectureItems(&b, "Condiciones de aceptación", verdict.AcceptanceConditions, p.sanitize)
+	writeArchitectureItems(&b, "Incertidumbres", verdict.Uncertainties, p.sanitize)
+	if recommendation := strings.TrimSpace(verdict.Recommendation); recommendation != "" {
+		fmt.Fprintf(&b, "\n**Recomendación original:** %s\n", p.sanitize(recommendation))
+	}
+	if verdict.Evidence.SchemaVersion != "" || len(verdict.Evidence.CitedObservationIDs) > 0 {
+		fmt.Fprintf(&b, "\n_Evidencia: %s · %d cita(s)_\n",
+			p.sanitize(verdict.Evidence.SchemaVersion), len(verdict.Evidence.CitedObservationIDs))
+	}
+	if len(verdict.Errors) > 0 {
+		fmt.Fprintf(&b, "\n> Análisis incompleto: %s\n", p.sanitize(strings.Join(verdict.Errors, "; ")))
+	}
+	b.WriteString("\n> Modo observación: el dictamen no cambia el check, el estado de QA ni los comentarios inline.\n")
+	return b.String()
+}
+
+func writeArchitectureItems(b *strings.Builder, label string, items []string, sanitize func(string) string) {
+	if len(items) == 0 {
+		return
+	}
+	fmt.Fprintf(b, "\n**%s:**\n", label)
+	for _, item := range items {
+		fmt.Fprintf(b, "- %s\n", sanitize(item))
+	}
+}
+
+func architectureStatusLabel(status string) string {
+	switch status {
+	case store.ArchitectureComplete:
+		return "completo"
+	case store.ArchitecturePartial:
+		return "parcial"
+	case store.ArchitectureInconclusive:
+		return "inconcluso"
+	default:
+		return status
+	}
+}
+
+func architectureModeLabel(mode string) string {
+	if mode == store.ArchitectureAnalysisObservation {
+		return "modo observación"
+	}
+	return mode
+}
+
+// architectureCheckLine is the one-line summary appended to the check output.
+// It never changes the conclusion.
+func (p *publishContext) architectureCheckLine() string {
+	verdict := store.DecodeArchitectureVerdict(p.run.ArchitectureAnalysis)
+	if !verdict.Requested || verdict.Status == "" || verdict.Status == store.ArchitectureNotRequested {
+		return ""
+	}
+	line := fmt.Sprintf("Análisis arquitectónico (observación): %s",
+		architectureStatusLabel(verdict.Status))
+	if len(verdict.Signals) > 0 {
+		line += " · señales: " + strings.Join(verdict.Signals, ", ")
+	}
+	if len(verdict.Dimensions) > 0 {
+		line += fmt.Sprintf(" · %d dimensión(es)", len(verdict.Dimensions))
+	}
+	return line
 }
 
 // verificationApplied reports whether the second OCR pass changed findings.

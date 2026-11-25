@@ -1182,6 +1182,42 @@ func TestPolicyRejectsVerifyTokenMaxOutOfRange(t *testing.T) {
 	}
 }
 
+func TestPolicyAcceptsArchitectureFields(t *testing.T) {
+	f := newSecureFixture(t)
+	profile := seedProfile(t, f, "architecture", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
+	team := f.team("architecture-team")
+	cookie := f.session(f.user("architecture-admin", true))
+	path := fmt.Sprintf("/api/teams/%d/policy", team.ID)
+
+	body := map[string]any{
+		"llm_profile_id":             profile.ID,
+		"architecture_analysis_mode": store.ArchitectureAnalysisOff,
+		"architecture_token_share":   40,
+		"architecture_time_share":    15,
+		"architecture_token_max":     50000,
+	}
+	rec := f.request(http.MethodPut, path, body, cookie)
+	assertStatus(t, rec, http.StatusOK)
+	var saved map[string]any
+	decodeJSON(t, rec, &saved)
+	if saved["architecture_analysis_mode"] != store.ArchitectureAnalysisOff ||
+		saved["architecture_token_share"] != float64(40) ||
+		saved["architecture_time_share"] != float64(15) ||
+		saved["architecture_token_max"] != float64(50000) {
+		t.Errorf("saved architecture policy = %v", saved)
+	}
+
+	stored, err := f.st.QAPolicyForTeam(f.ctx, team.ID)
+	if err != nil {
+		t.Fatalf("QAPolicyForTeam: %v", err)
+	}
+	if stored.ArchitectureAnalysisMode != store.ArchitectureAnalysisOff ||
+		stored.ArchitectureTokenShare != 40 || stored.ArchitectureTimeShare != 15 ||
+		stored.ArchitectureTokenMax != 50000 {
+		t.Errorf("stored architecture policy = %+v", stored)
+	}
+}
+
 func TestPolicyDefaultsAutoTriageOff(t *testing.T) {
 	f := newSecureFixture(t)
 	profile := seedProfile(t, f, "triage", store.LLMProfile{Enabled: true, HealthStatus: store.HealthOK})
@@ -1198,7 +1234,11 @@ func TestPolicyDefaultsAutoTriageOff(t *testing.T) {
 		saved["verify_max_files"] != float64(store.DefaultVerifyMaxFiles) ||
 		saved["verify_token_share"] != float64(store.DefaultVerifyTokenShare) ||
 		saved["verify_time_share"] != float64(store.DefaultVerifyTimeShare) ||
-		saved["verify_token_max"] != float64(store.DefaultVerifyTokenMax) {
+		saved["verify_token_max"] != float64(store.DefaultVerifyTokenMax) ||
+		saved["architecture_analysis_mode"] != store.ArchitectureAnalysisObservation ||
+		saved["architecture_token_share"] != float64(store.DefaultArchitectureTokenShare) ||
+		saved["architecture_time_share"] != float64(store.DefaultArchitectureTimeShare) ||
+		saved["architecture_token_max"] != float64(store.DefaultArchitectureTokenMax) {
 		t.Errorf("default auto-triage = %v", saved)
 	}
 }

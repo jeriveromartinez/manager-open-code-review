@@ -187,6 +187,11 @@ type runOutcome struct {
 	// with. Verification and triage attribution use it (#150).
 	executedProfile store.LLMProfile
 
+	// architecture is the structured observational verdict of the base–head
+	// comparison. It is JSON persisted on the run and never changes the review
+	// outcome.
+	architecture []byte
+
 	// Context needed to reconcile findings from passes that already completed
 	// when the run ends inconclusively.
 	merged  AgentOutput
@@ -388,19 +393,20 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		outcome.usage = []byte(`{}`)
 	}
 	completion := store.RunCompletion{
-		Status:          outcome.status,
-		ErrorCode:       outcome.code,
-		ErrorMessage:    truncateRunMessage(outcome.message),
-		Summary:         outcome.summary,
-		Coverage:        outcome.coverage,
-		Usage:           outcome.usage,
-		Tokens:          outcome.tokenTotals(),
-		TokensKnown:     outcome.tokensKnown,
-		Findings:        outcome.findings,
-		Resolved:        outcome.resolved,
-		BaseSHA:         outcome.baseSHA,
-		VerifySessionID: outcome.verifySessionID,
-		VerifyUsage:     outcome.verifyUsage,
+		Status:               outcome.status,
+		ErrorCode:            outcome.code,
+		ErrorMessage:         truncateRunMessage(outcome.message),
+		Summary:              outcome.summary,
+		Coverage:             outcome.coverage,
+		Usage:                outcome.usage,
+		Tokens:               outcome.tokenTotals(),
+		TokensKnown:          outcome.tokensKnown,
+		Findings:             outcome.findings,
+		Resolved:             outcome.resolved,
+		BaseSHA:              outcome.baseSHA,
+		VerifySessionID:      outcome.verifySessionID,
+		VerifyUsage:          outcome.verifyUsage,
+		ArchitectureAnalysis: outcome.architecture,
 	}
 	if err := r.Store.CompleteReviewRun(persistCtx, runID, completion); err != nil {
 		if errors.Is(err, store.ErrRunNotActive) {
@@ -835,14 +841,51 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	if !store.ValidReviewEffort(effort) {
 		effort = store.ReviewEffortLow
 	}
+	reviewBudget := cfg.Policy.ReviewTokenBudget
+	if reviewBudget < 0 {
+		reviewBudget = 0
+	}
+
+	// The architectural analysis shares the invocation but has its own budget
+	// and state. The diff inventory decides whether an explicit signal fires;
+	// the same inventory is reused to confront coverage after the review.
+	inventory, invErr := gitChangedFiles(runCtx, workDir, fromSHA, headSHA)
+	archStats, statsErr := gitArchitectureStats(runCtx, workDir, fromSHA, headSHA)
+	if statsErr != nil {
+		log.Log(runCtx, "worker", "analysis", "warn", logPhasePolicy,
+			fmt.Sprintf("no se pudieron medir las líneas del diff para el análisis: %v", statsErr))
+	}
+	if invErr == nil {
+		archStats = architectureStatsFromFiles(inventory, archStats)
+	}
+	analysisMode := architectureMode(cfg.Policy)
+	signals := []string{}
+	scope := store.ArchitectureScope{}
+	if invErr == nil {
+		signals = detectArchitectureSignals(inventory, archStats)
+		sortArchitectureSignals(signals)
+		scope = architectureScope(inventory, excludePatterns)
+	}
+	analysisRequested := architectureAnalysisRequested(analysisMode, invErr, signals)
+	analysisBudget := architectureBudget(cfg.Policy, timeout, reviewBudget)
+	// The analysis spends from the same aggregate budget. Carve its cap out
+	// before the verifier's share so analysis + review + verification cannot
+	// exceed ReviewTokenBudget. Its time window runs concurrently with the
+	// review, so only the token cap is additive.
+	if analysisRequested && reviewBudget > 0 {
+		reviewBudget -= analysisBudget.TokenBudget
+		if reviewBudget < 0 {
+			reviewBudget = 0
+		}
+	}
+
 	// The verifier's share is carved out before the main pass starts, so the
 	// first pass (and its chunks) cannot spend the budget reserved for it.
 	triage := verifyPolicy(cfg.Policy)
-	reserved := reserveVerification(cfg.Policy, triage, timeout)
-	budget := cfg.Policy.ReviewTokenBudget
-	if budget < 0 {
-		budget = 0
-	}
+	reservePolicy := cfg.Policy
+	reservePolicy.ReviewTokenBudget = reviewBudget
+	reserved := reserveVerification(reservePolicy, triage, timeout)
+	budget := reviewBudget
 	if reserved.enabled {
 		budget = reserved.mainTokens
 		timeout = reserved.mainTime
@@ -861,6 +904,31 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		log.Log(runCtx, "worker", "", "info", logPhasePolicy, fmt.Sprintf(
 			"verificación: cuota de %d tokens y %s; solo se reserva si puede iniciarse",
 			reserved.tokens, reserved.timeout.Round(time.Second)))
+	}
+
+	architectureVerdict := newArchitectureVerdict(analysisMode, analysisRequested, signals, scope,
+		store.ArchitectureComparison{
+			Repository: cfg.Repo.FullName,
+			Mode:       "range",
+			BaseRef:    cfg.PR.BaseRef,
+			HeadRef:    cfg.PR.HeadRef,
+			BaseSHA:    fromSHA,
+			HeadSHA:    headSHA,
+		}, analysisBudget)
+	if invErr != nil {
+		architectureVerdict.Errors = append(architectureVerdict.Errors,
+			fmt.Sprintf("no se pudo inventariar el cambio: %v", invErr))
+	}
+	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
+	switch {
+	case analysisRequested:
+		log.Log(runCtx, "worker", "analysis", "info", logPhasePolicy, fmt.Sprintf(
+			"análisis arquitectónico solicitado (%s): señales %s; presupuesto %d tokens, %ds",
+			analysisMode, strings.Join(signals, ", "),
+			analysisBudget.TokenBudget, analysisBudget.TimeBudgetSeconds))
+	case analysisMode == store.ArchitectureAnalysisObservation:
+		log.Log(runCtx, "worker", "analysis", "info", logPhasePolicy,
+			"análisis arquitectónico no solicitado: el cambio no activó ninguna señal")
 	}
 
 	// The review context is profile-independent, so it is built once and reused
@@ -916,6 +984,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		reviewer        *NativeReviewer
 		budgetBlocked   bool
 		failedUsageLost bool
+		// analysisSkippedResume records that the observation was omitted because
+		// OCR cannot combine --analysis with --resume.
+		analysisSkippedResume bool
 	)
 	// A return after an attempt started closes it with the work it actually did.
 	// Usage is the delta over the attempt's own snapshot, so the run total keeps
@@ -1017,6 +1088,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		reviewer = newNativeReviewer(r.Cfg.OCRBin, workDir, home, candidate, key,
 			excludes, background, fromSHA, headSHA,
 			effort, ceiling, attemptBudget, timeout, log.OCRLogger(runCtx, "main"))
+		reviewer.Analysis = analysisRequested
+		reviewer.AnalysisTokenBudget = analysisBudget.TokenBudget
+		analysisSkippedResume = false
 
 		r.setPhase(runCtx, run.ID, store.RunPhaseReviewing, log)
 		slog.Info("native OCR review started", "run_id", run.ID, "profile_id", candidate.ID,
@@ -1027,6 +1101,15 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		sessionBefore := snapshotOCRSessions(reviewer.Home)
 		if session := resumeSession(run, scope); session != "" {
 			reviewer.ResumeSession = session
+			if analysisRequested {
+				// OCR rejects --analysis together with --resume. The analysis is
+				// observational, so it is skipped rather than failing the review.
+				reviewer.Analysis = false
+				reviewer.AnalysisTokenBudget = 0
+				analysisSkippedResume = true
+				log.Log(runCtx, "worker", "analysis", "warn", logPhaseOCR,
+					"análisis arquitectónico omitido: OCR no combina --resume con --analysis")
+			}
 			log.Log(runCtx, "worker", "main", "info", logPhaseOCR,
 				"reanudando la sesión de OCR de un intento anterior")
 		}
@@ -1044,6 +1127,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 				fmt.Sprintf("la sesión de OCR no se pudo reanudar; se reintenta la pasada completa: %v", nativeErr))
 			r.clearSession(runCtx, run.ID)
 			reviewer.ResumeSession = ""
+			if analysisRequested {
+				reviewer.Analysis = true
+				reviewer.AnalysisTokenBudget = analysisBudget.TokenBudget
+				analysisSkippedResume = false
+			}
 			sessionBefore = snapshotOCRSessions(reviewer.Home)
 			res, mainRaw, nativeErr = r.runNativeReview(runCtx, candidate.ID, reviewer, log, "main")
 		}
@@ -1063,6 +1151,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			if index+1 >= len(candidates) || !recoverableNativeFailure(nativeErr) ||
 				!canStartFallback(runCtx, budget, out.tokens) {
 				// The deferred close records the code the classifier assigns.
+				if analysisRequested {
+					markArchitectureInconclusive(&out, &architectureVerdict, nativeErr)
+				}
 				out, _ = classifyNativeError(runCtx, out, nativeErr)
 				return out, nil
 			}
@@ -1105,11 +1196,17 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	}
 	if !resultReady {
 		if budgetBlocked && nativeErr == nil {
-			return out.inconclusive(errors.New(
-				"el presupuesto de tokens agregado se agotó antes de la pasada principal"), "token_budget"), nil
+			nativeErr = errors.New("el presupuesto de tokens agregado se agotó antes de la pasada principal")
+			if analysisRequested {
+				markArchitectureInconclusive(&out, &architectureVerdict, nativeErr)
+			}
+			return out.inconclusive(nativeErr, "token_budget"), nil
 		}
 		if nativeErr == nil {
 			nativeErr = errors.New("ningún perfil apto pudo ejecutar la revisión")
+		}
+		if analysisRequested {
+			markArchitectureInconclusive(&out, &architectureVerdict, nativeErr)
 		}
 		out, _ = classifyNativeError(runCtx, out, nativeErr)
 		return out, nil
@@ -1124,6 +1221,19 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		if status == store.RunSucceeded {
 			r.persistUnit(runCtx, completedMainUnit(run.ID, activeMainKey, res, mainRaw))
 		}
+	}
+	architectureVerdict = applyNativeArchitectureAnalysis(architectureVerdict, res)
+	if analysisSkippedResume {
+		architectureVerdict.Status = store.ArchitectureInconclusive
+		architectureVerdict.Errors = append(architectureVerdict.Errors,
+			"analysis skipped: OCR resume is incompatible with --analysis")
+	}
+	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
+	if analysisRequested {
+		log.Log(runCtx, "worker", "analysis", architectureLogLevel(architectureVerdict.Status), logPhaseOCR,
+			fmt.Sprintf("análisis arquitectónico %s (%s): %d dimensión(es), %d token(s)",
+				architectureVerdict.Status, architectureVerdict.ExecutionStatus,
+				len(architectureVerdict.Dimensions), architectureVerdict.Usage.Total))
 	}
 
 	reviewed, skipped, excluded := nativeCoverageCounts(res)
@@ -1158,7 +1268,6 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	// only a policy exclusion takes it out of scope.
 	var pending []coverageFile
 	var coverageErr error
-	inventory, invErr := gitChangedFiles(runCtx, workDir, fromSHA, headSHA)
 	if invErr != nil {
 		coverageErr = fmt.Errorf("no se pudo inventariar el diff revisado: %w", invErr)
 		log.Log(runCtx, "worker", "", "error", logPhaseFinish, coverageErr.Error())
@@ -1647,6 +1756,18 @@ func classifyNativeError(ctx context.Context, out runOutcome, err error) (runOut
 		}
 	}
 	return out.inconclusive(err, "ocr_error"), nil
+}
+
+// markArchitectureInconclusive records that a requested observation could not
+// finish. It only touches the analysis field: the review outcome is never
+// derived from it.
+func markArchitectureInconclusive(out *runOutcome, verdict *store.ArchitectureVerdict, err error) {
+	if err == nil {
+		err = errors.New("analysis did not run")
+	}
+	verdict.Status = store.ArchitectureInconclusive
+	verdict.Errors = append(verdict.Errors, err.Error())
+	out.architecture = store.ArchitectureVerdictJSON(*verdict)
 }
 
 func truncateRunMessage(message string) string {

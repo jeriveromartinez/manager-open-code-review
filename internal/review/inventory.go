@@ -24,6 +24,9 @@ const (
 type changedFile struct {
 	Path string
 	Kind string
+	// Renamed distinguishes a move from an in-place edit. It is a structural
+	// change signal for the architectural analysis.
+	Renamed bool
 }
 
 // gitChangedFiles inventories every path the reviewed range changed. It reads
@@ -88,7 +91,7 @@ func parseRawDiff(raw string) []changedFile {
 			if newMode == "160000" {
 				kind = changedSubmodule
 			}
-			files = append(files, changedFile{Path: tokens[i+1], Kind: kind})
+			files = append(files, changedFile{Path: tokens[i+1], Kind: kind, Renamed: status[0] == 'R'})
 			i += 2
 		default:
 			if i >= len(tokens) {

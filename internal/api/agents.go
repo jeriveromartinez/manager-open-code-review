@@ -479,6 +479,10 @@ type qaPolicyResponse struct {
 	MaxExternalDiffLines     int                   `json:"max_external_diff_lines"`
 	MaxExternalRunsPerDay    int                   `json:"max_external_runs_per_day"`
 	ExternalDailyTokenBudget int64                 `json:"external_daily_token_budget"`
+	ArchitectureAnalysisMode string                `json:"architecture_analysis_mode"`
+	ArchitectureTokenShare   int                   `json:"architecture_token_share"`
+	ArchitectureTimeShare    int                   `json:"architecture_time_share"`
+	ArchitectureTokenMax     int64                 `json:"architecture_token_max"`
 	PromptCache              bool                  `json:"prompt_cache"`
 	// Revision identifies the policy content; a review records it (#153).
 	Revision  string `json:"revision"`
@@ -557,6 +561,10 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 	if externalRuns <= 0 {
 		externalRuns = store.DefaultExternalRunsPerDay
 	}
+	architectureMode := p.ArchitectureAnalysisMode
+	if architectureMode == "" {
+		architectureMode = store.ArchitectureAnalysisObservation
+	}
 	return qaPolicyResponse{
 		ID: p.ID, TeamID: p.TeamID, LLMProfileID: p.LLMProfileID,
 		FallbackProfileIDs: fallbacks,
@@ -582,6 +590,10 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 		MaxExternalDiffLines:     externalDiffLines,
 		MaxExternalRunsPerDay:    externalRuns,
 		ExternalDailyTokenBudget: p.ExternalDailyTokenBudget,
+		ArchitectureAnalysisMode: architectureMode,
+		ArchitectureTokenShare:   verifyDefault(p.ArchitectureTokenShare, store.DefaultArchitectureTokenShare),
+		ArchitectureTimeShare:    verifyDefault(p.ArchitectureTimeShare, store.DefaultArchitectureTimeShare),
+		ArchitectureTokenMax:     verifyDefault64(p.ArchitectureTokenMax, store.DefaultArchitectureTokenMax),
 		PromptCache:              promptCache,
 		Revision:                 store.PolicyRevision(p, false),
 		UpdatedAt:                p.UpdatedAt.UTC().Format(time.RFC3339),
@@ -621,16 +633,20 @@ func (s *server) getPolicy(w http.ResponseWriter, r *http.Request) {
 			FallbackProfileIDs: []uint{},
 			MaxFiles:           40, MaxDiffLines: 3000, MaxPasses: 4,
 			GlobalContextCeiling: global, EffectiveContextCeiling: global,
-			ReviewEffort:          store.ReviewEffortLow,
-			AutoTriageMode:        store.AutoTriageOff,
-			VerifyMaxFindings:     store.DefaultVerifyMaxFindings,
-			VerifyMaxFiles:        store.DefaultVerifyMaxFiles,
-			VerifyTokenShare:      store.DefaultVerifyTokenShare,
-			VerifyTimeShare:       store.DefaultVerifyTimeShare,
-			VerifyTokenMax:        store.DefaultVerifyTokenMax,
-			ExternalAssociations:  append([]string(nil), store.DefaultExternalAssociations...),
-			MaxExternalDiffLines:  store.DefaultExternalDiffLines,
-			MaxExternalRunsPerDay: store.DefaultExternalRunsPerDay,
+			ReviewEffort:             store.ReviewEffortLow,
+			AutoTriageMode:           store.AutoTriageOff,
+			VerifyMaxFindings:        store.DefaultVerifyMaxFindings,
+			VerifyMaxFiles:           store.DefaultVerifyMaxFiles,
+			VerifyTokenShare:         store.DefaultVerifyTokenShare,
+			VerifyTimeShare:          store.DefaultVerifyTimeShare,
+			VerifyTokenMax:           store.DefaultVerifyTokenMax,
+			ExternalAssociations:     append([]string(nil), store.DefaultExternalAssociations...),
+			MaxExternalDiffLines:     store.DefaultExternalDiffLines,
+			MaxExternalRunsPerDay:    store.DefaultExternalRunsPerDay,
+			ArchitectureAnalysisMode: store.ArchitectureAnalysisObservation,
+			ArchitectureTokenShare:   store.DefaultArchitectureTokenShare,
+			ArchitectureTimeShare:    store.DefaultArchitectureTimeShare,
+			ArchitectureTokenMax:     store.DefaultArchitectureTokenMax,
 		})
 		return
 	}
@@ -962,6 +978,38 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 				(policy.VerifyTokenMax < store.VerifyTokenMaxMin ||
 					policy.VerifyTokenMax > store.ReviewTokenBudgetMax)) {
 			writeAPIError(w, http.StatusBadRequest, "invalid verify_token_max")
+			return
+		}
+	}
+	if value, present := raw["architecture_analysis_mode"]; present {
+		if err := json.Unmarshal(value, &policy.ArchitectureAnalysisMode); err != nil ||
+			(policy.ArchitectureAnalysisMode != "" &&
+				!store.ValidArchitectureAnalysisMode(policy.ArchitectureAnalysisMode)) {
+			writeAPIError(w, http.StatusBadRequest, "invalid architecture_analysis_mode")
+			return
+		}
+	}
+	for _, field := range []struct {
+		key string
+		dst *int
+	}{
+		{"architecture_token_share", &policy.ArchitectureTokenShare},
+		{"architecture_time_share", &policy.ArchitectureTimeShare},
+	} {
+		if value, present := raw[field.key]; present {
+			if err := json.Unmarshal(value, field.dst); err != nil ||
+				*field.dst < 0 || *field.dst > 90 {
+				writeAPIError(w, http.StatusBadRequest, "invalid "+field.key)
+				return
+			}
+		}
+	}
+	if value, present := raw["architecture_token_max"]; present {
+		if err := json.Unmarshal(value, &policy.ArchitectureTokenMax); err != nil ||
+			(policy.ArchitectureTokenMax != 0 &&
+				(policy.ArchitectureTokenMax < store.ArchitectureTokenMaxMin ||
+					policy.ArchitectureTokenMax > store.ReviewTokenBudgetMax)) {
+			writeAPIError(w, http.StatusBadRequest, "invalid architecture_token_max")
 			return
 		}
 	}

@@ -738,3 +738,20 @@ func TestCanChunkNativeRun(t *testing.T) {
 		t.Errorf("chunkByteBudget(0) = %d, want 0", got)
 	}
 }
+
+func TestChunkReviewerClearsAnalysis(t *testing.T) {
+	base := &NativeReviewer{
+		RepoDir: "/repo", BaseRef: "base", TokenBudget: 9000,
+		Analysis: true, AnalysisTokenBudget: 2500,
+	}
+	chunk := chunkReviewerFor(base, "chunk-sha", nil)
+	if chunk.Analysis || chunk.AnalysisTokenBudget != 0 {
+		t.Errorf("chunk reviewer kept analysis: %+v", chunk)
+	}
+	if chunk.Commit != "chunk-sha" || chunk.TokenBudget != 9000 {
+		t.Errorf("chunk reviewer lost its chunk configuration: %+v", chunk)
+	}
+	if !base.Analysis || base.AnalysisTokenBudget != 2500 {
+		t.Error("chunk derivation mutated the main reviewer")
+	}
+}

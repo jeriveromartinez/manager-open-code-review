@@ -644,6 +644,13 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 		}
 		text += p.renderHumanVerdict(verdict)
 	}
+	if analysis := p.architectureCheckLine(); analysis != "" {
+		text = strings.TrimSpace(text)
+		if text != "" {
+			text += "\n\n"
+		}
+		text += analysis
+	}
 	output := map[string]any{
 		"title":   title,
 		"summary": summary,

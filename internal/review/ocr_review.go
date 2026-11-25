@@ -57,6 +57,14 @@ type nativeReview struct {
 	RetryReport *nativeRetryReport `json:"retry_report"`
 	SessionID   string             `json:"session_id"`
 	Manifest    nativeManifest     `json:"manifest"`
+	// ReviewStatus, Analysis, AnalysisRaw and AnalysisMeta are emitted only
+	// when OCR 1.14.1 runs with --analysis. The analysis state stays separate
+	// from the review status: an incomplete analysis never changes the review
+	// outcome.
+	ReviewStatus string          `json:"review_status"`
+	Analysis     *string         `json:"analysis"`
+	AnalysisRaw  *string         `json:"analysis_raw"`
+	AnalysisMeta json.RawMessage `json:"analysis_meta"`
 	// closeReason records the worker's gradual close when OCR overran the
 	// global deadline ("global"). Empty means OCR ended on its own. It is not
 	// part of the OCR JSON and never leaves the review package.
@@ -175,6 +183,12 @@ type nativeInvocation struct {
 	// and every group shares the run's time, which the worker closes
 	// gradually before the hard stop.
 	GlobalDeadline bool
+	// Analysis requests OCR's Behavior/Impact report. It is compatible with a
+	// commit or range review and never combined with --resume.
+	Analysis bool
+	// AnalysisTokenBudget caps the analysis alone. Zero leaves OCR's default
+	// but the caller always computes a bounded value.
+	AnalysisTokenBudget int64
 }
 
 func buildReviewArgs(in nativeInvocation) []string {
@@ -201,6 +215,15 @@ func buildReviewArgs(in nativeInvocation) []string {
 		"--max-tokens", fmt.Sprint(in.MaxTokens),
 		"--background-file", in.BackgroundFile,
 	)
+	// --analysis cannot be combined with --resume or --preview. The wrapper is
+	// never a preview; when a session is resumed the analysis stays skipped and
+	// the run records an inconclusive observation instead of failing.
+	if in.Analysis && in.ResumeSession == "" {
+		args = append(args, "--analysis")
+		if in.AnalysisTokenBudget > 0 {
+			args = append(args, "--analysis-max-tokens-budget", fmt.Sprint(in.AnalysisTokenBudget))
+		}
+	}
 	// Zero disables the optional aggregate budget; OCR rejects the flag with 0.
 	if in.TokenBudget > 0 {
 		args = append(args, "--max-tokens-budget", fmt.Sprint(in.TokenBudget))
@@ -401,6 +424,10 @@ type NativeReviewer struct {
 	Effort      string
 	MaxTokens   int
 	TokenBudget int64
+	// Analysis asks OCR for the Behavior/Impact report and bounds it with its
+	// own token budget, separate from the review and the verifier.
+	Analysis            bool
+	AnalysisTokenBudget int64
 	// Timeout is the most this invocation may run. The context deadline wins
 	// when it is earlier, which is the case for chunks reviewed after the
 	// main run; the invocation deadline is shared with OCR's gradual close.
@@ -471,19 +498,21 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 		bin = "ocr"
 	}
 	args := buildReviewArgs(nativeInvocation{
-		RepoDir:        n.RepoDir,
-		Commit:         n.Commit,
-		BaseRef:        n.BaseRef,
-		HeadRef:        n.HeadRef,
-		BackgroundFile: backgroundPath,
-		Excludes:       n.Excludes,
-		Profile:        n.Profile,
-		Effort:         n.Effort,
-		MaxTokens:      n.MaxTokens,
-		TokenBudget:    n.TokenBudget,
-		ResumeSession:  n.ResumeSession,
-		TaskTimeout:    taskTimeout,
-		GlobalDeadline: global,
+		RepoDir:             n.RepoDir,
+		Commit:              n.Commit,
+		BaseRef:             n.BaseRef,
+		HeadRef:             n.HeadRef,
+		BackgroundFile:      backgroundPath,
+		Excludes:            n.Excludes,
+		Profile:             n.Profile,
+		Effort:              n.Effort,
+		MaxTokens:           n.MaxTokens,
+		TokenBudget:         n.TokenBudget,
+		ResumeSession:       n.ResumeSession,
+		TaskTimeout:         taskTimeout,
+		GlobalDeadline:      global,
+		Analysis:            n.Analysis,
+		AnalysisTokenBudget: n.AnalysisTokenBudget,
 	})
 
 	cmdCtx := ctx

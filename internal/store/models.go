@@ -376,6 +376,14 @@ type QAPolicy struct {
 	VerifyTokenShare  int    `gorm:"column:verify_token_share"`
 	VerifyTimeShare   int    `gorm:"column:verify_time_share"`
 	VerifyTokenMax    int64  `gorm:"column:verify_token_max"`
+	// ArchitectureAnalysisMode enables the observational architectural
+	// analysis (#157). It runs only when an explicit change signal fires and
+	// never changes the review result. Its budget is separate from Review and
+	// verification.
+	ArchitectureAnalysisMode string `gorm:"column:architecture_analysis_mode;default:observation"`
+	ArchitectureTokenShare   int    `gorm:"column:architecture_token_share"`
+	ArchitectureTimeShare    int    `gorm:"column:architecture_time_share"`
+	ArchitectureTokenMax     int64  `gorm:"column:architecture_token_max"`
 	// ReviewerLogin and ReviewerTeam are the GitHub review-request recipients
 	// of a run the engine cannot conclude, and of external contributions it
 	// escalates.
@@ -503,6 +511,9 @@ type ReviewRun struct {
 	// traceability and its consumption so the panel can show the extra cost.
 	VerifySessionID string         `gorm:"column:verify_session_id"`
 	VerifyUsage     datatypes.JSON `gorm:"column:verify_usage"`
+	// ArchitectureAnalysis is the structured observational verdict of the
+	// base–head comparison (#157). NULL when no analysis was evaluated.
+	ArchitectureAnalysis datatypes.JSON `gorm:"column:architecture_analysis"`
 	// PublishPending records, in the same transaction that finishes the run,
 	// that its GitHub delivery is still owed. The reconciler enqueues a publish
 	// job for it if the worker never managed to (#138). PublishState stores the

@@ -57,6 +57,53 @@ func TestMigrateCreatesPhase2Tables(t *testing.T) {
 			t.Fatalf("qa_policies.%s missing", column)
 		}
 	}
+	if !st.DB.Migrator().HasColumn(&store.ReviewRun{}, "architecture_analysis") {
+		t.Fatal("review_runs.architecture_analysis missing")
+	}
+	if !st.DB.Migrator().HasColumn(&store.QAPolicy{}, "architecture_analysis_mode") {
+		t.Fatal("qa_policies.architecture_analysis_mode missing")
+	}
+}
+
+func TestCompleteReviewRunPersistsArchitectureAnalysis(t *testing.T) {
+	f := newFixture(t)
+
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/app", nil, true)
+	pr := f.openPR(repo.ID, 1, store.StatusPending, false)
+	run, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: pr.ID, HeadSHA: pr.HeadSHA,
+	})
+	if err != nil {
+		t.Fatalf("CreateReviewRun: %v", err)
+	}
+	if _, ok, err := f.s.ClaimReviewRun(f.ctx, run.ID); err != nil || !ok {
+		t.Fatalf("ClaimReviewRun: ok = %v, err = %v", ok, err)
+	}
+	verdict := store.ArchitectureVerdict{
+		Status:    store.ArchitectureComplete,
+		Requested: true,
+		Mode:      store.ArchitectureAnalysisObservation,
+		Signals:   []string{"persistence"},
+		Evidence:  store.ArchitectureEvidence{Markdown: "## Behavior\n- changed"},
+	}
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+		Status:               store.RunSucceeded,
+		ArchitectureAnalysis: store.ArchitectureVerdictJSON(verdict),
+	}); err != nil {
+		t.Fatalf("CompleteReviewRun: %v", err)
+	}
+	stored, err := f.s.ReviewRun(f.ctx, run.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun: %v", err)
+	}
+	got := store.DecodeArchitectureVerdict(stored.ArchitectureAnalysis)
+	if got.Status != store.ArchitectureComplete || !got.Requested ||
+		len(got.Signals) != 1 || got.Signals[0] != "persistence" ||
+		got.Evidence.Markdown != "## Behavior\n- changed" {
+		t.Errorf("stored verdict = %+v, want the persisted analysis", got)
+	}
 }
 
 func TestOneActiveRunPerPullRequest(t *testing.T) {
@@ -605,6 +652,15 @@ func TestSavePolicyDefaults(t *testing.T) {
 		t.Errorf("defaults = %q/%d/%d/%d, want major/40/3000/4",
 			got.BlockingThreshold, got.MaxFilesPerPass, got.MaxDiffLinesPerPass, got.MaxPasses)
 	}
+	if got.ArchitectureAnalysisMode != store.ArchitectureAnalysisObservation ||
+		got.ArchitectureTokenShare != store.DefaultArchitectureTokenShare ||
+		got.ArchitectureTimeShare != store.DefaultArchitectureTimeShare ||
+		got.ArchitectureTokenMax != store.DefaultArchitectureTokenMax {
+		t.Errorf("architecture defaults = %q/%d/%d/%d, want observation/%d/%d/%d",
+			got.ArchitectureAnalysisMode, got.ArchitectureTokenShare, got.ArchitectureTimeShare,
+			got.ArchitectureTokenMax, store.DefaultArchitectureTokenShare,
+			store.DefaultArchitectureTimeShare, store.DefaultArchitectureTokenMax)
+	}
 	assertJSONEqual(t, "exclude_globs", got.ExcludeGlobs, `[]`)
 
 	// Saving again for the same team is an upsert: one row, same primary key.
@@ -712,6 +768,9 @@ func TestSavePolicyReviewControls(t *testing.T) {
 		{"ceiling above max", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ReviewContextCeiling: intPtr(store.ReviewContextCeilingMax + 1)}},
 		{"token share leaves no main pass", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, AutoTriageMode: store.AutoTriageApply, VerifyTokenShare: 100}},
 		{"time share leaves no main pass", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, AutoTriageMode: store.AutoTriageApply, VerifyTimeShare: 100}},
+		{"unknown architecture mode", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ArchitectureAnalysisMode: "promoted"}},
+		{"architecture token max below min", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ArchitectureTokenMax: store.ArchitectureTokenMaxMin - 1}},
+		{"architecture token share above max", store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ArchitectureTokenShare: 91}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := f.s.SaveQAPolicy(f.ctx, tc.policy); err == nil {

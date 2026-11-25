@@ -59,6 +59,14 @@ const (
 	DefaultVerifyTokenShare  = 20
 	DefaultVerifyTimeShare   = 15
 	DefaultVerifyTokenMax    = 100000
+
+	// Architecture analysis has a budget of its own, separate from the file
+	// review and the verifier. The shares bound it when the run has a token or
+	// time budget; the absolute maximum keeps it small when there is none.
+	DefaultArchitectureTokenShare = 25
+	DefaultArchitectureTimeShare  = 20
+	DefaultArchitectureTokenMax   = 100000
+	ArchitectureTokenMaxMin       = 10000
 )
 
 // VerifyTokenMaxMin is the smallest per-run cap the second OCR pass accepts:
@@ -93,6 +101,17 @@ func ValidReviewEffort(effort string) bool {
 func ValidAutoTriageMode(mode string) bool {
 	switch mode {
 	case AutoTriageOff, AutoTriageDryRun, AutoTriageApply:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidArchitectureAnalysisMode reports whether mode is one the worker
+// understands. Observation is the only active mode on this branch.
+func ValidArchitectureAnalysisMode(mode string) bool {
+	switch mode {
+	case ArchitectureAnalysisOff, ArchitectureAnalysisObservation:
 		return true
 	default:
 		return false
@@ -590,6 +609,31 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: %w", p.TeamID, err)
 	}
 	p.FallbackProfileIDs = fallbacks
+	if p.ArchitectureAnalysisMode == "" {
+		p.ArchitectureAnalysisMode = ArchitectureAnalysisObservation
+	}
+	if !ValidArchitectureAnalysisMode(p.ArchitectureAnalysisMode) {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid architecture analysis mode %q",
+			p.TeamID, p.ArchitectureAnalysisMode)
+	}
+	if p.ArchitectureTokenShare == 0 {
+		p.ArchitectureTokenShare = DefaultArchitectureTokenShare
+	}
+	if p.ArchitectureTimeShare == 0 {
+		p.ArchitectureTimeShare = DefaultArchitectureTimeShare
+	}
+	if p.ArchitectureTokenMax == 0 {
+		p.ArchitectureTokenMax = DefaultArchitectureTokenMax
+	}
+	if p.ArchitectureTokenShare < 0 || p.ArchitectureTokenShare > 90 ||
+		p.ArchitectureTimeShare < 0 || p.ArchitectureTimeShare > 90 {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid architecture shares %d/%d",
+			p.TeamID, p.ArchitectureTokenShare, p.ArchitectureTimeShare)
+	}
+	if p.ArchitectureTokenMax < ArchitectureTokenMaxMin || p.ArchitectureTokenMax > ReviewTokenBudgetMax {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid architecture token max %d",
+			p.TeamID, p.ArchitectureTokenMax)
+	}
 	globs := bytes.TrimSpace(p.ExcludeGlobs)
 	if len(globs) == 0 || bytes.Equal(globs, []byte("null")) {
 		p.ExcludeGlobs = datatypes.JSON([]byte(`[]`))
@@ -650,7 +694,9 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 			"verify_time_share", "verify_token_max", "reviewer_login", "reviewer_team",
 			"allow_external_reviews", "external_trusted_associations",
 			"max_external_diff_lines", "max_external_runs_per_day",
-			"external_daily_token_budget", "updated_at",
+			"external_daily_token_budget",
+			"architecture_analysis_mode", "architecture_token_share",
+			"architecture_time_share", "architecture_token_max", "updated_at",
 		}),
 	}).Create(&p).Error
 	if err != nil {
@@ -1415,6 +1461,9 @@ type RunCompletion struct {
 	// consumption. Empty values mean no verification ran.
 	VerifySessionID string
 	VerifyUsage     []byte
+	// ArchitectureAnalysis is the observational architectural verdict of the
+	// comparison. Empty keeps the column NULL.
+	ArchitectureAnalysis []byte
 }
 
 // CompleteReviewRun stores a run's outcome in a single transaction: the run is
@@ -1449,23 +1498,28 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 		if len(c.VerifyUsage) > 0 {
 			verifyUsage = datatypes.JSON(c.VerifyUsage)
 		}
+		var architectureAnalysis any
+		if len(c.ArchitectureAnalysis) > 0 {
+			architectureAnalysis = datatypes.JSON(c.ArchitectureAnalysis)
+		}
 		updates := map[string]any{
-			"status":             c.Status,
-			"error_code":         c.ErrorCode,
-			"error_message":      c.ErrorMessage,
-			"summary":            c.Summary,
-			"coverage":           datatypes.JSON(coverage),
-			"usage":              datatypes.JSON(usage),
-			"input_tokens":       input,
-			"output_tokens":      output,
-			"reasoning_tokens":   reasoning,
-			"cache_read_tokens":  cacheRead,
-			"cache_write_tokens": cacheWrite,
-			"total_tokens":       total,
-			"max_context_tokens": maxContext,
-			"verify_session_id":  c.VerifySessionID,
-			"verify_usage":       verifyUsage,
-			"clone_token_enc":    "",
+			"status":                c.Status,
+			"error_code":            c.ErrorCode,
+			"error_message":         c.ErrorMessage,
+			"summary":               c.Summary,
+			"coverage":              datatypes.JSON(coverage),
+			"usage":                 datatypes.JSON(usage),
+			"input_tokens":          input,
+			"output_tokens":         output,
+			"reasoning_tokens":      reasoning,
+			"cache_read_tokens":     cacheRead,
+			"cache_write_tokens":    cacheWrite,
+			"total_tokens":          total,
+			"max_context_tokens":    maxContext,
+			"verify_session_id":     c.VerifySessionID,
+			"verify_usage":          verifyUsage,
+			"architecture_analysis": architectureAnalysis,
+			"clone_token_enc":       "",
 			// The delivery is owed from the moment the result is durable, so a
 			// crash before the worker enqueues the publish job cannot lose it.
 			"publish_pending": true,

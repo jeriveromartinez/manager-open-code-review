@@ -46,6 +46,10 @@ type reviewRunDTO struct {
 	FinishedAt        *string `json:"finished_at"`
 	CreatedAt         string  `json:"created_at"`
 	UpdatedAt         string  `json:"updated_at"`
+	// ArchitectureAnalysis is the observational base–head verdict (#157), with
+	// its signals, scope, evidence and closing conditions. Empty on runs that
+	// did not evaluate it.
+	ArchitectureAnalysis json.RawMessage `json:"architecture_analysis"`
 }
 
 func jsonObject(raw datatypes.JSON) json.RawMessage {
@@ -68,8 +72,9 @@ func reviewRunDTOOf(run store.ReviewRun) reviewRunDTO {
 		Phase: run.Phase, PhaseStartedAt: formatTimePtr(run.PhaseStartedAt),
 		PolicyRevision: run.PolicyRevision, PolicyObservation: run.PolicyObservation,
 		StartedAt: formatTimePtr(run.StartedAt), FinishedAt: formatTimePtr(run.FinishedAt),
-		CreatedAt: run.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt: run.UpdatedAt.UTC().Format(time.RFC3339),
+		ArchitectureAnalysis: jsonObject(run.ArchitectureAnalysis),
+		CreatedAt:            run.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:            run.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 

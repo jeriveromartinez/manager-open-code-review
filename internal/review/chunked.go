@@ -339,11 +339,7 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 				break
 			}
 
-			chunkReviewer := *reviewer
-			chunkReviewer.Commit = ch.Commit
-			chunkReviewer.OnLog = log.OCRLogger(ctx, invocation)
-			chunkReviewer.OnSession = nil
-			chunkReviewer.ResumeSession = ""
+			chunkReviewer := chunkReviewerFor(reviewer, ch.Commit, log.OCRLogger(ctx, invocation))
 			if budget > 0 {
 				remaining := chunkAllowance(budget, resume.spent, resume.usageKnown && summary.usageKnown)
 				if remaining <= 0 {
@@ -397,6 +393,20 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 			"run_id", runID, "path", path, "chunks", len(chunks), "failures", failures)
 	}
 	return summary
+}
+
+// chunkReviewerFor derives the reviewer of one synthetic chunk. The analysis
+// describes the pull request comparison, not a chunk, so it is cleared; the
+// chunk keeps the main pass's token budget and configuration.
+func chunkReviewerFor(base *NativeReviewer, commit string, onLog func(string)) NativeReviewer {
+	chunk := *base
+	chunk.Commit = commit
+	chunk.Analysis = false
+	chunk.AnalysisTokenBudget = 0
+	chunk.OnSession = nil
+	chunk.ResumeSession = ""
+	chunk.OnLog = onLog
+	return chunk
 }
 
 // chunkLogLevel reports a failed chunk as an error and a successful one as
