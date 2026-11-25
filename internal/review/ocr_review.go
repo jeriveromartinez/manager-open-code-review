@@ -69,6 +69,10 @@ type nativeReview struct {
 	// global deadline ("global"). Empty means OCR ended on its own. It is not
 	// part of the OCR JSON and never leaves the review package.
 	closeReason string
+	// analysisTimedOut records that the analysis share, not the run deadline,
+	// closed the invocation. The review outcome stays whatever OCR reported;
+	// only the architectural observation is downgraded.
+	analysisTimedOut bool
 	// closeElapsed is how long OCR took to exit after the gradual close started.
 	closeElapsed time.Duration
 	// hardStopped reports that OCR ignored the signal and the process tree had
@@ -358,9 +362,25 @@ func verifyStopDeadline(now time.Time, ctx context.Context, timeout time.Duratio
 	return earliestDeadline(now, ctx, timeout)
 }
 
+// analysisStopDeadline bounds the invocation that carries --analysis. The
+// analysis has its own share of the run clock, so a hung analysis must not
+// consume the whole run. The run deadline still wins when it comes first, and a
+// zero share leaves only the run deadline in force.
+func analysisStopDeadline(now, runDeadline time.Time, hasRunDeadline bool, share time.Duration) (time.Time, bool, bool) {
+	if share <= 0 {
+		return runDeadline, hasRunDeadline, false
+	}
+	analysisDeadline := now.Add(share)
+	if hasRunDeadline && !analysisDeadline.Before(runDeadline) {
+		return runDeadline, true, false
+	}
+	return analysisDeadline, true, true
+}
+
 // nativeTimeoutError identifies which deadline stopped OCR. Kind is "global"
-// for the run's total deadline (and its per-group fallback); OCR's own task
-// budget arrives as JSON instead of an error.
+// for the run's total deadline (and its per-group fallback) and "analysis" for
+// the analysis share; OCR's own task budget arrives as JSON instead of an
+// error.
 type nativeTimeoutError struct {
 	Kind string
 	Err  error
@@ -370,6 +390,8 @@ func (e *nativeTimeoutError) Error() string {
 	switch e.Kind {
 	case "global":
 		return "deadline exceeded: " + e.Err.Error()
+	case "analysis":
+		return "analysis deadline exceeded: " + e.Err.Error()
 	default:
 		return "per-group deadline exceeded: " + e.Err.Error()
 	}
@@ -378,7 +400,8 @@ func (e *nativeTimeoutError) Error() string {
 func (e *nativeTimeoutError) Unwrap() error { return e.Err }
 
 // timeoutCodeFromKind maps the internal close kind onto the run error code the
-// panel and the log display.
+// panel and the log display. An analysis close shares the run-wide timeout code
+// because it only downgrades the observation, never the review outcome.
 func timeoutCodeFromKind(kind string) string {
 	switch kind {
 	case "http":
@@ -428,6 +451,10 @@ type NativeReviewer struct {
 	// own token budget, separate from the review and the verifier.
 	Analysis            bool
 	AnalysisTokenBudget int64
+	// AnalysisTimeout is the analysis share of the run clock. When it is sooner
+	// than the run deadline it bounds the invocation, so a hung analysis cannot
+	// consume the whole run. Zero leaves only the run deadline in force.
+	AnalysisTimeout time.Duration
 	// Timeout is the most this invocation may run. The context deadline wins
 	// when it is earlier, which is the case for chunks reviewed after the
 	// main run; the invocation deadline is shared with OCR's gradual close.
@@ -468,23 +495,41 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 		return nativeReview{}, nil, err
 	}
 	now := time.Now()
-	deadline, hasDeadline := ocrStopDeadline(now, ctx, n.Timeout)
-	remaining := time.Duration(0)
-	if hasDeadline {
-		remaining = deadline.Sub(now)
+	runDeadline, hasRunDeadline := ocrStopDeadline(now, ctx, n.Timeout)
+	runRemaining := time.Duration(0)
+	if hasRunDeadline {
+		runRemaining = runDeadline.Sub(now)
+	}
+	analysisTimeout := time.Duration(0)
+	if n.Analysis {
+		analysisTimeout = n.AnalysisTimeout
+	}
+	deadline, hasDeadline, analysisBounded := analysisStopDeadline(now, runDeadline, hasRunDeadline, analysisTimeout)
+	timeoutKind := "global"
+	if analysisBounded {
+		timeoutKind = "analysis"
 	}
 	margin := n.CloseMargin
 	if margin <= 0 {
 		margin = ocrCloseMargin
 	}
+	if analysisBounded && analysisTimeout > 0 {
+		// The analysis share can be shorter than OCR's close margin. Keep the
+		// graceful window inside it so the signal still reaches OCR and it can
+		// flush the report that preserves the review outcome.
+		if half := analysisTimeout / 2; margin > half {
+			margin = half
+		}
+	}
 	graceful := gracefulStopSupported()
 	// With enough room for the signal, OCR gets no per-task deadline at all:
 	// every group shares this run's absolute deadline.
-	global := graceful && remaining > margin
+	global := graceful && runRemaining > margin
 	// The fallback per-task budget derives from the stop window, so OCR's own
 	// deadline always lands before the hard stop on platforms without a
-	// graceful close.
-	taskTimeout, requestTimeout := ocrLimits(remaining, n.Effort, global)
+	// graceful close. It follows the run window, not the analysis share: the
+	// share only closes the process earlier, it must not shorten OCR's requests.
+	taskTimeout, requestTimeout := ocrLimits(runRemaining, n.Effort, global)
 	if err := writeNativeConfig(home, n.Profile, keyPath, requestTimeout); err != nil {
 		return nativeReview{}, nil, err
 	}
@@ -553,13 +598,13 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 			return nativeReview{}, nil, fmt.Errorf("ocr review: %w", cause)
 		}
 		if len(bytes.TrimSpace(stdout.Bytes())) == 0 {
-			return nativeReview{}, nil, &nativeTimeoutError{Kind: "global", Err: fmt.Errorf("ocr review: %w", cause)}
+			return nativeReview{}, nil, &nativeTimeoutError{Kind: timeoutKind, Err: fmt.Errorf("ocr review: %w", cause)}
 		}
 	}
 	if len(bytes.TrimSpace(stdout.Bytes())) == 0 {
 		runErr = nativeExecError(runErr, stderr.String())
 		if signalled || hardStopped {
-			return nativeReview{}, nil, &nativeTimeoutError{Kind: "global", Err: runErr}
+			return nativeReview{}, nil, &nativeTimeoutError{Kind: timeoutKind, Err: runErr}
 		}
 		return nativeReview{}, nil, runErr
 	}
@@ -567,7 +612,7 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 	if err != nil {
 		runErr = nativeExecError(runErr, stderr.String())
 		if signalled || hardStopped {
-			return nativeReview{}, stdout.Bytes(), &nativeTimeoutError{Kind: "global", Err: runErr}
+			return nativeReview{}, stdout.Bytes(), &nativeTimeoutError{Kind: timeoutKind, Err: runErr}
 		}
 		return nativeReview{}, stdout.Bytes(), runErr
 	}
@@ -576,6 +621,7 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 		// caller persists its coverage, findings and usage even though the
 		// run ends inconclusive.
 		res.closeReason = "global"
+		res.analysisTimedOut = analysisBounded
 		res.closeElapsed = closer.closeElapsed()
 		res.hardStopped = hardStopped
 	}

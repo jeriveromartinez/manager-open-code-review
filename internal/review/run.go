@@ -1216,6 +1216,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			effort, ceiling, attemptBudget, timeout, log.OCRLogger(runCtx, "main"))
 		reviewer.Analysis = analysisRequested
 		reviewer.AnalysisTokenBudget = analysisBudget.TokenBudget
+		reviewer.AnalysisTimeout = time.Duration(analysisBudget.TimeBudgetSeconds) * time.Second
 		analysisSkippedResume = false
 
 		r.setPhase(runCtx, run.ID, store.RunPhaseReviewing, log)
@@ -1357,6 +1358,12 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		}
 	}
 	architectureVerdict = applyNativeArchitectureAnalysis(architectureVerdict, res)
+	architectureVerdict, analysisDeadlineHit := applyAnalysisDeadline(architectureVerdict, res, analysisBudget)
+	if analysisDeadlineHit {
+		log.Log(runCtx, "worker", "analysis", "warn", logPhaseOCR, fmt.Sprintf(
+			"análisis arquitectónico inconcluso: agotó su plazo de %ds; la revisión conserva su resultado",
+			analysisBudget.TimeBudgetSeconds))
+	}
 	if analysisSkippedResume {
 		architectureVerdict.Status = store.ArchitectureInconclusive
 		architectureVerdict.Errors = append(architectureVerdict.Errors,

@@ -403,6 +403,7 @@ func chunkReviewerFor(base *NativeReviewer, commit string, onLog func(string)) N
 	chunk.Commit = commit
 	chunk.Analysis = false
 	chunk.AnalysisTokenBudget = 0
+	chunk.AnalysisTimeout = 0
 	chunk.OnSession = nil
 	chunk.ResumeSession = ""
 	chunk.OnLog = onLog

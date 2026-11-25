@@ -30,8 +30,8 @@ const (
 	architectureLinesThreshold = 400
 
 	// architectureTimeMax bounds the analysis window even when the run is
-	// much longer. OCR has no separate --analysis-timeout flag, so this budget
-	// is recorded (and logged) rather than passed as its own flag.
+	// much longer. OCR has no separate --analysis-timeout flag, so the worker
+	// enforces this share as the invocation's context deadline.
 	architectureTimeMax = 10 * time.Minute
 
 	// maxArchitectureMarkdown bounds the report copy kept in the run row.
@@ -294,9 +294,9 @@ func architectureScope(files []changedFile, patterns []string) store.Architectur
 // architectureBudget derives the analysis budget that is separate from the
 // review and the verifier. The token cap is the one OCR accepts through
 // --analysis-max-tokens-budget; the caller carves it out of the run budget so
-// the aggregate cannot exceed it. The time window is recorded in the verdict
-// because OCR has no separate analysis timeout flag; the analysis runs
-// concurrently, so the window is a share of the run clock, not extra time.
+// the aggregate cannot exceed it. The time window is a share of the run clock
+// that the caller enforces as the invocation's context deadline; the analysis
+// runs concurrently, so the window is not extra time.
 func architectureBudget(policy store.QAPolicy, remaining time.Duration, reviewTokens int64) store.ArchitectureBudget {
 	tokenShare := policy.ArchitectureTokenShare
 	if tokenShare <= 0 {
@@ -448,6 +448,32 @@ func applyNativeArchitectureAnalysis(verdict store.ArchitectureVerdict, res nati
 	verdict.Errors = append(verdict.Errors, meta.Errors...)
 	verdict.Status = architectureStatusFromMeta(meta, evidenceMarkdown)
 	return verdict
+}
+
+// markArchitectureTimedOut records that the analysis exhausted its own share of
+// the run. The report may still describe a complete review, so only the
+// observation is downgraded: the review outcome, conclusion, QA and inline
+// publication never depend on it.
+func markArchitectureTimedOut(verdict store.ArchitectureVerdict, reason string) store.ArchitectureVerdict {
+	if !verdict.Requested {
+		return verdict
+	}
+	verdict.Status = store.ArchitectureInconclusive
+	if strings.TrimSpace(reason) != "" {
+		verdict.Errors = append(verdict.Errors, reason)
+	}
+	return verdict
+}
+
+// applyAnalysisDeadline downgrades a requested observation when the analysis
+// share, not the run, closed the invocation. It reports whether the deadline
+// applied so the caller can log it. The review outcome is untouched.
+func applyAnalysisDeadline(verdict store.ArchitectureVerdict, res nativeReview, budget store.ArchitectureBudget) (store.ArchitectureVerdict, bool) {
+	if !res.analysisTimedOut {
+		return verdict, false
+	}
+	reason := fmt.Sprintf("analysis deadline exceeded: %ds share", budget.TimeBudgetSeconds)
+	return markArchitectureTimedOut(verdict, reason), true
 }
 
 // architectureComparisonMismatch reports the first SHA disagreement between

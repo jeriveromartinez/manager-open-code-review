@@ -714,6 +714,38 @@ func TestOCRStopDeadlineReserveIsBounded(t *testing.T) {
 	}
 }
 
+// TestAnalysisStopDeadlineUsesTheSoonerBound pins that the analysis carries its
+// own bound, but never outlives the run: the analysis share wins when it is
+// sooner, and a zero share keeps only the run deadline.
+func TestAnalysisStopDeadlineUsesTheSoonerBound(t *testing.T) {
+	now := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	runDeadline := now.Add(30 * time.Minute)
+
+	got, ok, bounded := analysisStopDeadline(now, runDeadline, true, 5*time.Minute)
+	if !ok || !bounded || !got.Equal(now.Add(5*time.Minute)) {
+		t.Errorf("analysis deadline = %s (ok=%v bounded=%v), want the 5m share", got, ok, bounded)
+	}
+
+	got, ok, bounded = analysisStopDeadline(now, runDeadline, true, 45*time.Minute)
+	if !ok || bounded || !got.Equal(runDeadline) {
+		t.Errorf("analysis deadline = %s (ok=%v bounded=%v), want the run deadline", got, ok, bounded)
+	}
+
+	got, ok, bounded = analysisStopDeadline(now, runDeadline, true, 0)
+	if !ok || bounded || !got.Equal(runDeadline) {
+		t.Errorf("zero share deadline = %s (ok=%v bounded=%v), want no analysis bound", got, ok, bounded)
+	}
+
+	if got, ok, bounded := analysisStopDeadline(now, time.Time{}, false, 0); ok || bounded || !got.IsZero() {
+		t.Errorf("no run deadline = %s (ok=%v bounded=%v), want no deadline at all", got, ok, bounded)
+	}
+
+	got, ok, bounded = analysisStopDeadline(now, time.Time{}, false, 5*time.Minute)
+	if !ok || !bounded || !got.Equal(now.Add(5*time.Minute)) {
+		t.Errorf("share without run deadline = %s (ok=%v bounded=%v), want the share", got, ok, bounded)
+	}
+}
+
 // TestVerifyStopDeadlineKeepsShare pins #151: the verifier's full share is
 // available to it even when it is smaller than the main run's 2m reserve.
 func TestVerifyStopDeadlineKeepsShare(t *testing.T) {
