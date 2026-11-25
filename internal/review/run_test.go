@@ -1245,6 +1245,87 @@ func TestRunStoresArchitectureBaselineInObservationMode(t *testing.T) {
 	}
 }
 
+// TestRunAnalysisDeadlineKeepsReviewOutcome is the run-level guard for the
+// analysis share: the budget reaches the reviewer, the invocation is closed at
+// the share, and the expiry downgrades only the observation. The Go fake runs
+// on every platform; Windows has no graceful close, so it is hard-stopped and
+// the run is inconclusive instead of succeeded.
+func TestRunAnalysisDeadlineKeepsReviewOutcome(t *testing.T) {
+	f := newRunTestFixture(t)
+
+	// Two code roots make the inventory fire the module-boundary signal, which
+	// is what requests the analysis.
+	work := filepath.Join(f.root, "work")
+	for _, dir := range []string{"internal/review", "internal/store"} {
+		if err := os.MkdirAll(filepath.Join(work, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRunTestFile(t, filepath.Join(work, "internal", "review", "a.go"), "package review\n")
+	writeRunTestFile(t, filepath.Join(work, "internal", "store", "b.go"), "package store\n")
+	runGit(t, work, "add", "-A")
+	runGit(t, work, "commit", "-qm", "two modules")
+	headSHA := f.publishWorkHead(t)
+	f.updateRun(t, f.runID, map[string]any{"head_sha": headSHA, "base_sha": f.baseSHA})
+
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).
+		Updates(map[string]any{
+			"architecture_analysis_mode": store.ArchitectureAnalysisObservation,
+			"architecture_time_share":    25,
+		}).Error; err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+
+	// The analysis claims completion; only the worker's own deadline can make
+	// it inconclusive.
+	report := strings.Replace(runTestNativeCovering(
+		"auth.go", "internal/review/a.go", "internal/store/b.go"),
+		"\n  \"manifest\": {",
+		"\n  \"review_status\": \"complete\",\n"+
+			"  \"analysis_raw\": \"## Resumen\\n- ok\",\n"+
+			"  \"analysis_meta\": {\"schema_version\": \"ocr.review-analysis/v2\", \"execution_status\": \"completed\"},\n"+
+			"  \"manifest\": {", 1)
+	dir := filepath.Join(f.root, "fake-ocr-analysis")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRunTestFile(t, filepath.Join(dir, "main.json"), report)
+	f.ocrBin = fakeOCRBatch(t)
+	t.Setenv("RUN_FAKE_OCR_DIR", dir)
+	t.Setenv("RUN_FAKE_OCR_PHASE", "0")
+	t.Setenv("RUN_FAKE_OCR_CALLS", f.ocrCallLog)
+	t.Setenv("RUN_FAKE_OCR_ARGV", f.ocrArgv)
+	t.Setenv("RUN_FAKE_OCR_ANALYSIS_HANG", "1")
+	t.Setenv("RUN_FAKE_OCR_READY", filepath.Join(dir, "ready"))
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 12 * time.Second
+
+	started := time.Now()
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 8*time.Second {
+		t.Errorf("Run() took %s, want the analysis share to close OCR before the run deadline", elapsed)
+	}
+
+	wantStatus, wantCode := store.RunSucceeded, ""
+	if !gracefulStopSupported() {
+		// Without a graceful close the report is lost with the process; the
+		// run is inconclusive, never failed.
+		wantStatus, wantCode = store.RunInconclusive, "timeout_global"
+	}
+	run := assertRunTerminal(t, f, wantStatus, wantCode)
+	verdict := store.DecodeArchitectureVerdict(run.ArchitectureAnalysis)
+	if verdict.Status != store.ArchitectureInconclusive {
+		t.Fatalf("analysis status = %q, want inconclusive (errors: %v)", verdict.Status, verdict.Errors)
+	}
+	if verdict.Budget.TimeBudgetSeconds <= 0 {
+		t.Errorf("time budget = %ds, want the policy share", verdict.Budget.TimeBudgetSeconds)
+	}
+}
+
 // TestRunUsesSingleOCRReview is the #71 acceptance test: one invocation covers
 // the whole pull request.
 func TestRunUsesSingleOCRReview(t *testing.T) {

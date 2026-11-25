@@ -196,6 +196,7 @@ func (r *Runner) reviewTextFiles(ctx context.Context, runID, profileID uint, rev
 			// text window: never request it again per window.
 			textReviewer.Analysis = false
 			textReviewer.AnalysisTokenBudget = 0
+			textReviewer.AnalysisTimeout = 0
 			// The original path already passed the team's exclude patterns; the
 			// synthetic path is an implementation detail and must not be caught
 			// by a language glob such as **/*.go.

@@ -341,6 +341,67 @@ func TestArchitecturePartialVerdict(t *testing.T) {
 	}
 }
 
+// TestMarkArchitectureTimedOutKeepsReviewOutcome pins the boundary of the
+// analysis deadline: the observation becomes inconclusive, but the review
+// status OCR reported is what decides the run.
+func TestMarkArchitectureTimedOutKeepsReviewOutcome(t *testing.T) {
+	verdict := newArchitectureVerdict(store.ArchitectureAnalysisObservation, true, []string{"persistence"},
+		store.ArchitectureScope{}, store.ArchitectureComparison{}, store.ArchitectureBudget{})
+	verdict.Status = store.ArchitectureComplete
+	verdict.Evidence.Markdown = "## Resumen\n- ok"
+
+	got := markArchitectureTimedOut(verdict, "analysis deadline exceeded")
+	if got.Status != store.ArchitectureInconclusive {
+		t.Errorf("status = %q, want inconclusive", got.Status)
+	}
+	if len(got.Errors) == 0 || !strings.Contains(got.Errors[len(got.Errors)-1], "deadline") {
+		t.Errorf("errors = %v, want the deadline reason", got.Errors)
+	}
+
+	res := nativeReview{Status: "complete", Manifest: nativeManifest{TerminalState: "complete"}}
+	if status, code := nativeOutcome(res); status != store.RunSucceeded || code != "" {
+		t.Errorf("review outcome = %s/%q, want succeeded", status, code)
+	}
+}
+
+// TestApplyAnalysisDeadlineDowngradesOnlyTheObservation connects the flag the
+// reviewer sets to the verdict run.go persists, without depending on a shell.
+func TestApplyAnalysisDeadlineDowngradesOnlyTheObservation(t *testing.T) {
+	budget := store.ArchitectureBudget{TimeBudgetSeconds: 120}
+	verdict := newArchitectureVerdict(store.ArchitectureAnalysisObservation, true, []string{"persistence"},
+		store.ArchitectureScope{}, store.ArchitectureComparison{}, budget)
+	verdict.Status = store.ArchitectureComplete
+
+	res := nativeReview{Status: "complete", Manifest: nativeManifest{TerminalState: "complete"}, analysisTimedOut: true}
+	got, applied := applyAnalysisDeadline(verdict, res, budget)
+	if !applied {
+		t.Fatal("applied = false, want the analysis deadline branch")
+	}
+	if got.Status != store.ArchitectureInconclusive {
+		t.Errorf("status = %q, want inconclusive", got.Status)
+	}
+	if status, code := nativeOutcome(res); status != store.RunSucceeded || code != "" {
+		t.Errorf("review outcome = %s/%q, want succeeded", status, code)
+	}
+
+	untouched, applied := applyAnalysisDeadline(verdict, nativeReview{Status: "complete"}, budget)
+	if applied || untouched.Status != store.ArchitectureComplete {
+		t.Errorf("verdict without a close = %q (applied=%v), want untouched", untouched.Status, applied)
+	}
+}
+
+func TestMarkArchitectureTimedOutLeavesUnrequestedVerdict(t *testing.T) {
+	verdict := newArchitectureVerdict(store.ArchitectureAnalysisOff, false, nil,
+		store.ArchitectureScope{}, store.ArchitectureComparison{}, store.ArchitectureBudget{})
+	got := markArchitectureTimedOut(verdict, "analysis deadline exceeded")
+	if got.Status != store.ArchitectureNotRequested {
+		t.Errorf("status = %q, want not_requested", got.Status)
+	}
+	if len(got.Errors) != 0 {
+		t.Errorf("errors = %v, want none for an unrequested analysis", got.Errors)
+	}
+}
+
 func TestArchitectureBudgetIsSeparateAndBounded(t *testing.T) {
 	policy := store.QAPolicy{ArchitectureTokenShare: 25, ArchitectureTimeShare: 20, ArchitectureTokenMax: 100000}
 

@@ -6,6 +6,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,6 +39,20 @@ func main() {
 		output := os.Getenv("RUN_FAKE_OCR_MAIN_OUTPUT")
 		if output == "" {
 			output = filepath.Join(dir, "main.json")
+		}
+		// The analysis hang flushes the report only when the worker asks OCR to
+		// close, which is how a deadline close preserves the review outcome.
+		if phase == "0" && os.Getenv("RUN_FAKE_OCR_ANALYSIS_HANG") == "1" {
+			writeFile(os.Getenv("RUN_FAKE_OCR_READY"), "ready")
+			signals := make(chan os.Signal, 1)
+			signal.Notify(signals, os.Interrupt)
+			select {
+			case <-signals:
+				printFile(output)
+				os.Exit(1)
+			case <-time.After(time.Minute):
+			}
+			return
 		}
 		printFile(output)
 		return

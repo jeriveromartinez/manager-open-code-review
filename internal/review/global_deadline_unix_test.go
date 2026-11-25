@@ -129,6 +129,126 @@ while :; do sleep 0.2; done
 	}
 }
 
+// analysisDeadlineReport is what the fake OCR writes when the analysis share,
+// not the run, is what closes the invocation: the review is complete and the
+// analysis section is present but no longer trustworthy.
+const analysisDeadlineReport = `{
+  "status": "complete",
+  "summary": {"files_reviewed": 1, "comments": 0, "total_tokens": 12,
+    "input_tokens": 8, "output_tokens": 4},
+  "manifest": {
+    "terminal_state": "complete",
+    "coverage": {"completed": [{"path": "a.go"}]}
+  },
+  "review_status": "complete",
+  "analysis_raw": "## Resumen\n- ok",
+  "analysis_meta": {
+    "schema_version": "ocr.review-analysis/v2",
+    "execution_status": "completed"
+  }
+}`
+
+// The analysis has its own bound. When it fires, the process is closed early
+// and the analysis is inconclusive, but the review outcome the report carries
+// stays untouched.
+func TestReviewAnalysisDeadlineKeepsReviewOutcome(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "partial.json")
+	if err := os.WriteFile(output, []byte(analysisDeadlineReport), 0o644); err != nil {
+		t.Fatalf("write report: %v", err)
+	}
+	bin := writeDeadlineOCR(t, fmt.Sprintf(`#!/bin/sh
+trap 'cat %q; exit 1' INT
+while :; do sleep 0.2; done
+`, output))
+
+	reviewer := deadlineReviewer(t, bin, 10*time.Second, 150*time.Millisecond)
+	reviewer.Analysis = true
+	reviewer.AnalysisTimeout = 400 * time.Millisecond
+
+	started := time.Now()
+	res, _, err := reviewer.Review(context.Background())
+	if err != nil {
+		t.Fatalf("Review() error = %v, want the partial report", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Errorf("Review() took %s, want it closed by the analysis share", elapsed)
+	}
+	if !res.analysisTimedOut {
+		t.Error("analysisTimedOut = false, want the analysis share to be recorded")
+	}
+	if res.closeReason != "global" || res.hardStopped {
+		t.Errorf("closeReason/hardStopped = %q/%v, want the cooperative close", res.closeReason, res.hardStopped)
+	}
+	if status, code := nativeOutcome(res); status != store.RunSucceeded || code != "" {
+		t.Errorf("review outcome = %s/%q, want succeeded", status, code)
+	}
+
+	verdict := newArchitectureVerdict(store.ArchitectureAnalysisObservation, true, []string{"persistence"},
+		store.ArchitectureScope{}, store.ArchitectureComparison{}, store.ArchitectureBudget{})
+	verdict = applyNativeArchitectureAnalysis(verdict, res)
+	verdict = markArchitectureTimedOut(verdict, "analysis deadline exceeded")
+	if verdict.Status != store.ArchitectureInconclusive {
+		t.Errorf("analysis status = %q, want inconclusive", verdict.Status)
+	}
+}
+
+// A share shorter than OCR's default 20s close margin must still be closed
+// gracefully; otherwise the hard stop arrives first and the review report is
+// lost with the analysis it was carrying.
+func TestReviewAnalysisDeadlineClosesGracefullyWhenShareIsShort(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "partial.json")
+	if err := os.WriteFile(output, []byte(analysisDeadlineReport), 0o644); err != nil {
+		t.Fatalf("write report: %v", err)
+	}
+	bin := writeDeadlineOCR(t, fmt.Sprintf(`#!/bin/sh
+trap 'cat %q; exit 1' INT
+while :; do sleep 0.2; done
+`, output))
+
+	// Zero keeps the production margin of 20s, which is longer than the share.
+	reviewer := deadlineReviewer(t, bin, 10*time.Second, 0)
+	reviewer.Analysis = true
+	reviewer.AnalysisTimeout = 400 * time.Millisecond
+
+	res, _, err := reviewer.Review(context.Background())
+	if err != nil {
+		t.Fatalf("Review() error = %v, want the gracefully closed report", err)
+	}
+	if !res.analysisTimedOut {
+		t.Error("analysisTimedOut = false, want the analysis share to be recorded")
+	}
+	if res.hardStopped {
+		t.Error("hardStopped = true, want OCR to receive the close signal first")
+	}
+}
+
+// A process that ignores the analysis close and writes nothing must still be
+// inconclusive, never failed: the analysis shares the invocation but not the
+// review's terminal state.
+func TestReviewAnalysisDeadlineWithoutReportIsInconclusive(t *testing.T) {
+	bin := writeDeadlineOCR(t, `#!/bin/sh
+trap '' INT
+while :; do sleep 0.2; done
+`)
+	reviewer := deadlineReviewer(t, bin, 10*time.Second, 100*time.Millisecond)
+	reviewer.Analysis = true
+	reviewer.AnalysisTimeout = 350 * time.Millisecond
+
+	started := time.Now()
+	_, _, err := reviewer.Review(context.Background())
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Errorf("Review() took %s, want the process stopped at the analysis share", elapsed)
+	}
+	var timeout *nativeTimeoutError
+	if !errors.As(err, &timeout) || timeout.Kind != "analysis" {
+		t.Fatalf("Review() error = %v, want an analysis timeout", err)
+	}
+	out, _ := classifyNativeError(context.Background(), runOutcome{}, err)
+	if out.status != store.RunInconclusive || out.code != "timeout_global" {
+		t.Errorf("outcome = %q/%q, want inconclusive/timeout_global", out.status, out.code)
+	}
+}
+
 // A run that ends on its own keeps its result and reports no close.
 func TestReviewNormalRunIsUnaffected(t *testing.T) {
 	output := filepath.Join(t.TempDir(), "complete.json")
