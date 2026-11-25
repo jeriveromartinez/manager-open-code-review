@@ -1634,6 +1634,26 @@ func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, compari
 	return nil
 }
 
+// SetReviewRunBaseTip re-pins the base tip of a run whose comparison was
+// adopted after an equivalent base advance. The run keeps its merge base, so
+// the head/base-ref/merge-base identity is unchanged; recording the newer tip
+// is what lets CurrentVerdictRun keep recognizing it as the current comparison.
+// The head and base branch are part of the guard so a concurrent retarget can
+// never rewrite the run. An empty tip is ignored because it would erase a
+// snapshot the run already carries.
+func (s *Store) SetReviewRunBaseTip(ctx context.Context, runID uint, headSHA, baseRef, baseTipSHA string) error {
+	if baseTipSHA == "" {
+		return nil
+	}
+	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND head_sha = ? AND base_ref = ?", runID, headSHA, baseRef).
+		Update("base_tip_sha", baseTipSHA)
+	if res.Error != nil {
+		return fmt.Errorf("set base tip of review run %d: %w", runID, res.Error)
+	}
+	return nil
+}
+
 // SetPRMergeBase records the resolved merge base of the pull request's current
 // comparison. The update is conditional on the head, base branch and base tip
 // still being the ones the resolution was made for, so a retarget or a

@@ -131,8 +131,10 @@ type triggerFixture struct {
 
 	mu           sync.Mutex
 	mergeBase    string
+	mergeBases   map[string]string
 	compareErr   bool
 	compareCalls int
+	compareBases []string
 	reviewReqs   []triggerReviewRequest
 }
 
@@ -197,9 +199,15 @@ func newTriggerFixture(t *testing.T) *triggerFixture {
 			return
 		}
 		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/compare/") {
+			_, rest, _ := strings.Cut(r.URL.Path, "/compare/")
+			base, _, _ := strings.Cut(rest, "...")
 			f.mu.Lock()
 			f.compareCalls++
+			f.compareBases = append(f.compareBases, base)
 			mergeBase, fail := f.mergeBase, f.compareErr
+			if pinned, ok := f.mergeBases[base]; ok {
+				mergeBase = pinned
+			}
 			f.mu.Unlock()
 			if fail {
 				http.Error(w, "compare unavailable", http.StatusInternalServerError)
@@ -272,6 +280,30 @@ func (f *triggerFixture) compares() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.compareCalls
+}
+
+// setCompareByBase programs the fake Compare API per base, so a test can make
+// the mutable branch name and the recorded tip resolve different comparisons.
+func (f *triggerFixture) setCompareByBase(bases map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.mergeBases = bases
+}
+
+func (f *triggerFixture) comparedBases() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.compareBases...)
+}
+
+// setRunBaseTip seeds the base tip a run snapshot carries, the way a real run
+// created by the trigger records it.
+func (f *triggerFixture) setRunBaseTip(runID uint, tip string) {
+	f.t.Helper()
+	if err := f.st.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", runID).Update("base_tip_sha", tip).Error; err != nil {
+		f.t.Fatalf("set base tip of run %d: %v", runID, err)
+	}
 }
 
 // setPRComparison rewrites the comparison columns the way a webhook sync or the
@@ -821,6 +853,79 @@ func TestTriggerReusesComparisonWhenBaseAdvances(t *testing.T) {
 	// publication had been skipped; adopting the comparison republishes it.
 	if len(f.jobs.publishes) != 1 || f.jobs.publishes[0] != runs[0].ID {
 		t.Errorf("EnqueuePublish calls = %v, want [%d]", f.jobs.publishes, runs[0].ID)
+	}
+}
+
+// Compare must be pinned to the base tip recorded on the pull request, not the
+// mutable branch name: a base push after the metadata read must not resolve a
+// newer comparison and record its merge base under the old tip.
+func TestTriggerPinsCompareToRecordedBaseTip(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	run := f.seedRun(pr, pr.HeadSHA, "main", "mb-1", store.RunSucceeded)
+	f.setRunBaseTip(run.ID, "tip-1")
+	pr = f.setPRComparison(pr, "main", "tip-2", "")
+	// Only the recorded tip still resolves the reviewed comparison; the branch
+	// moved again in GitHub after the metadata was read.
+	f.setCompareByBase(map[string]string{"main": "mb-elsewhere", "tip-2": "mb-1"})
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+
+	if got := f.comparedBases(); len(got) != 1 || got[0] != "tip-2" {
+		t.Errorf("Compare bases = %v, want [tip-2]", got)
+	}
+	runs, err := f.st.ListReviewRuns(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("ListReviewRuns: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != run.ID {
+		t.Fatalf("runs = %+v, want the existing run to be adopted", runs)
+	}
+	if runs[0].BaseSHA != "mb-1" {
+		t.Errorf("adopted run base = %q, want mb-1", runs[0].BaseSHA)
+	}
+	var saved store.PullRequest
+	if err := f.st.DB.WithContext(f.ctx).Take(&saved, pr.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if saved.MergeBaseSHA != "mb-1" {
+		t.Errorf("merge_base_sha = %q, want mb-1", saved.MergeBaseSHA)
+	}
+}
+
+// A run adopted because the base advanced without changing the merge base must
+// become the current comparison: a later republish (for example a CI change)
+// has to find it instead of reporting no verdict forever.
+func TestTriggerAdoptedRunRemainsCurrentForRepublish(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("app", eligibleOpts())
+	run := f.seedRun(pr, pr.HeadSHA, "main", "mb-1", store.RunSucceeded)
+	f.setRunBaseTip(run.ID, "tip-1")
+	pr = f.setPRComparison(pr, "main", "tip-2", "")
+	f.setCompare("mb-1", false)
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+	if got := f.compares(); got != 1 {
+		t.Fatalf("Compare calls = %d, want 1", got)
+	}
+	saved, err := f.st.PullRequest(f.ctx, pr.ID)
+	if err != nil {
+		t.Fatalf("PullRequest: %v", err)
+	}
+
+	current, ok, err := f.st.CurrentVerdictRun(f.ctx, saved)
+	if err != nil {
+		t.Fatalf("CurrentVerdictRun: %v", err)
+	}
+	if !ok || current.ID != run.ID {
+		t.Fatalf("current verdict = %+v/%v, want the adopted run %d", current, ok, run.ID)
+	}
+	if current.BaseTipSHA != "tip-2" {
+		t.Errorf("adopted run base tip = %q, want tip-2", current.BaseTipSHA)
 	}
 }
 
