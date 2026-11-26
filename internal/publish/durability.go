@@ -25,6 +25,9 @@ type publishProgress struct {
 	Check       bool `json:"check,omitempty"`
 	Status      bool `json:"status,omitempty"`
 	Completed   bool `json:"completed,omitempty"`
+	// CheckAnnotations counts the check annotations GitHub already accepted.
+	// GitHub appends them on every PATCH, so a retry resumes after this count.
+	CheckAnnotations int `json:"check_annotations,omitempty"`
 }
 
 func (p *publishContext) loadProgress() {
@@ -70,6 +73,21 @@ func (p *publishContext) markStep(ctx context.Context, step string) error {
 	case store.PublishStepStatus:
 		p.progress.Status = true
 	}
+	return nil
+}
+
+// advanceCheckCursor persists how many check annotations GitHub has accepted.
+// It only moves forward: a remote count below the local cursor means an older
+// observation and must not make a retry resend an accepted page.
+func (p *publishContext) advanceCheckCursor(ctx context.Context, accepted int) error {
+	if accepted <= p.progress.CheckAnnotations {
+		return nil
+	}
+	if err := p.w.Store.AdvancePublishCursor(ctx, p.run.ID,
+		store.PublishCursorCheckAnnotations, accepted); err != nil {
+		return err
+	}
+	p.progress.CheckAnnotations = accepted
 	return nil
 }
 

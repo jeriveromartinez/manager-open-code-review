@@ -269,9 +269,13 @@ func (p *publishContext) publishInlineComments(ctx context.Context, added addedL
 			ID int64 `json:"id"`
 		}
 		payload := map[string]any{
-			"event":    "COMMENT",
-			"body":     p.sanitize("Comentarios automáticos de QA Control Center") + "\n\n" + marker,
-			"comments": comments,
+			// Pin the review to the commit the run reviewed. Without it GitHub
+			// resolves the inline comments against whatever head is current when
+			// the request lands, which may be a commit the run never saw (#138).
+			"commit_id": p.run.HeadSHA,
+			"event":     "COMMENT",
+			"body":      p.sanitize("Comentarios automáticos de QA Control Center") + "\n\n" + marker,
+			"comments":  comments,
 		}
 		path := p.repoPath(fmt.Sprintf("pulls/%d/reviews", p.pr.Number))
 		if err := p.request(ctx, http.MethodPost, path, payload, &created); err != nil {

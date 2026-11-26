@@ -81,18 +81,23 @@ type e2ePostedComment struct {
 	Line   int    `json:"line"`
 }
 
+type e2eCheckAnnotation struct {
+	Path            string `json:"path"`
+	StartLine       int    `json:"start_line"`
+	EndLine         int    `json:"end_line"`
+	AnnotationLevel string `json:"annotation_level"`
+	Title           string `json:"title"`
+	Message         string `json:"message"`
+}
+
 type e2eCheckPatch struct {
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
 	Output     struct {
-		Title       string `json:"title"`
-		Summary     string `json:"summary"`
-		Text        string `json:"text"`
-		Annotations []struct {
-			Path            string `json:"path"`
-			StartLine       int    `json:"start_line"`
-			AnnotationLevel string `json:"annotation_level"`
-		} `json:"annotations"`
+		Title       string               `json:"title"`
+		Summary     string               `json:"summary"`
+		Text        string               `json:"text"`
+		Annotations []e2eCheckAnnotation `json:"annotations"`
 	} `json:"output"`
 }
 
@@ -109,6 +114,9 @@ type e2eGitHub struct {
 	reviews            []e2eReview
 	checkCreates       []string
 	checkPatches       []e2eCheckPatch
+	checkStatus        string
+	checkConclusion    string
+	checkAnnotations   []e2eCheckAnnotation
 	replies            []string
 	resolves           int
 	reviewCommentNodes []string
@@ -207,7 +215,44 @@ func (g *e2eGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var patch e2eCheckPatch
 		_ = json.Unmarshal(body, &patch)
 		g.checkPatches = append(g.checkPatches, patch)
+		g.checkAnnotations = append(g.checkAnnotations, patch.Output.Annotations...)
+		if patch.Status != "" {
+			g.checkStatus = patch.Status
+		}
+		if patch.Conclusion != "" {
+			g.checkConclusion = patch.Conclusion
+		}
 		writeJSON(map[string]any{"id": e2eCheckID}, http.StatusOK)
+
+	case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/check-runs/") &&
+		strings.HasSuffix(r.URL.Path, "/annotations"):
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		if perPage < 1 {
+			perPage = 30
+		}
+		start := (page - 1) * perPage
+		if start > len(g.checkAnnotations) {
+			start = len(g.checkAnnotations)
+		}
+		end := start + perPage
+		if end > len(g.checkAnnotations) {
+			end = len(g.checkAnnotations)
+		}
+		writeJSON(g.checkAnnotations[start:end], http.StatusOK)
+
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/acme/origin/check-runs/"):
+		status := g.checkStatus
+		if status == "" {
+			status = "in_progress"
+		}
+		writeJSON(map[string]any{
+			"id": e2eCheckID, "status": status, "conclusion": g.checkConclusion,
+			"output": map[string]any{"annotations_count": len(g.checkAnnotations)},
+		}, http.StatusOK)
 
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/origin/issues/1/comments":
 		comments := g.comments
