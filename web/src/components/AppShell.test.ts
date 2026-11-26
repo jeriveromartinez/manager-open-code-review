@@ -1,7 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createMemoryHistory, createRouter } from 'vue-router'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import AppShell from './AppShell.vue'
 
 const mocks = vi.hoisted(() => ({
@@ -26,7 +26,7 @@ function me(overrides: Record<string, unknown> = {}) {
   }
 }
 
-async function mountShell(path = '/'): Promise<VueWrapper> {
+async function mountShellWithRouter(path = '/'): Promise<{ wrapper: VueWrapper; router: Router }> {
   const page = { template: '<div />' }
   const router = createRouter({
     history: createMemoryHistory(),
@@ -42,6 +42,11 @@ async function mountShell(path = '/'): Promise<VueWrapper> {
     global: { plugins: [createPinia(), router] },
   })
   await flushPromises()
+  return { wrapper, router }
+}
+
+async function mountShell(path = '/'): Promise<VueWrapper> {
+  const { wrapper } = await mountShellWithRouter(path)
   return wrapper
 }
 
@@ -150,5 +155,22 @@ describe('AppShell', () => {
     const main = wrapper.get('main.container')
     expect(main.classes()).not.toContain('container--flush')
     expect(main.classes()).not.toContain('list-view')
+  })
+
+  it('updates the container classes when navigating between routes', async () => {
+    const { wrapper, router } = await mountShellWithRouter('/')
+    expect(wrapper.get('main.container').classes()).toContain('container--flush')
+
+    await router.push('/teams')
+    await flushPromises()
+
+    expect(wrapper.get('main.container').classes()).not.toContain('container--flush')
+    expect(wrapper.get('main.container').classes()).not.toContain('list-view')
+
+    await router.push('/')
+    await flushPromises()
+
+    expect(wrapper.get('main.container').classes()).toContain('container--flush')
+    expect(wrapper.get('main.container').classes()).toContain('list-view')
   })
 })
