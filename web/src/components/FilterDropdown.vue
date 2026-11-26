@@ -14,7 +14,7 @@ const emit = defineEmits<{
   'update:modelValue': [value: string[]]
 }>()
 
-// En modo múltiple la opción vacía limpia el filtro y siempre vive al principio.
+// In multiple mode the empty option clears the filter and always comes first.
 const allOption: FilterOption = { value: '', label: 'Todas' }
 
 const open = ref(false)
@@ -131,6 +131,7 @@ function onKeydown(event: KeyboardEvent): void {
       break
     case 'Escape':
       event.preventDefault()
+      event.stopPropagation()
       close(true)
       break
     case 'Tab':
@@ -187,6 +188,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocumentPoin
       class="filter-dropdown__list"
       role="listbox"
       :aria-label="label"
+      :aria-multiselectable="multiple || undefined"
       tabindex="-1"
       :aria-activedescendant="activeOptionId"
       @keydown="onKeydown"
