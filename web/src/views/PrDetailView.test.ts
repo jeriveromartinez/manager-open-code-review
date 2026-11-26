@@ -23,7 +23,10 @@ vi.mock('../composables/useLiveRefresh', () => ({
   },
 }))
 
-vi.mock('vue-router', () => ({ useRoute: () => ({ params: { id: '42' } }) }))
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ params: { id: '42' }, query: {} }),
+  useRouter: () => ({ replace: () => Promise.resolve() }),
+}))
 
 const detail: PRDetail = {
   id: 42,
@@ -147,6 +150,85 @@ const detail: PRDetail = {
 
 function mountDetail(): VueWrapper {
   return mount(PrDetailView)
+}
+
+const filterFindings: Finding[] = [
+  {
+    ...detail.findings[0],
+    id: 'b1',
+    fingerprint: 'fp-b1',
+    title: 'Fallo bloqueante',
+    severity: 'blocker',
+    category: 'security',
+    path: 'internal/auth.go',
+    status: 'open',
+    triage_verdict: '',
+  },
+  {
+    ...detail.findings[0],
+    id: 'm1',
+    fingerprint: 'fp-m1',
+    title: 'Fallo mayor',
+    severity: 'major',
+    category: 'bug',
+    path: 'web/src/Login.vue',
+    status: 'open',
+    triage_verdict: 'confirmed',
+    triaged_by: 'mvega',
+  },
+  {
+    ...detail.findings[0],
+    id: 'm2',
+    fingerprint: 'fp-m2',
+    title: 'Fallo mayor descartado',
+    severity: 'major',
+    category: 'tests',
+    path: 'web/src/Login.spec.ts',
+    status: 'open',
+    triage_verdict: 'false_positive',
+    triaged_by: 'mvega',
+  },
+  {
+    ...detail.findings[0],
+    id: 'n1',
+    fingerprint: 'fp-n1',
+    title: 'Fallo menor resuelto',
+    severity: 'minor',
+    category: 'docs',
+    path: 'README.md',
+    status: 'resolved',
+    triage_verdict: '',
+  },
+  {
+    ...detail.findings[0],
+    id: 'n2',
+    fingerprint: 'fp-n2',
+    title: 'Fallo menor sin triar',
+    severity: 'minor',
+    category: 'performance',
+    path: 'internal/scan.go',
+    status: 'open',
+    triage_verdict: '',
+  },
+  {
+    ...detail.findings[0],
+    id: 'w1',
+    fingerprint: 'fp-w1',
+    title: 'Fallo nit retirado',
+    severity: 'nit',
+    category: 'design',
+    path: 'internal/ui.go',
+    status: 'withdrawn',
+    triage_verdict: '',
+  },
+]
+
+function findingTitles(wrapper: VueWrapper): string[] {
+  return wrapper.findAll('[data-finding]').map((card) => card.get('.finding__title').text())
+}
+
+function severityCount(wrapper: VueWrapper, severity: string): string {
+  return wrapper.get(`[data-severity-chip="${severity}"] [data-severity-count]`).text()
 }
 
 describe('PrDetailView', () => {
@@ -288,6 +370,93 @@ describe('PrDetailView', () => {
 
     wrapper.unmount()
   })
+
+  it('filters findings by severity chips and the triage segmented control', async () => {
+    mocks.api.prDetail.mockResolvedValue({ ...detail, findings: filterFindings })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(severityCount(wrapper, 'blocker')).toBe('1')
+    expect(severityCount(wrapper, 'major')).toBe('2')
+    expect(severityCount(wrapper, 'minor')).toBe('2')
+    expect(severityCount(wrapper, 'nit')).toBe('1')
+
+    await wrapper.get('[data-severity-chip="major"]').trigger('click')
+    expect(findingTitles(wrapper)).toEqual(['Fallo mayor', 'Fallo mayor descartado'])
+
+    await wrapper.get('[data-severity-chip="blocker"]').trigger('click')
+    expect(findingTitles(wrapper)).toEqual(['Fallo bloqueante', 'Fallo mayor', 'Fallo mayor descartado'])
+
+    await wrapper.get('[data-severity-chip="blocker"]').trigger('click')
+    await wrapper.get('[data-severity-chip="major"]').trigger('click')
+    expect(findingTitles(wrapper)).toHaveLength(6)
+
+    await wrapper.get('[data-status-tab="untriaged"]').trigger('click')
+    expect(findingTitles(wrapper)).toEqual(['Fallo bloqueante', 'Fallo menor sin triar'])
+
+    await wrapper.get('[data-status-tab="confirmed"]').trigger('click')
+    expect(findingTitles(wrapper)).toEqual(['Fallo mayor'])
+
+    await wrapper.get('[data-status-tab="dismissed"]').trigger('click')
+    expect(findingTitles(wrapper)).toEqual(['Fallo mayor descartado', 'Fallo nit retirado'])
+    expect(wrapper.get('[data-withdrawn]').text()).toContain('Fallo nit retirado')
+
+    await wrapper.get('[data-status-tab="resolved"]').trigger('click')
+    expect(findingTitles(wrapper)).toEqual(['Fallo menor resuelto'])
+
+    await wrapper.get('[data-status-tab="all"]').trigger('click')
+    expect(findingTitles(wrapper)).toHaveLength(6)
+
+    wrapper.unmount()
+  })
+
+  it('searches findings by category and path', async () => {
+    mocks.api.prDetail.mockResolvedValue({ ...detail, findings: filterFindings })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    await wrapper.get('.filter-bar__input').setValue('security')
+    expect(findingTitles(wrapper)).toEqual(['Fallo bloqueante'])
+
+    await wrapper.get('.filter-bar__input').setValue('Login.vue')
+    expect(findingTitles(wrapper)).toEqual(['Fallo mayor'])
+
+    wrapper.unmount()
+  })
+
+  it('renders the finding category on the card', async () => {
+    mocks.api.prDetail.mockResolvedValue({
+      ...detail,
+      findings: [filterFindings[0], { ...filterFindings[1], status: 'withdrawn' }],
+    })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.get('[data-severity="blocker"] .finding__category').text()).toBe('security')
+    expect(wrapper.get('[data-withdrawn] .finding__category').text()).toBe('bug')
+
+    wrapper.unmount()
+  })
+
+  it('shows the empty state without hiding the QA aside', async () => {
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    await wrapper.get('.filter-bar__input').setValue('nada-coincide')
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-finding]')).toHaveLength(0)
+    expect(wrapper.get('.empty__title').text()).toBe('NADA COINCIDE CON ESTOS FILTROS')
+    expect(wrapper.get('.empty button').text()).toBe('LIMPIAR FILTROS')
+    expect(wrapper.find('.split__aside [data-qa-check]').exists()).toBe(true)
+    expect(wrapper.get('.split__aside').text()).toContain('Validación QA')
+
+    await wrapper.get('.empty button').trigger('click')
+    expect(wrapper.findAll('[data-finding]')).toHaveLength(3)
+
+    wrapper.unmount()
+  })
+
 
   it('shows a multi-file finding once with every citation and labels advisory evidence', async () => {
     const multi: Finding = {

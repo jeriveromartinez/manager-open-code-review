@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, useId } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, type CoverageFile, type Finding, type HumanVerdict, type HumanVerdictFile, type PRDetail, type ReviewRun } from '../api'
+import EmptyState from '../components/EmptyState.vue'
+import FilterBar from '../components/FilterBar.vue'
+import FilterSheet from '../components/FilterSheet.vue'
 import RunLogPanel from '../components/RunLogPanel.vue'
 import { formatElapsed, phaseLabel } from '../runPhase'
 import { cacheShare, formatTokens } from '../tokens'
+import { useListFilters } from '../composables/useListFilters'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { isConflict, isForbidden } from '../errors'
 import { prStatusLabel, statusLabel } from '../status'
@@ -57,13 +61,110 @@ const severityLabels: Record<string, string> = {
   other: 'Otros',
 }
 
+const SEVERITY_CHIPS = ['blocker', 'major', 'minor', 'nit'] as const
+
+const STATUS_TABS = [
+  { value: 'untriaged', label: 'Sin triar' },
+  { value: 'confirmed', label: 'Confirmados' },
+  { value: 'dismissed', label: 'Descartados' },
+  { value: 'resolved', label: 'Resueltos' },
+  { value: '', label: 'Todos' },
+]
+
+const { q, facets, isActive, activeCount, setFacet, toggleFacet, clear, apply, facetCounts } =
+  useListFilters({ facets: ['severity', 'status'] })
+
+const sheetOpen = ref(false)
+const sheetId = `findings-filters-${useId()}`
+
+// A finding can fall in more than one bucket (a withdrawn confirmed finding is
+// both confirmed and dismissed); the segmented control selects one bucket.
+function findingStatusKeys(finding: Finding): string[] {
+  const keys: string[] = []
+  if (finding.status === 'open' && !finding.triage_verdict) keys.push('untriaged')
+  if (finding.triage_verdict === 'confirmed') keys.push('confirmed')
+  if (finding.triage_verdict === 'false_positive' || finding.status === 'withdrawn') {
+    keys.push('dismissed')
+  }
+  if (finding.status === 'resolved') keys.push('resolved')
+  return keys
+}
+
+function findingSearchText(finding: Finding): string {
+  return [finding.category, finding.path].join(' ')
+}
+
+const filteredFindings = apply(
+  () => detail.value?.findings ?? [],
+  findingSearchText,
+  (finding, active) => {
+    const severities = active.severity ?? []
+    const statuses = active.status ?? []
+    if (severities.length > 0 && !severities.includes(finding.severity)) return false
+    if (statuses.length > 0 && !findingStatusKeys(finding).some((key) => statuses.includes(key))) {
+      return false
+    }
+    return true
+  },
+)
+
+const counts = facetCounts(
+  () => detail.value?.findings ?? [],
+  (finding, facet) => (facet === 'severity' ? [finding.severity] : findingStatusKeys(finding)),
+  findingSearchText,
+)
+
+const severityChips = computed(() =>
+  SEVERITY_CHIPS.map((value) => ({
+    value,
+    label: severityLabels[value],
+    count: counts.value.severity?.[value] ?? 0,
+  })),
+)
+
+const statusSelection = computed(() => facets.value.status[0] ?? '')
+
+function statusLabelFor(value: string): string {
+  return STATUS_TABS.find((tab) => tab.value === value)?.label ?? value
+}
+
+function setStatus(value: string): void {
+  setFacet('status', value === '' ? [] : [value])
+}
+
+const chips = computed(() => [
+  ...facets.value.severity.map((value) => ({
+    key: `severity:${value}`,
+    label: `Severidad: ${severityLabels[value] ?? value}`,
+  })),
+  ...facets.value.status.map((value) => ({
+    key: `status:${value}`,
+    label: `Estado: ${statusLabelFor(value)}`,
+  })),
+])
+
+function setQuery(value: string): void {
+  q.value = value
+}
+
+function removeChip(key: string): void {
+  const separator = key.indexOf(':')
+  if (separator < 0) return
+  const facet = key.slice(0, separator)
+  const value = key.slice(separator + 1)
+  setFacet(
+    facet,
+    (facets.value[facet] ?? []).filter((entry) => entry !== value),
+  )
+}
+
 const groupedFindings = computed(() => {
   const groups = Object.keys(severityLabels).map((key) => ({
     key,
     label: severityLabels[key],
     findings: [] as Finding[],
   }))
-  for (const finding of detail.value?.findings ?? []) {
+  for (const finding of filteredFindings.value) {
     if (finding.status === 'withdrawn') continue
     const key = severityLabels[finding.severity] ? finding.severity : 'other'
     groups.find((group) => group.key === key)!.findings.push(finding)
@@ -74,7 +175,7 @@ const groupedFindings = computed(() => {
 // Los descartados desde el panel o con /qa dismiss se apartan del recuento por
 // severidad pero siguen visibles para poder confirmarlos de vuelta.
 const withdrawnFindings = computed(() =>
-  (detail.value?.findings ?? []).filter((finding) => finding.status === 'withdrawn'),
+  filteredFindings.value.filter((finding) => finding.status === 'withdrawn'),
 )
 
 // ListReviewRuns devuelve las ejecuciones en orden ascendente de id: la última
@@ -765,126 +866,227 @@ onBeforeUnmount(() => {
             <h2 class="pr-section__title">Hallazgos</h2>
             <span class="pr-section__count">{{ detail.findings.length }} en total</span>
           </div>
-          <p v-if="detail.findings.length === 0" class="empty-state">No se encontraron hallazgos</p>
 
-          <div class="severity-list">
-            <div
-              v-for="group in groupedFindings"
-              :key="group.key"
-              class="severity"
-              :data-severity="group.key"
-            >
-              <div class="severity__head">
-                <h3 class="severity__title">{{ group.label }}</h3>
-                <span class="severity__count">{{ group.findings.length }}</span>
-              </div>
-              <article v-for="finding in group.findings" :key="finding.id" class="finding" data-finding>
-                <div class="finding__meta">
-                  <h4 class="finding__title">{{ finding.title }}</h4>
-                  <p class="finding__location">
-                    <code>{{ findingLocation(finding) }}</code>
-                    <span v-if="finding.advisory" class="finding__label">observación</span>
-                  </p>
-                </div>
-                <p class="finding__body">{{ finding.body }}</p>
-                <p v-if="finding.suggestion" class="finding__suggestion">
-                  <span class="finding__label">Sugerencia</span>
-                  <span>{{ finding.suggestion }}</span>
-                </p>
-                <p v-if="verificationLabel(finding)" class="finding__verification" data-verification>
-                  <span class="finding__label">Verificación automática</span>
-                  <span data-verification-verdict>{{ verificationLabel(finding) }}</span>
-                  <template v-if="verificationEvidence(finding)">
-                    <span class="finding__label">Evidencia</span>
-                    <code data-verification-evidence>{{ verificationEvidence(finding) }}</code>
-                  </template>
-                  <template v-if="verificationReason(finding)">
-                    <span class="finding__label">Motivo</span>
-                    <span data-verification-reason>{{ verificationReason(finding) }}</span>
-                  </template>
-                </p>
-                <div class="finding__actions">
-                  <span
-                    class="finding__triage"
-                    :class="{ 'finding__triage--done': finding.triage_verdict === 'confirmed' }"
-                    data-triage-note
-                  >
-                    {{ triageNote(finding) }}
-                  </span>
-                  <!-- A resolved finding is no longer QA's call: confirming it would
-                       reopen it and block the PR again. -->
-                  <button
-                    v-if="finding.status === 'open'"
-                    class="button button--ghost finding__action"
-                    type="button"
-                    data-withdraw
-                    :data-finding-id="finding.id"
-                    :disabled="acting === finding.id"
-                    @click="askWithdraw(finding)"
-                  >
-                    Falso positivo
-                  </button>
-                  <button
-                    v-if="finding.status === 'open' && finding.triage_verdict !== 'confirmed'"
-                    class="button button--light finding__action"
-                    type="button"
-                    data-confirm
-                    :data-finding-id="finding.id"
-                    :disabled="acting === finding.id"
-                    @click="askConfirm(finding)"
-                  >
-                    Confirmar
-                  </button>
-                </div>
-              </article>
-            </div>
-          </div>
-
-          <div v-if="withdrawnFindings.length > 0" class="severity severity--withdrawn" data-withdrawn>
-            <div class="severity__head">
-              <h3 class="severity__title">Descartados</h3>
-              <span class="severity__count">{{ withdrawnFindings.length }}</span>
-            </div>
-            <article
-              v-for="finding in withdrawnFindings"
-              :key="finding.id"
-              class="finding finding--muted"
-              data-finding
-            >
-              <div class="finding__meta">
-                <h4 class="finding__title">{{ finding.title }}</h4>
-                <p class="finding__location">
-                  <code>{{ findingLocation(finding) }}</code>
-                </p>
-              </div>
-              <p v-if="verificationLabel(finding)" class="finding__verification" data-verification>
-                <span class="finding__label">Verificación automática</span>
-                <span data-verification-verdict>{{ verificationLabel(finding) }}</span>
-                <template v-if="verificationEvidence(finding)">
-                  <span class="finding__label">Evidencia</span>
-                  <code data-verification-evidence>{{ verificationEvidence(finding) }}</code>
-                </template>
-                <template v-if="verificationReason(finding)">
-                  <span class="finding__label">Motivo</span>
-                  <span data-verification-reason>{{ verificationReason(finding) }}</span>
-                </template>
-              </p>
-              <div class="finding__actions">
-                <span class="finding__triage" data-triage-note>{{ triageNote(finding) }}</span>
+          <FilterBar
+            :q="q"
+            :shown="filteredFindings.length"
+            :total="detail.findings.length"
+            :chips="chips"
+            :active-count="activeCount"
+            :sheet-open="sheetOpen"
+            :sheet-id="sheetId"
+            @update:q="setQuery"
+            @clear="clear"
+            @remove="removeChip"
+            @open-sheet="sheetOpen = true"
+          >
+            <div class="findings-bar">
+              <div class="finding-chips" role="group" aria-label="Severidad">
                 <button
-                  class="button button--ghost finding__action"
+                  v-for="chip in severityChips"
+                  :key="chip.value"
                   type="button"
-                  data-confirm
-                  :data-finding-id="finding.id"
-                  :disabled="acting === finding.id"
-                  @click="askConfirm(finding)"
+                  class="finding-chip"
+                  :class="{ 'finding-chip--active': facets.severity.includes(chip.value) }"
+                  :aria-pressed="facets.severity.includes(chip.value)"
+                  :data-severity-chip="chip.value"
+                  @click="toggleFacet('severity', chip.value)"
                 >
-                  Restaurar
+                  {{ chip.label }}<span class="finding-chip__count" data-severity-count>{{ chip.count }}</span>
                 </button>
               </div>
-            </article>
+              <div class="finding-status" role="group" aria-label="Estado">
+                <button
+                  v-for="tab in STATUS_TABS"
+                  :key="tab.value || 'all'"
+                  type="button"
+                  class="finding-tab"
+                  :class="{ 'finding-tab--active': statusSelection === tab.value }"
+                  :aria-pressed="statusSelection === tab.value"
+                  :data-status-tab="tab.value || 'all'"
+                  @click="setStatus(tab.value)"
+                >
+                  {{ tab.label }}
+                </button>
+              </div>
+            </div>
+          </FilterBar>
+
+          <div class="list-scroll findings__scroll">
+            <EmptyState
+              v-if="filteredFindings.length === 0 && isActive"
+              title="NADA COINCIDE CON ESTOS FILTROS"
+              action-label="LIMPIAR FILTROS"
+              @action="clear"
+            />
+            <p v-else-if="filteredFindings.length === 0" class="empty-state">
+              No se encontraron hallazgos
+            </p>
+            <template v-else>
+              <div class="severity-list">
+                <div
+                  v-for="group in groupedFindings"
+                  :key="group.key"
+                  class="severity"
+                  :data-severity="group.key"
+                >
+                  <div class="severity__head">
+                    <h3 class="severity__title">{{ group.label }}</h3>
+                    <span class="severity__count">{{ group.findings.length }}</span>
+                  </div>
+                  <article v-for="finding in group.findings" :key="finding.id" class="finding" data-finding>
+                    <div class="finding__meta">
+                      <h4 class="finding__title">{{ finding.title }}</h4>
+                      <p class="finding__location">
+                        <code>{{ findingLocation(finding) }}</code>
+                        <span v-if="finding.category" class="finding__category">{{ finding.category }}</span>
+                        <span v-if="finding.advisory" class="finding__label">observación</span>
+                      </p>
+                    </div>
+                    <p class="finding__body">{{ finding.body }}</p>
+                    <p v-if="finding.suggestion" class="finding__suggestion">
+                      <span class="finding__label">Sugerencia</span>
+                      <span>{{ finding.suggestion }}</span>
+                    </p>
+                    <p v-if="verificationLabel(finding)" class="finding__verification" data-verification>
+                      <span class="finding__label">Verificación automática</span>
+                      <span data-verification-verdict>{{ verificationLabel(finding) }}</span>
+                      <template v-if="verificationEvidence(finding)">
+                        <span class="finding__label">Evidencia</span>
+                        <code data-verification-evidence>{{ verificationEvidence(finding) }}</code>
+                      </template>
+                      <template v-if="verificationReason(finding)">
+                        <span class="finding__label">Motivo</span>
+                        <span data-verification-reason>{{ verificationReason(finding) }}</span>
+                      </template>
+                    </p>
+                    <div class="finding__actions">
+                      <span
+                        class="finding__triage"
+                        :class="{ 'finding__triage--done': finding.triage_verdict === 'confirmed' }"
+                        data-triage-note
+                      >
+                        {{ triageNote(finding) }}
+                      </span>
+                      <!-- A resolved finding is no longer QA's call: confirming it would
+                           reopen it and block the PR again. -->
+                      <button
+                        v-if="finding.status === 'open'"
+                        class="button button--ghost finding__action"
+                        type="button"
+                        data-withdraw
+                        :data-finding-id="finding.id"
+                        :disabled="acting === finding.id"
+                        @click="askWithdraw(finding)"
+                      >
+                        Falso positivo
+                      </button>
+                      <button
+                        v-if="finding.status === 'open' && finding.triage_verdict !== 'confirmed'"
+                        class="button button--light finding__action"
+                        type="button"
+                        data-confirm
+                        :data-finding-id="finding.id"
+                        :disabled="acting === finding.id"
+                        @click="askConfirm(finding)"
+                      >
+                        Confirmar
+                      </button>
+                    </div>
+                  </article>
+                </div>
+              </div>
+
+              <div v-if="withdrawnFindings.length > 0" class="severity severity--withdrawn" data-withdrawn>
+                <div class="severity__head">
+                  <h3 class="severity__title">Descartados</h3>
+                  <span class="severity__count">{{ withdrawnFindings.length }}</span>
+                </div>
+                <article
+                  v-for="finding in withdrawnFindings"
+                  :key="finding.id"
+                  class="finding finding--muted"
+                  data-finding
+                >
+                  <div class="finding__meta">
+                    <h4 class="finding__title">{{ finding.title }}</h4>
+                    <p class="finding__location">
+                      <code>{{ findingLocation(finding) }}</code>
+                      <span v-if="finding.category" class="finding__category">{{ finding.category }}</span>
+                    </p>
+                  </div>
+                  <p v-if="verificationLabel(finding)" class="finding__verification" data-verification>
+                    <span class="finding__label">Verificación automática</span>
+                    <span data-verification-verdict>{{ verificationLabel(finding) }}</span>
+                    <template v-if="verificationEvidence(finding)">
+                      <span class="finding__label">Evidencia</span>
+                      <code data-verification-evidence>{{ verificationEvidence(finding) }}</code>
+                    </template>
+                    <template v-if="verificationReason(finding)">
+                      <span class="finding__label">Motivo</span>
+                      <span data-verification-reason>{{ verificationReason(finding) }}</span>
+                    </template>
+                  </p>
+                  <div class="finding__actions">
+                    <span class="finding__triage" data-triage-note>{{ triageNote(finding) }}</span>
+                    <button
+                      class="button button--ghost finding__action"
+                      type="button"
+                      data-confirm
+                      :data-finding-id="finding.id"
+                      :disabled="acting === finding.id"
+                      @click="askConfirm(finding)"
+                    >
+                      Restaurar
+                    </button>
+                  </div>
+                </article>
+              </div>
+            </template>
           </div>
         </section>
+
+        <FilterSheet
+          :id="sheetId"
+          :open="sheetOpen"
+          :active-count="activeCount"
+          :shown="filteredFindings.length"
+          clearable
+          :apply-label="`VER ${filteredFindings.length} hallazgos`"
+          @close="sheetOpen = false"
+          @clear="clear"
+        >
+          <div class="findings__sheet-filters">
+            <div class="finding-chips" role="group" aria-label="Severidad">
+              <button
+                v-for="chip in severityChips"
+                :key="chip.value"
+                type="button"
+                class="finding-chip"
+                :class="{ 'finding-chip--active': facets.severity.includes(chip.value) }"
+                :aria-pressed="facets.severity.includes(chip.value)"
+                :data-severity-chip="chip.value"
+                @click="toggleFacet('severity', chip.value)"
+              >
+                {{ chip.label }}<span class="finding-chip__count" data-severity-count>{{ chip.count }}</span>
+              </button>
+            </div>
+            <div class="finding-status" role="group" aria-label="Estado">
+              <button
+                v-for="tab in STATUS_TABS"
+                :key="tab.value || 'all'"
+                type="button"
+                class="finding-tab"
+                :class="{ 'finding-tab--active': statusSelection === tab.value }"
+                :aria-pressed="statusSelection === tab.value"
+                :data-status-tab="tab.value || 'all'"
+                @click="setStatus(tab.value)"
+              >
+                {{ tab.label }}
+              </button>
+            </div>
+          </div>
+        </FilterSheet>
       </div>
     </div>
 
@@ -930,8 +1132,120 @@ onBeforeUnmount(() => {
 <style scoped>
 .pr-detail {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: var(--space-5);
+  min-height: 0;
+}
+
+.findings-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.finding-chips,
+.finding-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.finding-chip,
+.finding-tab {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  border: var(--rule-hair) solid var(--border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-micro) ease,
+    border-color var(--dur-micro) ease,
+    color var(--dur-micro) ease;
+}
+
+.finding-chip:hover:not(.finding-chip--active),
+.finding-tab:hover:not(.finding-tab--active) {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.finding-chip--active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.finding-tab--active {
+  border-color: var(--text);
+  background: var(--text);
+  color: var(--bg);
+}
+
+.finding-chip__count {
+  color: var(--text-faint);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.finding-chip--active .finding-chip__count {
+  color: var(--accent);
+}
+
+.findings__scroll {
+  padding-right: var(--space-1);
+}
+
+.findings__sheet-filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* The shell gives this view the leftover height. Below the split breakpoint
+   the whole detail scrolls; at wide widths only the findings list does. */
+@media (max-width: 2199.98px) {
+  .pr-detail {
+    overflow-y: auto;
+  }
+
+  .findings__scroll {
+    overflow-y: visible;
+  }
+}
+
+@media (min-width: 2200px) {
+  .split,
+  .split__main,
+  .pr-section {
+    min-height: 0;
+  }
+
+  .split {
+    flex: 1;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .split__aside {
+    overflow-y: auto;
+  }
+
+  .pr-section {
+    flex: 1;
+  }
 }
 
 .severity-list {
@@ -1268,6 +1582,15 @@ onBeforeUnmount(() => {
 
 .finding__location code {
   font-size: 13px;
+}
+
+.finding__category {
+  margin-left: var(--space-2);
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .finding__body {
