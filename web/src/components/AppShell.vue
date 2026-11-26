@@ -86,8 +86,10 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <main class="container">
-      <slot />
-    </main>
+    <div class="shell__body">
+      <main class="container">
+        <slot />
+      </main>
+    </div>
   </div>
 </template>

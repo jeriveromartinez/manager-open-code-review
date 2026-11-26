@@ -126,4 +126,13 @@ describe('AppShell', () => {
 
     expect(wrapper.get('[data-logout]').attributes('aria-label')).toBe('Salir (mvega)')
   })
+
+  it('renders the scroll body between the bar and the routed view', async () => {
+    const wrapper = await mountShell()
+
+    const body = wrapper.get('.shell__body')
+    expect(wrapper.get('.shell__bar').element.nextElementSibling).toBe(body.element)
+    expect(body.element.nextElementSibling).toBeNull()
+    expect(body.find('.container [data-page]').exists()).toBe(true)
+  })
 })
