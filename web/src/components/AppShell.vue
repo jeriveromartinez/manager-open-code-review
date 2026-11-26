@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute } from 'vue-router'
 import RoleSwitch from './RoleSwitch.vue'
 import { useLiveStore } from '../stores/live'
 import { useSessionStore } from '../stores/session'
 
+const route = useRoute()
 const session = useSessionStore()
 const live = useLiveStore()
+
+// List views opt into the full-height shell so their own list region scrolls.
+const flush = computed(() => route.meta.flushContainer === true)
 
 const links = computed(() => {
   const base = [
@@ -87,7 +91,7 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="shell__body">
-      <main class="container">
+      <main class="container" :class="{ 'container--flush': flush, 'list-view': flush }">
         <slot />
       </main>
     </div>

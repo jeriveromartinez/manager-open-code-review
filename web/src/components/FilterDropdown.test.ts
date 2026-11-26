@@ -22,6 +22,7 @@ function mountDropdown(props: {
   modelValue: string[]
   multiple?: boolean
   clearLabel?: string
+  active?: boolean
 }) {
   const wrapper = mount(FilterDropdown, { attachTo: document.body, props })
   mounted.push(wrapper)
@@ -75,6 +76,20 @@ describe('FilterDropdown', () => {
     expect(rendered[1].attributes('aria-selected')).toBe('false')
     expect(rendered[1].text()).not.toContain('✓')
     expect(rendered[1].get('.filter-dropdown__count').text()).toBe('2')
+  })
+
+  it('lets the parent keep the pill quiet for a default value', async () => {
+    const wrapper = mountDropdown({ label: 'Orden', options, modelValue: ['open'], active: false })
+    const pill = wrapper.get('button')
+
+    expect(pill.classes()).not.toContain('filter-dropdown__pill--active')
+    expect(wrapper.get('.filter-dropdown__value').text()).toBe('Abiertas')
+
+    await wrapper.setProps({ active: true })
+    expect(pill.classes()).toContain('filter-dropdown__pill--active')
+
+    await wrapper.setProps({ active: undefined })
+    expect(pill.classes()).toContain('filter-dropdown__pill--active')
   })
 
   it('single mode replaces the selection; multiple mode toggles', async () => {

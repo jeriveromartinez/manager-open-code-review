@@ -27,7 +27,7 @@ propio y hoja inferior en móvil. Cada vista ocupa una pantalla y solo su lista 
   naranja con `×` por chip.
 - Los recuentos y el filtrado son **en cliente** sobre las listas completas que ya devuelve la API
   (no hay paginación hoy). Si se añade paginación, harán falta facetas en servidor.
-- Estado en URL: `q` más una clave por dimensión (`status`, `team`, `repo`, `severity`, `triage`,
+- Estado en URL: `q` más una clave por dimensión (`status`, `team`, `repo`, `severity`,
   `reason`, `sort`), con `router.replace` y sin recargar. Los nombres de faceta desconocidos se
   ignoran y los valores repetidos se deduplican; un valor desconocido de una faceta válida se
   conserva y no coincide con nada, y el estado vacío permite limpiarlo.
@@ -37,7 +37,9 @@ propio y hoja inferior en móvil. Cada vista ocupa una pantalla y solo su lista 
 - `.shell` pasa a `height: 100vh; overflow: hidden`; la barra superior mantiene su sitio y el cuerpo
   de la vista ocupa el resto (`flex: 1; min-height: 0`).
 - Solo la región de lista hace scroll (`flex: 1; min-height: 0; overflow-y: auto`, scrollbar fina
-  `#3A3A3A`). En tablas, `thead` fijo. Sin scroll horizontal.
+  `#3A3A3A`). En tablas, `thead` fijo. Sin scroll horizontal. Por debajo de 2200 px la vista se
+  apila (aside sobre la lista) y es la propia vista la que scrollea; el scroll exclusivo de la
+  lista aplica desde 2200 px, donde el aside pasa a columna propia.
 - A partir de 2108 px se usa el ancho completo (sin el tope de 1360 px); las tarjetas de resumen van
   en tira de 6 columnas sobre la lista.
 - A partir de 2200 px la barra de filtros es `position: sticky; top: 0; background: var(--bg)` y las

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, useId } from 'vue'
 import {
   api,
   ApiError,
@@ -15,6 +15,11 @@ import {
   type SetupStatus,
   type Team,
 } from '../api'
+import EmptyState from '../components/EmptyState.vue'
+import FilterBar from '../components/FilterBar.vue'
+import FilterDropdown from '../components/FilterDropdown.vue'
+import FilterSheet from '../components/FilterSheet.vue'
+import { useListFilters } from '../composables/useListFilters'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
 import { useSessionStore } from '../stores/session'
 
@@ -45,6 +50,168 @@ function canManageRepo(repo: Repository): boolean {
 function teamName(id: number | null): string {
   if (id === null) return 'Sin equipo'
   return teams.value.find((team) => team.id === id)?.name ?? 'Sin equipo'
+}
+
+const { q, facets, isActive, activeCount, setFacet, clear, apply, facetCounts } = useListFilters({
+  facets: ['account', 'team', 'visibility', 'policy', 'enabled'],
+})
+
+const sheetOpen = ref(false)
+const sheetId = `repos-filters-${useId()}`
+
+function teamKey(id: number | null): string {
+  return id === null ? '__none__' : String(id)
+}
+
+function teamKeyLabel(key: string): string {
+  if (key === '__none__') return 'Sin equipo'
+  const id = Number(key)
+  return teams.value.some((team) => team.id === id) ? teamName(id) : key
+}
+
+function visibilityLabel(value: string): string {
+  return value === 'private' ? 'Privado' : 'Público'
+}
+
+// `policy_observation` is a boolean flag in the API (api.ts), so it becomes a
+// single «Observación» tag next to the policy and override tags.
+const POLICY_OPTIONS = [
+  { value: 'observation', label: 'Observación' },
+  { value: 'policy', label: 'Con política' },
+  { value: 'override', label: 'Con override' },
+]
+
+function policyLabel(value: string): string {
+  return POLICY_OPTIONS.find((option) => option.value === value)?.label ?? value
+}
+
+function enabledLabel(value: string): string {
+  return value === 'on' ? 'Activada' : 'Desactivada'
+}
+
+type RepositoryFacet = 'account' | 'team' | 'visibility' | 'policy' | 'enabled'
+
+function facetValues(repo: Repository, facet: RepositoryFacet): string[] {
+  switch (facet) {
+    case 'account':
+      return [repo.account_login]
+    case 'team':
+      return [teamKey(repo.team_id)]
+    case 'visibility':
+      return [repo.private ? 'private' : 'public']
+    case 'policy': {
+      const values: string[] = []
+      if (repo.policy_observation) values.push('observation')
+      if (repo.has_policy) values.push('policy')
+      if (repo.has_policy_override) values.push('override')
+      return values
+    }
+    case 'enabled':
+      return [repo.enabled ? 'on' : 'off']
+  }
+}
+
+function searchText(repo: Repository): string {
+  return [repo.full_name, repo.account_login].join(' ')
+}
+
+const filteredRepos = apply(
+  () => repos.value,
+  searchText,
+  (repo, active) =>
+    Object.entries(active).every(([facet, selected]) => {
+      if (selected.length === 0) return true
+      return facetValues(repo, facet as RepositoryFacet).some((value) => selected.includes(value))
+    }),
+)
+
+const counts = facetCounts(
+  () => repos.value,
+  (repo, facet) => facetValues(repo, facet as RepositoryFacet),
+  searchText,
+)
+
+function optionCount(facet: string, value: string): number {
+  return counts.value[facet]?.[value] ?? 0
+}
+
+const accountOptions = computed(() => {
+  const values = new Set(repos.value.map((repo) => repo.account_login))
+  for (const value of facets.value.account) values.add(value)
+  return [...values]
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .map((value) => ({ value, label: value, count: optionCount('account', value) }))
+})
+
+const teamOptions = computed(() => {
+  const values = new Set(repos.value.map((repo) => teamKey(repo.team_id)))
+  for (const value of facets.value.team) values.add(value)
+  return [...values]
+    .sort((a, b) => teamKeyLabel(a).localeCompare(teamKeyLabel(b), 'es'))
+    .map((value) => ({ value, label: teamKeyLabel(value), count: optionCount('team', value) }))
+})
+
+const visibilityOptions = computed(() =>
+  ['public', 'private'].map((value) => ({
+    value,
+    label: visibilityLabel(value),
+    count: optionCount('visibility', value),
+  })),
+)
+
+const policyOptions = computed(() =>
+  POLICY_OPTIONS.map((option) => ({
+    ...option,
+    count: optionCount('policy', option.value),
+  })),
+)
+
+const enabledSegments = computed(() => {
+  const on = optionCount('enabled', 'on')
+  const off = optionCount('enabled', 'off')
+  return [
+    { value: '', label: 'Todas', count: on + off },
+    { value: 'on', label: 'Activada', count: on },
+    { value: 'off', label: 'Desactivada', count: off },
+  ]
+})
+
+const enabledSelection = computed(() => facets.value.enabled[0] ?? '')
+
+function setEnabledSegment(value: string): void {
+  setFacet('enabled', value === '' ? [] : [value])
+}
+
+const CHIP_LABELS: Record<string, (value: string) => string> = {
+  account: (value) => `Cuenta: ${value}`,
+  team: (value) => `Equipo: ${teamKeyLabel(value)}`,
+  visibility: (value) => `Visibilidad: ${visibilityLabel(value)}`,
+  policy: (value) => `Política: ${policyLabel(value)}`,
+  enabled: (value) => `Revisión: ${enabledLabel(value)}`,
+}
+
+const chips = computed(() =>
+  Object.entries(facets.value).flatMap(([facet, values]) =>
+    values.map((value) => ({
+      key: `${facet}:${value}`,
+      label: CHIP_LABELS[facet]?.(value) ?? value,
+    })),
+  ),
+)
+
+function setQuery(value: string): void {
+  q.value = value
+}
+
+function removeChip(key: string): void {
+  const separator = key.indexOf(':')
+  if (separator < 0) return
+  const facet = key.slice(0, separator)
+  const value = key.slice(separator + 1)
+  setFacet(
+    facet,
+    (facets.value[facet] ?? []).filter((entry) => entry !== value),
+  )
 }
 
 async function load({ silent = false } = {}): Promise<void> {
@@ -757,33 +924,104 @@ onMounted(() => {
       </div>
 
       <div class="split__main">
-        <section class="register" aria-label="Repositorios">
+        <section class="register register--repo" aria-label="Repositorios">
           <div class="register__head">
-            <h2 class="register__title">Registro de repositorios</h2>
-            <span v-if="!loading" class="register__meta">Total: {{ repos.length }}</span>
+            <div>
+              <h2 class="register__title">Registro de repositorios</h2>
+              <span v-if="!loading" class="register__meta">Total: {{ repos.length }}</span>
+            </div>
+            <div class="repo-segment" role="group" aria-label="Revisión automática">
+              <button
+                v-for="segment in enabledSegments"
+                :key="segment.value || 'all'"
+                type="button"
+                class="repo-segment__button"
+                :class="{ 'repo-segment__button--active': enabledSelection === segment.value }"
+                :aria-pressed="enabledSelection === segment.value"
+                :data-enabled-segment="segment.value || 'all'"
+                @click="setEnabledSegment(segment.value)"
+              >
+                {{ segment.label }}
+                <span class="repo-segment__count">{{ segment.count }}</span>
+              </button>
+            </div>
           </div>
           <p v-if="error" class="empty-state" role="alert">{{ error }}</p>
           <p v-else-if="!loading && repos.length === 0" class="empty-state">
             No hay repositorios disponibles
           </p>
-          <div v-else class="table-wrap">
-            <table class="repo-table register-table">
-              <thead>
-                <tr>
-                  <th scope="col">Repositorio</th>
-                  <th scope="col">Cuenta</th>
-                  <th scope="col">Visibilidad</th>
-                  <th scope="col">Revisión automática</th>
-                  <th scope="col">Equipo</th>
-                  <th scope="col">Política</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="repo in repos" :key="repo.id" :data-repo-row="repo.id">
-                  <td class="repo-table__name">
-                    <span class="repo-table__id">#{{ repo.id }}</span>
-                    <span class="repo-table__fullname">{{ repo.full_name }}</span>
-                  </td>
+          <template v-else>
+            <FilterBar
+              :q="q"
+              :shown="filteredRepos.length"
+              :total="repos.length"
+              :chips="chips"
+              :active-count="activeCount"
+              :sheet-open="sheetOpen"
+              :sheet-id="sheetId"
+              @update:q="setQuery"
+              @clear="clear"
+              @remove="removeChip"
+              @open-sheet="sheetOpen = true"
+            >
+              <FilterDropdown
+                label="Cuenta"
+                :options="accountOptions"
+                :model-value="facets.account"
+                multiple
+                @update:model-value="setFacet('account', $event)"
+              />
+              <FilterDropdown
+                label="Equipo"
+                :options="teamOptions"
+                :model-value="facets.team"
+                multiple
+                @update:model-value="setFacet('team', $event)"
+              />
+              <FilterDropdown
+                label="Visibilidad"
+                :options="visibilityOptions"
+                :model-value="facets.visibility"
+                multiple
+                @update:model-value="setFacet('visibility', $event)"
+              />
+              <FilterDropdown
+                label="Política"
+                :options="policyOptions"
+                :model-value="facets.policy"
+                multiple
+                @update:model-value="setFacet('policy', $event)"
+              />
+            </FilterBar>
+
+            <div class="list-scroll repo-list">
+              <EmptyState
+                v-if="!loading && filteredRepos.length === 0 && isActive"
+                title="NADA COINCIDE CON ESTOS FILTROS"
+                action-label="LIMPIAR FILTROS"
+                @action="clear"
+              />
+              <p v-else-if="!loading && filteredRepos.length === 0" class="empty-state">
+                No hay repositorios disponibles
+              </p>
+              <div v-else class="table-wrap">
+                <table class="repo-table register-table">
+                <thead>
+                  <tr>
+                    <th scope="col">Repositorio</th>
+                    <th scope="col">Cuenta</th>
+                    <th scope="col">Visibilidad</th>
+                    <th scope="col">Revisión automática</th>
+                    <th scope="col">Equipo</th>
+                    <th scope="col">Política</th>
+                    <th scope="col" class="repo-table__id">ID</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="repo in filteredRepos" :key="repo.id" :data-repo-row="repo.id">
+                    <td class="repo-table__name">
+                      <span class="repo-table__fullname">{{ repo.full_name }}</span>
+                    </td>
                   <td class="mono">{{ repo.account_login }}</td>
                   <td>
                     <span class="badge" :class="repo.private ? 'badge--muted' : 'badge--ok'">
@@ -878,11 +1116,56 @@ onMounted(() => {
                       </button>
                     </div>
                   </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+                    <td class="repo-table__id">{{ repo.id }}</td>
+                  </tr>
+                </tbody>
+                </table>
+              </div>
+            </div>
+          </template>
         </section>
+
+        <FilterSheet
+          :id="sheetId"
+          :open="sheetOpen"
+          :active-count="activeCount"
+          :shown="filteredRepos.length"
+          clearable
+          :apply-label="`VER ${filteredRepos.length} repos`"
+          @close="sheetOpen = false"
+          @clear="clear"
+        >
+          <div class="repos__sheet-filters">
+            <FilterDropdown
+              label="Cuenta"
+              :options="accountOptions"
+              :model-value="facets.account"
+              multiple
+              @update:model-value="setFacet('account', $event)"
+            />
+            <FilterDropdown
+              label="Equipo"
+              :options="teamOptions"
+              :model-value="facets.team"
+              multiple
+              @update:model-value="setFacet('team', $event)"
+            />
+            <FilterDropdown
+              label="Visibilidad"
+              :options="visibilityOptions"
+              :model-value="facets.visibility"
+              multiple
+              @update:model-value="setFacet('visibility', $event)"
+            />
+            <FilterDropdown
+              label="Política"
+              :options="policyOptions"
+              :model-value="facets.policy"
+              multiple
+              @update:model-value="setFacet('policy', $event)"
+            />
+          </div>
+        </FilterSheet>
       </div>
     </div>
 
@@ -1167,6 +1450,8 @@ onMounted(() => {
 .repos {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  min-height: 0;
   gap: var(--space-5);
 }
 
@@ -1174,6 +1459,11 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+.register--repo {
+  flex: 1;
+  min-height: 0;
 }
 
 .register__head {
@@ -1257,10 +1547,67 @@ onMounted(() => {
   font-family: var(--font-mono);
 }
 
-.repo-table__id {
-  margin-right: var(--space-2);
-  color: var(--text-faint);
+.register-table .repo-table__id {
+  width: 1%;
+  padding-right: var(--space-2);
+  padding-left: var(--space-2);
+  border-left: var(--rule-hair) solid var(--border);
+  color: #6b6b6b;
+  font-family: var(--font-mono);
   font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.repos__sheet-filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.repo-segment {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.repo-segment__button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: var(--rule-hair) solid var(--border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-micro) ease,
+    color var(--dur-micro) ease;
+}
+
+.repo-segment__button:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.repo-segment__button--active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.repo-segment__count {
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
 }
 
 .repo-table__fullname {
@@ -1487,6 +1834,37 @@ onMounted(() => {
 @media (max-width: 700px) {
   .policy-dialog__fields {
     grid-template-columns: 1fr;
+  }
+}
+
+/* The shell gives this view the leftover height. Below the split breakpoint
+   the whole registry scrolls; at wide widths only the list does. */
+@media (max-width: 2199.98px) {
+  .repos {
+    overflow-y: auto;
+  }
+}
+
+@media (min-width: 2200px) {
+  .split,
+  .split__main,
+  .register--repo {
+    min-height: 0;
+  }
+
+  .split {
+    flex: 1;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .split__aside {
+    overflow-y: auto;
+  }
+
+  .split__main,
+  .register--repo {
+    flex: 1;
   }
 }
 </style>

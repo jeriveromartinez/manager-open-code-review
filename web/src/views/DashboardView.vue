@@ -1,14 +1,19 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, useId } from 'vue'
 import { RouterLink } from 'vue-router'
 import DotBar from '../components/DotBar.vue'
 import DotMeter from '../components/DotMeter.vue'
 import DotRing from '../components/DotRing.vue'
+import EmptyState from '../components/EmptyState.vue'
+import FilterBar from '../components/FilterBar.vue'
+import FilterDropdown from '../components/FilterDropdown.vue'
+import FilterSheet from '../components/FilterSheet.vue'
 import FilterTabs from '../components/FilterTabs.vue'
 import KpiCard from '../components/KpiCard.vue'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
+import { useListFilters } from '../composables/useListFilters'
 import PrCard from '../components/PrCard.vue'
-import { api, type Readiness } from '../api'
+import { api, type PRView, type Readiness } from '../api'
 import type { DotTone } from '../dots'
 import { isForbidden } from '../errors'
 import { formatWait, isOverSla, qaBucket, waitMinutes } from '../qaQueue'
@@ -83,6 +88,122 @@ const waitingRows = computed(() =>
   }),
 )
 
+const SORT_LABELS: Record<string, string> = {
+  wait: 'Más espera',
+  newest: 'Más recientes',
+  findings: 'Más hallazgos',
+}
+
+const ORDER_SUMMARIES: Record<string, string> = {
+  wait: 'ordenados por tiempo de espera',
+  newest: 'los más recientes primero',
+  findings: 'ordenados por hallazgos abiertos',
+}
+
+const { q, facets, sort, isActive, activeCount, setFacet, setSort, clear, apply, facetCounts } =
+  useListFilters({ facets: ['team'], sorts: ['wait', 'newest', 'findings'], defaultSort: 'wait' })
+
+const sheetOpen = ref(false)
+const sheetId = `queue-filters-${useId()}`
+
+function teamKey(pr: Pick<PRView, 'team_id'>): string {
+  return pr.team_id === null ? '__none__' : String(pr.team_id)
+}
+
+function searchText(pr: PRView): string {
+  return [pr.title, pr.repo, pr.author_login].join(' ')
+}
+
+function findingsCount(pr: PRView): number {
+  const { blocker, major, minor, nit } = pr.open_findings
+  return blocker + major + minor + nit
+}
+
+const teamNames = computed(() => new Map((session.me?.teams ?? []).map((team) => [String(team.id), team.name])))
+
+function teamLabel(key: string): string {
+  if (key === '__none__') return 'Sin equipo'
+  return teamNames.value.get(key) ?? `Equipo ${key}`
+}
+
+function matchesQueueFilters(pr: PRView, active: { team?: string[] }): boolean {
+  const teams = active.team ?? []
+  return teams.length === 0 || teams.includes(teamKey(pr))
+}
+
+const filteredQueue = apply(() => prsStore.visible, searchText, matchesQueueFilters)
+
+// The tabs count the whole queue with the bar's filters applied, not only the
+// current tab, so their figures follow the search and team selection.
+const filteredTab = apply(() => prsStore.prs, searchText, matchesQueueFilters)
+
+const tabCounts = computed<Record<BucketFilter, number>>(() => {
+  const counts: Record<BucketFilter, number> = {
+    '': 0,
+    ready: 0,
+    defects: 0,
+    inconclusive: 0,
+    ai: 0,
+    other: 0,
+  }
+  for (const pr of filteredTab.value) {
+    counts['']++
+    counts[qaBucket(pr)]++
+  }
+  return counts
+})
+
+const teamCounts = facetCounts(
+  () => prsStore.visible,
+  (pr) => [teamKey(pr)],
+  searchText,
+)
+
+const teamOptions = computed(() => {
+  const values = new Set<string>()
+  for (const pr of prsStore.prs) values.add(teamKey(pr))
+  for (const value of facets.value.team) values.add(value)
+  return [...values]
+    .sort((a, b) => teamLabel(a).localeCompare(teamLabel(b), 'es'))
+    .map((value) => ({ value, label: teamLabel(value), count: teamCounts.value.team?.[value] ?? 0 }))
+})
+
+const sortOptions = computed(() => Object.entries(SORT_LABELS).map(([value, label]) => ({ value, label })))
+
+const sortSelection = computed(() => [sort.value ?? 'wait'])
+
+// The order is a view of the same rows, not a filter: it never adds to activeCount.
+const queue = computed(() => {
+  const items = [...filteredQueue.value]
+  if (sort.value === 'newest') {
+    items.sort((a, b) => new Date(b.status_since).getTime() - new Date(a.status_since).getTime())
+  } else if (sort.value === 'findings') {
+    items.sort((a, b) => findingsCount(b) - findingsCount(a))
+  } else {
+    items.sort((a, b) => waitMinutes(b, now.value) - waitMinutes(a, now.value))
+  }
+  return items
+})
+
+// The order is not a filter: it never adds a chip, so it neither tints the
+// counter nor enables LIMPIAR nor changes FILTROS · n.
+const chips = computed(() =>
+  facets.value.team.map((value) => ({ key: `team:${value}`, label: teamLabel(value) })),
+)
+
+function setQuery(value: string): void {
+  q.value = value
+}
+
+function onSort(values: string[]): void {
+  setSort(values[0])
+}
+
+function removeChip(key: string): void {
+  if (!key.startsWith('team:')) return
+  setFacet('team', facets.value.team.filter((value) => `team:${value}` !== key))
+}
+
 function bar(label: string, count: number, tone: DotTone) {
   return { label, count, tone }
 }
@@ -93,7 +214,7 @@ const queueSummary = computed(() => {
   const teams = session.me?.is_admin ? 'Todos los equipos' : own
   const count = prsStore.prs.length
   const open = `${count} ${count === 1 ? 'PR abierto' : 'PRs abiertos'}`
-  return [teams, open, 'ordenados por tiempo de espera'].filter(Boolean).join(' · ')
+  return [teams, open, ORDER_SUMMARIES[sort.value ?? 'wait']].filter(Boolean).join(' · ')
 })
 
 const untriaged = computed(() => {
@@ -373,17 +494,82 @@ onBeforeUnmount(() => {
               <h2 id="queue-title" class="pr-section__title">PRs de mis equipos</h2>
               <p class="page-subtitle" data-queue-summary>{{ queueSummary }}</p>
             </div>
-            <FilterTabs :model-value="prsStore.bucket" :counts="prsStore.counts" @update:model-value="changeBucket" />
+            <FilterTabs :model-value="prsStore.bucket" :counts="tabCounts" @update:model-value="changeBucket" />
           </div>
 
-          <p v-if="prsStore.error" class="empty-state">{{ prsStore.error }}</p>
-          <p v-else-if="!prsStore.loading && prsStore.visible.length === 0" class="empty-state">
-            Nada pendiente en este filtro.
-          </p>
-          <div v-else class="pr-grid">
-            <PrCard v-for="pr in prsStore.visible" :key="pr.id" :pr="pr" :sla-seconds="slaSeconds" :now="now" />
+          <FilterBar
+            :q="q"
+            :shown="queue.length"
+            :total="prsStore.visible.length"
+            :chips="chips"
+            :active-count="activeCount"
+            :sheet-open="sheetOpen"
+            :sheet-id="sheetId"
+            @update:q="setQuery"
+            @clear="clear"
+            @remove="removeChip"
+            @open-sheet="sheetOpen = true"
+          >
+            <FilterDropdown
+              label="Equipo"
+              :options="teamOptions"
+              :model-value="facets.team"
+              multiple
+              @update:model-value="setFacet('team', $event)"
+            />
+            <FilterDropdown
+              label="Orden"
+              :options="sortOptions"
+              :model-value="sortSelection"
+              :active="(sort ?? 'wait') !== 'wait'"
+              @update:model-value="onSort"
+            />
+          </FilterBar>
+
+          <div class="list-scroll queue__scroll">
+            <p v-if="prsStore.error" class="empty-state">{{ prsStore.error }}</p>
+            <EmptyState
+              v-else-if="!prsStore.loading && queue.length === 0 && isActive"
+              title="NADA COINCIDE CON ESTOS FILTROS"
+              action-label="LIMPIAR FILTROS"
+              @action="clear"
+            />
+            <p v-else-if="!prsStore.loading && queue.length === 0" class="empty-state">
+              Nada pendiente en este filtro.
+            </p>
+            <div v-else class="pr-grid">
+              <PrCard v-for="pr in queue" :key="pr.id" :pr="pr" :sla-seconds="slaSeconds" :now="now" />
+            </div>
           </div>
         </section>
+
+        <FilterSheet
+          :id="sheetId"
+          :open="sheetOpen"
+          :active-count="activeCount"
+          :shown="queue.length"
+          clearable
+          :apply-label="`VER ${queue.length} PRs`"
+          @close="sheetOpen = false"
+          @clear="clear"
+        >
+          <div class="queue__sheet-filters">
+            <FilterDropdown
+              label="Equipo"
+              :options="teamOptions"
+              :model-value="facets.team"
+              multiple
+              @update:model-value="setFacet('team', $event)"
+            />
+            <FilterDropdown
+              label="Orden"
+              :options="sortOptions"
+              :model-value="sortSelection"
+              :active="(sort ?? 'wait') !== 'wait'"
+              @update:model-value="onSort"
+            />
+          </div>
+        </FilterSheet>
       </div>
     </div>
   </section>
@@ -596,6 +782,49 @@ onBeforeUnmount(() => {
 .queue__head {
   flex-wrap: wrap;
   align-items: flex-end;
+}
+
+/* The shell gives this view the leftover height. Below the split breakpoint
+   the whole dashboard scrolls; at wide widths only the queue does. */
+.dashboard {
+  flex: 1;
+  min-height: 0;
+}
+
+.queue__scroll {
+  padding-right: var(--space-1);
+}
+
+@media (max-width: 2199.98px) {
+  .dashboard {
+    overflow-y: auto;
+  }
+
+  .queue__scroll {
+    overflow-y: visible;
+  }
+}
+
+@media (min-width: 2200px) {
+  .split,
+  .split__main,
+  .pr-section {
+    min-height: 0;
+  }
+
+  .split {
+    flex: 1;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .split__aside {
+    overflow-y: auto;
+  }
+
+  .pr-section {
+    flex: 1;
+  }
 }
 
 @media (max-width: 480px) {

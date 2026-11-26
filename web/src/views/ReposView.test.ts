@@ -1,5 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import ReposView from './ReposView.vue'
 import type { Me, QAPolicy, Repository, RepositoryPolicy, Team } from '../api'
 
@@ -169,9 +171,93 @@ const developer: Me = {
   teams: [],
 }
 
-function mountRepos(): VueWrapper {
-  return mount(ReposView)
+function testRouter() {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', component: { template: '<div />' } },
+      { path: '/:pathMatch(.*)*', component: { template: '<div />' } },
+    ],
+  })
 }
+
+function mountRepos(): VueWrapper {
+  return mount(ReposView, { global: { plugins: [testRouter()] } })
+}
+
+async function mountReposAt(path: string): Promise<VueWrapper> {
+  const router = testRouter()
+  await router.push(path)
+  await router.isReady()
+  return mount(ReposView, { global: { plugins: [router] } })
+}
+
+async function chooseOption(
+  scope: ParentNode,
+  dropdownLabel: string,
+  optionLabel: string,
+): Promise<void> {
+  const pill = Array.from(scope.querySelectorAll<HTMLButtonElement>('.filter-dropdown__pill')).find(
+    (button) => button.textContent?.includes(dropdownLabel),
+  )
+  if (!pill) throw new Error(`dropdown ${dropdownLabel} not found`)
+  const dropdown = pill.closest('.filter-dropdown') as HTMLElement
+  if (!dropdown.querySelector('.filter-dropdown__list')) {
+    pill.click()
+    await nextTick()
+  }
+
+  const option = Array.from(dropdown.querySelectorAll<HTMLElement>('[role="option"]')).find((item) =>
+    item.textContent?.includes(optionLabel),
+  )
+  if (!option) throw new Error(`option ${optionLabel} not found`)
+  option.click()
+  await nextTick()
+  await flushPromises()
+}
+
+function rowIds(wrapper: VueWrapper): string[] {
+  return wrapper.findAll('[data-repo-row]').map((row) => String(row.attributes('data-repo-row')))
+}
+
+const filterRepos: Repository[] = [
+  {
+    ...repos[0],
+    id: 10,
+    full_name: 'acme/backend-api',
+    private: true,
+    enabled: false,
+    team_id: null,
+    has_policy: false,
+    has_policy_override: false,
+    policy_observation: false,
+    account_login: 'acme',
+  },
+  {
+    ...repos[1],
+    id: 20,
+    full_name: 'acme/frontend-app',
+    private: false,
+    enabled: true,
+    team_id: 1,
+    has_policy: true,
+    has_policy_override: true,
+    policy_observation: false,
+    account_login: 'personal',
+  },
+  {
+    ...repos[1],
+    id: 30,
+    full_name: 'acme/infra-api',
+    private: true,
+    enabled: true,
+    team_id: 2,
+    has_policy: true,
+    has_policy_override: false,
+    policy_observation: true,
+    account_login: 'acme',
+  },
+]
 
 function toggle(wrapper: VueWrapper, id: number): HTMLInputElement {
   return wrapper.get(`input[data-repo-enabled="${id}"]`).element as HTMLInputElement
@@ -937,6 +1023,156 @@ describe('ReposView', () => {
       'La política del repositorio se guardó, pero los consumidores no',
     )
     expect(wrapper.text()).toContain('La lista de consumidores no es válida')
+    wrapper.unmount()
+  })
+
+  it('filters repositories by search, account, team, visibility and policy', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue(filterRepos.map((repo) => ({ ...repo })))
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(rowIds(wrapper)).toEqual(['10', '20', '30'])
+
+    const search = wrapper.get('input[type="search"]')
+    await search.setValue('frontend')
+    expect(rowIds(wrapper)).toEqual(['20'])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('1 DE 3')
+    await search.setValue('')
+
+    await chooseOption(wrapper.element, 'Cuenta', 'personal')
+    expect(rowIds(wrapper)).toEqual(['20'])
+    await wrapper.get('.filter-bar__clear').trigger('click')
+
+    await chooseOption(wrapper.element, 'Visibilidad', 'Privado')
+    expect(rowIds(wrapper)).toEqual(['10', '30'])
+    await chooseOption(wrapper.element, 'Política', 'Observación')
+    expect(rowIds(wrapper)).toEqual(['30'])
+    await wrapper.get('.filter-bar__clear').trigger('click')
+
+    await chooseOption(wrapper.element, 'Equipo', 'Sin equipo')
+    expect(rowIds(wrapper)).toEqual(['10'])
+    await chooseOption(wrapper.element, 'Equipo', 'T2')
+    expect(rowIds(wrapper)).toEqual(['10', '30'])
+    await wrapper.get('.filter-bar__clear').trigger('click')
+
+    await chooseOption(wrapper.element, 'Política', 'Con override')
+    expect(rowIds(wrapper)).toEqual(['20'])
+    wrapper.unmount()
+  })
+
+  it('keeps an unknown team filter value instead of treating it as no team', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue(filterRepos.map((repo) => ({ ...repo })))
+
+    const wrapper = await mountReposAt('/?team=foo')
+    await flushPromises()
+
+    expect(wrapper.get('.filter-bar__chip').text()).toContain('Equipo: foo')
+    expect(rowIds(wrapper)).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('segments by automatic review with counts', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue(filterRepos.map((repo) => ({ ...repo })))
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    const count = (value: string) =>
+      wrapper.get(`[data-enabled-segment="${value}"] .repo-segment__count`).text()
+    expect(count('all')).toBe('3')
+    expect(count('on')).toBe('2')
+    expect(count('off')).toBe('1')
+
+    await wrapper.get('[data-enabled-segment="on"]').trigger('click')
+    expect(rowIds(wrapper)).toEqual(['20', '30'])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('2 DE 3')
+
+    await wrapper.get('input[type="search"]').setValue('frontend')
+    expect(count('all')).toBe('1')
+    expect(count('on')).toBe('1')
+    expect(count('off')).toBe('0')
+
+    await wrapper.get('input[type="search"]').setValue('')
+    await wrapper.get('[data-enabled-segment="off"]').trigger('click')
+    expect(rowIds(wrapper)).toEqual(['10'])
+
+    await wrapper.get('[data-enabled-segment="all"]').trigger('click')
+    expect(rowIds(wrapper)).toEqual(['10', '20', '30'])
+    wrapper.unmount()
+  })
+
+  it('renders the repository id in its own right-aligned column', async () => {
+    mocks.session.me = admin
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    const headers = wrapper.findAll('thead th')
+    expect(headers[headers.length - 1].text()).toBe('ID')
+    expect(headers[headers.length - 1].classes()).toContain('repo-table__id')
+
+    const rows = wrapper.findAll('[data-repo-row]')
+    const idCells = rows.map((row) => row.findAll('td')[row.findAll('td').length - 1])
+    expect(idCells.map((cell) => cell.text())).toEqual(['10', '20'])
+    expect(idCells.every((cell) => cell.classes().includes('repo-table__id'))).toBe(true)
+
+    const name = wrapper.get('[data-repo-row="10"] .repo-table__name')
+    expect(name.text()).toBe('acme/backend-api')
+    wrapper.unmount()
+  })
+
+  it('shows the filters empty state when nothing matches', async () => {
+    mocks.session.me = admin
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    await wrapper.get('input[type="search"]').setValue('ninguno-de-estos')
+
+    expect(rowIds(wrapper)).toEqual([])
+    const empty = wrapper.get('.empty')
+    expect(empty.get('.empty__title').text()).toBe('NADA COINCIDE CON ESTOS FILTROS')
+    expect(empty.get('button').text()).toBe('LIMPIAR FILTROS')
+
+    await empty.get('button').trigger('click')
+    expect(rowIds(wrapper)).toEqual(['10', '20'])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('2 DE 2')
+    wrapper.unmount()
+  })
+
+  it('opens the mobile sheet with the same repository dropdowns', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue(filterRepos.map((repo) => ({ ...repo })))
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    await wrapper.get('.filter-bar__sheet').trigger('click')
+    await flushPromises()
+
+    const sheet = document.body.querySelector('.filter-sheet') as HTMLElement
+    expect(sheet).not.toBeNull()
+    expect(wrapper.get('.filter-bar__sheet').attributes('aria-expanded')).toBe('true')
+
+    const controls = wrapper.get('.filter-bar__sheet').attributes('aria-controls')
+    const panel = document.body.querySelector('.filter-sheet__panel') as HTMLElement
+    expect(controls).toBeTruthy()
+    expect(panel.id).toBe(controls)
+
+    await chooseOption(sheet, 'Cuenta', 'personal')
+    expect(rowIds(wrapper)).toEqual(['20'])
+
+    const apply = document.body.querySelector('.filter-sheet__apply') as HTMLElement
+    expect(apply.textContent?.trim()).toBe('VER 1 repos')
+    apply.click()
+    await flushPromises()
+
+    expect(document.body.querySelector('.filter-sheet')).toBeNull()
+    expect(wrapper.get('.filter-bar__sheet').attributes('aria-expanded')).toBe('false')
     wrapper.unmount()
   })
 })

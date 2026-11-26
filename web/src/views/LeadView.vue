@@ -1,10 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, useId } from 'vue'
 import { RouterLink } from 'vue-router'
 import DotBar from '../components/DotBar.vue'
 import DotLoader from '../components/DotLoader.vue'
 import DotRing from '../components/DotRing.vue'
+import EmptyState from '../components/EmptyState.vue'
+import FilterBar from '../components/FilterBar.vue'
+import FilterDropdown from '../components/FilterDropdown.vue'
+import FilterSheet from '../components/FilterSheet.vue'
 import KpiCard from '../components/KpiCard.vue'
+import { useListFilters } from '../composables/useListFilters'
 import { useLiveRefresh } from '../composables/useLiveRefresh'
 import {
   api,
@@ -16,8 +21,9 @@ import {
 } from '../api'
 import type { DotTone } from '../dots'
 import { isForbidden } from '../errors'
-import { blockedAt, decisionRows, thresholds, type Threshold } from '../leadPanel'
+import { blockedAt, decisionRows, thresholds, type DecisionRow, type Threshold } from '../leadPanel'
 import { formatWait, isOverSla, qaBucket, waitMinutes } from '../qaQueue'
+import { prStatusLabel } from '../status'
 import { cacheShare, formatTokens } from '../tokens'
 import { useSessionStore } from '../stores/session'
 
@@ -116,6 +122,97 @@ const byRepo = computed(() =>
 const tokenStats = computed(() => summary.value?.tokens ?? null)
 
 const decisions = computed(() => decisionRows(prs.value, slaSeconds.value, now.value))
+
+const { q, facets, isActive, activeCount, setFacet, toggleFacet, clear, apply, facetCounts } =
+  useListFilters({ facets: ['reason', 'repo'] })
+
+const sheetOpen = ref(false)
+const sheetId = `lead-filters-${useId()}`
+
+const REASON_ORDER = [
+  'Con defectos',
+  'Fuera de plazo de QA',
+  'Inconcluso',
+  'En pausa',
+  'Sin revisión programada',
+]
+
+function searchText(row: DecisionRow): string {
+  return [row.pr.title, row.pr.repo, row.pr.author_login].join(' ')
+}
+
+// For a pending, blocked PR `reasonFor` returns the free-form review_reason;
+// the facet and the table show the status tag instead so it joins the fixed
+// reason set («Sin revisión programada»).
+function reasonLabel(row: DecisionRow): string {
+  if (row.pr.qa_status === 'pending' && row.pr.review_state === 'blocked') {
+    return prStatusLabel(row.pr).tag
+  }
+  return row.reason
+}
+
+function facetValues(row: DecisionRow, facet: string): string[] {
+  return facet === 'reason' ? [reasonLabel(row)] : [row.pr.repo]
+}
+
+const filteredDecisions = apply(
+  () => decisions.value,
+  searchText,
+  (row, active) => {
+    const reasons = active.reason ?? []
+    const repos = active.repo ?? []
+    return (
+      (reasons.length === 0 || reasons.includes(reasonLabel(row))) &&
+      (repos.length === 0 || repos.includes(row.pr.repo))
+    )
+  },
+)
+
+const counts = facetCounts(
+  () => decisions.value,
+  (row, facet) => facetValues(row, facet),
+  searchText,
+)
+
+function reasonRank(reason: string): number {
+  const index = REASON_ORDER.indexOf(reason)
+  return index === -1 ? REASON_ORDER.length : index
+}
+
+const reasonOptions = computed(() => {
+  const present = new Set(decisions.value.map(reasonLabel))
+  return [...present]
+    .sort((a, b) => reasonRank(a) - reasonRank(b) || a.localeCompare(b, 'es'))
+    .map((reason) => ({ value: reason, label: reason, count: counts.value.reason?.[reason] ?? 0 }))
+})
+
+const repoOptions = computed(() => {
+  const values = new Set(decisions.value.map((row) => row.pr.repo))
+  for (const value of facets.value.repo) values.add(value)
+  return [...values]
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .map((repo) => ({ value: repo, label: repo, count: counts.value.repo?.[repo] ?? 0 }))
+})
+
+const chips = computed(() => [
+  ...facets.value.reason.map((value) => ({ key: `reason:${value}`, label: value })),
+  ...facets.value.repo.map((value) => ({ key: `repo:${value}`, label: `Repo: ${value}` })),
+])
+
+function setQuery(value: string): void {
+  q.value = value
+}
+
+function removeChip(key: string): void {
+  const separator = key.indexOf(':')
+  if (separator < 0) return
+  const facet = key.slice(0, separator)
+  const value = key.slice(separator + 1)
+  setFacet(
+    facet,
+    (facets.value[facet] ?? []).filter((entry) => entry !== value),
+  )
+}
 
 async function loadTeams(): Promise<void> {
   const me = await session.load()
@@ -437,29 +534,112 @@ onBeforeUnmount(() => {
               <span class="pr-section__count">{{ decisions.length }}</span>
             </div>
             <p v-if="decisions.length === 0" class="empty-state">Nada bloqueado ni fuera de plazo.</p>
-            <div v-else class="decisions">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">PR</th>
-                    <th scope="col">Motivo</th>
-                    <th scope="col">Espera</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="row in decisions" :key="row.pr.id" data-decision>
-                    <td>
-                      <RouterLink :to="`/prs/${row.pr.id}`">{{ row.pr.title }}</RouterLink>
-                      <br />
-                      <span class="caption">{{ row.pr.repo }} #{{ row.pr.number }} · por {{ row.pr.author_login }}</span>
-                    </td>
-                    <td class="decisions__reason">{{ row.reason }}</td>
-                    <td class="decisions__wait">{{ row.wait }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+            <template v-else>
+              <FilterBar
+                :q="q"
+                :shown="filteredDecisions.length"
+                :total="decisions.length"
+                :chips="chips"
+                :active-count="activeCount"
+                :sheet-open="sheetOpen"
+                :sheet-id="sheetId"
+                @update:q="setQuery"
+                @clear="clear"
+                @remove="removeChip"
+                @open-sheet="sheetOpen = true"
+              >
+                <div class="reason-chips" role="group" aria-label="Motivo">
+                  <button
+                    v-for="option in reasonOptions"
+                    :key="option.value"
+                    type="button"
+                    class="reason-chip"
+                    :class="{ 'reason-chip--active': facets.reason.includes(option.value) }"
+                    :aria-pressed="facets.reason.includes(option.value)"
+                    :data-reason-chip="option.value"
+                    @click="toggleFacet('reason', option.value)"
+                  >
+                    {{ option.label }}<span class="reason-chip__count" data-reason-count>{{ option.count }}</span>
+                  </button>
+                </div>
+                <FilterDropdown
+                  label="Repo"
+                  :options="repoOptions"
+                  :model-value="facets.repo"
+                  multiple
+                  @update:model-value="setFacet('repo', $event)"
+                />
+              </FilterBar>
+              <div class="list-scroll decisions__scroll">
+                <EmptyState
+                  v-if="filteredDecisions.length === 0 && isActive"
+                  title="NADA COINCIDE CON ESTOS FILTROS"
+                  action-label="LIMPIAR FILTROS"
+                  @action="clear"
+                />
+                <p v-else-if="filteredDecisions.length === 0" class="empty-state">
+                  Nada bloqueado ni fuera de plazo.
+                </p>
+                <div v-else class="decisions">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">PR</th>
+                        <th scope="col">Motivo</th>
+                        <th scope="col">Espera</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="row in filteredDecisions" :key="row.pr.id" :data-decision="row.pr.id">
+                        <td>
+                          <RouterLink :to="`/prs/${row.pr.id}`">{{ row.pr.title }}</RouterLink>
+                          <br />
+                          <span class="caption">{{ row.pr.repo }} #{{ row.pr.number }} · por {{ row.pr.author_login }}</span>
+                        </td>
+                        <td class="decisions__reason">{{ reasonLabel(row) }}</td>
+                        <td class="decisions__wait">{{ row.wait }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </template>
           </section>
+
+          <FilterSheet
+            :id="sheetId"
+            :open="sheetOpen"
+            :active-count="activeCount"
+            :shown="filteredDecisions.length"
+            clearable
+            :apply-label="`VER ${filteredDecisions.length} PRs`"
+            @close="sheetOpen = false"
+            @clear="clear"
+          >
+            <div class="lead__sheet-filters">
+              <div class="reason-chips" role="group" aria-label="Motivo">
+                <button
+                  v-for="option in reasonOptions"
+                  :key="option.value"
+                  type="button"
+                  class="reason-chip"
+                  :class="{ 'reason-chip--active': facets.reason.includes(option.value) }"
+                  :aria-pressed="facets.reason.includes(option.value)"
+                  :data-reason-chip="option.value"
+                  @click="toggleFacet('reason', option.value)"
+                >
+                  {{ option.label }}<span class="reason-chip__count" data-reason-count>{{ option.count }}</span>
+                </button>
+              </div>
+              <FilterDropdown
+                label="Repo"
+                :options="repoOptions"
+                :model-value="facets.repo"
+                multiple
+                @update:model-value="setFacet('repo', $event)"
+              />
+            </div>
+          </FilterSheet>
         </div>
       </div>
     </template>
@@ -469,8 +649,103 @@ onBeforeUnmount(() => {
 <style scoped>
 .lead {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 36px;
+  min-height: 0;
+}
+
+.reason-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.reason-chip {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  border: var(--rule-hair) solid var(--border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-micro) ease,
+    color var(--dur-micro) ease;
+}
+
+.reason-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.reason-chip--active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.reason-chip__count {
+  color: var(--text-faint);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.reason-chip--active .reason-chip__count {
+  color: var(--accent);
+}
+
+.lead__sheet-filters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.decisions__scroll {
+  padding-right: var(--space-1);
+}
+
+/* The shell gives this view the leftover height. Below the split breakpoint
+   the whole view scrolls; at wide widths only the decisions list does. */
+@media (max-width: 2199.98px) {
+  .lead {
+    overflow-y: auto;
+  }
+
+  .decisions__scroll {
+    overflow-y: visible;
+  }
+}
+
+@media (min-width: 2200px) {
+  .split,
+  .split__main,
+  .pr-section {
+    min-height: 0;
+  }
+
+  .split {
+    flex: 1;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .split__aside {
+    overflow-y: auto;
+  }
+
+  .pr-section {
+    flex: 1;
+  }
 }
 
 .lead__title {
