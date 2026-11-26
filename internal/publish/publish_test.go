@@ -2066,7 +2066,7 @@ func TestPublishBlocksOnHumanConfirmationDespiteVerifierUncertainty(t *testing.T
 	}
 }
 
-func TestPublishDoesNotBlockOnUncertainVerification(t *testing.T) {
+func TestPublishApplyUncertaintyDoesNotBlockButNeedsAHuman(t *testing.T) {
 	st := testutil.NewStore(t)
 	ctx := context.Background()
 	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
@@ -2082,8 +2082,72 @@ func TestPublishDoesNotBlockOnUncertainVerification(t *testing.T) {
 	}
 
 	conclusion, status := publishConclusion(t, st, gh, pr.ID)
-	if conclusion != "success" || status != store.StatusReadyForHuman {
-		t.Errorf("conclusion/status = %q/%q, want an uncertainty to leave the human in charge", conclusion, status)
+	if conclusion != "action_required" || status != store.StatusInconclusive {
+		t.Errorf("conclusion/status = %q/%q, want the uncertainty to leave the review inconclusive", conclusion, status)
+	}
+}
+
+// The observation modes record what the verifier would do, but they must not
+// change the gate: off and dry_run see the same finding, so they publish the
+// same conclusion and QA status.
+func TestPublishDryRunGateMatchesOffForUncertainty(t *testing.T) {
+	for _, mode := range []string{store.AutoTriageOff, store.AutoTriageDryRun} {
+		t.Run(mode, func(t *testing.T) {
+			st := testutil.NewStore(t)
+			ctx := context.Background()
+			run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+			enableAutoTriage(t, st, mode)
+			seedFinding(t, st, pr.ID, run.ID, "pending", 2, "major", store.FindingOpen)
+			if mode == store.AutoTriageDryRun {
+				setRunVerificationSession(t, st, run.ID, "verify-session")
+				markVerified(t, st, "pending", "uncertain", "")
+			}
+			gh := newFakeGitHub(t)
+			w, _ := newPublishWorker(t, st, gh)
+
+			if err := w.Publish(ctx, run.ID); err != nil {
+				t.Fatalf("Publish() error = %v", err)
+			}
+
+			conclusion, status := publishConclusion(t, st, gh, pr.ID)
+			if conclusion != "failure" || status != store.StatusChangesRequested {
+				t.Errorf("conclusion/status = %q/%q, want the same blocking gate as off", conclusion, status)
+			}
+			if calls := reviewRequestCalls(gh); len(calls) != 0 {
+				t.Errorf("review requests = %+v, want none in observation mode", calls)
+			}
+		})
+	}
+}
+
+func TestPublishApplyMaterialUncertaintyDerivesToHuman(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableAutoTriage(t, st, store.AutoTriageApply)
+	setRunVerificationSession(t, st, run.ID, "verify-session")
+	setReviewTarget(t, st, "qa-reviewer", "")
+	seedFinding(t, st, pr.ID, run.ID, "material", 2, "major", store.FindingOpen)
+	markVerified(t, st, "material", "uncertain", "")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	if calls := reviewRequestCalls(gh); len(calls) != 1 {
+		t.Fatalf("review requests = %d, want the material uncertainty to reach a human", len(calls))
+	}
+	saved, err := st.ReviewRequestFor(ctx, pr.ID, run.HeadSHA)
+	if err != nil {
+		t.Fatalf("ReviewRequestFor() error = %v", err)
+	}
+	if saved.Cause != store.ReviewRequestCauseInconclusive {
+		t.Errorf("request cause = %q, want the inconclusive cause", saved.Cause)
+	}
+	if body := publishedSummary(t, gh); !strings.Contains(body, "Necesita tu criterio (1)") {
+		t.Errorf("summary does not show the material uncertainty:\n%s", body)
 	}
 }
 
@@ -2134,8 +2198,8 @@ func TestPublishDoesNotTrustAConfirmationWithoutEvidence(t *testing.T) {
 	}
 
 	conclusion, status := publishConclusion(t, st, gh, pr.ID)
-	if conclusion != "success" || status != store.StatusReadyForHuman {
-		t.Errorf("conclusion/status = %q/%q, want an evidence-less confirmation not to block", conclusion, status)
+	if conclusion != "action_required" || status != store.StatusInconclusive {
+		t.Errorf("conclusion/status = %q/%q, want an evidence-less confirmation to leave the review inconclusive", conclusion, status)
 	}
 	body := publishedSummary(t, gh)
 	if !strings.Contains(body, "0 validados · 1 para tu criterio") {
@@ -2159,6 +2223,7 @@ func TestPublishDoesNotTrustAVerdictFromAnotherHead(t *testing.T) {
 	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
 	enableAutoTriage(t, st, store.AutoTriageApply)
 	setRunVerificationSession(t, st, run.ID, "verify-session")
+	setReviewTarget(t, st, "qa-reviewer", "")
 	seedFinding(t, st, pr.ID, run.ID, "stale", 2, "major", store.FindingOpen)
 	markVerifiedAtHead(t, st, "stale", "confirm", store.VerdictConfirmed, "oldsha111")
 	gh := newFakeGitHub(t)
@@ -2169,8 +2234,11 @@ func TestPublishDoesNotTrustAVerdictFromAnotherHead(t *testing.T) {
 	}
 
 	conclusion, status := publishConclusion(t, st, gh, pr.ID)
-	if conclusion != "success" || status != store.StatusReadyForHuman {
-		t.Errorf("conclusion/status = %q/%q, want a stale verdict not to block", conclusion, status)
+	if conclusion != "action_required" || status != store.StatusInconclusive {
+		t.Errorf("conclusion/status = %q/%q, want a stale verdict to leave the review inconclusive", conclusion, status)
+	}
+	if calls := reviewRequestCalls(gh); len(calls) != 1 {
+		t.Errorf("review requests = %d, want the stale verdict to reach a human", len(calls))
 	}
 	body := publishedSummary(t, gh)
 	for _, want := range []string{

@@ -1,7 +1,9 @@
 package review
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
@@ -25,6 +27,10 @@ func testFinding(id, severity, source string) store.Finding {
 
 func testFiles(content string) map[string][]byte {
 	return map[string][]byte{"a.go": []byte(content)}
+}
+
+func testBlobs(content string) evidenceBlobs {
+	return headOnlyBlobs(testFiles(content))
 }
 
 func verified(verdict Verdict, evidence string) Verification {
@@ -85,21 +91,21 @@ func TestValidateEvidence(t *testing.T) {
 		name     string
 		evidence string
 		head     string
-		files    map[string][]byte
+		blobs    evidenceBlobs
 		want     string
 	}{
-		{"valid quote at the cited line", "func guard() {", verifyHead, testFiles(content), ""},
-		{"quote at a neighbouring line is not evidence", "func other() {", verifyHead, testFiles(content), "la evidencia no coincide con las líneas citadas del hallazgo"},
-		{"quote at the wrong line", "package a", verifyHead, testFiles(content), "la evidencia no coincide con las líneas citadas del hallazgo"},
-		{"missing quote", "frobnicate()", verifyHead, testFiles(content), "la evidencia no coincide con las líneas citadas del hallazgo"},
-		{"empty quote", "   ", verifyHead, testFiles(content), "el verificador no citó evidencia"},
-		{"stale head", "func guard() {", "head-2", testFiles(content), "la verificación no corresponde al head revisado"},
-		{"evidence from another file", "func guard() {", verifyHead, map[string][]byte{"b.go": []byte(content)}, "el archivo citado no existe en el head revisado"},
+		{"valid quote at the cited line", "func guard() {", verifyHead, testBlobs(content), ""},
+		{"quote at a neighbouring line is not evidence", "func other() {", verifyHead, testBlobs(content), "la evidencia no coincide con las líneas citadas del hallazgo"},
+		{"quote at the wrong line", "package a", verifyHead, testBlobs(content), "la evidencia no coincide con las líneas citadas del hallazgo"},
+		{"missing quote", "frobnicate()", verifyHead, testBlobs(content), "la evidencia no coincide con las líneas citadas del hallazgo"},
+		{"empty quote", "   ", verifyHead, testBlobs(content), "el verificador no citó evidencia"},
+		{"stale head", "func guard() {", "head-2", testBlobs(content), "la verificación no corresponde al head revisado"},
+		{"evidence from another file", "func guard() {", verifyHead, evidenceBlobs{head: map[string][]byte{"b.go": []byte(content)}}, "el archivo citado no existe en el head revisado"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			v := Verification{Verdict: VerdictConfirm, Evidence: tc.evidence, HeadSHA: tc.head}
-			if got := validateEvidence(f, v, tc.files, verifyHead); got != tc.want {
+			if got := validateEvidence(f, v, tc.blobs, verifyHead); got != tc.want {
 				t.Errorf("validateEvidence() = %q, want %q", got, tc.want)
 			}
 		})
@@ -109,14 +115,14 @@ func TestValidateEvidence(t *testing.T) {
 func TestDecideConfirmRequiresValidEvidence(t *testing.T) {
 	f := testFinding("f_1", "minor", "")
 	valid := Decide([]store.Finding{f}, map[string]Verification{"f_1": verified(VerdictConfirm, "func guard() {")},
-		testFiles("package a\n\nfunc guard() {\n}\n"), verifyHead, applyPolicy())
+		testBlobs("package a\n\nfunc guard() {\n}\n"), verifyHead, applyPolicy())
 	if len(valid) != 1 || !valid[0].Apply || valid[0].Status != store.FindingOpen ||
 		valid[0].Verdict != VerdictConfirm || valid[0].Verification.Reason != "" {
 		t.Fatalf("valid confirm = %+v, want an applied confirm", valid)
 	}
 
 	invalid := Decide([]store.Finding{f}, map[string]Verification{"f_1": verified(VerdictConfirm, "func other() {")},
-		testFiles("package a\n\nfunc guard() {\n}\n"), verifyHead, applyPolicy())
+		testBlobs("package a\n\nfunc guard() {\n}\n"), verifyHead, applyPolicy())
 	if invalid[0].Apply || invalid[0].Verdict != VerdictUncertain || invalid[0].Status != f.Status {
 		t.Fatalf("invalid confirm = %+v, want an unapplied uncertainty", invalid[0])
 	}
@@ -130,7 +136,7 @@ func TestDecideConfirmRequiresValidEvidence(t *testing.T) {
 func TestDecideRefuteRejectsHallucinatedEvidence(t *testing.T) {
 	f := testFinding("f_1", "nit", "")
 	verdicts := map[string]Verification{"f_1": verified(VerdictRefute, "if user == nil {")}
-	d := Decide([]store.Finding{f}, verdicts, testFiles("if user != nil {\n\treturn nil\n}\n"), verifyHead, applyPolicy())
+	d := Decide([]store.Finding{f}, verdicts, testBlobs("if user != nil {\n\treturn nil\n}\n"), verifyHead, applyPolicy())
 	if d[0].Apply || d[0].Verdict != VerdictUncertain || d[0].Status != f.Status {
 		t.Fatalf("decision = %+v, want an unapplied uncertainty", d[0])
 	}
@@ -146,7 +152,7 @@ func TestDecideRefuteWithEvidenceAtTheWrongLineIsUncertain(t *testing.T) {
 	f := testFinding("f_1", "nit", "")
 	f.StartLine, f.EndLine = 10, 10
 	verdicts := map[string]Verification{"f_1": verified(VerdictRefute, "package a")}
-	d := Decide([]store.Finding{f}, verdicts, testFiles("package a\n\n\n\n\n\n\n\n\nfunc guard() {\n\treturn nil\n}\n"), verifyHead, applyPolicy())
+	d := Decide([]store.Finding{f}, verdicts, testBlobs("package a\n\n\n\n\n\n\n\n\nfunc guard() {\n\treturn nil\n}\n"), verifyHead, applyPolicy())
 	if d[0].Apply || d[0].Verdict != VerdictUncertain {
 		t.Fatalf("decision = %+v, want uncertain when the quote is outside the cited range", d[0])
 	}
@@ -160,7 +166,7 @@ func TestDecideRefuteUsesEvidenceOnlyFromTheCitedFile(t *testing.T) {
 	verdicts := map[string]Verification{"f_1": verified(VerdictRefute, "func guard() {")}
 
 	other := Decide([]store.Finding{f}, verdicts,
-		map[string][]byte{"b.go": []byte("func guard() {\n}\n")}, verifyHead, applyPolicy())
+		evidenceBlobs{head: map[string][]byte{"b.go": []byte("func guard() {\n}\n")}}, verifyHead, applyPolicy())
 	if other[0].Apply || other[0].Verdict != VerdictUncertain {
 		t.Fatalf("decision = %+v, want uncertain when the quote is from another file", other[0])
 	}
@@ -168,7 +174,7 @@ func TestDecideRefuteUsesEvidenceOnlyFromTheCitedFile(t *testing.T) {
 		t.Errorf("reason = %q, want the missing file", other[0].Reason)
 	}
 
-	cited := Decide([]store.Finding{f}, verdicts, testFiles("package a\n\nfunc guard() {\n}\n"), verifyHead, applyPolicy())
+	cited := Decide([]store.Finding{f}, verdicts, testBlobs("package a\n\nfunc guard() {\n}\n"), verifyHead, applyPolicy())
 	if !cited[0].Apply || cited[0].Status != store.FindingWithdrawn {
 		t.Errorf("decision = %+v, want the refutation applied with evidence in the cited file", cited[0])
 	}
@@ -177,7 +183,7 @@ func TestDecideRefuteUsesEvidenceOnlyFromTheCitedFile(t *testing.T) {
 func TestDecideStaleVerdictIsUncertain(t *testing.T) {
 	f := testFinding("f_1", "minor", "")
 	verdicts := map[string]Verification{"f_1": {Verdict: VerdictConfirm, Evidence: "func guard() {", HeadSHA: "head-2"}}
-	d := Decide([]store.Finding{f}, verdicts, testFiles("func guard() {\n}\n"), verifyHead, applyPolicy())
+	d := Decide([]store.Finding{f}, verdicts, testBlobs("func guard() {\n}\n"), verifyHead, applyPolicy())
 	if d[0].Apply || d[0].Verdict != VerdictUncertain {
 		t.Fatalf("decision = %+v, want uncertain for a verdict from another head", d[0])
 	}
@@ -187,7 +193,7 @@ func TestDecideStaleVerdictIsUncertain(t *testing.T) {
 }
 
 func TestDecideMissingVerdictIsUncertain(t *testing.T) {
-	d := Decide([]store.Finding{testFinding("f_1", "minor", "")}, nil, nil, verifyHead, applyPolicy())
+	d := Decide([]store.Finding{testFinding("f_1", "minor", "")}, nil, evidenceBlobs{}, verifyHead, applyPolicy())
 	if len(d) != 1 || d[0].Apply || d[0].Verdict != VerdictUncertain {
 		t.Fatalf("decision = %+v, want an applied-nothing uncertain decision", d)
 	}
@@ -200,7 +206,7 @@ func TestDecideNeverWithdrawsMajorOrBlocker(t *testing.T) {
 	for _, severity := range []string{"major", "blocker"} {
 		f := testFinding("f_1", severity, "")
 		verdicts := map[string]Verification{"f_1": verified(VerdictRefute, "func guard() {")}
-		d := Decide([]store.Finding{f}, verdicts, testFiles("func guard() {\n}\n"), verifyHead, applyPolicy())
+		d := Decide([]store.Finding{f}, verdicts, testBlobs("func guard() {\n}\n"), verifyHead, applyPolicy())
 		if d[0].Apply || d[0].Verdict != VerdictUncertain {
 			t.Errorf("severity %s: decision = %+v, want uncertain and not applied", severity, d[0])
 		}
@@ -210,7 +216,7 @@ func TestDecideNeverWithdrawsMajorOrBlocker(t *testing.T) {
 func TestDecidePolicyDegradationKeepsTheVerifierVerdict(t *testing.T) {
 	f := testFinding("f_1", "major", "")
 	verdicts := map[string]Verification{"f_1": verified(VerdictRefute, "func guard() {")}
-	d := Decide([]store.Finding{f}, verdicts, testFiles("func guard() {\n}\n"), verifyHead, applyPolicy())
+	d := Decide([]store.Finding{f}, verdicts, testBlobs("func guard() {\n}\n"), verifyHead, applyPolicy())
 	if d[0].Verdict != VerdictUncertain || d[0].Apply || d[0].Status != f.Status {
 		t.Fatalf("decision = %+v, want the policy to refuse the dismissal", d[0])
 	}
@@ -225,7 +231,7 @@ func TestDecidePolicyDegradationKeepsTheVerifierVerdict(t *testing.T) {
 func TestDecideRefuteNeedsAutoWithdraw(t *testing.T) {
 	f := testFinding("f_1", "nit", "")
 	verdicts := map[string]Verification{"f_1": verified(VerdictRefute, "func guard() {")}
-	files := testFiles("func guard() {\n}\n")
+	files := testBlobs("func guard() {\n}\n")
 	d := Decide([]store.Finding{f}, verdicts, files, verifyHead, VerifyPolicy{Mode: store.AutoTriageApply})
 	if d[0].Apply || d[0].Verdict != VerdictUncertain {
 		t.Fatalf("decision = %+v, want uncertain when auto_withdraw is off", d[0])
@@ -236,17 +242,88 @@ func TestDecideConfirmAppliesForEverySeverity(t *testing.T) {
 	for _, severity := range []string{"nit", "minor", "major", "blocker"} {
 		f := testFinding("f_1", severity, "")
 		verdicts := map[string]Verification{"f_1": verified(VerdictConfirm, "func guard() {")}
-		d := Decide([]store.Finding{f}, verdicts, testFiles("package a\n\nfunc guard() {\n}\n"), verifyHead, applyPolicy())
+		d := Decide([]store.Finding{f}, verdicts, testBlobs("package a\n\nfunc guard() {\n}\n"), verifyHead, applyPolicy())
 		if !d[0].Apply || d[0].Verdict != VerdictConfirm || d[0].Status != store.FindingOpen {
 			t.Errorf("severity %s: decision = %+v, want an applied confirm", severity, d[0])
 		}
 	}
 }
 
+func TestValidateEvidenceRejectsCodeOnlyTheFindingClaims(t *testing.T) {
+	f := testFinding("f_1", "minor", "")
+	f.StartLine, f.EndLine = 3, 3
+	// The model wrote this line in ExistingCode, but the reviewed blob has
+	// different code at the cited range. A quote from the model's own output is
+	// not evidence of the repository content.
+	f.ExistingCode = "if user == nil {\n\treturn deny\n}"
+	v := verified(VerdictConfirm, "return deny")
+	if got := validateEvidence(f, v, testBlobs("package a\n\nfunc guard() {\n}\n"), verifyHead); got == "" {
+		t.Fatal("a quote absent from the blob but present in ExistingCode was accepted")
+	}
+}
+
+func TestDecideHeadSideEvidenceOnABaseCitationIsUncertain(t *testing.T) {
+	f := testFinding("f_1", "minor", "")
+	f.Citations = store.EncodeFindingCitations([]store.FindingCitation{{
+		Path: "a.go", StartLine: 3, EndLine: 3, Side: store.FindingCitationBase,
+	}})
+	// The quote exists in the head checkout the verifier read, but the finding
+	// cites the base side. The head blob cannot stand in for the base blob.
+	d := Decide([]store.Finding{f},
+		map[string]Verification{"f_1": verified(VerdictConfirm, "func guard() {")},
+		testBlobs("package a\n\nfunc guard() {\n}\n"), verifyHead, applyPolicy())
+	if d[0].Apply || d[0].Verdict != VerdictUncertain {
+		t.Fatalf("decision = %+v, want uncertainty when the cited side lacks the quote", d[0])
+	}
+}
+
+func TestDecideBaseSideCitationUsesTheBaseBlob(t *testing.T) {
+	f := testFinding("f_1", "minor", "")
+	f.Citations = store.EncodeFindingCitations([]store.FindingCitation{{
+		Path: "gone.go", StartLine: 2, EndLine: 2, Side: store.FindingCitationBase,
+	}})
+	// The file was deleted by the pull request, so it only exists in the base.
+	blobs := evidenceBlobs{
+		head: map[string][]byte{},
+		base: map[string][]byte{"gone.go": []byte("package a\nfunc removed() {}\n")},
+	}
+	d := Decide([]store.Finding{f},
+		map[string]Verification{"f_1": verified(VerdictConfirm, "func removed() {}")},
+		blobs, verifyHead, applyPolicy())
+	if len(d) != 1 || !d[0].Apply || d[0].Verdict != VerdictConfirm {
+		t.Fatalf("decision = %+v, want the base-side confirmation validated", d)
+	}
+}
+
+func TestReusedVerdictIsRevalidatedAgainstTheBlob(t *testing.T) {
+	raw, err := json.Marshal(Verification{
+		Verdict: VerdictConfirm, Evidence: "ghost()", HeadSHA: verifyHead,
+		VerifiedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal verification: %v", err)
+	}
+	prev := store.Finding{Verification: raw, ExistingCode: "ghost()"}
+	current := testFinding("f_1", "minor", "")
+	current.ExistingCode = "ghost()"
+	current.StartLine, current.EndLine = 3, 3
+
+	reused, ok := reusedVerdict(prev, current, verifyHead)
+	if !ok {
+		t.Fatal("the stored verdict was not reused, want the identity check to pass")
+	}
+	d := Decide([]store.Finding{current},
+		map[string]Verification{"f_1": reused},
+		testBlobs("package a\n\nfunc guard() {\n}\n"), verifyHead, applyPolicy())
+	if d[0].Apply || d[0].Verdict != VerdictUncertain {
+		t.Fatalf("reused verdict = %+v, want it revalidated and degraded to uncertainty", d[0])
+	}
+}
+
 func TestDecideSkipsHumanTriaged(t *testing.T) {
 	f := testFinding("f_1", "minor", "human")
 	verdicts := map[string]Verification{"f_1": verified(VerdictRefute, "func guard() {")}
-	d := Decide([]store.Finding{f}, verdicts, testFiles("func guard() {\n}\n"), verifyHead, applyPolicy())
+	d := Decide([]store.Finding{f}, verdicts, testBlobs("func guard() {\n}\n"), verifyHead, applyPolicy())
 	if len(d) != 0 {
 		t.Fatalf("decisions = %+v, want none for a human-triaged finding", d)
 	}
@@ -260,7 +337,7 @@ func TestDecideDryRunNeverApplies(t *testing.T) {
 		"f_2": verified(VerdictRefute, "func guard() {"),
 	}
 	d := Decide([]store.Finding{confirm, refute}, verdicts,
-		testFiles("package a\n\nfunc guard() {\n}\n"), verifyHead, VerifyPolicy{Mode: store.AutoTriageDryRun, AutoWithdraw: true})
+		testBlobs("package a\n\nfunc guard() {\n}\n"), verifyHead, VerifyPolicy{Mode: store.AutoTriageDryRun, AutoWithdraw: true})
 	if len(d) != 2 {
 		t.Fatalf("decisions = %d, want the verdicts recorded", len(d))
 	}
@@ -277,7 +354,7 @@ func TestDecideDryRunNeverApplies(t *testing.T) {
 func TestDecideOffNeverApplies(t *testing.T) {
 	f := testFinding("f_1", "minor", "")
 	verdicts := map[string]Verification{"f_1": verified(VerdictConfirm, "func guard() {")}
-	d := Decide([]store.Finding{f}, verdicts, testFiles("package a\n\nfunc guard() {\n}\n"), verifyHead, VerifyPolicy{Mode: store.AutoTriageOff})
+	d := Decide([]store.Finding{f}, verdicts, testBlobs("package a\n\nfunc guard() {\n}\n"), verifyHead, VerifyPolicy{Mode: store.AutoTriageOff})
 	if len(d) != 1 || d[0].Apply {
 		t.Fatalf("decision = %+v, want a recorded but unapplied verdict", d)
 	}
@@ -288,7 +365,7 @@ func TestDecideSkipsAdvisoryFindings(t *testing.T) {
 	advisory.Advisory = true
 	got := Decide([]store.Finding{advisory}, map[string]Verification{
 		"f_advisory": verified(VerdictUncertain, ""),
-	}, testFiles("guard()"), verifyHead, applyPolicy())
+	}, testBlobs("guard()"), verifyHead, applyPolicy())
 	if len(got) != 0 {
 		t.Fatalf("decisions = %+v, want none for advisory evidence", got)
 	}

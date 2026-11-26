@@ -68,6 +68,85 @@ func TestReusedVerdictRequiresSameHeadAndCitedCode(t *testing.T) {
 	}
 }
 
+func TestReadCitedBlobsReadsBothSides(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q", "-b", "main")
+	runGit(t, dir, "config", "user.email", "qa@example.com")
+	runGit(t, dir, "config", "user.name", "QA")
+	runGit(t, dir, "config", "core.autocrlf", "false")
+	if err := os.WriteFile(filepath.Join(dir, "gone.go"), []byte("package a\nfunc removed() {}\n"), 0o644); err != nil {
+		t.Fatalf("write gone.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kept.go"), []byte("package a\nfunc kept() {}\n"), 0o644); err != nil {
+		t.Fatalf("write kept.go: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0o755); err != nil {
+		t.Fatalf("create pkg dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "util.go"), []byte("package pkg\n"), 0o644); err != nil {
+		t.Fatalf("write pkg/util.go: %v", err)
+	}
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-qm", "base")
+	baseSHA := runGit(t, dir, "rev-parse", "HEAD")
+	if err := os.Remove(filepath.Join(dir, "gone.go")); err != nil {
+		t.Fatalf("remove gone.go: %v", err)
+	}
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-qm", "delete gone.go")
+
+	findings := []store.Finding{
+		{
+			ID: "base", Path: "gone.go", StartLine: 2, EndLine: 2,
+			Citations: store.EncodeFindingCitations([]store.FindingCitation{{
+				Path: "gone.go", StartLine: 2, EndLine: 2, Side: store.FindingCitationBase,
+			}}),
+		},
+		{ID: "head", Path: "kept.go", StartLine: 2, EndLine: 2},
+		{
+			ID: "dir", Path: "pkg", StartLine: 1, EndLine: 1,
+			Citations: store.EncodeFindingCitations([]store.FindingCitation{{
+				Path: "pkg", StartLine: 1, EndLine: 1, Side: store.FindingCitationBase,
+			}}),
+		},
+	}
+	blobs := readCitedBlobs(context.Background(), dir, baseSHA, findings)
+	if got := string(blobs.base["gone.go"]); got != "package a\nfunc removed() {}\n" {
+		t.Errorf("base blob = %q, want the deleted file content", got)
+	}
+	if _, ok := blobs.head["gone.go"]; ok {
+		t.Error("a file deleted at head was read from the head checkout")
+	}
+	if got := string(blobs.head["kept.go"]); got != "package a\nfunc kept() {}\n" {
+		t.Errorf("head blob = %q, want the checked-out content", got)
+	}
+	if _, ok := blobs.base["pkg"]; ok {
+		t.Error("a directory citation was read as a blob")
+	}
+	if _, err := readBaseBlob(context.Background(), dir, baseSHA, "pkg"); err == nil {
+		t.Error("readBaseBlob accepted a directory, want cat-file to reject the tree")
+	}
+}
+
+func TestCleanRepoPathRejectsEscapingPaths(t *testing.T) {
+	for _, bad := range []string{"", "../a.go", `..\a.go`, "/a.go", `\a.go`, "../dir/a.go"} {
+		if _, err := cleanRepoPath(bad); err == nil {
+			t.Errorf("path %q was accepted, want rejected", bad)
+		}
+	}
+	if abs, err := filepath.Abs("a.go"); err != nil {
+		t.Fatalf("absolute path: %v", err)
+	} else if _, err := cleanRepoPath(abs); err == nil {
+		t.Errorf("absolute path %q was accepted, want rejected", abs)
+	}
+	if got, err := cleanRepoPath(`dir\a.go`); err != nil || got != "dir/a.go" {
+		t.Errorf("cleanRepoPath() = %q (err=%v), want dir/a.go", got, err)
+	}
+	if got, err := cleanRepoPath("./a.go"); err != nil || got != "a.go" {
+		t.Errorf("cleanRepoPath() = %q (err=%v), want a.go", got, err)
+	}
+}
+
 func TestReadRepoFileRejectsEscapingPaths(t *testing.T) {
 	workDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workDir, "a.go"), []byte("package main\n"), 0o644); err != nil {
@@ -292,7 +371,7 @@ func TestMarkUnverifiedKeepsStatusAndRecordsTheReason(t *testing.T) {
 	if verdicts["stored"].Verdict != VerdictConfirm {
 		t.Errorf("stored verdict = %+v, want the reused confirm untouched", verdicts["stored"])
 	}
-	decisions := Decide(findings, verdicts, map[string][]byte{}, "head-1",
+	decisions := Decide(findings, verdicts, evidenceBlobs{}, "head-1",
 		VerifyPolicy{Mode: store.AutoTriageApply, AutoWithdraw: true})
 	var pending Decision
 	for _, d := range decisions {

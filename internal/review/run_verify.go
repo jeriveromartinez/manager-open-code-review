@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -197,7 +198,7 @@ func verifyContext(ctx context.Context, timeout time.Duration) (context.Context,
 // budget leaves the findings untriaged. profile and apiKey are the destination
 // that actually executed the review, which may be an authorized fallback;
 // reservation is the share carved out before the main pass.
-func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig, profile store.LLMProfile, apiKey []byte, workDir, headSHA string, out *runOutcome, reservation verifyReservation, log *runLogSink) {
+func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg store.ReviewConfig, profile store.LLMProfile, apiKey []byte, workDir, headSHA, baseSHA string, out *runOutcome, reservation verifyReservation, log *runLogSink) {
 	policy := verifyPolicy(cfg.Policy)
 	if cfg.PR.External() {
 		// Never withdraw a finding based on hostile input: the verifier reads
@@ -221,6 +222,8 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 			continue
 		}
 		if reused, ok := reusedVerdict(openByID[f.ID], f, headSHA); ok {
+			// Reuse only saves the scan: Decide still validates the stored quote
+			// against the current blobs, so a stale confirmation cannot survive.
 			verdicts[f.ID] = reused
 			continue
 		}
@@ -308,8 +311,8 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 	if len(verdicts) == 0 && !attempted {
 		return
 	}
-	files := readCitedFiles(workDir, out.findings)
-	out.decisions = Decide(out.findings, verdicts, files, headSHA, policy)
+	blobs := readCitedBlobs(ctx, workDir, baseSHA, out.findings)
+	out.decisions = Decide(out.findings, verdicts, blobs, headSHA, policy)
 }
 
 // reusedVerdict returns the stored verdict when it still refers to the same
@@ -373,22 +376,76 @@ func verifyPriority(severity string) int {
 	}
 }
 
-// readCitedFiles loads the files the findings point at. An invalid or oversized
-// path is skipped, which leaves the evidence unverifiable and the verdict
-// uncertain instead of trusting it.
-func readCitedFiles(workDir string, findings []store.Finding) map[string][]byte {
-	files := make(map[string][]byte, len(findings))
+// readCitedBlobs loads every path the findings cite, from the side that
+// citation belongs to. The head side is the reviewed checkout; the base side is
+// read from the base commit, so a file the pull request deleted is still
+// validated instead of silently discarded. An unreadable path is omitted, which
+// leaves the evidence unverifiable and the verdict uncertain.
+func readCitedBlobs(ctx context.Context, workDir, baseSHA string, findings []store.Finding) evidenceBlobs {
+	blobs := evidenceBlobs{head: make(map[string][]byte), base: make(map[string][]byte)}
 	for _, f := range findings {
-		if _, done := files[f.Path]; done {
-			continue
+		for _, citation := range findingEvidenceCitations(f) {
+			if citation.Side == store.FindingCitationBase {
+				if _, done := blobs.base[citation.Path]; done {
+					continue
+				}
+				content, err := readBaseBlob(ctx, workDir, baseSHA, citation.Path)
+				if err != nil {
+					continue
+				}
+				blobs.base[citation.Path] = content
+				continue
+			}
+			if _, done := blobs.head[citation.Path]; done {
+				continue
+			}
+			content, err := readRepoFile(workDir, citation.Path)
+			if err != nil {
+				continue
+			}
+			blobs.head[citation.Path] = content
 		}
-		content, err := readRepoFile(workDir, f.Path)
-		if err != nil {
-			continue
-		}
-		files[f.Path] = content
 	}
-	return files
+	return blobs
+}
+
+// readBaseBlob reads one blob from the base commit. It never follows a
+// filesystem path, so a file that only exists in the base is available and the
+// path cannot escape the repository. cat-file fails for a tree, so a citation
+// pointing at a directory can never validate a quote against its entries.
+func readBaseBlob(ctx context.Context, workDir, baseSHA, path string) ([]byte, error) {
+	if baseSHA == "" {
+		return nil, fmt.Errorf("no base commit for %q", path)
+	}
+	clean, err := cleanRepoPath(path)
+	if err != nil {
+		return nil, err
+	}
+	content, err := gitRaw(ctx, workDir, "read base blob", "cat-file", "blob", baseSHA+":"+clean)
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > maxVerifyFileBytes {
+		return nil, fmt.Errorf("finding file is too large: %q", path)
+	}
+	return content, nil
+}
+
+// cleanRepoPath canonicalizes a repository-relative path with slash semantics
+// and rejects anything that could address outside the tree.
+func cleanRepoPath(value string) (string, error) {
+	if value == "" || filepath.IsAbs(value) {
+		return "", fmt.Errorf("invalid finding path %q", value)
+	}
+	slash := strings.ReplaceAll(value, `\`, "/")
+	if strings.HasPrefix(slash, "/") {
+		return "", fmt.Errorf("invalid finding path %q", value)
+	}
+	clean := path.Clean(slash)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("finding path escapes the checkout: %q", value)
+	}
+	return clean, nil
 }
 
 func readRepoFile(workDir, path string) ([]byte, error) {

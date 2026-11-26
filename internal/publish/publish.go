@@ -299,7 +299,10 @@ func openFindings(findings []store.Finding) []store.Finding {
 // it never saw. The request is deduplicated by pull request and head, so a
 // retried publish is harmless.
 func (p *publishContext) requestHumanReview(ctx context.Context, cause string) error {
-	if p.run.Status == store.RunSucceeded {
+	// A conclusive run normally owes no human request. A material uncertainty
+	// does: the run succeeded, but it did not settle a finding that can change
+	// the gate, so the human derivation path must still run.
+	if p.run.Status == store.RunSucceeded && !p.hasMaterialUncertainty(p.findingSnapshot) {
 		return nil
 	}
 	pr, err := loadPullRequest(ctx, p.w.Store, p.run.PullRequestID)
@@ -479,6 +482,12 @@ func (p *publishContext) blocksOnVerification(f store.Finding) bool {
 	if f.TriageSource == store.TriageSourceHuman {
 		return true
 	}
+	// Only apply mode may change the gate. Off and dry run keep exactly the
+	// gate the pull request would have without verification, so an observation
+	// can never unblock a finding off would block.
+	if p.policy.AutoTriageMode != store.AutoTriageApply {
+		return true
+	}
 	if len(f.Verification) == 0 {
 		return true
 	}
@@ -487,6 +496,45 @@ func (p *publishContext) blocksOnVerification(f store.Finding) bool {
 		return true
 	}
 	return trusted && v.Verdict != "uncertain"
+}
+
+// hasMaterialUncertainty reports whether an open finding at or above the
+// blocking threshold has a verdict that cannot settle it: an uncertainty, or
+// any answer recorded for another head. That uncertainty can change the
+// conclusion, so the review must stay inconclusive instead of passing, and a
+// human must be asked.
+func (p *publishContext) hasMaterialUncertainty(findings []store.Finding) bool {
+	if p.policy.AutoTriageMode != store.AutoTriageApply {
+		return false
+	}
+	minimum := severityRank[p.policy.BlockingThreshold]
+	if minimum == 0 {
+		minimum = severityRank[defaultBlockingThreshold]
+	}
+	for _, f := range findings {
+		if f.Advisory || f.Status != store.FindingOpen || severityRank[f.Severity] < minimum {
+			continue
+		}
+		if f.TriageSource == store.TriageSourceHuman {
+			continue
+		}
+		v := parseVerification(f)
+		if v.Verdict == "" {
+			// No stored answer: blocksOnVerification keeps the pre-verifier gate.
+			continue
+		}
+		atHead, trusted := p.verificationAtHead(f)
+		if !trusted {
+			// A verdict from another head cannot settle or unblock this one.
+			return true
+		}
+		if atHead.Verdict == "uncertain" {
+			return true
+		}
+		// A trusted confirmation blocks, and a trusted refutation of a blocking
+		// finding keeps the block; neither is an uncertainty.
+	}
+	return false
 }
 
 func shortSHA(sha string) string {
