@@ -285,10 +285,15 @@ func pullRequestPayloadEqual(prev, in PullRequest, status string) bool {
 
 // CloseMissingPullRequests closes open pull requests of a repository that are
 // no longer present in a GitHub listing. An empty list means GitHub reported
-// no open pull requests at all, so every open row is closed.
-func (s *Store) CloseMissingPullRequests(ctx context.Context, repoID int64, openNumbers []int) error {
+// no open pull requests at all, so every open row is closed. Callers must
+// re-check the rows of MissingOpenPullRequests first: the listing is a
+// paginated snapshot and can miss a pull request opened while it was read.
+// sweepStart bounds the update: a row written after the sweep began may belong
+// to a pull request that was opened during it, so it is left for the next pass.
+func (s *Store) CloseMissingPullRequests(ctx context.Context, repoID int64, openNumbers []int, sweepStart time.Time) error {
 	q := s.DB.WithContext(ctx).Model(&PullRequest{}).
-		Where("repository_id = ? AND state = ?", repoID, stateOpen)
+		Where("repository_id = ? AND state = ?", repoID, stateOpen).
+		Where("updated_at < ?", sweepStart)
 	if len(openNumbers) > 0 {
 		q = q.Where("number NOT IN ?", openNumbers)
 	}
@@ -301,6 +306,22 @@ func (s *Store) CloseMissingPullRequests(ctx context.Context, repoID int64, open
 		return fmt.Errorf("close missing pull requests in repository %d: %w", repoID, err)
 	}
 	return nil
+}
+
+// MissingOpenPullRequests lists the stored open pull requests of a repository
+// whose numbers GitHub did not report in the current listing. The syncer
+// re-checks each one against GitHub before closing it.
+func (s *Store) MissingOpenPullRequests(ctx context.Context, repoID int64, openNumbers []int) ([]PullRequest, error) {
+	q := s.DB.WithContext(ctx).
+		Where("repository_id = ? AND state = ?", repoID, stateOpen)
+	if len(openNumbers) > 0 {
+		q = q.Where("number NOT IN ?", openNumbers)
+	}
+	var rows []PullRequest
+	if err := q.Order("number").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("list missing pull requests in repository %d: %w", repoID, err)
+	}
+	return rows, nil
 }
 
 // PRFilter narrows the visible pull requests by QA workflow group. An empty or

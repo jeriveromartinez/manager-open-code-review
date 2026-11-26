@@ -1016,10 +1016,27 @@ func (s *Store) ReviewConfigForPR(ctx context.Context, prID uint) (ReviewConfig,
 // ordered candidates before the limit, so a crowded batch of PRs still waiting
 // for checks (or missing a required one) cannot push an eligible candidate past
 // it.
+// PendingReviewPRs returns at most limit candidates. It has no production
+// caller: EnqueuePending reads PendingReviewCandidates so a row the external
+// policy rejects cannot consume the batch. It is kept for the store tests that
+// pin the query's ordering and CI gate.
 func (s *Store) PendingReviewPRs(ctx context.Context, limit int) ([]PullRequest, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
+	return s.pendingReviewPRs(ctx, limit)
+}
+
+// PendingReviewCandidates lists every pending pull request in the same
+// priority order as PendingReviewPRs, without a limit. The trigger uses it to
+// apply the external policy to each candidate before counting it against the
+// batch, so contributions that will never be reviewed cannot crowd out an
+// eligible pull request.
+func (s *Store) PendingReviewCandidates(ctx context.Context) ([]PullRequest, error) {
+	return s.pendingReviewPRs(ctx, 0)
+}
+
+func (s *Store) pendingReviewPRs(ctx context.Context, limit int) ([]PullRequest, error) {
 	const query = `
 SELECT pr.*,
        q.require_green_ci AS team_require_green_ci,
@@ -1072,7 +1089,7 @@ ORDER BY pr.updated_at DESC`
 			}
 		}
 		prs = append(prs, candidate.PullRequest)
-		if len(prs) == limit {
+		if limit > 0 && len(prs) == limit {
 			break
 		}
 	}

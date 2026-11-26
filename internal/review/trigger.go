@@ -300,13 +300,19 @@ func (t *Trigger) Retry(ctx context.Context, prID uint) error {
 }
 
 // EnqueuePending queues reviews for every eligible pull request and returns
-// how many runs were actually created. Per-PR errors are joined so one bad PR
-// does not prevent the rest of the batch from being scheduled.
+// how many runs were actually created. The limit counts scheduled reviews, not
+// examined candidates: a candidate the external policy rejects records its
+// reason and does not consume the batch, so older eligible pull requests are
+// still reached. Per-PR errors are joined so one bad PR does not prevent the
+// rest of the batch from being scheduled.
 func (t *Trigger) EnqueuePending(ctx context.Context, limit int) (int, error) {
 	if t.Store == nil {
 		return 0, errors.New("review: trigger has no store")
 	}
-	prs, err := t.Store.PendingReviewPRs(ctx, limit)
+	if limit <= 0 {
+		return 0, nil
+	}
+	prs, err := t.Store.PendingReviewCandidates(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list pending review pull requests: %w", err)
 	}
@@ -319,8 +325,12 @@ func (t *Trigger) EnqueuePending(ctx context.Context, limit int) (int, error) {
 			errs = append(errs, fmt.Errorf("pull request %d: %w", pr.ID, err))
 			continue
 		}
-		if ok {
-			created++
+		if !ok {
+			continue
+		}
+		created++
+		if created == limit {
+			break
 		}
 	}
 	return created, errors.Join(errs...)

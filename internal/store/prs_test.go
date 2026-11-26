@@ -516,7 +516,7 @@ func TestCloseMissingPullRequests(t *testing.T) {
 		t.Fatalf("mark PR #3 as merged: %v", err)
 	}
 
-	if err := f.s.CloseMissingPullRequests(f.ctx, repo.ID, []int{1}); err != nil {
+	if err := f.s.CloseMissingPullRequests(f.ctx, repo.ID, []int{1}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CloseMissingPullRequests() returned error: %v", err)
 	}
 
@@ -538,7 +538,7 @@ func TestCloseMissingPullRequestsEmptyList(t *testing.T) {
 	first := f.openPR(repo.ID, 1, store.StatusPending, false)
 	second := f.openPR(repo.ID, 2, store.StatusPending, false)
 
-	if err := f.s.CloseMissingPullRequests(f.ctx, repo.ID, nil); err != nil {
+	if err := f.s.CloseMissingPullRequests(f.ctx, repo.ID, nil, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("CloseMissingPullRequests(nil) returned error: %v", err)
 	}
 

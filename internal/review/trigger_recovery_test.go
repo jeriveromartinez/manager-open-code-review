@@ -3,8 +3,10 @@ package review
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/publish"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
@@ -346,5 +348,57 @@ func TestTriggerReopenConcurrentWithPollingQueuesOnce(t *testing.T) {
 	}
 	if len(runs) != 1 || active != 1 {
 		t.Fatalf("runs = %+v, want exactly one active run", runs)
+	}
+}
+
+// A full batch of recent contributions the external policy rejects must not
+// consume the limit: the older eligible candidate is still scheduled and the
+// rejected ones keep their recorded reason.
+func TestEnqueuePendingDoesNotLetRejectedExternalPRsConsumeBatch(t *testing.T) {
+	f := newTriggerFixture(t)
+	opts := eligibleOpts()
+	opts.reviewerLogin = "human-qa"
+	eligible := f.seed("eligible", opts)
+
+	old := time.Now().UTC().Add(-time.Hour)
+	if err := f.st.DB.WithContext(f.ctx).Exec(
+		`UPDATE pull_requests SET updated_at = ? WHERE id = ?`, old, eligible.ID,
+	).Error; err != nil {
+		t.Fatalf("age eligible pull request: %v", err)
+	}
+	var firstExternal store.PullRequest
+	for i := range 51 {
+		pr := store.PullRequest{
+			RepositoryID: eligible.RepositoryID, Number: 100 + i,
+			Title: fmt.Sprintf("external %d", i), AuthorLogin: "contributor",
+			AuthorAssociation: "OWNER", HeadSHA: fmt.Sprintf("sha-external-%d", i),
+			BaseRef: "main", HeadRef: "external", HTMLURL: fmt.Sprintf("https://github.com/acme/eligible/pull/%d", 100+i),
+			IsFork: true, Origin: store.OriginCrossRepo, State: "open",
+			QAStatus: store.StatusPending, GitHubUpdatedAt: time.Now().UTC(),
+		}
+		if err := f.st.DB.WithContext(f.ctx).Create(&pr).Error; err != nil {
+			t.Fatalf("seed external pull request %d: %v", i, err)
+		}
+		if i == 0 {
+			firstExternal = pr
+		}
+	}
+
+	created, err := f.trigger.EnqueuePending(f.ctx, 50)
+	if err != nil {
+		t.Fatalf("EnqueuePending() error = %v", err)
+	}
+	if created != 1 {
+		t.Fatalf("created = %d, want the eligible PR scheduled despite the full rejected batch", created)
+	}
+	if runs := f.runsOf(eligible); len(runs) != 1 {
+		t.Errorf("eligible runs = %+v, want one", runs)
+	}
+	request, err := f.st.ReviewRequestFor(f.ctx, firstExternal.ID, firstExternal.HeadSHA)
+	if err != nil {
+		t.Fatalf("ReviewRequestFor: %v", err)
+	}
+	if request.Cause != store.ReviewRequestCauseFork {
+		t.Errorf("rejected request cause = %q, want %q", request.Cause, store.ReviewRequestCauseFork)
 	}
 }
