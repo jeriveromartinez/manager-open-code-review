@@ -10,8 +10,10 @@ const props = withDefaults(
     total: number
     chips: FilterChip[]
     activeCount?: number
+    sheetOpen?: boolean
+    sheetId?: string
   }>(),
-  { activeCount: 0 },
+  { activeCount: 0, sheetOpen: false },
 )
 
 const emit = defineEmits<{
@@ -65,6 +67,9 @@ function onOpenSheet(): void {
     <button
       type="button"
       class="filter-bar__sheet"
+      aria-haspopup="dialog"
+      :aria-expanded="sheetOpen"
+      :aria-controls="sheetId"
       @click="onOpenSheet"
     >
       FILTROS · {{ activeCount }}

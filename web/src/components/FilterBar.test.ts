@@ -83,6 +83,20 @@ describe('FilterBar', () => {
     expect(wrapper.emitted('open-sheet')).toHaveLength(1)
   })
 
+  it('exposes the sheet dialog state on the mobile trigger', async () => {
+    const wrapper = mount(FilterBar, {
+      props: { q: '', shown: 2, total: 12, chips: [], sheetId: 'filters-sheet' },
+    })
+
+    const trigger = wrapper.get('.filter-bar__sheet')
+    expect(trigger.attributes('aria-haspopup')).toBe('dialog')
+    expect(trigger.attributes('aria-expanded')).toBe('false')
+    expect(trigger.attributes('aria-controls')).toBe('filters-sheet')
+
+    await wrapper.setProps({ sheetOpen: true })
+    expect(trigger.attributes('aria-expanded')).toBe('true')
+  })
+
   it('renders the desktop slot inside the bar', () => {
     const wrapper = mount(FilterBar, {
       props: { q: '', shown: 3, total: 8, chips: [] },
