@@ -216,9 +216,11 @@ type CloneTokenRefresher interface {
 
 // PublishReconciler recovers terminal runs whose publication was never
 // enqueued, for example because the worker crashed right after committing the
-// result. It is implemented by the publisher.
+// result, and human review requests whose delivery was interrupted. It is
+// implemented by the publisher.
 type PublishReconciler interface {
 	ReconcilePendingPublishes(ctx context.Context, limit int) (int, error)
+	ReconcileReviewRequests(ctx context.Context, limit int) (int, error)
 }
 
 // ControlDeps are optional dependencies of the control client. The review and
@@ -284,6 +286,14 @@ func (w *reconcileWorker) Work(ctx context.Context, _ *river.Job[ReconcileArgs])
 			slog.Error("reconcile pending publications", "error", err)
 		} else if enqueued > 0 {
 			slog.Info("enqueued pending publications", "count", enqueued)
+		}
+		resumed, err := w.publishes.ReconcileReviewRequests(ctx, pendingBatchSize)
+		if err != nil {
+			// The request row keeps its state, so the next reconciliation
+			// retries the sweep.
+			slog.Error("reconcile review requests", "error", err)
+		} else if resumed > 0 {
+			slog.Info("resumed review requests", "count", resumed)
 		}
 	}
 	if w.trigger == nil {

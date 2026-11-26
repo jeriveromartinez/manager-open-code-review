@@ -274,6 +274,15 @@ func (p PullRequest) CoveredBy(r ReviewRun) bool {
 	return r.Comparison().Covers(p.Comparison())
 }
 
+// Same reports whether two comparisons are the same identity. Unlike Covers it
+// has no wildcard: a legacy row with an unknown side never matches a resolved
+// one.
+func (c Comparison) Same(o Comparison) bool {
+	return strings.EqualFold(c.HeadSHA, o.HeadSHA) &&
+		c.BaseRef == o.BaseRef &&
+		strings.EqualFold(c.MergeBaseSHA, o.MergeBaseSHA)
+}
+
 // ComparisonMoved reports whether a synced payload changed the comparison
 // identity: the head, the base branch, the base tip, or the resolved merge
 // base (which SyncPullRequest clears when either side moves).
@@ -419,8 +428,9 @@ type QAPolicy struct {
 }
 
 // ReviewRequest is one GitHub review request for a pull request revision. The
-// (pull_request_id, head_sha) pair is unique, so a redelivery or a retried
-// publish cannot ask the same reviewers twice for the same head.
+// (pull_request_id, head_sha, base_ref, merge_base_sha) tuple is unique, so a
+// redelivery or a retried publish cannot ask the same reviewers twice for the
+// same comparison, while a retarget with the same head requests it again.
 type ReviewRequest struct {
 	ID            uint       `gorm:"column:id;primaryKey"`
 	PullRequestID uint       `gorm:"column:pull_request_id"`
@@ -436,6 +446,11 @@ type ReviewRequest struct {
 	DeliveredAt   *time.Time `gorm:"column:delivered_at"`
 	CreatedAt     time.Time  `gorm:"column:created_at"`
 	UpdatedAt     time.Time  `gorm:"column:updated_at"`
+}
+
+// Comparison returns the comparison identity this request was recorded for.
+func (r ReviewRequest) Comparison() Comparison {
+	return Comparison{HeadSHA: r.HeadSHA, BaseRef: r.BaseRef, MergeBaseSHA: r.MergeBaseSHA}
 }
 
 // RepositoryPolicy holds the explicit review overrides of one repository

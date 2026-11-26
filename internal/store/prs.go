@@ -328,9 +328,10 @@ type PRView struct {
 	StatusSince  time.Time
 	TeamID       *uint
 	UpdatedAt    time.Time
-	// ReviewRequest is the latest human review request of the pull request, or
-	// nil when none was ever recorded. It tells the panel whether the engine
-	// handed the revision to a person and whether GitHub accepted it.
+	// ReviewRequest is the human review request of the pull request's current
+	// comparison, or nil when the current comparison has none. It tells the
+	// panel whether the engine handed this revision to a person and whether
+	// GitHub accepted it; an old request never confirms a retargeted comparison.
 	ReviewRequest *ReviewRequestSummary
 }
 
@@ -516,7 +517,11 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 		Joins(`LEFT JOIN LATERAL (
 			SELECT rq.status, rq.head_sha, rq.cause, rq.reviewer_login, rq.reviewer_team,
 			       rq.attempts, rq.last_error, rq.delivered_at
-			FROM review_requests rq WHERE rq.pull_request_id = pr.id
+			FROM review_requests rq
+			WHERE rq.pull_request_id = pr.id
+			  AND rq.head_sha = pr.head_sha
+			  AND rq.base_ref = pr.base_ref
+			  AND rq.merge_base_sha = pr.merge_base_sha
 			ORDER BY rq.id DESC LIMIT 1) rr ON true`).
 		Select(strings.Join([]string{
 			"pr.id AS id",
