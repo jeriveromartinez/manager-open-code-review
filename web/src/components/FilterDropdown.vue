@@ -3,19 +3,20 @@ import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
 
 type FilterOption = { value: string; label: string; count?: number }
 
-const props = defineProps<{
-  label: string
-  options: FilterOption[]
-  modelValue: string[]
-  multiple?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    label: string
+    options: FilterOption[]
+    modelValue: string[]
+    multiple?: boolean
+    clearLabel?: string
+  }>(),
+  { clearLabel: 'Todas' },
+)
 
 const emit = defineEmits<{
   'update:modelValue': [value: string[]]
 }>()
-
-// In multiple mode the empty option clears the filter and always comes first.
-const allOption: FilterOption = { value: '', label: 'Todas' }
 
 const open = ref(false)
 const activeIndex = ref(0)
@@ -25,7 +26,13 @@ const listbox = ref<HTMLElement | null>(null)
 const dropdownId = useId()
 
 const entries = computed<FilterOption[]>(() =>
-  props.multiple ? [allOption, ...props.options] : props.options,
+  props.multiple
+    ? [
+        // In multiple mode the empty option clears the filter and always comes first.
+        { value: '', label: props.clearLabel },
+        ...props.options,
+      ]
+    : props.options,
 )
 
 const selectedLabel = computed(() => {

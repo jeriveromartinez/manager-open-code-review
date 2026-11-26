@@ -21,6 +21,7 @@ function mountDropdown(props: {
   options: (typeof options)[number][]
   modelValue: string[]
   multiple?: boolean
+  clearLabel?: string
 }) {
   const wrapper = mount(FilterDropdown, { attachTo: document.body, props })
   mounted.push(wrapper)
@@ -102,6 +103,20 @@ describe('FilterDropdown', () => {
     await multiple.setProps({ modelValue: ['closed'] })
     await multiple.findAll('[role="option"]')[0].trigger('click')
     expect(multiple.emitted('update:modelValue')?.[2]).toEqual([[]])
+  })
+
+  it('uses a custom clear label in multiple mode', async () => {
+    const wrapper = mountDropdown({
+      label: 'Repo',
+      options,
+      modelValue: [],
+      multiple: true,
+      clearLabel: 'Todos',
+    })
+
+    await wrapper.get('button').trigger('keydown', { key: 'Enter' })
+
+    expect(wrapper.findAll('[role="option"]')[0].text()).toContain('Todos')
   })
 
   it('wraps keyboard navigation in both directions', async () => {
