@@ -1,5 +1,6 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
+import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import LeadView from './LeadView.vue'
@@ -182,6 +183,48 @@ function mountLead(): VueWrapper {
   void router.push('/lead')
   return mount(LeadView, { global: { plugins: [createPinia(), router] } })
 }
+
+async function chooseOption(
+  scope: ParentNode,
+  dropdownLabel: string,
+  optionLabel: string,
+): Promise<void> {
+  const pill = Array.from(scope.querySelectorAll<HTMLButtonElement>('.filter-dropdown__pill')).find(
+    (button) => button.textContent?.includes(dropdownLabel),
+  )
+  if (!pill) throw new Error(`dropdown ${dropdownLabel} not found`)
+  const dropdown = pill.closest('.filter-dropdown') as HTMLElement
+  if (!dropdown.querySelector('.filter-dropdown__list')) {
+    pill.click()
+    await nextTick()
+  }
+
+  const option = Array.from(dropdown.querySelectorAll<HTMLElement>('[role="option"]')).find((item) =>
+    item.textContent?.includes(optionLabel),
+  )
+  if (!option) throw new Error(`option ${optionLabel} not found`)
+  option.click()
+  await nextTick()
+  await flushPromises()
+}
+
+function decisionIds(wrapper: VueWrapper): number[] {
+  return wrapper.findAll('[data-decision]').map((row) => Number(row.attributes('data-decision')))
+}
+
+const twoDecisionRepos: PRView[] = [
+  pr({ id: 1, number: 482, title: 'Idempotencia de cobros', status_since: hoursAgo(6) }),
+  pr({
+    id: 3,
+    number: 479,
+    title: 'Rotar claves',
+    repo: 'acme/payments-sdk',
+    qa_status: 'changes_requested',
+    group: 'blocked',
+    open_findings: { blocker: 1, major: 2, minor: 0, nit: 0 },
+    status_since: hoursAgo(2),
+  }),
+]
 
 describe('LeadView', () => {
   beforeEach(() => {
@@ -497,6 +540,103 @@ describe('LeadView', () => {
 
     expect(wrapper.get('[role="alert"]').text()).toBe('No se pudo cargar el equipo')
     expect(wrapper.get('.page-subtitle').text()).toContain('0 PRs abiertos · 0 repositorios')
+    wrapper.unmount()
+  })
+
+  it('filters decisions by reason chips with counts', async () => {
+    const wrapper = mountLead()
+    await flushPromises()
+
+    const count = (reason: string) =>
+      wrapper.get(`[data-reason-chip="${reason}"] [data-reason-count]`).text()
+    expect(count('Con defectos')).toBe('1')
+    expect(count('Fuera de plazo de QA')).toBe('1')
+    expect(wrapper.find('[data-reason-chip="Inconcluso"]').exists()).toBe(false)
+    expect(decisionIds(wrapper)).toEqual([1, 3])
+
+    await wrapper.get('[data-reason-chip="Con defectos"]').trigger('click')
+    expect(decisionIds(wrapper)).toEqual([3])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('1 DE 2')
+
+    await wrapper.get('[data-reason-chip="Fuera de plazo de QA"]').trigger('click')
+    expect(decisionIds(wrapper)).toEqual([1, 3])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('2 DE 2')
+
+    await wrapper.get('[data-reason-chip="Con defectos"]').trigger('click')
+    expect(decisionIds(wrapper)).toEqual([1])
+    wrapper.unmount()
+  })
+
+  it('filters by repository and search text', async () => {
+    mocks.api.prs.mockResolvedValue(twoDecisionRepos)
+    const wrapper = mountLead()
+    await flushPromises()
+
+    await chooseOption(wrapper.element, 'Repo', 'acme/payments-sdk')
+    expect(decisionIds(wrapper)).toEqual([3])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('1 DE 2')
+
+    await wrapper.get('.filter-bar__clear').trigger('click')
+    expect(decisionIds(wrapper)).toEqual([1, 3])
+
+    const search = wrapper.get('input[type="search"]')
+    await search.setValue('idempotencia')
+    expect(decisionIds(wrapper)).toEqual([1])
+    await search.setValue('payments-sdk')
+    expect(decisionIds(wrapper)).toEqual([3])
+    await search.setValue('octocat')
+    expect(decisionIds(wrapper)).toEqual([1, 3])
+    await search.setValue('nadie')
+    expect(wrapper.get('.empty__title').text()).toBe('NADA COINCIDE CON ESTOS FILTROS')
+    wrapper.unmount()
+  })
+
+  it('keeps the team tabs above the decisions table', async () => {
+    mocks.api.me.mockResolvedValue({
+      id: 7,
+      login: 'lmartin',
+      avatar_url: '',
+      is_admin: false,
+      teams: [
+        { id: 3, name: 'Pagos', role: 'lead' },
+        { id: 4, name: 'Web', role: 'lead' },
+      ],
+    })
+    const wrapper = mountLead()
+    await flushPromises()
+
+    const tabs = wrapper.get('.filter-tabs').element
+    const table = wrapper.get('.list-scroll table').element
+    expect(tabs.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+    expect(wrapper.get('.filter-bar').element.closest('.decisions')).toBeNull()
+    expect(table.closest('.decisions')).not.toBeNull()
+    wrapper.unmount()
+  })
+
+  it('opens the mobile sheet with the same reason and repo filters', async () => {
+    mocks.api.prs.mockResolvedValue(twoDecisionRepos)
+    const wrapper = mountLead()
+    await flushPromises()
+
+    await wrapper.get('.filter-bar__sheet').trigger('click')
+    await flushPromises()
+
+    const sheet = document.body.querySelector('.filter-sheet') as HTMLElement
+    expect(sheet).not.toBeNull()
+    expect(sheet.querySelector('[data-reason-chip="Con defectos"]')).not.toBeNull()
+    expect(sheet.textContent).toContain('Repo')
+
+    const chip = sheet.querySelector('[data-reason-chip="Con defectos"]') as HTMLElement
+    chip.click()
+    await flushPromises()
+    expect(decisionIds(wrapper)).toEqual([3])
+
+    const apply = document.body.querySelector('.filter-sheet__apply') as HTMLElement
+    expect(apply.textContent?.trim()).toBe('VER 1 PRs')
+    apply.click()
+    await flushPromises()
+
+    expect(document.body.querySelector('.filter-sheet')).toBeNull()
     wrapper.unmount()
   })
 })
