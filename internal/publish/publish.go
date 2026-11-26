@@ -296,8 +296,8 @@ func openFindings(findings []store.Finding) []store.Finding {
 // requestHumanReview asks GitHub for a person when the engine could not
 // conclude. The run must still cover the pull request's current comparison
 // (#141): a result of another base–head pair must not assign reviewers to code
-// it never saw. The request is deduplicated by pull request and head, so a
-// retried publish is harmless.
+// it never saw. The request is deduplicated by pull request and comparison, so
+// a retried publish is harmless while a retarget asks for a review again.
 func (p *publishContext) requestHumanReview(ctx context.Context, cause string) error {
 	if p.run.Status == store.RunSucceeded {
 		return nil

@@ -427,7 +427,7 @@ type QAPolicy struct {
 	UpdatedAt                   time.Time      `gorm:"column:updated_at"`
 }
 
-// ReviewRequest is one GitHub review request for a pull request revision. The
+// ReviewRequest is one GitHub review request for a pull request comparison. The
 // (pull_request_id, head_sha, base_ref, merge_base_sha) tuple is unique, so a
 // redelivery or a retried publish cannot ask the same reviewers twice for the
 // same comparison, while a retarget with the same head requests it again.

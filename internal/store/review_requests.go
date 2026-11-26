@@ -176,8 +176,10 @@ RETURNING *`,
 // RecoverableReviewRequests returns the requests of the current comparison that
 // a reconciliation can resume: pending after a crash, a sending row whose lease
 // expired, or a rejected row whose configured destination changed. Delivered
-// and escalated rows, rows of a previous comparison and rejected rows with an
-// unchanged destination are left alone.
+// and escalated rows, rows of a previous comparison, rejected rows with an
+// unchanged destination and rows whose repository cannot produce a request
+// (disabled, no team or no installation) are left alone, so they cannot consume
+// the batch and starve later work.
 func (s *Store) RecoverableReviewRequests(ctx context.Context, limit int) ([]ReviewRequest, error) {
 	var reqs []ReviewRequest
 	err := quietDB(s.DB.WithContext(ctx)).Raw(`
@@ -185,8 +187,11 @@ SELECT r.*
 FROM review_requests r
 JOIN pull_requests pr ON pr.id = r.pull_request_id
 JOIN repositories repo ON repo.id = pr.repository_id
+JOIN installations inst ON inst.id = repo.installation_id
 LEFT JOIN qa_policies pol ON pol.team_id = repo.team_id
-WHERE r.head_sha = pr.head_sha
+WHERE repo.enabled
+  AND repo.team_id IS NOT NULL
+  AND r.head_sha = pr.head_sha
   AND r.base_ref = pr.base_ref
   AND r.merge_base_sha = pr.merge_base_sha
   AND (
