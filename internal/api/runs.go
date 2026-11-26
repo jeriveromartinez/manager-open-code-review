@@ -119,6 +119,12 @@ func parseHistoryCursor(w http.ResponseWriter, r *http.Request) (int64, *time.Ti
 	if rawCreatedAt == "" {
 		return before, nil, true
 	}
+	if before == 0 {
+		// A timestamp without an id cannot form a cursor; accepting it would
+		// silently ignore it and serve the first page.
+		writeAPIError(w, http.StatusBadRequest, "invalid before_created_at")
+		return 0, nil, false
+	}
 	createdAt, err := time.Parse(time.RFC3339, rawCreatedAt)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid before_created_at")
@@ -270,10 +276,17 @@ func (s *server) runHistory(w http.ResponseWriter, r *http.Request) {
 	for _, run := range page.Runs {
 		dtos = append(dtos, runHistoryDTOOf(run))
 	}
+	// Emit the cursor halves together or not at all: an id without its creation
+	// time would make the client resume through the unstable id-only fallback.
+	nextBefore := int64(0)
+	nextCreatedAt := nextHistoryCreatedAt(page)
+	if nextCreatedAt != nil {
+		nextBefore = page.NextBefore
+	}
 	writeJSON(w, http.StatusOK, runHistoryResponse{
 		Runs:          dtos,
-		NextBefore:    page.NextBefore,
-		NextCreatedAt: nextHistoryCreatedAt(page),
+		NextBefore:    nextBefore,
+		NextCreatedAt: nextCreatedAt,
 		HasMore:       page.HasMore,
 	})
 }

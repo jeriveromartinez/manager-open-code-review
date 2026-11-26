@@ -210,8 +210,8 @@ func TestRunHistoryReturnsTerminalRunsForTheUserTeams(t *testing.T) {
 	if body.HasMore {
 		t.Error("has_more = true, want false for a single page")
 	}
-	if body.NextBefore != int64(okRun.ID) {
-		t.Errorf("next_before = %d, want the last returned id %d", body.NextBefore, okRun.ID)
+	if body.NextBefore != 0 {
+		t.Errorf("next_before = %d, want 0 when there is no next page", body.NextBefore)
 	}
 	if body.NextCreatedAt != nil {
 		t.Errorf("next_created_at = %q, want null when there is no next page", *body.NextCreatedAt)
@@ -282,6 +282,7 @@ func TestRunHistoryRejectsInvalidParams(t *testing.T) {
 		"status=failed,bogus",
 		"repo=0",
 		"before=5&before_created_at=not-a-time",
+		"before=0&before_created_at=2026-01-02T03:04:05Z",
 		"before_created_at=2026-01-02T03:04:05Z",
 	} {
 		t.Run(query, func(t *testing.T) {
@@ -350,8 +351,8 @@ func TestRunHistoryPaginatesByBefore(t *testing.T) {
 	if got := historyIDs(page.Runs); fmt.Sprint(got) != fmt.Sprint([]uint{runs[0].ID, runs[3].ID}) {
 		t.Fatalf("page 2 = %v, want the remaining runs including the outlier %d", got, runs[3].ID)
 	}
-	if page.HasMore || page.NextBefore != int64(runs[3].ID) {
-		t.Fatalf("page 2 cursor = %d/%v, want %d/false", page.NextBefore, page.HasMore, runs[3].ID)
+	if page.HasMore || page.NextBefore != 0 {
+		t.Fatalf("page 2 cursor = %d/%v, want 0/false", page.NextBefore, page.HasMore)
 	}
 	if page.NextCreatedAt != nil {
 		t.Errorf("page 2 next_created_at = %q, want null without a next page", *page.NextCreatedAt)
