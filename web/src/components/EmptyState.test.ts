@@ -8,7 +8,7 @@ describe('EmptyState', () => {
       props: { title: 'NADA COINCIDE CON ESTOS FILTROS', actionLabel: 'LIMPIAR FILTROS' },
     })
 
-    expect(wrapper.get('.empty-state__title').text()).toBe('NADA COINCIDE CON ESTOS FILTROS')
+    expect(wrapper.get('.empty__title').text()).toBe('NADA COINCIDE CON ESTOS FILTROS')
     const action = wrapper.get('button')
     expect(action.text()).toBe('LIMPIAR FILTROS')
     await action.trigger('click')

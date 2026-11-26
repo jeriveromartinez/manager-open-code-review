@@ -10,8 +10,8 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="empty-state">
-    <p class="empty-state__title">{{ title }}</p>
+  <div class="empty">
+    <p class="empty__title">{{ title }}</p>
     <button
       v-if="actionLabel"
       type="button"
@@ -24,14 +24,18 @@ const emit = defineEmits<{
 </template>
 
 <style scoped>
-.empty-state {
+.empty {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: var(--space-4);
+  padding: var(--space-5);
+  border: var(--rule-hair) dashed var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--text-muted);
 }
 
-.empty-state__title {
+.empty__title {
   font-family: var(--font-display);
   font-size: 24px;
   font-weight: 900;

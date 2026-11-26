@@ -170,6 +170,7 @@ img {
 
 .shell {
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -290,11 +291,17 @@ img {
   max-width: var(--container);
   margin: 0 auto;
   padding: var(--space-5) var(--space-5) 72px;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
 .container--full {
   max-width: none;
+}
+
+/* List views skip the page-level scroll so .list-scroll stays the only one. */
+.container--flush {
+  overflow: hidden;
 }
 
 /* Ultrawide: every page spreads into columns (split views and card grids)
@@ -1248,6 +1255,13 @@ img {
   top: 0;
   z-index: 1;
   background: var(--bg);
+}
+
+/* The sheet freezes the viewport: the body lock is set inline, and the panel
+ * scroll roots hold still while it is open. */
+.sheet-open .container,
+.sheet-open .list-scroll {
+  overflow: hidden;
 }
 
 table {

@@ -34,13 +34,16 @@ function focusFirst(): void {
 }
 
 // Follow-up: a shared lock counter is needed if another overlay starts locking body scroll.
+// The page scrolls inside .container / .list-scroll now, so the class holds those roots too.
 function lockScroll(): void {
   previousOverflow = document.body.style.overflow
   document.body.style.overflow = 'hidden'
+  document.documentElement.classList.add('sheet-open')
 }
 
 function unlockScroll(): void {
   document.body.style.overflow = previousOverflow
+  document.documentElement.classList.remove('sheet-open')
 }
 
 function onKeydown(event: KeyboardEvent): void {

@@ -163,7 +163,7 @@ describe('FilterSheet', () => {
     wrapper.unmount()
   })
 
-  it('locks body scroll while open and restores it on close', async () => {
+  it('locks body and panel scroll while open and restores it on close', async () => {
     document.body.style.overflow = 'auto'
 
     const wrapper = mount(FilterSheet, {
@@ -173,9 +173,11 @@ describe('FilterSheet', () => {
 
     await wrapper.setProps({ open: true })
     expect(document.body.style.overflow).toBe('hidden')
+    expect(document.documentElement.classList.contains('sheet-open')).toBe(true)
 
     await wrapper.setProps({ open: false })
     expect(document.body.style.overflow).toBe('auto')
+    expect(document.documentElement.classList.contains('sheet-open')).toBe(false)
 
     document.body.style.overflow = ''
     wrapper.unmount()
@@ -191,9 +193,11 @@ describe('FilterSheet', () => {
 
     await wrapper.setProps({ open: true })
     expect(document.body.style.overflow).toBe('hidden')
+    expect(document.documentElement.classList.contains('sheet-open')).toBe(true)
 
     wrapper.unmount()
     expect(document.body.style.overflow).toBe('auto')
+    expect(document.documentElement.classList.contains('sheet-open')).toBe(false)
 
     document.body.style.overflow = ''
   })
