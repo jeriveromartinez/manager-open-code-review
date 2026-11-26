@@ -23,6 +23,7 @@ import type { DotTone } from '../dots'
 import { isForbidden } from '../errors'
 import { blockedAt, decisionRows, thresholds, type DecisionRow, type Threshold } from '../leadPanel'
 import { formatWait, isOverSla, qaBucket, waitMinutes } from '../qaQueue'
+import { prStatusLabel } from '../status'
 import { cacheShare, formatTokens } from '../tokens'
 import { useSessionStore } from '../stores/session'
 
@@ -140,8 +141,18 @@ function searchText(row: DecisionRow): string {
   return [row.pr.title, row.pr.repo, row.pr.author_login].join(' ')
 }
 
+// For a pending, blocked PR `reasonFor` returns the free-form review_reason;
+// the facet and the table show the status tag instead so it joins the fixed
+// reason set («Sin revisión programada»).
+function reasonLabel(row: DecisionRow): string {
+  if (row.pr.qa_status === 'pending' && row.pr.review_state === 'blocked') {
+    return prStatusLabel(row.pr).tag
+  }
+  return row.reason
+}
+
 function facetValues(row: DecisionRow, facet: string): string[] {
-  return facet === 'reason' ? [row.reason] : [row.pr.repo]
+  return facet === 'reason' ? [reasonLabel(row)] : [row.pr.repo]
 }
 
 const filteredDecisions = apply(
@@ -151,7 +162,7 @@ const filteredDecisions = apply(
     const reasons = active.reason ?? []
     const repos = active.repo ?? []
     return (
-      (reasons.length === 0 || reasons.includes(row.reason)) &&
+      (reasons.length === 0 || reasons.includes(reasonLabel(row))) &&
       (repos.length === 0 || repos.includes(row.pr.repo))
     )
   },
@@ -169,7 +180,7 @@ function reasonRank(reason: string): number {
 }
 
 const reasonOptions = computed(() => {
-  const present = new Set(decisions.value.map((row) => row.reason))
+  const present = new Set(decisions.value.map(reasonLabel))
   return [...present]
     .sort((a, b) => reasonRank(a) - reasonRank(b) || a.localeCompare(b, 'es'))
     .map((reason) => ({ value: reason, label: reason, count: counts.value.reason?.[reason] ?? 0 }))
@@ -585,7 +596,7 @@ onBeforeUnmount(() => {
                           <br />
                           <span class="caption">{{ row.pr.repo }} #{{ row.pr.number }} · por {{ row.pr.author_login }}</span>
                         </td>
-                        <td class="decisions__reason">{{ row.reason }}</td>
+                        <td class="decisions__reason">{{ reasonLabel(row) }}</td>
                         <td class="decisions__wait">{{ row.wait }}</td>
                       </tr>
                     </tbody>

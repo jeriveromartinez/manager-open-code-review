@@ -544,6 +544,18 @@ describe('LeadView', () => {
   })
 
   it('filters decisions by reason chips with counts', async () => {
+    mocks.api.prs.mockResolvedValue([
+      ...prs,
+      pr({
+        id: 5,
+        number: 500,
+        title: 'Sin política',
+        qa_status: 'pending',
+        review_state: 'blocked',
+        review_reason: 'El equipo no tiene política',
+        status_since: hoursAgo(3),
+      }),
+    ])
     const wrapper = mountLead()
     await flushPromises()
 
@@ -551,19 +563,24 @@ describe('LeadView', () => {
       wrapper.get(`[data-reason-chip="${reason}"] [data-reason-count]`).text()
     expect(count('Con defectos')).toBe('1')
     expect(count('Fuera de plazo de QA')).toBe('1')
+    expect(count('Sin revisión programada')).toBe('1')
     expect(wrapper.find('[data-reason-chip="Inconcluso"]').exists()).toBe(false)
-    expect(decisionIds(wrapper)).toEqual([1, 3])
+    expect(decisionIds(wrapper)).toEqual([1, 5, 3])
+
+    const blockedRow = wrapper.get('[data-decision="5"]')
+    expect(blockedRow.text()).toContain('Sin revisión programada')
+    expect(blockedRow.text()).not.toContain('El equipo no tiene política')
+
+    await wrapper.get('[data-reason-chip="Sin revisión programada"]').trigger('click')
+    expect(decisionIds(wrapper)).toEqual([5])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('1 DE 3')
 
     await wrapper.get('[data-reason-chip="Con defectos"]').trigger('click')
+    expect(decisionIds(wrapper)).toEqual([5, 3])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('2 DE 3')
+
+    await wrapper.get('[data-reason-chip="Sin revisión programada"]').trigger('click')
     expect(decisionIds(wrapper)).toEqual([3])
-    expect(wrapper.get('.filter-bar__count').text()).toBe('1 DE 2')
-
-    await wrapper.get('[data-reason-chip="Fuera de plazo de QA"]').trigger('click')
-    expect(decisionIds(wrapper)).toEqual([1, 3])
-    expect(wrapper.get('.filter-bar__count').text()).toBe('2 DE 2')
-
-    await wrapper.get('[data-reason-chip="Con defectos"]').trigger('click')
-    expect(decisionIds(wrapper)).toEqual([1])
     wrapper.unmount()
   })
 
@@ -587,7 +604,10 @@ describe('LeadView', () => {
     await search.setValue('octocat')
     expect(decisionIds(wrapper)).toEqual([1, 3])
     await search.setValue('nadie')
+    expect(decisionIds(wrapper)).toEqual([])
     expect(wrapper.get('.empty__title').text()).toBe('NADA COINCIDE CON ESTOS FILTROS')
+    // The threshold aside keeps simulating over every open PR, not the filtered rows.
+    expect(wrapper.get('[data-threshold="major"]').text()).toBe('Mayor (actual)1')
     wrapper.unmount()
   })
 
@@ -624,7 +644,19 @@ describe('LeadView', () => {
     const sheet = document.body.querySelector('.filter-sheet') as HTMLElement
     expect(sheet).not.toBeNull()
     expect(sheet.querySelector('[data-reason-chip="Con defectos"]')).not.toBeNull()
-    expect(sheet.textContent).toContain('Repo')
+
+    await chooseOption(sheet, 'Repo', 'acme/payments-sdk')
+    expect(decisionIds(wrapper)).toEqual([3])
+    expect(wrapper.findAll('.filter-bar__chip')).toHaveLength(1)
+
+    await chooseOption(sheet, 'Repo', 'acme/payments-api')
+    expect(decisionIds(wrapper)).toEqual([1, 3])
+    expect(wrapper.findAll('.filter-bar__chip')).toHaveLength(2)
+    expect(wrapper.get('.filter-bar__count').text()).toBe('2 DE 2')
+
+    await chooseOption(sheet, 'Repo', 'Todas')
+    expect(decisionIds(wrapper)).toEqual([1, 3])
+    expect(wrapper.findAll('.filter-bar__chip')).toHaveLength(0)
 
     const chip = sheet.querySelector('[data-reason-chip="Con defectos"]') as HTMLElement
     chip.click()
