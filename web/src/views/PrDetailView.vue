@@ -64,11 +64,11 @@ const severityLabels: Record<string, string> = {
 const SEVERITY_CHIPS = ['blocker', 'major', 'minor', 'nit'] as const
 
 const STATUS_TABS = [
+  { value: '', label: 'Todos' },
   { value: 'untriaged', label: 'Sin triar' },
   { value: 'confirmed', label: 'Confirmados' },
   { value: 'dismissed', label: 'Descartados' },
   { value: 'resolved', label: 'Resueltos' },
-  { value: '', label: 'Todos' },
 ]
 
 const { q, facets, isActive, activeCount, setFacet, toggleFacet, clear, apply, facetCounts } =

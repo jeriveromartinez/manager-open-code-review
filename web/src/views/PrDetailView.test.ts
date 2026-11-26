@@ -403,6 +403,10 @@ describe('PrDetailView', () => {
 
     await wrapper.get('[data-status-tab="resolved"]').trigger('click')
     expect(findingTitles(wrapper)).toEqual(['Fallo menor resuelto'])
+    expect(severityCount(wrapper, 'blocker')).toBe('0')
+    expect(severityCount(wrapper, 'major')).toBe('0')
+    expect(severityCount(wrapper, 'minor')).toBe('1')
+    expect(severityCount(wrapper, 'nit')).toBe('0')
 
     await wrapper.get('[data-status-tab="all"]').trigger('click')
     expect(findingTitles(wrapper)).toHaveLength(6)
