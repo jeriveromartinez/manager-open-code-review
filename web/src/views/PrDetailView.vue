@@ -77,6 +77,14 @@ const { q, facets, isActive, activeCount, setFacet, toggleFacet, clear, apply, f
 const sheetOpen = ref(false)
 const sheetId = `findings-filters-${useId()}`
 
+// The segmented control is single-select, but a shared URL can carry several
+// status values. Keep the first so the control and the filter cannot disagree;
+// the URL watcher then rewrites the query to that single value.
+const [firstStatus] = facets.value.status
+if (firstStatus !== undefined && facets.value.status.length > 1) {
+  setFacet('status', [firstStatus])
+}
+
 // A finding can fall in more than one bucket (a withdrawn confirmed finding is
 // both confirmed and dismissed); the segmented control selects one bucket.
 function findingStatusKeys(finding: Finding): string[] {

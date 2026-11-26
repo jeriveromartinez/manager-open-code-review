@@ -23,9 +23,12 @@ vi.mock('../composables/useLiveRefresh', () => ({
   },
 }))
 
+const routeQuery = vi.hoisted(() => ({ current: {} as Record<string, unknown> }))
+const routerReplace = vi.hoisted(() => vi.fn((_location: unknown) => Promise.resolve()))
+
 vi.mock('vue-router', () => ({
-  useRoute: () => ({ params: { id: '42' }, query: {} }),
-  useRouter: () => ({ replace: () => Promise.resolve() }),
+  useRoute: () => ({ params: { id: '42' }, query: routeQuery.current }),
+  useRouter: () => ({ replace: routerReplace }),
 }))
 
 const detail: PRDetail = {
@@ -235,6 +238,7 @@ describe('PrDetailView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     live.registrations.length = 0
+    routeQuery.current = {}
     mocks.api.prDetail.mockResolvedValue(detail)
     mocks.api.retryPR.mockResolvedValue({ status: 'queued' })
     mocks.api.withdrawFinding.mockResolvedValue({ ...detail.findings[0], status: 'withdrawn' })
@@ -410,6 +414,20 @@ describe('PrDetailView', () => {
 
     await wrapper.get('[data-status-tab="all"]').trigger('click')
     expect(findingTitles(wrapper)).toHaveLength(6)
+
+    wrapper.unmount()
+  })
+
+  it('collapses repeated status values from the URL into one segment', async () => {
+    routeQuery.current = { status: ['resolved', 'untriaged'] }
+    mocks.api.prDetail.mockResolvedValue({ ...detail, findings: filterFindings })
+    const wrapper = mountDetail()
+    await flushPromises()
+
+    expect(wrapper.get('[data-status-tab="resolved"]').attributes('aria-pressed')).toBe('true')
+    expect(wrapper.get('[data-status-tab="untriaged"]').attributes('aria-pressed')).toBe('false')
+    expect(findingTitles(wrapper)).toEqual(['Fallo menor resuelto'])
+    expect(routerReplace).toHaveBeenCalledWith({ query: { status: ['resolved'] } })
 
     wrapper.unmount()
   })
