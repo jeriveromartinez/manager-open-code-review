@@ -65,7 +65,7 @@ function teamKey(id: number | null): string {
 
 function teamKeyLabel(key: string): string {
   if (key === '__none__') return 'Sin equipo'
-  return teams.value.find((team) => String(team.id) === key)?.name ?? `Equipo ${key}`
+  return teamName(Number(key))
 }
 
 function visibilityLabel(value: string): string {
@@ -995,12 +995,12 @@ onMounted(() => {
 
             <div class="list-scroll repo-list">
               <EmptyState
-                v-if="filteredRepos.length === 0 && isActive"
+                v-if="!loading && filteredRepos.length === 0 && isActive"
                 title="NADA COINCIDE CON ESTOS FILTROS"
-                action-label="LIMPIAR"
+                action-label="LIMPIAR FILTROS"
                 @action="clear"
               />
-              <p v-else-if="filteredRepos.length === 0" class="empty-state">
+              <p v-else-if="!loading && filteredRepos.length === 0" class="empty-state">
                 No hay repositorios disponibles
               </p>
               <table v-else class="repo-table register-table">

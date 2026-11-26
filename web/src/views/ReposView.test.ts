@@ -1114,6 +1114,7 @@ describe('ReposView', () => {
     expect(rowIds(wrapper)).toEqual([])
     const empty = wrapper.get('.empty')
     expect(empty.get('.empty__title').text()).toBe('NADA COINCIDE CON ESTOS FILTROS')
+    expect(empty.get('button').text()).toBe('LIMPIAR FILTROS')
 
     await empty.get('button').trigger('click')
     expect(rowIds(wrapper)).toEqual(['10', '20'])
