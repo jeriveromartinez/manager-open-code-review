@@ -124,7 +124,7 @@ describe('useListFilters', () => {
     const items: Pr[] = [
       { title: 'Fix auth', status: 'open', severity: ['high'] },
       { title: 'Fix login', status: 'open', severity: ['low'] },
-      { title: 'Fix docs', status: 'closed', severity: ['high'] },
+      { title: 'Docs', status: 'closed', severity: ['high'] },
     ]
     const { filters } = await mountFilters({ q: 'fix', status: ['open'], severity: ['high'] })
 
@@ -135,7 +135,8 @@ describe('useListFilters', () => {
     )
 
     expect(counts.value.severity).toEqual({ high: 1, low: 1 })
-    expect(counts.value.status).toEqual({ open: 1, closed: 1 })
+    expect(counts.value.status).toEqual({ open: 1 })
+    expect(counts.value.status.closed ?? 0).toBe(0)
   })
 
   it('falls back to the default sort', async () => {

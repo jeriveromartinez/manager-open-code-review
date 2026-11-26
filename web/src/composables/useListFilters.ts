@@ -33,9 +33,9 @@ function emptyFacets(facets: readonly string[]): FacetValues {
 }
 
 /**
- * Filtros de lista compartidos por las vistas del panel. `q`, las facetas y el
- * orden viven en la ref y se reflejan en la URL con `replace`, de modo que una
- * recarga o un enlace compartido recuperan la misma vista sin recargar.
+ * List filters shared by the panel views. `q`, the facets and the sort order
+ * live in refs and are mirrored to the URL with `replace`, so a reload or a
+ * shared link restores the same view without reloading.
  */
 export function useListFilters(options: ListFiltersOptions) {
   const route = useRoute()
@@ -78,16 +78,16 @@ export function useListFilters(options: ListFiltersOptions) {
     return next
   }
 
-  // Limitación conocida: la URL se hidrata una sola vez al crear el composable.
-  // Un cambio externo en la misma ruta (atrás/adelante, editar el query a mano)
-  // no vuelve a hidratar; se resolverá si las vistas lo necesitan.
+  // Known limitation: the URL is hydrated only once, when the composable is
+  // created. An external change on the same route (back/forward, manual query
+  // edit) does not re-hydrate; it will be addressed if views need it.
   watch(
     [q, facets, sort],
     () => {
-      // Un guard que falle rechaza la promesa; el estado local sigue siendo
-      // válido, pero el fallo no debe pasar desapercibido.
+      // A failing guard rejects the promise; local state is still valid, but
+      // the failure must not go unnoticed.
       void router.replace({ query: currentQuery() }).catch((error: unknown) => {
-        console.error('No se pudo sincronizar los filtros con la URL', error)
+        console.error('Failed to sync list filters with the URL', error)
       })
     },
     { deep: true },
@@ -129,13 +129,13 @@ export function useListFilters(options: ListFiltersOptions) {
   }
 
   /**
-   * Cuenta cada valor de cada faceta contra el texto y las demás dimensiones:
-   * la faceta que se cuenta se ignora a sí misma para que una opción elegida
-   * nunca desaparezca del desplegable.
+   * Counts each value of each facet against the text and the other dimensions:
+   * the facet being counted ignores itself so a selected option never
+   * disappears from the dropdown.
    *
-   * Contrato: los valores de `valuesOf` deben significar lo mismo que el
-   * predicado de `apply` (pertenencia a la selección de esa faceta); si no,
-   * los recuentos no coincidirán con la lista filtrada.
+   * Contract: `valuesOf` must mean the same as the `apply` predicate
+   * (membership in that facet's selection); otherwise the counts will not
+   * match the filtered list.
    */
   function facetCounts<T>(
     items: MaybeRefOrGetter<T[]>,
