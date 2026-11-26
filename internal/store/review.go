@@ -1016,6 +1016,10 @@ func (s *Store) ReviewConfigForPR(ctx context.Context, prID uint) (ReviewConfig,
 // ordered candidates before the limit, so a crowded batch of PRs still waiting
 // for checks (or missing a required one) cannot push an eligible candidate past
 // it.
+// PendingReviewPRs returns at most limit candidates. It has no production
+// caller: EnqueuePending reads PendingReviewCandidates so a row the external
+// policy rejects cannot consume the batch. It is kept for the store tests that
+// pin the query's ordering and CI gate.
 func (s *Store) PendingReviewPRs(ctx context.Context, limit int) ([]PullRequest, error) {
 	if limit <= 0 {
 		return nil, nil

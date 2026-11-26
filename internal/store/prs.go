@@ -288,9 +288,12 @@ func pullRequestPayloadEqual(prev, in PullRequest, status string) bool {
 // no open pull requests at all, so every open row is closed. Callers must
 // re-check the rows of MissingOpenPullRequests first: the listing is a
 // paginated snapshot and can miss a pull request opened while it was read.
-func (s *Store) CloseMissingPullRequests(ctx context.Context, repoID int64, openNumbers []int) error {
+// sweepStart bounds the update: a row written after the sweep began may belong
+// to a pull request that was opened during it, so it is left for the next pass.
+func (s *Store) CloseMissingPullRequests(ctx context.Context, repoID int64, openNumbers []int, sweepStart time.Time) error {
 	q := s.DB.WithContext(ctx).Model(&PullRequest{}).
-		Where("repository_id = ? AND state = ?", repoID, stateOpen)
+		Where("repository_id = ? AND state = ?", repoID, stateOpen).
+		Where("updated_at < ?", sweepStart)
 	if len(openNumbers) > 0 {
 		q = q.Where("number NOT IN ?", openNumbers)
 	}

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	gh "github.com/google/go-github/v93/github"
 	"gorm.io/gorm"
@@ -353,9 +354,10 @@ func (s *Syncer) syncPullRequests(ctx context.Context, client *gh.Client, instal
 // syncRepositoryPullRequests reconciles one repository. The caller keeps
 // walking the rest of the installation after an error: a repository GitHub
 // cannot be read from must not starve its siblings. Closing is skipped when the
-// listing or a pull request sync failed, because the snapshot would be
-// incomplete and valid rows could be closed.
+// listing, a pull request sync or the revalidation query failed, because the
+// snapshot would be incomplete and valid rows could be closed.
 func (s *Syncer) syncRepositoryPullRequests(ctx context.Context, client *gh.Client, repo store.Repository) error {
+	sweepStart := time.Now().UTC()
 	owner, name, ok := strings.Cut(repo.FullName, "/")
 	if !ok || owner == "" || name == "" {
 		slog.Warn("skip repository with invalid full name", "repository_id", repo.ID, "full_name", repo.FullName)
@@ -396,8 +398,13 @@ func (s *Syncer) syncRepositoryPullRequests(ctx context.Context, client *gh.Clie
 		s.requestForkReview(ctx, pr)
 	}
 
-	openNumbers, revalidateErr := s.revalidateAbsentPullRequests(ctx, client, owner, name, repo, openNumbers)
-	closeErr := s.Store.CloseMissingPullRequests(ctx, repo.ID, openNumbers)
+	openNumbers, safeToClose, revalidateErr := s.revalidateAbsentPullRequests(ctx, client, owner, name, repo, openNumbers)
+	if !safeToClose {
+		// The rows that must be re-checked could not even be listed, so the
+		// listing alone is not proof of closure.
+		return revalidateErr
+	}
+	closeErr := s.Store.CloseMissingPullRequests(ctx, repo.ID, openNumbers, sweepStart)
 	if closeErr != nil {
 		closeErr = fmt.Errorf("close missing pull requests of %s: %w", repo.FullName, closeErr)
 	}
@@ -409,11 +416,12 @@ func (s *Syncer) syncRepositoryPullRequests(ctx context.Context, client *gh.Clie
 // pull request opened while the pages were being read is missing from the
 // snapshot but still open, so closing it would cancel live work. A 404 confirms
 // it is gone; any other read failure keeps the row open and retries on the next
-// sweep.
-func (s *Syncer) revalidateAbsentPullRequests(ctx context.Context, client *gh.Client, owner, name string, repo store.Repository, openNumbers []int) ([]int, error) {
+// sweep. safeToClose is false when the rows to re-check could not be read at
+// all, in which case the caller must not close anything.
+func (s *Syncer) revalidateAbsentPullRequests(ctx context.Context, client *gh.Client, owner, name string, repo store.Repository, openNumbers []int) ([]int, bool, error) {
 	missing, err := s.Store.MissingOpenPullRequests(ctx, repo.ID, openNumbers)
 	if err != nil {
-		return openNumbers, fmt.Errorf("list missing pull requests of %s: %w", repo.FullName, err)
+		return openNumbers, false, fmt.Errorf("list missing pull requests of %s: %w", repo.FullName, err)
 	}
 	var errs []error
 	for _, pr := range missing {
@@ -430,7 +438,7 @@ func (s *Syncer) revalidateAbsentPullRequests(ctx context.Context, client *gh.Cl
 			openNumbers = append(openNumbers, pr.Number)
 		}
 	}
-	return openNumbers, errors.Join(errs...)
+	return openNumbers, true, errors.Join(errs...)
 }
 
 // refreshChecks keeps the stored counters current in polling mode. A failure is

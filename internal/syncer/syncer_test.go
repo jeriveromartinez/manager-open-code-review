@@ -722,6 +722,66 @@ func TestSyncRechecksMissingBeforeClosing(t *testing.T) {
 	}
 }
 
+// A webhook can persist a pull request after the revalidation snapshot but
+// before the close update. That row belongs to a pull request opened during the
+// sweep and must not be closed unvalidated.
+func TestSyncDoesNotClosePRWrittenDuringSweep(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 1, testInstallationID, "acme/repo-1", true)
+	seedPR(t, s, 1, 5, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(1, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writePulls(t, w, r, []int{6}, time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC), "")
+		}, nil)
+	f.pullGet = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/acme/repo-1/pulls/5" {
+			http.NotFound(w, r)
+			return
+		}
+		// The delivery lands while the sweep is re-checking PR #5.
+		raced := store.PullRequest{
+			RepositoryID: 1, Number: 7, Title: "PR 7", AuthorLogin: "alice",
+			HeadSHA: "sha-7", BaseRef: "main", HeadRef: "feature",
+			HTMLURL: "https://github.com/acme/repo-1/pull/7",
+			State:   "open", QAStatus: store.StatusPending, GitHubUpdatedAt: time.Now().UTC(),
+		}
+		if err := s.DB.WithContext(ctx).Create(&raced).Error; err != nil {
+			t.Errorf("insert pull request during the sweep: %v", err)
+			http.Error(w, "insert failed", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&gh.PullRequest{
+			Number: gh.Int(5),
+			State:  gh.String("closed"),
+		})
+	}
+
+	if err := newSyncer(s, f.srv.URL, noopPublisher{}).SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v", err)
+	}
+	var closed store.PullRequest
+	if err := s.DB.WithContext(ctx).Where("repository_id = ? AND number = ?", 1, 5).Take(&closed).Error; err != nil {
+		t.Fatalf("load PR #5: %v", err)
+	}
+	if closed.State != store.StatusClosed {
+		t.Errorf("PR #5 state = %q, want %q", closed.State, store.StatusClosed)
+	}
+	var raced store.PullRequest
+	if err := s.DB.WithContext(ctx).Where("repository_id = ? AND number = ?", 1, 7).Take(&raced).Error; err != nil {
+		t.Fatalf("load PR #7: %v", err)
+	}
+	if raced.State != "open" {
+		t.Errorf("PR #7 state = %q, want open (written after the sweep began)", raced.State)
+	}
+}
+
 func TestSyncPublishesEvents(t *testing.T) {
 	ctx := context.Background()
 	s := testutil.NewStore(t)
