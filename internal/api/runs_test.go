@@ -136,9 +136,10 @@ type historyRunEntry struct {
 }
 
 type historyBody struct {
-	Runs       []historyRunEntry `json:"runs"`
-	NextBefore int64             `json:"next_before"`
-	HasMore    bool              `json:"has_more"`
+	Runs          []historyRunEntry `json:"runs"`
+	NextBefore    int64             `json:"next_before"`
+	NextCreatedAt *string           `json:"next_created_at"`
+	HasMore       bool              `json:"has_more"`
 }
 
 // seedHistoryRun inserts a run with an explicit creation time so ordering does
@@ -212,6 +213,9 @@ func TestRunHistoryReturnsTerminalRunsForTheUserTeams(t *testing.T) {
 	if body.NextBefore != int64(okRun.ID) {
 		t.Errorf("next_before = %d, want the last returned id %d", body.NextBefore, okRun.ID)
 	}
+	if body.NextCreatedAt != nil {
+		t.Errorf("next_created_at = %q, want null when there is no next page", *body.NextCreatedAt)
+	}
 
 	failed := body.Runs[1]
 	if failed.Repo != "acme/history-a" || failed.Team != teamA.Name || failed.PRNumber != 42 {
@@ -247,7 +251,7 @@ func TestRunHistoryReturnsTerminalRunsForTheUserTeams(t *testing.T) {
 	// The row keeps the active-run shape so the panel can merge both lists.
 	var raw map[string]any
 	decodeJSON(t, rec, &raw)
-	assertKeys(t, raw, "runs", "next_before", "has_more")
+	assertKeys(t, raw, "runs", "next_before", "next_created_at", "has_more")
 	rawRuns, ok := raw["runs"].([]any)
 	if !ok || len(rawRuns) != 3 {
 		t.Fatalf("raw runs = %v, want the three rows", raw["runs"])
@@ -277,6 +281,8 @@ func TestRunHistoryRejectsInvalidParams(t *testing.T) {
 		"status=bogus",
 		"status=failed,bogus",
 		"repo=0",
+		"before=5&before_created_at=not-a-time",
+		"before_created_at=2026-01-02T03:04:05Z",
 	} {
 		t.Run(query, func(t *testing.T) {
 			rec := f.request(http.MethodGet, "/api/review-runs/history?"+query, nil, cookie)
@@ -305,33 +311,50 @@ func TestRunHistoryPaginatesByBefore(t *testing.T) {
 	cookie := f.session(f.user("history-admin", true))
 
 	base := time.Now().UTC().Truncate(time.Millisecond)
-	runs := make([]store.ReviewRun, 5) // oldest first
-	for i := range runs {
+	// The last inserted run gets the newest id but the oldest creation time, so
+	// an id-only cursor would skip it. Creation order: runs[2], runs[1],
+	// runs[0], runs[3].
+	createdAt := []time.Time{
+		base.Add(-5 * time.Minute),
+		base.Add(-4 * time.Minute),
+		base.Add(-3 * time.Minute),
+		base.Add(-6 * time.Minute),
+	}
+	runs := make([]store.ReviewRun, len(createdAt))
+	for i, at := range createdAt {
 		runs[i] = seedHistoryRun(t, f, f.pr(repo.ID, 50+i, store.StatusPending).ID,
-			store.RunSucceeded, "webhook", base.Add(time.Duration(i)*time.Minute), nil, nil, "", "")
+			store.RunSucceeded, "webhook", at, nil, nil, "", "")
 	}
 
 	var seen []uint
-	rec := f.request(http.MethodGet, "/api/review-runs/history?limit=3", nil, cookie)
+	rec := f.request(http.MethodGet, "/api/review-runs/history?limit=2", nil, cookie)
 	assertStatus(t, rec, http.StatusOK)
 	var page historyBody
 	decodeJSON(t, rec, &page)
-	if got := historyIDs(page.Runs); fmt.Sprint(got) != fmt.Sprint([]uint{runs[4].ID, runs[3].ID, runs[2].ID}) {
-		t.Fatalf("page 1 = %v, want the three newest runs", got)
+	if got := historyIDs(page.Runs); fmt.Sprint(got) != fmt.Sprint([]uint{runs[2].ID, runs[1].ID}) {
+		t.Fatalf("page 1 = %v, want the two newest by creation time", got)
 	}
-	if !page.HasMore || page.NextBefore != int64(runs[2].ID) {
-		t.Fatalf("page 1 cursor = %d/%v, want %d/true", page.NextBefore, page.HasMore, runs[2].ID)
+	if !page.HasMore || page.NextBefore != int64(runs[1].ID) {
+		t.Fatalf("page 1 cursor = %d/%v, want %d/true", page.NextBefore, page.HasMore, runs[1].ID)
+	}
+	if want := createdAt[1].Format(time.RFC3339Nano); page.NextCreatedAt == nil || *page.NextCreatedAt != want {
+		t.Fatalf("page 1 next_created_at = %v, want %q", page.NextCreatedAt, want)
 	}
 	seen = append(seen, historyIDs(page.Runs)...)
 
-	rec = f.request(http.MethodGet, fmt.Sprintf("/api/review-runs/history?before=%d&limit=3", page.NextBefore), nil, cookie)
+	rec = f.request(http.MethodGet, fmt.Sprintf(
+		"/api/review-runs/history?before=%d&before_created_at=%s&limit=2",
+		page.NextBefore, *page.NextCreatedAt), nil, cookie)
 	assertStatus(t, rec, http.StatusOK)
 	decodeJSON(t, rec, &page)
-	if got := historyIDs(page.Runs); fmt.Sprint(got) != fmt.Sprint([]uint{runs[1].ID, runs[0].ID}) {
-		t.Fatalf("page 2 = %v, want the two oldest runs", got)
+	if got := historyIDs(page.Runs); fmt.Sprint(got) != fmt.Sprint([]uint{runs[0].ID, runs[3].ID}) {
+		t.Fatalf("page 2 = %v, want the remaining runs including the outlier %d", got, runs[3].ID)
 	}
-	if page.HasMore || page.NextBefore != int64(runs[0].ID) {
-		t.Fatalf("page 2 cursor = %d/%v, want %d/false", page.NextBefore, page.HasMore, runs[0].ID)
+	if page.HasMore || page.NextBefore != int64(runs[3].ID) {
+		t.Fatalf("page 2 cursor = %d/%v, want %d/false", page.NextBefore, page.HasMore, runs[3].ID)
+	}
+	if page.NextCreatedAt != nil {
+		t.Errorf("page 2 next_created_at = %q, want null without a next page", *page.NextCreatedAt)
 	}
 	seen = append(seen, historyIDs(page.Runs)...)
 

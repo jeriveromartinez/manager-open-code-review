@@ -76,9 +76,10 @@ type runHistoryDTO struct {
 }
 
 type runHistoryResponse struct {
-	Runs       []runHistoryDTO `json:"runs"`
-	NextBefore int64           `json:"next_before"`
-	HasMore    bool            `json:"has_more"`
+	Runs          []runHistoryDTO `json:"runs"`
+	NextBefore    int64           `json:"next_before"`
+	NextCreatedAt *string         `json:"next_created_at"`
+	HasMore       bool            `json:"has_more"`
 }
 
 // knownRunStatuses are every status a run can hold, so the status filter can be
@@ -93,17 +94,38 @@ var knownRunStatuses = map[string]bool{
 	store.RunSuperseded:   true,
 }
 
-func parseHistoryBefore(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	raw := r.URL.Query().Get("before")
-	if raw == "" {
-		return 0, true
+// parseHistoryCursor reads the keyset cursor. before is the id and
+// before_created_at its creation time; the pair is what keeps pages stable when
+// a newer id carries an older creation time. before without the timestamp is
+// still accepted as the legacy id-only cursor for older clients. A timestamp
+// without an id is rejected rather than silently ignored.
+func parseHistoryCursor(w http.ResponseWriter, r *http.Request) (int64, *time.Time, bool) {
+	query := r.URL.Query()
+	rawBefore := query.Get("before")
+	rawCreatedAt := query.Get("before_created_at")
+
+	if rawBefore == "" {
+		if rawCreatedAt != "" {
+			writeAPIError(w, http.StatusBadRequest, "invalid before_created_at")
+			return 0, nil, false
+		}
+		return 0, nil, true
 	}
-	before, err := strconv.ParseInt(raw, 10, 64)
+	before, err := strconv.ParseInt(rawBefore, 10, 64)
 	if err != nil || before < 0 {
 		writeAPIError(w, http.StatusBadRequest, "invalid before")
-		return 0, false
+		return 0, nil, false
 	}
-	return before, true
+	if rawCreatedAt == "" {
+		return before, nil, true
+	}
+	createdAt, err := time.Parse(time.RFC3339, rawCreatedAt)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid before_created_at")
+		return 0, nil, false
+	}
+	createdAt = createdAt.UTC()
+	return before, &createdAt, true
 }
 
 func parseHistoryLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
@@ -177,6 +199,16 @@ func durationSeconds(startedAt, finishedAt *time.Time) *int64 {
 	return &seconds
 }
 
+// nextHistoryCreatedAt exposes the second half of the cursor only while another
+// page exists. Nano precision keeps the keyset comparison exact.
+func nextHistoryCreatedAt(page store.RunHistoryPage) *string {
+	if !page.HasMore || page.NextCreatedAt == nil {
+		return nil
+	}
+	next := page.NextCreatedAt.UTC().Format(time.RFC3339Nano)
+	return &next
+}
+
 func runHistoryDTOOf(run store.RunHistoryRow) runHistoryDTO {
 	return runHistoryDTO{
 		activeRunDTO: activeRunDTO{
@@ -199,7 +231,7 @@ func runHistoryDTOOf(run store.RunHistoryRow) runHistoryDTO {
 // validates the cursor and filters.
 func (s *server) runHistory(w http.ResponseWriter, r *http.Request) {
 	user, _ := auth.UserFrom(r.Context())
-	before, ok := parseHistoryBefore(w, r)
+	before, beforeCreatedAt, ok := parseHistoryCursor(w, r)
 	if !ok {
 		return
 	}
@@ -221,12 +253,13 @@ func (s *server) runHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	page, err := s.Store.ReviewRunHistory(r.Context(), user, store.RunHistoryFilter{
-		BeforeID: before,
-		Limit:    limit,
-		Statuses: statuses,
-		RepoID:   repoID,
-		Trigger:  r.URL.Query().Get("trigger"),
-		Query:    r.URL.Query().Get("q"),
+		BeforeID:        before,
+		BeforeCreatedAt: beforeCreatedAt,
+		Limit:           limit,
+		Statuses:        statuses,
+		RepoID:          repoID,
+		Trigger:         r.URL.Query().Get("trigger"),
+		Query:           r.URL.Query().Get("q"),
 	})
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "list review run history")
@@ -238,6 +271,9 @@ func (s *server) runHistory(w http.ResponseWriter, r *http.Request) {
 		dtos = append(dtos, runHistoryDTOOf(run))
 	}
 	writeJSON(w, http.StatusOK, runHistoryResponse{
-		Runs: dtos, NextBefore: page.NextBefore, HasMore: page.HasMore,
+		Runs:          dtos,
+		NextBefore:    page.NextBefore,
+		NextCreatedAt: nextHistoryCreatedAt(page),
+		HasMore:       page.HasMore,
 	})
 }
