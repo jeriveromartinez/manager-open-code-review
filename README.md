@@ -152,7 +152,7 @@ Las credenciales nunca llegan al log: se sustituyen el token de clonado, la clav
 
 ### Revisiones en curso
 
-**Revisiones** (`/runs`, #123) lista los runs `queued` y `running` con repositorio, PR, equipo, perfil, trigger, estado, fase actual y tiempo transcurrido. Cada cambio de fase publica `run.updated` y la lista se refresca por SSE sin recargar; el reloj local avanza aunque no llegue ningún evento. El alcance es el mismo del dashboard: `GET /api/review-runs` solo devuelve runs de PRs de equipos visibles para el usuario.
+**Revisiones** (`/runs`, #123) lista los runs `queued` y `running` con repositorio, PR, equipo, perfil, trigger, estado, fase actual y tiempo transcurrido, y debajo el **historial** de runs terminados con su estado, error y duración. La barra común filtra por texto, estado, repositorio y trigger; el historial se pagina con `GET /api/review-runs/history?before=<id>&before_created_at=<RFC3339Nano>&limit=<n>` (1–200, 50 por defecto), que devuelve `runs`, `next_before`, `next_created_at` y respeta el mismo alcance por equipo. Cada cambio de fase publica `run.updated` y la lista se refresca por SSE sin recargar; el reloj local avanza aunque no llegue ningún evento. El alcance es el mismo del dashboard: `GET /api/review-runs` solo devuelve runs de PRs de equipos visibles para el usuario.
 
 El worker guarda la fase en `review_runs.phase` (más `phase_started_at`): `preparing`, `cloning`, `reviewing`, `chunking` y `finishing`. Un run en cola, terminado o anterior a esta migración no tiene fase y se muestra como «—»; el detalle del PR también enseña la fase y su tiempo mientras el run sigue activo.
 
@@ -218,7 +218,7 @@ El binario admite `qa serve`, `qa worker`, `qa migrate`, `qa monitor` y `qa heal
 
 ## Rutas principales
 
-`GET /healthz` · `GET /api/setup/status` · `POST /api/setup/manifest` · `/setup` · `/auth/login` · `/auth/callback` · `/api/me` · `/api/stats` · `/api/prs` · `GET /api/prs/{id}` · `GET /api/review-runs` · `GET /api/review-runs/{id}/logs` · `POST /api/prs/{id}/retry` · `POST /api/prs/{id}/human-verdict` · `/api/teams` · `GET|PUT /api/teams/{id}/policy` · `GET|POST /api/llm-profiles` · `GET /api/llm-profiles/usage` · `POST /api/llm-profiles/{id}/health` · `GET /api/installations` · `POST /api/installations/{id}/sync` · `/agents` · `/runs` · `/prs/:id` · `GET /api/events` (SSE) · `POST /webhooks/github`. Cualquier otra ruta sirve la SPA.
+`GET /healthz` · `GET /api/setup/status` · `POST /api/setup/manifest` · `/setup` · `/auth/login` · `/auth/callback` · `/api/me` · `/api/stats` · `/api/prs` · `GET /api/prs/{id}` · `GET /api/review-runs` · `GET /api/review-runs/history` · `GET /api/review-runs/{id}/logs` · `POST /api/prs/{id}/retry` · `POST /api/prs/{id}/human-verdict` · `/api/teams` · `GET|PUT /api/teams/{id}/policy` · `GET|POST /api/llm-profiles` · `GET /api/llm-profiles/usage` · `POST /api/llm-profiles/{id}/health` · `GET /api/installations` · `POST /api/installations/{id}/sync` · `/agents` · `/runs` · `/prs/:id` · `GET /api/events` (SSE) · `POST /webhooks/github`. Cualquier otra ruta sirve la SPA.
 
 ## Hojas de ruta
 
