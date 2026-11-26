@@ -72,7 +72,7 @@ type PRCommenter interface {
 // ChecksRefresher re-reads the CI state of a pull request head from GitHub and
 // stores it, so the dashboard and the trigger gate agree on the same verdict.
 type ChecksRefresher interface {
-	RefreshPR(ctx context.Context, prID uint) (store.PRValidations, bool, error)
+	RefreshPR(ctx context.Context, prID uint, source string) (store.PRValidations, bool, error)
 }
 
 // WebhookHandler receives GitHub App deliveries. Store persists the state they
@@ -405,7 +405,7 @@ func (h *WebhookHandler) handleCheckEvent(ctx context.Context, w http.ResponseWr
 	}
 
 	for _, pr := range prs {
-		_, changed, err := h.Checks.RefreshPR(ctx, pr.ID)
+		_, changed, err := h.Checks.RefreshPR(ctx, pr.ID, store.ObservationSourceWebhook)
 		if err != nil {
 			h.serverError(w)
 			return

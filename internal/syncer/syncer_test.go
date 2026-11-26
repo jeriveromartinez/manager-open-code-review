@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,6 +69,37 @@ func (p *recordingPublisher) snapshot() []events.Event {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]events.Event(nil), p.events...)
+}
+
+type stubChecksRefresher struct {
+	changed bool
+	err     error
+	source  string
+	calls   int
+}
+
+func (r *stubChecksRefresher) RefreshPRWith(_ context.Context, _ *gh.Client, _ store.PullRequest, source string) (store.PRValidations, bool, error) {
+	r.calls++
+	r.source = source
+	return store.PRValidations{Passed: 1, Total: 1}, r.changed, r.err
+}
+
+type recordingCIGate struct {
+	mu  sync.Mutex
+	ids []uint
+}
+
+func (g *recordingCIGate) OnChecksUpdated(_ context.Context, prID uint) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.ids = append(g.ids, prID)
+	return nil
+}
+
+func (g *recordingCIGate) snapshot() []uint {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]uint(nil), g.ids...)
 }
 
 // fakeGitHub serves the installation token endpoint plus the REST endpoints
@@ -824,6 +856,83 @@ func TestSyncPublishesEvents(t *testing.T) {
 	}
 	if got := pub.snapshot(); len(got) != len(want) {
 		t.Fatalf("events after identical second sync = %+v, want no new events", got)
+	}
+}
+
+func TestPollingReevaluatesTheGateWhenChecksChange(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 1, testInstallationID, "acme/repo-1", true)
+	updated := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(1, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writePulls(t, w, r, []int{7}, updated, "")
+		}, nil)
+	sy := newSyncer(s, f.srv.URL, &recordingPublisher{})
+	refresher := &stubChecksRefresher{changed: true}
+	gate := &recordingCIGate{}
+	sy.Checks = refresher
+	sy.CIGate = gate
+
+	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v", err)
+	}
+	var pr store.PullRequest
+	if err := s.DB.WithContext(ctx).Where("repository_id = ? AND number = ?", 1, 7).Take(&pr).Error; err != nil {
+		t.Fatalf("load PR #7: %v", err)
+	}
+	if got := gate.snapshot(); len(got) != 1 || got[0] != pr.ID {
+		t.Fatalf("OnChecksUpdated calls = %v, want [%d]", got, pr.ID)
+	}
+	if refresher.source != store.ObservationSourcePolling {
+		t.Errorf("observation source = %q, want %q", refresher.source, store.ObservationSourcePolling)
+	}
+
+	// An unchanged observation must not re-drive the gate on every pass.
+	refresher.changed = false
+	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("second SyncInstallation() error = %v", err)
+	}
+	if got := gate.snapshot(); len(got) != 1 {
+		t.Errorf("OnChecksUpdated calls after an unchanged pass = %v, want [%d]", got, pr.ID)
+	}
+}
+
+func TestPollingWithdrawsTheCheckAfterAFailedLookup(t *testing.T) {
+	ctx := context.Background()
+	s := testutil.NewStore(t)
+	seedInstallation(t, s, testInstallationID)
+	seedRepo(t, s, 1, testInstallationID, "acme/repo-1", true)
+	updated := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	f := newFakeGitHub(t,
+		func(w http.ResponseWriter, r *http.Request) {
+			writeRepos(t, w, r, []*gh.Repository{repo(1, "acme/repo-1")}, "")
+		},
+		func(w http.ResponseWriter, r *http.Request) {
+			writePulls(t, w, r, []int{7}, updated, "")
+		}, nil)
+	sy := newSyncer(s, f.srv.URL, noopPublisher{})
+	// A failed lookup clears the counters, so changed is true even though the
+	// refresher returns an error.
+	sy.Checks = &stubChecksRefresher{changed: true, err: errors.New("github unavailable")}
+	gate := &recordingCIGate{}
+	sy.CIGate = gate
+
+	if err := sy.SyncInstallation(ctx, testInstallationID); err != nil {
+		t.Fatalf("SyncInstallation() error = %v", err)
+	}
+	var pr store.PullRequest
+	if err := s.DB.WithContext(ctx).Where("repository_id = ? AND number = ?", 1, 7).Take(&pr).Error; err != nil {
+		t.Fatalf("load PR #7: %v", err)
+	}
+	if got := gate.snapshot(); len(got) != 1 || got[0] != pr.ID {
+		t.Fatalf("OnChecksUpdated calls = %v, want [%d] after a failed lookup", got, pr.ID)
 	}
 }
 

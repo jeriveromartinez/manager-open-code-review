@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	gh "github.com/google/go-github/v93/github"
 	"gorm.io/gorm"
@@ -23,7 +24,7 @@ type Checks struct {
 // RefreshPR reads the check runs and commit statuses of the pull request's
 // current head SHA and stores the resulting counters. changed reports whether
 // the stored state moved, which is what makes a delivery worth republishing.
-func (c *Checks) RefreshPR(ctx context.Context, prID uint) (store.PRValidations, bool, error) {
+func (c *Checks) RefreshPR(ctx context.Context, prID uint, source string) (store.PRValidations, bool, error) {
 	if c == nil || c.Store == nil {
 		return store.PRValidations{}, false, errors.New("github: checks refresher has no store")
 	}
@@ -51,12 +52,12 @@ func (c *Checks) RefreshPR(ctx context.Context, prID uint) (store.PRValidations,
 	if err != nil {
 		return store.PRValidations{}, false, fmt.Errorf("create installation %d client: %w", repo.InstallationID, err)
 	}
-	return c.storeValidations(ctx, client, app.Creds.AppID, pr, repo)
+	return c.storeValidations(ctx, client, app.Creds.AppID, pr, repo, source)
 }
 
 // RefreshPRWith refreshes a pull request through an installation client the
 // caller already holds, so reconciliation does not mint a second token per PR.
-func (c *Checks) RefreshPRWith(ctx context.Context, client *gh.Client, pr store.PullRequest) (store.PRValidations, bool, error) {
+func (c *Checks) RefreshPRWith(ctx context.Context, client *gh.Client, pr store.PullRequest, source string) (store.PRValidations, bool, error) {
 	if c == nil || c.Store == nil {
 		return store.PRValidations{}, false, errors.New("github: checks refresher has no store")
 	}
@@ -74,7 +75,7 @@ func (c *Checks) RefreshPRWith(ctx context.Context, client *gh.Client, pr store.
 	if err != nil {
 		return store.PRValidations{}, false, fmt.Errorf("load GitHub App: %w", err)
 	}
-	return c.storeValidations(ctx, client, app.Creds.AppID, pr, repo)
+	return c.storeValidations(ctx, client, app.Creds.AppID, pr, repo, source)
 }
 
 func (c *Checks) pullRequest(ctx context.Context, prID uint) (store.PullRequest, error) {
@@ -97,25 +98,31 @@ func (c *Checks) repository(ctx context.Context, id int64) (store.Repository, er
 	return repo, nil
 }
 
-func (c *Checks) storeValidations(ctx context.Context, client *gh.Client, ownAppID int64, pr store.PullRequest, repo store.Repository) (store.PRValidations, bool, error) {
+func (c *Checks) storeValidations(ctx context.Context, client *gh.Client, ownAppID int64, pr store.PullRequest, repo store.Repository, source string) (store.PRValidations, bool, error) {
 	owner, name, ok := strings.Cut(repo.FullName, "/")
 	if !ok || owner == "" || name == "" {
 		return store.PRValidations{}, false, fmt.Errorf("invalid repository full name %q", repo.FullName)
 	}
+	// The stamp is taken before the lookup: a read that started earlier must
+	// not overwrite a newer delivery that arrived while it was in flight.
+	stamp := store.ObservationStamp{At: time.Now().UTC(), Source: source}
 	state, observation, err := ReadObservation(ctx, client, owner, name, pr.HeadSHA, ownAppID)
 	if err != nil {
 		// The previous counters must not survive a failed lookup: the gate would
-		// keep using a verdict GitHub did not confirm.
-		if _, markErr := c.Store.SetPRValidationLookupFailure(ctx, pr.ID, pr.HeadSHA); markErr != nil {
+		// keep using a verdict GitHub did not confirm. The write still reports
+		// whether it cleared a previous verdict, so polling can re-drive the
+		// check it just invalidated.
+		write, markErr := c.Store.SetPRValidationLookupFailure(ctx, pr.ID, pr.HeadSHA, stamp)
+		if markErr != nil {
 			return store.PRValidations{}, false, errors.Join(err, markErr)
 		}
-		return store.PRValidations{}, false, err
+		return store.PRValidations{}, write.Changed, err
 	}
-	changed, err := c.Store.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA, state, observation)
+	write, err := c.Store.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA, state, observation, stamp)
 	if err != nil {
 		return store.PRValidations{}, false, err
 	}
-	return state, changed, nil
+	return state, write.Changed, nil
 }
 
 // ReadValidations reads the check runs and commit statuses GitHub reports for

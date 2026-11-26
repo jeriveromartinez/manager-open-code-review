@@ -128,6 +128,9 @@ func runServe() error {
 		Compare:   &github.Compare{Apps: apps},
 	}
 	trigger.Debounce = cfg.ReviewDebounce
+	// Polling mode has no webhook: the syncer must re-drive the check itself
+	// when it observes that the required CI state changed.
+	s.CIGate = trigger
 	objectionSweeper := &review.ObjectionSweeper{Store: st}
 	client, err := jobs.NewControlClient(st.Pool, s, jobs.ControlDeps{
 		Trigger: trigger, Publisher: publisherWorker, Tokens: trigger, Objections: objectionSweeper,
