@@ -295,11 +295,7 @@ img {
   overflow-y: auto;
 }
 
-.container--full {
-  max-width: none;
-}
-
-/* List views skip the page-level scroll so .list-scroll stays the only one. */
+/* Plan B list views use this so .list-scroll is the only scroller. */
 .container--flush {
   overflow: hidden;
 }
