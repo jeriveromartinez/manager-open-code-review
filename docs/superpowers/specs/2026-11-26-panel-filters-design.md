@@ -37,7 +37,9 @@ propio y hoja inferior en móvil. Cada vista ocupa una pantalla y solo su lista 
 - `.shell` pasa a `height: 100vh; overflow: hidden`; la barra superior mantiene su sitio y el cuerpo
   de la vista ocupa el resto (`flex: 1; min-height: 0`).
 - Solo la región de lista hace scroll (`flex: 1; min-height: 0; overflow-y: auto`, scrollbar fina
-  `#3A3A3A`). En tablas, `thead` fijo. Sin scroll horizontal.
+  `#3A3A3A`). En tablas, `thead` fijo. Sin scroll horizontal. Por debajo de 2200 px la vista se
+  apila (aside sobre la lista) y es la propia vista la que scrollea; el scroll exclusivo de la
+  lista aplica desde 2200 px, donde el aside pasa a columna propia.
 - A partir de 2108 px se usa el ancho completo (sin el tope de 1360 px); las tarjetas de resumen van
   en tira de 6 columnas sobre la lista.
 - A partir de 2200 px la barra de filtros es `position: sticky; top: 0; background: var(--bg)` y las
