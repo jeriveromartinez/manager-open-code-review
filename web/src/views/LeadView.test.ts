@@ -606,6 +606,7 @@ describe('LeadView', () => {
     await search.setValue('nadie')
     expect(decisionIds(wrapper)).toEqual([])
     expect(wrapper.get('.empty__title').text()).toBe('NADA COINCIDE CON ESTOS FILTROS')
+    expect(wrapper.get('.empty button').text()).toBe('LIMPIAR FILTROS')
     // The threshold aside keeps simulating over every open PR, not the filtered rows.
     expect(wrapper.get('[data-threshold="major"]').text()).toBe('Mayor (actual)1')
     wrapper.unmount()
@@ -643,6 +644,9 @@ describe('LeadView', () => {
 
     const sheet = document.body.querySelector('.filter-sheet') as HTMLElement
     expect(sheet).not.toBeNull()
+    const dialog = sheet.querySelector('[role="dialog"]') as HTMLElement
+    expect(dialog.id).not.toBe('')
+    expect(wrapper.get('.filter-bar__sheet').attributes('aria-controls')).toBe(dialog.id)
     expect(sheet.querySelector('[data-reason-chip="Con defectos"]')).not.toBeNull()
 
     await chooseOption(sheet, 'Repo', 'acme/payments-sdk')

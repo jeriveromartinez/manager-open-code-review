@@ -574,7 +574,7 @@ onBeforeUnmount(() => {
                 <EmptyState
                   v-if="filteredDecisions.length === 0 && isActive"
                   title="NADA COINCIDE CON ESTOS FILTROS"
-                  action-label="LIMPIAR"
+                  action-label="LIMPIAR FILTROS"
                   @action="clear"
                 />
                 <p v-else-if="filteredDecisions.length === 0" class="empty-state">
@@ -607,6 +607,7 @@ onBeforeUnmount(() => {
           </section>
 
           <FilterSheet
+            :id="sheetId"
             :open="sheetOpen"
             :active-count="activeCount"
             :shown="filteredDecisions.length"
@@ -615,7 +616,7 @@ onBeforeUnmount(() => {
             @close="sheetOpen = false"
             @clear="clear"
           >
-            <div :id="sheetId" class="lead__sheet-filters">
+            <div class="lead__sheet-filters">
               <div class="reason-chips" role="group" aria-label="Motivo">
                 <button
                   v-for="option in reasonOptions"
