@@ -171,14 +171,24 @@ const developer: Me = {
   teams: [],
 }
 
-function mountRepos(): VueWrapper {
-  const router = createRouter({
+function testRouter() {
+  return createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: { template: '<div />' } },
       { path: '/:pathMatch(.*)*', component: { template: '<div />' } },
     ],
   })
+}
+
+function mountRepos(): VueWrapper {
+  return mount(ReposView, { global: { plugins: [testRouter()] } })
+}
+
+async function mountReposAt(path: string): Promise<VueWrapper> {
+  const router = testRouter()
+  await router.push(path)
+  await router.isReady()
   return mount(ReposView, { global: { plugins: [router] } })
 }
 
@@ -1052,6 +1062,18 @@ describe('ReposView', () => {
     wrapper.unmount()
   })
 
+  it('keeps an unknown team filter value instead of treating it as no team', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue(filterRepos.map((repo) => ({ ...repo })))
+
+    const wrapper = await mountReposAt('/?team=foo')
+    await flushPromises()
+
+    expect(wrapper.get('.filter-bar__chip').text()).toContain('Equipo: foo')
+    expect(rowIds(wrapper)).toEqual([])
+    wrapper.unmount()
+  })
+
   it('segments by automatic review with counts', async () => {
     mocks.session.me = admin
     mocks.api.repos.mockResolvedValue(filterRepos.map((repo) => ({ ...repo })))
@@ -1135,6 +1157,11 @@ describe('ReposView', () => {
     const sheet = document.body.querySelector('.filter-sheet') as HTMLElement
     expect(sheet).not.toBeNull()
     expect(wrapper.get('.filter-bar__sheet').attributes('aria-expanded')).toBe('true')
+
+    const controls = wrapper.get('.filter-bar__sheet').attributes('aria-controls')
+    const panel = document.body.querySelector('.filter-sheet__panel') as HTMLElement
+    expect(controls).toBeTruthy()
+    expect(panel.id).toBe(controls)
 
     await chooseOption(sheet, 'Cuenta', 'personal')
     expect(rowIds(wrapper)).toEqual(['20'])

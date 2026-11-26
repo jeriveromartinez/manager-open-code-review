@@ -65,7 +65,8 @@ function teamKey(id: number | null): string {
 
 function teamKeyLabel(key: string): string {
   if (key === '__none__') return 'Sin equipo'
-  return teamName(Number(key))
+  const id = Number(key)
+  return teams.value.some((team) => team.id === id) ? teamName(id) : key
 }
 
 function visibilityLabel(value: string): string {
@@ -1003,7 +1004,8 @@ onMounted(() => {
               <p v-else-if="!loading && filteredRepos.length === 0" class="empty-state">
                 No hay repositorios disponibles
               </p>
-              <table v-else class="repo-table register-table">
+              <div v-else class="table-wrap">
+                <table class="repo-table register-table">
                 <thead>
                   <tr>
                     <th scope="col">Repositorio</th>
@@ -1117,12 +1119,14 @@ onMounted(() => {
                     <td class="repo-table__id">{{ repo.id }}</td>
                   </tr>
                 </tbody>
-              </table>
+                </table>
+              </div>
             </div>
           </template>
         </section>
 
         <FilterSheet
+          :id="sheetId"
           :open="sheetOpen"
           :active-count="activeCount"
           :shown="filteredRepos.length"
@@ -1131,7 +1135,7 @@ onMounted(() => {
           @close="sheetOpen = false"
           @clear="clear"
         >
-          <div :id="sheetId" class="repos__sheet-filters">
+          <div class="repos__sheet-filters">
             <FilterDropdown
               label="Cuenta"
               :options="accountOptions"
@@ -1554,10 +1558,6 @@ onMounted(() => {
   font-variant-numeric: tabular-nums;
   text-align: right;
   white-space: nowrap;
-}
-
-.repo-list {
-  border: var(--rule-hair) solid var(--border-strong);
 }
 
 .repos__sheet-filters {
