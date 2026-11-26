@@ -33,6 +33,7 @@ function focusFirst(): void {
   else sheet.value?.focus()
 }
 
+// Follow-up: a shared lock counter is needed if another overlay starts locking body scroll.
 function lockScroll(): void {
   previousOverflow = document.body.style.overflow
   document.body.style.overflow = 'hidden'
@@ -66,7 +67,8 @@ function onKeydown(event: KeyboardEvent): void {
   const inside = active instanceof Node && sheet.value?.contains(active) === true
 
   if (event.shiftKey) {
-    if (!inside || active === first) {
+    // The panel itself is tabindex="-1": treat it as the start of the trap.
+    if (!inside || active === first || active === sheet.value) {
       event.preventDefault()
       last.focus()
     }
@@ -192,6 +194,7 @@ onBeforeUnmount(() => {
   gap: var(--space-3);
 }
 
+/* Follow-up: dropdowns opened near the footer can overlap it; they need upward placement or a fixed layer. */
 .filter-sheet__body :deep(.filter-dropdown) {
   display: flex;
   width: 100%;

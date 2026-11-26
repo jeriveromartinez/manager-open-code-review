@@ -1,7 +1,9 @@
-import { mount } from '@vue/test-utils'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import FilterSheet from './FilterSheet.vue'
+
+enableAutoUnmount(afterEach)
 
 const slot = `
   <button type="button" data-test="first">Estado</button>
@@ -65,6 +67,30 @@ describe('FilterSheet', () => {
 
     wrapper.unmount()
     trigger.remove()
+  })
+
+  it('keeps Shift+Tab trapped when the panel itself has focus', async () => {
+    const wrapper = mount(FilterSheet, {
+      attachTo: document.body,
+      props: { open: true, activeCount: 1, shown: 3 },
+      slots: { default: slot },
+    })
+    await nextTick()
+
+    const dialog = getDialog() as HTMLElement
+    const apply = document.body.querySelector('.filter-sheet__apply') as HTMLElement
+
+    dialog.focus()
+    expect(document.activeElement).toBe(dialog)
+
+    press(dialog, 'Tab', true)
+    expect(document.activeElement).toBe(apply)
+
+    press(apply, 'Tab')
+    expect(document.activeElement).toBe(document.body.querySelector('[data-test="first"]'))
+
+    await wrapper.setProps({ open: false })
+    wrapper.unmount()
   })
 
   it('closes with Escape and with the backdrop', async () => {
@@ -153,5 +179,22 @@ describe('FilterSheet', () => {
 
     document.body.style.overflow = ''
     wrapper.unmount()
+  })
+
+  it('releases the body scroll lock when unmounted while open', async () => {
+    document.body.style.overflow = 'auto'
+
+    const wrapper = mount(FilterSheet, {
+      attachTo: document.body,
+      props: { open: false, activeCount: 0, shown: 4 },
+    })
+
+    await wrapper.setProps({ open: true })
+    expect(document.body.style.overflow).toBe('hidden')
+
+    wrapper.unmount()
+    expect(document.body.style.overflow).toBe('auto')
+
+    document.body.style.overflow = ''
   })
 })
