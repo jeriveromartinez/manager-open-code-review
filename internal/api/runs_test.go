@@ -227,11 +227,14 @@ func TestRunHistoryReturnsTerminalRunsForTheUserTeams(t *testing.T) {
 	if failed.ErrorCode != "clone_failed" || failed.ErrorMessage != "could not clone the repository" {
 		t.Errorf("failed run error = %q/%q, want the stored code and message", failed.ErrorCode, failed.ErrorMessage)
 	}
-	if want := failedStarted.Format(time.RFC3339); failed.StartedAt == nil || *failed.StartedAt != want {
+	if want := failedStarted.Format(time.RFC3339Nano); failed.StartedAt == nil || *failed.StartedAt != want {
 		t.Errorf("started_at = %v, want %q", failed.StartedAt, want)
 	}
-	if want := failedFinished.Format(time.RFC3339); failed.FinishedAt == nil || *failed.FinishedAt != want {
+	if want := failedFinished.Format(time.RFC3339Nano); failed.FinishedAt == nil || *failed.FinishedAt != want {
 		t.Errorf("finished_at = %v, want %q", failed.FinishedAt, want)
+	}
+	if want := failedRun.CreatedAt.UTC().Format(time.RFC3339Nano); failed.CreatedAt != want {
+		t.Errorf("created_at = %q, want sub-second precision %q", failed.CreatedAt, want)
 	}
 	if failed.DurationSeconds == nil || *failed.DurationSeconds != 180 {
 		t.Errorf("duration_seconds = %v, want 180", failed.DurationSeconds)
@@ -275,6 +278,7 @@ func TestRunHistoryRejectsInvalidParams(t *testing.T) {
 	for _, query := range []string{
 		"before=-1",
 		"before=abc",
+		"before=5",
 		"limit=0",
 		"limit=201",
 		"limit=abc",

@@ -204,6 +204,15 @@ func TestReviewRunHistoryPaginatesWithCursor(t *testing.T) {
 	if len(page.Runs) != 0 || page.HasMore || page.NextBefore != 0 || page.NextCreatedAt != nil {
 		t.Errorf("past-end page = %+v, want empty with no cursor and no more", page)
 	}
+
+	// An id without its creation time is not a cursor: it must not skip rows.
+	page, err = f.s.ReviewRunHistory(f.ctx, admin, store.RunHistoryFilter{BeforeID: int64(want[0]), Limit: 2})
+	if err != nil {
+		t.Fatalf("ReviewRunHistory(lone id) error = %v", err)
+	}
+	if got := historyIDs(page); !reflect.DeepEqual(got, want[:2]) {
+		t.Errorf("lone-id page = %v, want the first page %v", got, want[:2])
+	}
 }
 
 func TestReviewRunHistoryFiltersByStatusRepoAndTrigger(t *testing.T) {

@@ -10,9 +10,10 @@ import (
 // RunHistoryFilter narrows the finished-run history. Zero values mean "no
 // filter"; Limit falls back to the default page size.
 type RunHistoryFilter struct {
-	// BeforeID and BeforeCreatedAt together are the keyset cursor: pass the
-	// previous page's NextBefore and NextCreatedAt. Both are required for a
-	// stable cursor because a newer run id can carry an older creation time.
+	// BeforeID and BeforeCreatedAt are the keyset cursor: pass the previous
+	// page's NextBefore and NextCreatedAt together. A lone BeforeID is treated
+	// as no cursor because ordering by created_at with an id-only predicate can
+	// skip rows; the HTTP layer rejects that combination outright.
 	BeforeID        int64
 	BeforeCreatedAt *time.Time
 	Limit           int
@@ -53,9 +54,12 @@ type RunHistoryPage struct {
 	HasMore       bool
 }
 
+// RunHistoryDefaultLimit is the page size when the caller does not ask for one;
+// RunHistoryMaxLimit caps a page. Exported so the HTTP layer validates against
+// the same bounds the query applies.
 const (
-	defaultRunHistoryLimit = 50
-	maxRunHistoryLimit     = 200
+	RunHistoryDefaultLimit = 50
+	RunHistoryMaxLimit     = 200
 )
 
 // terminalRunStatuses are the statuses a run can no longer leave. Queued and
@@ -66,15 +70,15 @@ var terminalRunStatuses = []string{RunSucceeded, RunInconclusive, RunFailed, Run
 // ReviewRunHistory lists the finished runs the user may see, newest first. It
 // keeps the same visibility scope as ListActiveReviewRuns, so the two views
 // cannot disagree, but it does include runs of closed pull requests: closed
-// history stays relevant. A cursor on the run id keeps pages stable even when
-// several runs share a creation time.
+// history stays relevant. Pages use the (created_at, id) keyset cursor so the
+// order cannot repeat or skip rows.
 func (s *Store) ReviewRunHistory(ctx context.Context, u User, filter RunHistoryFilter) (RunHistoryPage, error) {
 	limit := filter.Limit
 	if limit <= 0 {
-		limit = defaultRunHistoryLimit
+		limit = RunHistoryDefaultLimit
 	}
-	if limit > maxRunHistoryLimit {
-		limit = maxRunHistoryLimit
+	if limit > RunHistoryMaxLimit {
+		limit = RunHistoryMaxLimit
 	}
 
 	visible := s.teamScopedPRs(ctx, u).Select("pr.id")
@@ -92,14 +96,8 @@ func (s *Store) ReviewRunHistory(ctx context.Context, u User, filter RunHistoryF
 		Where("rr.pull_request_id IN (?)", visible).
 		Where("rr.status IN ?", terminalRunStatuses)
 
-	if filter.BeforeID > 0 {
-		if filter.BeforeCreatedAt != nil {
-			q = q.Where("(rr.created_at, rr.id) < (?, ?)", *filter.BeforeCreatedAt, filter.BeforeID)
-		} else {
-			// Id-only callers keep the older behaviour, but only the pair is a
-			// stable cursor: a newer id can carry an older creation time.
-			q = q.Where("rr.id < ?", filter.BeforeID)
-		}
+	if filter.BeforeID > 0 && filter.BeforeCreatedAt != nil {
+		q = q.Where("(rr.created_at, rr.id) < (?, ?)", *filter.BeforeCreatedAt, filter.BeforeID)
 	}
 	if len(filter.Statuses) > 0 {
 		q = q.Where("rr.status IN ?", filter.Statuses)

@@ -57,14 +57,6 @@ func (s *server) activeRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"runs": dtos})
 }
 
-const (
-	// runHistoryDefaultLimit is the history page size when the client does not
-	// ask for one. Unlike the log tail, a larger page only delays the first
-	// paint, so anything outside 1-200 is a client bug and is rejected.
-	runHistoryDefaultLimit = 50
-	runHistoryMaxLimit     = 200
-)
-
 // runHistoryDTO is a finished run. It keeps the active-run shape so the panel
 // can merge both lists into one, and adds the fields only the history has.
 type runHistoryDTO struct {
@@ -95,10 +87,9 @@ var knownRunStatuses = map[string]bool{
 }
 
 // parseHistoryCursor reads the keyset cursor. before is the id and
-// before_created_at its creation time; the pair is what keeps pages stable when
-// a newer id carries an older creation time. before without the timestamp is
-// still accepted as the legacy id-only cursor for older clients. A timestamp
-// without an id is rejected rather than silently ignored.
+// before_created_at its creation time. The pair is required: ordering by
+// created_at with an id-only predicate can skip rows, so a lone id is rejected
+// rather than served through an unstable cursor.
 func parseHistoryCursor(w http.ResponseWriter, r *http.Request) (int64, *time.Time, bool) {
 	query := r.URL.Query()
 	rawBefore := query.Get("before")
@@ -116,12 +107,16 @@ func parseHistoryCursor(w http.ResponseWriter, r *http.Request) (int64, *time.Ti
 		writeAPIError(w, http.StatusBadRequest, "invalid before")
 		return 0, nil, false
 	}
-	if rawCreatedAt == "" {
-		return before, nil, true
-	}
 	if before == 0 {
-		// A timestamp without an id cannot form a cursor; accepting it would
-		// silently ignore it and serve the first page.
+		if rawCreatedAt != "" {
+			// A timestamp with no id cannot form a cursor; accepting it would
+			// silently ignore it and serve the first page.
+			writeAPIError(w, http.StatusBadRequest, "invalid before_created_at")
+			return 0, nil, false
+		}
+		return 0, nil, true
+	}
+	if rawCreatedAt == "" {
 		writeAPIError(w, http.StatusBadRequest, "invalid before_created_at")
 		return 0, nil, false
 	}
@@ -137,10 +132,10 @@ func parseHistoryCursor(w http.ResponseWriter, r *http.Request) (int64, *time.Ti
 func parseHistoryLimit(w http.ResponseWriter, r *http.Request) (int, bool) {
 	raw := r.URL.Query().Get("limit")
 	if raw == "" {
-		return runHistoryDefaultLimit, true
+		return store.RunHistoryDefaultLimit, true
 	}
 	limit, err := strconv.Atoi(raw)
-	if err != nil || limit < 1 || limit > runHistoryMaxLimit {
+	if err != nil || limit < 1 || limit > store.RunHistoryMaxLimit {
 		writeAPIError(w, http.StatusBadRequest, "invalid limit")
 		return 0, false
 	}
@@ -215,6 +210,17 @@ func nextHistoryCreatedAt(page store.RunHistoryPage) *string {
 	return &next
 }
 
+// formatTimeNanoPtr keeps sub-second precision: the panel sorts and merges on
+// these times, and RFC3339 alone would let same-second runs reorder on the
+// client differently from the server.
+func formatTimeNanoPtr(v *time.Time) *string {
+	if v == nil {
+		return nil
+	}
+	formatted := v.UTC().Format(time.RFC3339Nano)
+	return &formatted
+}
+
 func runHistoryDTOOf(run store.RunHistoryRow) runHistoryDTO {
 	return runHistoryDTO{
 		activeRunDTO: activeRunDTO{
@@ -222,12 +228,12 @@ func runHistoryDTOOf(run store.RunHistoryRow) runHistoryDTO {
 			PRNumber: run.PRNumber, PRTitle: run.PRTitle,
 			Repo: run.Repo, Team: run.Team, Profile: run.Profile,
 			Trigger: run.Trigger, Status: run.Status, Attempt: run.Attempt,
-			StartedAt: formatTimePtr(run.StartedAt),
-			CreatedAt: run.CreatedAt.UTC().Format(time.RFC3339),
+			StartedAt: formatTimeNanoPtr(run.StartedAt),
+			CreatedAt: run.CreatedAt.UTC().Format(time.RFC3339Nano),
 		},
 		ErrorCode:       run.ErrorCode,
 		ErrorMessage:    run.ErrorMessage,
-		FinishedAt:      formatTimePtr(run.FinishedAt),
+		FinishedAt:      formatTimeNanoPtr(run.FinishedAt),
 		DurationSeconds: durationSeconds(run.StartedAt, run.FinishedAt),
 	}
 }
