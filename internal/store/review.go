@@ -1638,13 +1638,17 @@ func (s *Store) SupersedeOtherActiveRuns(ctx context.Context, prID uint, compari
 // comparison. The update is conditional on the head, base branch and base tip
 // still being the ones the resolution was made for, so a retarget or a
 // force-push landing between the Compare call and this write cannot overwrite
-// the newer comparison. It reports whether the row was updated; false means the
-// comparison moved.
-func (s *Store) SetPRMergeBase(ctx context.Context, prID uint, headSHA, baseRef, baseTipSHA, mergeBase string) (bool, error) {
+// the newer comparison. It returns the number of rows updated: zero means the
+// comparison moved and nothing was written.
+func (s *Store) SetPRMergeBase(ctx context.Context, prID uint, headSHA, baseRef, baseTipSHA, mergeBase string) (int64, error) {
+	return setPRMergeBase(s.DB.WithContext(ctx), prID, headSHA, baseRef, baseTipSHA, mergeBase)
+}
+
+func setPRMergeBase(db *gorm.DB, prID uint, headSHA, baseRef, baseTipSHA, mergeBase string) (int64, error) {
 	if mergeBase == "" {
-		return false, nil
+		return 0, nil
 	}
-	res := s.DB.WithContext(ctx).Model(&PullRequest{}).
+	res := db.Model(&PullRequest{}).
 		Where("id = ? AND head_sha = ? AND base_ref = ? AND base_sha = ?",
 			prID, headSHA, baseRef, baseTipSHA).
 		Where("merge_base_sha = '' OR merge_base_sha = ?", mergeBase).
@@ -1653,9 +1657,49 @@ func (s *Store) SetPRMergeBase(ctx context.Context, prID uint, headSHA, baseRef,
 			"updated_at":     time.Now().UTC(),
 		})
 	if res.Error != nil {
-		return false, fmt.Errorf("set merge base of pull request %d: %w", prID, res.Error)
+		return 0, fmt.Errorf("set merge base of pull request %d: %w", prID, res.Error)
 	}
-	return res.RowsAffected > 0, nil
+	return res.RowsAffected, nil
+}
+
+// AdoptReviewComparison records the merge base resolved for the pull request's
+// current comparison and re-pins the base tip of the run adopted for it, in one
+// transaction. Writing only the merge base would leave a run whose snapshot
+// still names the old tip, and CurrentVerdictRun and republish would ignore it
+// forever (#141). A run that no longer matches aborts the transaction so the
+// pull request is never committed without the run that covers it.
+// It returns the number of pull request rows updated: zero means the comparison
+// moved and nothing was written.
+func (s *Store) AdoptReviewComparison(ctx context.Context, prID uint, headSHA, baseRef, baseTipSHA, mergeBase string, runID uint) (int64, error) {
+	var updated int64
+	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		affected, err := setPRMergeBase(tx, prID, headSHA, baseRef, baseTipSHA, mergeBase)
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return nil
+		}
+		// An empty tip carries no snapshot to re-pin; the run keeps whatever it
+		// already has, exactly as before the comparison was adopted.
+		if baseTipSHA != "" {
+			res := tx.Model(&ReviewRun{}).
+				Where("id = ? AND head_sha = ? AND base_ref = ?", runID, headSHA, baseRef).
+				Update("base_tip_sha", baseTipSHA)
+			if res.Error != nil {
+				return fmt.Errorf("set base tip of review run %d: %w", runID, res.Error)
+			}
+			if res.RowsAffected == 0 {
+				return fmt.Errorf("set base tip of review run %d: no row matched the adopted comparison", runID)
+			}
+		}
+		updated = affected
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return updated, nil
 }
 
 // RunUsage is the structured token consumption of one review run, summed over

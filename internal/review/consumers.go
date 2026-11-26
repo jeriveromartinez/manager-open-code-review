@@ -1002,7 +1002,9 @@ type consumerTriggerEvaluation struct {
 	Comparator      any
 	InstallationID  int64
 	Repository      string
-	BaseRef         string
+	// Base is the recorded base tip (or the branch name when no tip is known),
+	// pinned so the changed-file diff belongs to the comparison being queued.
+	Base            string
 	HeadSHA         string
 	MergeBase       string
 	Policy          store.QAPolicy
@@ -1031,7 +1033,7 @@ func resolveConsumerImpact(ctx context.Context, opts consumerTriggerEvaluation) 
 		return unavailableConsumerAggregate(configured, sources, problems, opts.ProducerPrivate,
 			"el proceso de control no pudo determinar el diff de consumidores")
 	}
-	comparison, err := differ.ComparisonFiles(ctx, opts.InstallationID, opts.Repository, opts.BaseRef, opts.HeadSHA)
+	comparison, err := differ.ComparisonFiles(ctx, opts.InstallationID, opts.Repository, opts.Base, opts.HeadSHA)
 	if err != nil {
 		configured, sources, problems := consumerConfig(ctx, opts.MergeBase, opts.Policy, reader.Read)
 		return unavailableConsumerAggregate(configured, sources, problems, opts.ProducerPrivate,

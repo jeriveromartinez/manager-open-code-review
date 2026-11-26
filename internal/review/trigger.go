@@ -418,8 +418,10 @@ func (h comparisonHint) matches(cfg store.ReviewConfig) bool {
 // head did not change, the base moved (the merge base was cleared) and a run
 // of the same head and branch already resolved a merge base. Resolving it here,
 // outside the lock, keeps a slow GitHub call from blocking every other delivery
-// of the pull request. The hint also snapshots the base tip, so a force-push
-// between the Compare call and the lock invalidates the result.
+// of the pull request. Compare is pinned to the base tip snapshotted in the
+// hint, and the hint is only applied while that same tip is still recorded, so
+// a base push can neither leak another tip's merge base into the run nor
+// invalidate a result resolved for the recorded one.
 func (t *Trigger) comparisonHint(ctx context.Context, prID uint) comparisonHint {
 	cfg, err := t.reviewConfig(ctx, prID)
 	if err != nil || cfg == nil {
@@ -465,7 +467,19 @@ func (t *Trigger) resolveMergeBase(ctx context.Context, cfg *store.ReviewConfig)
 	if t.Compare == nil {
 		return "", errors.New("review: trigger has no comparator")
 	}
-	return t.Compare.MergeBase(ctx, cfg.Installation.ID, cfg.Repo.FullName, cfg.PR.BaseRef, cfg.PR.HeadSHA)
+	return t.Compare.MergeBase(ctx, cfg.Installation.ID, cfg.Repo.FullName, comparisonBase(cfg.PR), cfg.PR.HeadSHA)
+}
+
+// comparisonBase returns the base Compare must resolve. The recorded tip is
+// used when it exists, so a base branch that moves between the metadata read
+// and the Compare call cannot produce a merge base that belongs to another tip
+// than the one recorded on the run. Without a tip the branch name is the only
+// reference available.
+func comparisonBase(pr store.PullRequest) string {
+	if pr.BaseSHA != "" {
+		return pr.BaseSHA
+	}
+	return pr.BaseRef
 }
 
 // enqueueForHead is enqueue with an optional head check evaluated under the PR
@@ -557,11 +571,16 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 		case hint.matches(cfg) && !hint.failed:
 			mergeBase = hint.mergeBase
 			if adopted := runForMergeBase(runs, cfg.PR, mergeBase); adopted != nil {
-				stored, err := t.Store.SetPRMergeBase(ctx, prID, cfg.PR.HeadSHA, cfg.PR.BaseRef, cfg.PR.BaseSHA, mergeBase)
+				// The merge-base write and the run re-pin share one transaction:
+				// committing only the pull request would leave the adopted run
+				// naming the old base tip, and the retry would take the "covered"
+				// early return without ever making it current again.
+				stored, err := t.Store.AdoptReviewComparison(ctx, prID, cfg.PR.HeadSHA,
+					cfg.PR.BaseRef, cfg.PR.BaseSHA, mergeBase, adopted.ID)
 				if err != nil {
 					return false, err
 				}
-				if !stored {
+				if stored == 0 {
 					// The pull request moved while the comparison was being
 					// adopted. The delivery that moved it owns the new run; this
 					// one must not supersede it with a stale target.
@@ -677,7 +696,7 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 			Comparator:      t.Compare,
 			InstallationID:  cfg.Installation.ID,
 			Repository:      cfg.Repo.FullName,
-			BaseRef:         cfg.PR.BaseRef,
+			Base:            comparisonBase(cfg.PR),
 			HeadSHA:         cfg.PR.HeadSHA,
 			MergeBase:       mergeBase,
 			Policy:          cfg.Policy,
