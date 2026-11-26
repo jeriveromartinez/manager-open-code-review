@@ -169,12 +169,15 @@ img {
 /* ---------- Shell ---------- */
 
 .shell {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
 }
 
 .shell__bar {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -184,6 +187,14 @@ img {
   max-width: var(--container);
   margin: 0 auto;
   padding: 40px var(--space-5) 0;
+}
+
+/* The body owns the height left by the bar; only what scrolls inside it moves. */
+.shell__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .shell__identity {
@@ -272,23 +283,46 @@ img {
 }
 
 .container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
   width: 100%;
   max-width: var(--container);
   margin: 0 auto;
   padding: var(--space-5) var(--space-5) 72px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* Plan B list views use this so .list-scroll is the only scroller. */
+.container--flush {
+  overflow: hidden;
 }
 
 /* Ultrawide: every page spreads into columns (split views and card grids)
- * instead of stretching one, so the extra width carries content. */
-@media (min-width: 2200px) {
+ * instead of stretching one, so the extra width carries content. The width
+ * cap lifts earlier than the split rules so the extra room exists for them. */
+@media (min-width: 2108px) {
   .shell {
-    --container: 3200px;
+    --container: 100%;
   }
 
   .shell__bar,
   .container {
     padding-left: 40px;
     padding-right: 40px;
+  }
+}
+
+/* Once the view is split into columns, the filter bar stays in view while
+ * only the list beside it scrolls. */
+@media (min-width: 2200px) {
+  .filter-bar {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--bg);
   }
 }
 
@@ -1184,6 +1218,46 @@ img {
   width: 100%;
   overflow-x: auto;
   border: var(--rule-hair) solid var(--border-strong);
+}
+
+/* The one scroll region of a list view: a thin scrollbar and a fixed head
+ * keep the chrome still while the rows move. */
+.list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a3a transparent;
+  overscroll-behavior: contain;
+}
+
+.list-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.list-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.list-scroll::-webkit-scrollbar-thumb {
+  background: #3a3a3a;
+  border-radius: var(--radius-pill);
+}
+
+.list-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+}
+
+/* The sheet freezes the viewport: the body lock is set inline, and the panel
+ * scroll roots hold still while it is open. */
+.sheet-open .container,
+.sheet-open .list-scroll {
+  overflow: hidden;
 }
 
 table {
