@@ -144,10 +144,16 @@ async function chooseOption(scope: ParentNode, dropdownLabel: string, optionLabe
     button.textContent?.includes(dropdownLabel),
   )
   if (!pill) throw new Error(`dropdown ${dropdownLabel} not found`)
+  const dropdown = pill.closest('.filter-dropdown') as HTMLElement
+
   pill.click()
   await nextTick()
+  if (!dropdown.querySelector('[role="listbox"]')) {
+    pill.click()
+    await nextTick()
+  }
 
-  const option = Array.from(scope.querySelectorAll<HTMLElement>('[role="option"]')).find((item) =>
+  const option = Array.from(dropdown.querySelectorAll<HTMLElement>('[role="option"]')).find((item) =>
     item.textContent?.includes(optionLabel),
   )
   if (!option) throw new Error(`option ${optionLabel} not found`)
@@ -475,7 +481,7 @@ describe('DashboardView', () => {
         title: 'Beta',
         team_id: 4,
         status_since: minutesAgo(120),
-        open_findings: { blocker: 2, major: 4, minor: 0, nit: 0 },
+        open_findings: { blocker: 0, major: 0, minor: 1, nit: 0 },
       }),
       pr({
         id: 13,
@@ -484,6 +490,16 @@ describe('DashboardView', () => {
         team_id: 4,
         status_since: minutesAgo(10),
         open_findings: { blocker: 0, major: 5, minor: 0, nit: 0 },
+      }),
+      pr({
+        id: 14,
+        repo: 'etl',
+        title: 'Delta',
+        team_id: 3,
+        qa_status: 'changes_requested',
+        group: 'blocked',
+        status_since: minutesAgo(60),
+        open_findings: { blocker: 3, major: 0, minor: 0, nit: 0 },
       }),
     ])
 
@@ -500,23 +516,32 @@ describe('DashboardView', () => {
     expect(cardTitles(wrapper)).toEqual(['Gamma', 'Beta'])
 
     await chooseOption(wrapper.element, 'Orden', 'Más hallazgos')
-    expect(cardTitles(wrapper)).toEqual(['Beta', 'Gamma'])
+    expect(cardTitles(wrapper)).toEqual(['Gamma', 'Beta'])
+
+    await chooseOption(wrapper.element, 'Equipo', 'Todas')
+    await wrapper.get('[data-tab="all"]').trigger('click')
+    expect(wrapper.findAll('.pr-card')).toHaveLength(4)
 
     await chooseOption(wrapper.element, 'Orden', 'Más espera')
-    expect(cardTitles(wrapper)).toEqual(['Beta', 'Gamma'])
+    expect(cardTitles(wrapper)).toEqual(['Beta', 'Delta', 'Alpha', 'Gamma'])
+
+    await chooseOption(wrapper.element, 'Orden', 'Más hallazgos')
+    expect(cardTitles(wrapper)).toEqual(['Gamma', 'Delta', 'Beta', 'Alpha'])
+
+    await chooseOption(wrapper.element, 'Orden', 'Más recientes')
+    expect(cardTitles(wrapper)).toEqual(['Gamma', 'Alpha', 'Delta', 'Beta'])
     wrapper.unmount()
   })
 
-  it('keeps the status tabs and their counts while other filters apply', async () => {
+  it('updates the status tab counts with the other filters', async () => {
     const wrapper = mountDashboard()
     await flushPromises()
 
-    const countsBefore = wrapper.findAll('.filter-tab__count').map((count) => count.text())
-    expect(countsBefore).toEqual(['2', '0', '1', '1', '0', '4'])
+    expect(wrapper.findAll('.filter-tab__count').map((count) => count.text())).toEqual(['2', '0', '1', '1', '0', '4'])
 
     await wrapper.get('input[type="search"]').setValue('carrito')
 
-    expect(wrapper.findAll('.filter-tab__count').map((count) => count.text())).toEqual(countsBefore)
+    expect(wrapper.findAll('.filter-tab__count').map((count) => count.text())).toEqual(['1', '0', '0', '0', '0', '1'])
     expect(wrapper.get('[data-tab="ready"]').classes()).toContain('filter-tab--active')
 
     await wrapper.get('[data-tab="all"]').trigger('click')
@@ -566,7 +591,7 @@ describe('DashboardView', () => {
     wrapper.unmount()
   })
 
-  it('shows the filters empty state with LIMPIAR', async () => {
+  it('shows the filters empty state with LIMPIAR FILTROS', async () => {
     const wrapper = mountDashboard()
     await flushPromises()
 
@@ -575,6 +600,7 @@ describe('DashboardView', () => {
     expect(wrapper.findAll('.pr-card')).toHaveLength(0)
     const empty = wrapper.get('.empty')
     expect(empty.get('.empty__title').text()).toBe('NADA COINCIDE CON ESTOS FILTROS')
+    expect(empty.get('button').text()).toBe('LIMPIAR FILTROS')
 
     await empty.get('button').trigger('click')
     expect(wrapper.findAll('.pr-card')).toHaveLength(2)

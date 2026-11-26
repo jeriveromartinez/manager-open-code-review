@@ -8,8 +8,9 @@ const props = withDefaults(
     shown: number
     clearable?: boolean
     applyLabel?: string
+    id?: string
   }>(),
-  { clearable: undefined, applyLabel: undefined },
+  { clearable: undefined, applyLabel: undefined, id: undefined },
 )
 
 const emit = defineEmits<{
@@ -131,6 +132,7 @@ onBeforeUnmount(() => {
 
       <div
         ref="sheet"
+        :id="id"
         class="filter-sheet__panel"
         role="dialog"
         aria-modal="true"

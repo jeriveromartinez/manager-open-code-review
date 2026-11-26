@@ -10,8 +10,9 @@ const props = withDefaults(
     modelValue: string[]
     multiple?: boolean
     clearLabel?: string
+    active?: boolean
   }>(),
-  { clearLabel: 'Todas' },
+  { clearLabel: 'Todas', active: undefined },
 )
 
 const emit = defineEmits<{
@@ -43,6 +44,10 @@ const selectedLabel = computed(() => {
 })
 
 const hasSelection = computed(() => props.modelValue.some((value) => value !== ''))
+
+// A parent whose default value is meaningful (a sort order, for instance) can
+// keep the pill quiet until the value departs from that default.
+const highlighted = computed(() => props.active ?? hasSelection.value)
 
 const activeOptionId = computed(() => (open.value ? optionId(activeIndex.value) : undefined))
 
@@ -176,7 +181,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocumentPoin
       ref="trigger"
       type="button"
       class="filter-dropdown__pill"
-      :class="{ 'filter-dropdown__pill--active': hasSelection }"
+      :class="{ 'filter-dropdown__pill--active': highlighted }"
       aria-haspopup="listbox"
       :aria-expanded="open"
       :aria-controls="open ? dropdownId : undefined"

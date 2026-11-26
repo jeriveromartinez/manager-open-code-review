@@ -126,14 +126,32 @@ function teamLabel(key: string): string {
   return teamNames.value.get(key) ?? `Equipo ${key}`
 }
 
-const filteredQueue = apply(
-  () => prsStore.visible,
-  searchText,
-  (pr, active) => {
-    const teams = active.team ?? []
-    return teams.length === 0 || teams.includes(teamKey(pr))
-  },
-)
+function matchesQueueFilters(pr: PRView, active: { team?: string[] }): boolean {
+  const teams = active.team ?? []
+  return teams.length === 0 || teams.includes(teamKey(pr))
+}
+
+const filteredQueue = apply(() => prsStore.visible, searchText, matchesQueueFilters)
+
+// The tabs count the whole queue with the bar's filters applied, not only the
+// current tab, so their figures follow the search and team selection.
+const filteredTab = apply(() => prsStore.prs, searchText, matchesQueueFilters)
+
+const tabCounts = computed<Record<BucketFilter, number>>(() => {
+  const counts: Record<BucketFilter, number> = {
+    '': 0,
+    ready: 0,
+    defects: 0,
+    inconclusive: 0,
+    ai: 0,
+    other: 0,
+  }
+  for (const pr of filteredTab.value) {
+    counts['']++
+    counts[qaBucket(pr)]++
+  }
+  return counts
+})
 
 const teamCounts = facetCounts(
   () => prsStore.visible,
@@ -482,7 +500,7 @@ onBeforeUnmount(() => {
               <h2 id="queue-title" class="pr-section__title">PRs de mis equipos</h2>
               <p class="page-subtitle" data-queue-summary>{{ queueSummary }}</p>
             </div>
-            <FilterTabs :model-value="prsStore.bucket" :counts="prsStore.counts" @update:model-value="changeBucket" />
+            <FilterTabs :model-value="prsStore.bucket" :counts="tabCounts" @update:model-value="changeBucket" />
           </div>
 
           <FilterBar
@@ -509,6 +527,7 @@ onBeforeUnmount(() => {
               label="Orden"
               :options="sortOptions"
               :model-value="sortSelection"
+              :active="(sort ?? 'wait') !== 'wait'"
               @update:model-value="onSort"
             />
           </FilterBar>
@@ -518,7 +537,7 @@ onBeforeUnmount(() => {
             <EmptyState
               v-else-if="!prsStore.loading && queue.length === 0 && isActive"
               title="NADA COINCIDE CON ESTOS FILTROS"
-              action-label="LIMPIAR"
+              action-label="LIMPIAR FILTROS"
               @action="clear"
             />
             <p v-else-if="!prsStore.loading && queue.length === 0" class="empty-state">
@@ -531,6 +550,7 @@ onBeforeUnmount(() => {
         </section>
 
         <FilterSheet
+          :id="sheetId"
           :open="sheetOpen"
           :active-count="activeCount"
           :shown="queue.length"
@@ -539,7 +559,7 @@ onBeforeUnmount(() => {
           @close="sheetOpen = false"
           @clear="clear"
         >
-          <div :id="sheetId" class="queue__sheet-filters">
+          <div class="queue__sheet-filters">
             <FilterDropdown
               label="Equipo"
               :options="teamOptions"
@@ -551,6 +571,7 @@ onBeforeUnmount(() => {
               label="Orden"
               :options="sortOptions"
               :model-value="sortSelection"
+              :active="(sort ?? 'wait') !== 'wait'"
               @update:model-value="onSort"
             />
           </div>

@@ -196,6 +196,20 @@ describe('FilterSheet', () => {
     wrapper.unmount()
   })
 
+  it('puts the supplied id on the dialog so the mobile trigger can target it', async () => {
+    const wrapper = mount(FilterSheet, {
+      attachTo: document.body,
+      props: { open: true, activeCount: 0, shown: 4, id: 'queue-filters' },
+      slots: { default: slot },
+    })
+    await nextTick()
+
+    expect(getDialog()?.getAttribute('id')).toBe('queue-filters')
+
+    await wrapper.setProps({ open: false })
+    wrapper.unmount()
+  })
+
   it('locks body and panel scroll while open and restores it on close', async () => {
     document.body.style.overflow = 'auto'
 
