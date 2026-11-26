@@ -18,17 +18,19 @@ const HISTORY_LIMIT = 50
 const STATUS_LABELS: Record<string, string> = {
   queued: 'En cola',
   running: 'En curso',
+  finalizing: 'Finalizando',
   succeeded: 'Completada',
   inconclusive: 'Inconclusa',
   failed: 'Fallida',
   superseded: 'Reemplazada',
 }
 
-const STATUS_ORDER = ['queued', 'running', 'succeeded', 'inconclusive', 'failed', 'superseded']
+const STATUS_ORDER = ['queued', 'running', 'finalizing', 'succeeded', 'inconclusive', 'failed', 'superseded']
 
 const STATUS_TONES: Record<string, string> = {
   queued: 'muted',
   running: 'busy',
+  finalizing: 'busy',
   succeeded: 'ok',
   failed: 'bad',
   inconclusive: 'muted',
@@ -37,6 +39,9 @@ const STATUS_TONES: Record<string, string> = {
 
 const activeRuns = ref<ActiveRun[]>([])
 const historyRuns = ref<RunHistoryRow[]>([])
+// A run that leaves the active list before it reaches the newest history page
+// keeps its last known data here, so it cannot vanish while the user pages back.
+const finishedGhosts = ref<RunCard[]>([])
 const cursor = ref<{ before: number; createdAt: string } | null>(null)
 const hasMore = ref(false)
 // Once the user has loaded a page past the first one, a refresh must not
@@ -74,9 +79,10 @@ function statusRank(status: string): number {
 }
 
 // Active wins over a stale history copy of the same run: the live row carries
-// the phase the finished one lacks.
+// the phase the finished one lacks. A local ghost is the weakest source.
 const mergedRuns = computed<RunCard[]>(() => {
   const byId = new Map<number, RunCard>()
+  for (const run of finishedGhosts.value) byId.set(run.id, run)
   for (const run of historyRuns.value) byId.set(run.id, run)
   for (const run of activeRuns.value) byId.set(run.id, run)
   return [...byId.values()].sort(
@@ -200,6 +206,29 @@ function mergeHistory(primary: RunHistoryRow[], existing: RunHistoryRow[]): RunH
   return [...byId.values()]
 }
 
+function dropKnownGhosts(): void {
+  if (finishedGhosts.value.length === 0) return
+  const historyIds = new Set(historyRuns.value.map((run) => run.id))
+  finishedGhosts.value = finishedGhosts.value.filter((run) => !historyIds.has(run.id))
+}
+
+// A run that leaves the active list is not necessarily in the newest history
+// page (many newer runs can push it out). Keep its last known data marked as
+// finalizing until a page returns it by id, then the real row takes over.
+function retainFinished(previousActive: ActiveRun[]): void {
+  const activeIds = new Set(activeRuns.value.map((run) => run.id))
+  const historyIds = new Set(historyRuns.value.map((run) => run.id))
+  const ghosts = new Map<number, RunCard>()
+  for (const ghost of finishedGhosts.value) {
+    if (!activeIds.has(ghost.id) && !historyIds.has(ghost.id)) ghosts.set(ghost.id, ghost)
+  }
+  for (const run of previousActive) {
+    if (activeIds.has(run.id) || historyIds.has(run.id) || ghosts.has(run.id)) continue
+    ghosts.set(run.id, { ...run, status: 'finalizing', phase: '', phase_started_at: null })
+  }
+  finishedGhosts.value = [...ghosts.values()]
+}
+
 // The pair is the keyset cursor; with either half missing there is no next
 // page, so the button never asks for a page the server cannot resolve.
 function applyCursor(page: RunHistoryPage): void {
@@ -221,10 +250,12 @@ async function load(): Promise<void> {
   loading.value = true
   error.value = null
   try {
+    const previousActive = activeRuns.value
     const { active, page } = await fetchFirstPage()
     activeRuns.value = active
     historyRuns.value = page.runs
     pagedBeyondFirst.value = false
+    retainFinished(previousActive)
     applyCursor(page)
     error.value = null
     refreshError.value = null
@@ -239,9 +270,11 @@ async function load(): Promise<void> {
 // failure leaves the last good rows in place and warns with a note.
 async function refresh(): Promise<void> {
   try {
+    const previousActive = activeRuns.value
     const { active, page } = await fetchFirstPage()
     activeRuns.value = active
     historyRuns.value = mergeHistory(page.runs, historyRuns.value)
+    retainFinished(previousActive)
     if (!pagedBeyondFirst.value) applyCursor(page)
     error.value = null
     refreshError.value = null
@@ -260,6 +293,7 @@ async function loadMore(): Promise<void> {
       limit: HISTORY_LIMIT,
     })
     historyRuns.value = mergeHistory(page.runs, historyRuns.value)
+    dropKnownGhosts()
     pagedBeyondFirst.value = true
     applyCursor(page)
     refreshError.value = null
@@ -308,6 +342,7 @@ onBeforeUnmount(() => {
           :active-count="filterCount"
           :sheet-open="sheetOpen"
           :sheet-id="sheetId"
+          :loaded-only="hasMore"
           @update:q="setQuery"
           @clear="clear"
           @remove="removeChip"
@@ -339,7 +374,11 @@ onBeforeUnmount(() => {
         <div class="list-scroll runs__scroll">
           <EmptyState
             v-if="filteredRuns.length === 0 && isActive"
-            title="NADA COINCIDE CON ESTOS FILTROS"
+            :title="
+              hasMore
+                ? 'NINGUNA REVISIÓN CARGADA COINCIDE CON ESTOS FILTROS'
+                : 'NADA COINCIDE CON ESTOS FILTROS'
+            "
             action-label="LIMPIAR FILTROS"
             @action="clear"
           />

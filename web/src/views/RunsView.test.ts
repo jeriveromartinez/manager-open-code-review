@@ -328,6 +328,58 @@ describe('RunsView', () => {
     wrapper.unmount()
   })
 
+  it('keeps a run visible once when it finishes between refreshes', async () => {
+    mocks.api.activeRuns.mockResolvedValue({ runs: [activeRun()] })
+    const { wrapper } = await mountRuns()
+
+    expect(wrapper.findAll('[data-run-card]')).toHaveLength(1)
+    expect(wrapper.get('[data-run-status]').text()).toBe('En curso')
+
+    // The run finished, but newer history rows push it out of the first page.
+    mocks.api.activeRuns.mockResolvedValue({ runs: [] })
+    const [registration] = live.registrations
+    await registration.reload()
+    await flushPromises()
+
+    let cards = wrapper.findAll('[data-run-card]')
+    expect(cards).toHaveLength(1)
+    expect(cards[0].attributes('data-run-id')).toBe('9')
+    expect(cards[0].get('[data-run-status]').text()).toBe('Finalizando')
+    expect(cards[0].get('[data-run-elapsed]').text()).toBe('—')
+
+    // A later history page returns the real row by id: it replaces the ghost.
+    mocks.api.runHistory.mockResolvedValue(
+      historyPage([historyRun({ id: 9, status: 'succeeded', created_at: iso(-900_000) })]),
+    )
+    await registration.reload()
+    await flushPromises()
+
+    cards = wrapper.findAll('[data-run-card]')
+    expect(cards).toHaveLength(1)
+    expect(cards[0].get('[data-run-status]').text()).toBe('Completada')
+
+    wrapper.unmount()
+  })
+
+  it('labels the count and empty state as loaded-only while more history exists', async () => {
+    mocks.api.runHistory.mockResolvedValue(
+      historyPage([historyRun({ id: 20 }), historyRun({ id: 21 })], {
+        has_more: true,
+        next_before: 21,
+        next_created_at: '2026-11-26T10:00:00.123456789Z',
+      }),
+    )
+
+    const full = await mountRuns()
+    expect(full.wrapper.get('.filter-bar__count').text()).toBe('2 DE 2 cargados')
+    full.wrapper.unmount()
+
+    const filtered = await mountRuns({ q: 'no-existe' })
+    expect(filtered.wrapper.get('.filter-bar__count').text()).toBe('0 DE 2 cargados')
+    expect(filtered.wrapper.text()).toContain('NINGUNA REVISIÓN CARGADA COINCIDE CON ESTOS FILTROS')
+    filtered.wrapper.unmount()
+  })
+
   it('keeps the active list on a silent refresh failure', async () => {
     mocks.api.activeRuns.mockResolvedValue({ runs: [activeRun()] })
     const { wrapper } = await mountRuns()

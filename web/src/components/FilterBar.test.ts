@@ -45,6 +45,13 @@ describe('FilterBar', () => {
     expect(filtered.get('.filter-bar__count').classes()).toContain('filter-bar__count--active')
   })
 
+  it('marks the count as loaded-only when the list has more server-side rows', () => {
+    const wrapper = mount(FilterBar, {
+      props: { q: '', shown: 2, total: 10, chips: [], loadedOnly: true },
+    })
+    expect(wrapper.get('.filter-bar__count').text()).toBe('2 DE 10 cargados')
+  })
+
   it('emits remove for a chip and clear for LIMPIAR', async () => {
     const wrapper = mount(FilterBar, {
       props: { q: 'api', shown: 2, total: 12, chips },
