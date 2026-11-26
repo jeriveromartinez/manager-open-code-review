@@ -185,14 +185,11 @@ const queue = computed(() => {
   return items
 })
 
-const chips = computed(() => {
-  const list = facets.value.team.map((value) => ({ key: `team:${value}`, label: teamLabel(value) }))
-  const currentSort = sort.value ?? 'wait'
-  if (currentSort !== 'wait') {
-    list.push({ key: `sort:${currentSort}`, label: `Orden: ${SORT_LABELS[currentSort] ?? currentSort}` })
-  }
-  return list
-})
+// The order is not a filter: it never adds a chip, so it neither tints the
+// counter nor enables LIMPIAR nor changes FILTROS · n.
+const chips = computed(() =>
+  facets.value.team.map((value) => ({ key: `team:${value}`, label: teamLabel(value) })),
+)
 
 function setQuery(value: string): void {
   q.value = value
@@ -203,11 +200,8 @@ function onSort(values: string[]): void {
 }
 
 function removeChip(key: string): void {
-  if (key.startsWith('team:')) {
-    setFacet('team', facets.value.team.filter((value) => `team:${value}` !== key))
-    return
-  }
-  if (key.startsWith('sort:')) setSort('wait')
+  if (!key.startsWith('team:')) return
+  setFacet('team', facets.value.team.filter((value) => `team:${value}` !== key))
 }
 
 function bar(label: string, count: number, tone: DotTone) {

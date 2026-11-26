@@ -2,7 +2,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
 import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createMemoryHistory, createRouter } from 'vue-router'
+import { createMemoryHistory, createRouter, type LocationQueryRaw } from 'vue-router'
 import DashboardView from './DashboardView.vue'
 import { useLiveStore } from '../stores/live'
 import type { PRView, QASummary } from '../api'
@@ -115,8 +115,8 @@ const prs: PRView[] = [
 
 let pinia = createPinia()
 
-function mountDashboard(): VueWrapper {
-  const router = createRouter({
+function createTestRouter() {
+  return createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: '/', component: { template: '<div />' } },
@@ -127,6 +127,17 @@ function mountDashboard(): VueWrapper {
       { path: '/:pathMatch(.*)*', component: { template: '<div />' } },
     ],
   })
+}
+
+function mountDashboard(): VueWrapper {
+  pinia = createPinia()
+  return mount(DashboardView, { global: { plugins: [pinia, createTestRouter()] } })
+}
+
+async function mountDashboardAt(query: LocationQueryRaw): Promise<VueWrapper> {
+  const router = createTestRouter()
+  await router.push({ path: '/', query })
+  await router.isReady()
   pinia = createPinia()
   return mount(DashboardView, { global: { plugins: [pinia, router] } })
 }
@@ -530,6 +541,52 @@ describe('DashboardView', () => {
 
     await chooseOption(wrapper.element, 'Orden', 'Más recientes')
     expect(cardTitles(wrapper)).toEqual(['Gamma', 'Alpha', 'Delta', 'Beta'])
+    wrapper.unmount()
+  })
+
+  it('does not treat a non-default sort as a filter', async () => {
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    await chooseOption(wrapper.element, 'Orden', 'Más recientes')
+
+    expect(cardTitles(wrapper)).toEqual(['Añade endpoint de pedidos', 'Corrige el carrito'])
+    const count = wrapper.get('.filter-bar__count')
+    expect(count.text()).toBe('2 DE 2')
+    expect(count.classes()).not.toContain('filter-bar__count--active')
+    expect(wrapper.get('.filter-bar__clear').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.filter-bar__sheet').text()).toBe('FILTROS · 0')
+    expect(wrapper.findAll('.filter-bar__chip')).toHaveLength(0)
+    wrapper.unmount()
+  })
+
+  it('hydrates q, team and sort from the URL query', async () => {
+    mocks.api.me.mockResolvedValue({
+      id: 1,
+      login: 'mvega',
+      avatar_url: '',
+      is_admin: true,
+      teams: [
+        { id: 3, name: 'Pagos', role: 'qa' },
+        { id: 4, name: 'Web', role: 'qa' },
+      ],
+    })
+    mocks.api.prs.mockResolvedValue([
+      pr({ id: 21, repo: 'api', title: 'Corrige pedidos', team_id: 3, status_since: minutesAgo(20) }),
+      pr({ id: 22, repo: 'web', title: 'Corrige carrito', team_id: 4, status_since: minutesAgo(100) }),
+      pr({ id: 23, repo: 'web', title: 'Corrige tabla', team_id: 4, status_since: minutesAgo(5) }),
+      pr({ id: 24, repo: 'web', title: 'Migra tabla', team_id: 4, status_since: minutesAgo(50) }),
+    ])
+
+    const wrapper = await mountDashboardAt({ q: 'corrige', team: '4', sort: 'newest' })
+    await flushPromises()
+
+    expect((wrapper.get('input[type="search"]').element as HTMLInputElement).value).toBe('corrige')
+    expect(cardTitles(wrapper)).toEqual(['Corrige tabla', 'Corrige carrito'])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('2 DE 4')
+    expect(wrapper.get('.filter-bar__chip-label').text()).toBe('Web')
+    expect(wrapper.get('.filter-bar__filters').text()).toContain('Más recientes')
+    expect(wrapper.get('.filter-bar__clear').attributes('disabled')).toBeUndefined()
     wrapper.unmount()
   })
 

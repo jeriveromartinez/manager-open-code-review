@@ -17,18 +17,6 @@ export const usePrsStore = defineStore('prs', () => {
   const visible = computed(() =>
     bucket.value === '' ? queue.value : queue.value.filter((pr) => qaBucket(pr) === bucket.value),
   )
-  const counts = computed(() => {
-    const result: Record<BucketFilter, number> = {
-      '': prs.value.length,
-      ready: 0,
-      defects: 0,
-      inconclusive: 0,
-      ai: 0,
-      other: 0,
-    }
-    for (const pr of prs.value) result[qaBucket(pr)]++
-    return result
-  })
 
   // A silent refresh (live events) leaves loading alone so the empty state
   // does not flicker while the list is fetched again.
@@ -55,7 +43,6 @@ export const usePrsStore = defineStore('prs', () => {
     prs,
     queue,
     visible,
-    counts,
     bucket,
     loading,
     error,
