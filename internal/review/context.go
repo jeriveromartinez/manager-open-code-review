@@ -39,12 +39,41 @@ const (
 	repoContextMinBytes     = 512
 	// maxChangedPaths bounds the diff listing used to discover related tests.
 	maxChangedPaths = 50
+	// backgroundMaxBytes is the hard ceiling of the Markdown handed to OCR's
+	// --background-file. OCR aborts the whole review above 8000 characters, and
+	// a UTF-8 byte count is never smaller than its character count, so a byte
+	// bound guarantees the character bound and leaves a small margin.
+	backgroundMaxBytes = 7900
 	// backgroundContextMaxBytes caps every added section together, and
 	// backgroundContextMinBytes drops context that would only fit a few words.
 	// The effective size is a share of the per-group ceiling: a small team
-	// ceiling must not be consumed by the background (#72/#141).
-	backgroundContextMaxBytes = 32000
+	// ceiling must not be consumed by the background (#72/#141). The cap stays
+	// below backgroundMaxBytes so the run never asks for a context that cannot
+	// fit next to the fixed header and the metadata fields.
+	backgroundContextMaxBytes = 6000
 	backgroundContextMinBytes = 512
+	// backgroundFieldBudget bounds the metadata block together, so an oversized
+	// title cannot starve the PR context below it.
+	backgroundFieldBudget = 1024
+	// backgroundFieldBytes bounds one metadata value. Real titles, refs and
+	// URLs fit; the bound only protects the background invariant.
+	backgroundFieldBytes = 256
+	// backgroundRefBytes bounds a ref, repository name or SHA quoted in a
+	// provenance line inside a section.
+	backgroundRefBytes = 64
+	// backgroundIssueTitleBytes and backgroundIssueErrBytes bound the untrusted
+	// linked-issue metadata that is not part of the criteria budget.
+	backgroundIssueTitleBytes = 128
+	backgroundIssueErrBytes   = 128
+	// backgroundPRContextOverhead reserves the headings, provenance lines,
+	// per-issue metadata and truncation notes of the description, criteria and
+	// linked-issue sections before their content budget is divided.
+	backgroundPRContextOverhead = 3072
+	// backgroundNoteBytes is the most a truncation note occupies. Sections
+	// reserve it before cutting content so the note is never dropped.
+	backgroundNoteBytes = 96
+	// fenceTagBytes is the fixed cost of the balanced tags fenceLimited adds.
+	fenceTagBytes = len("<untrusted>") + len("</untrusted>")
 )
 
 var (
@@ -463,7 +492,7 @@ func readRelatedFile(dir, rel string, limit int) (content string, truncated bool
 func writePRBody(b *strings.Builder, pr store.PullRequest, limit int) {
 	b.WriteString("\n## Descripción del PR (DATA)\n\n")
 	fmt.Fprintf(b, "Procedencia: descripción del PR #%d en GitHub, guardada para el head %s.\n\n",
-		pr.Number, fence(pr.HeadSHA))
+		pr.Number, boundedFence(pr.HeadSHA, backgroundRefBytes))
 	body := strings.TrimSpace(pr.Body)
 	if body == "" {
 		b.WriteString("Contexto ausente: el PR no tiene descripción.\n")
@@ -525,15 +554,17 @@ func writeLinkedIssues(b *strings.Builder, pr store.PullRequest, linked linkedCo
 	for _, issue := range linked.Issues {
 		label := fmt.Sprintf("#%d", issue.Number)
 		if issue.Repo != "" {
-			label = fmt.Sprintf("%s#%d", issue.Repo, issue.Number)
+			label = fmt.Sprintf("%s#%d", boundedText(issue.Repo, backgroundRefBytes), issue.Number)
 		}
 		fmt.Fprintf(b, "### Issue %s\n\n", label)
 		if issue.Err != "" {
-			fmt.Fprintf(b, "Contexto ausente: referencia inaccesible (%s).\n\n", issue.Err)
+			fmt.Fprintf(b, "Contexto ausente: referencia inaccesible (%s).\n\n",
+				boundedText(issue.Err, backgroundIssueErrBytes))
 			continue
 		}
-		fmt.Fprintf(b, "Título: %s\n\n", fence(issue.Title))
-		fmt.Fprintf(b, "Procedencia: issue de GitHub consultado para el head %s.\n\n", fence(pr.HeadSHA))
+		fmt.Fprintf(b, "Título: %s\n\n", boundedFence(issue.Title, backgroundIssueTitleBytes))
+		fmt.Fprintf(b, "Procedencia: issue de GitHub consultado para el head %s.\n\n",
+			boundedFence(pr.HeadSHA, backgroundRefBytes))
 		criteria, truncated := extractAcceptanceCriteria(issue.Body, maxCriteriaItems, perIssue)
 		if len(criteria) == 0 {
 			text, cut := fenceLimited(strings.TrimSpace(issue.Body), perIssue)
