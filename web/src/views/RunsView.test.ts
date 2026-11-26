@@ -257,6 +257,77 @@ describe('RunsView', () => {
     wrapper.unmount()
   })
 
+  it('stops paging when has_more arrives without a complete cursor', async () => {
+    mocks.api.runHistory.mockResolvedValue(
+      historyPage([historyRun()], { has_more: true, next_before: 20, next_created_at: null }),
+    )
+
+    const { wrapper } = await mountRuns()
+
+    expect(wrapper.findAll('[data-run-card]')).toHaveLength(1)
+    expect(wrapper.find('[data-runs-more]').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('does not re-arm the cursor from a refresh after every page was loaded', async () => {
+    const cursor = '2026-11-26T10:00:00.123456789Z'
+    mocks.api.runHistory.mockResolvedValueOnce(
+      historyPage([historyRun({ id: 20, created_at: iso(-200_000) })], {
+        has_more: true,
+        next_before: 20,
+        next_created_at: cursor,
+      }),
+    )
+    mocks.api.runHistory.mockResolvedValueOnce(
+      historyPage([historyRun({ id: 10, created_at: iso(-400_000) })]),
+    )
+
+    const { wrapper } = await mountRuns()
+    await wrapper.get('[data-runs-more]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-run-card]')).toHaveLength(2)
+    expect(wrapper.find('[data-runs-more]').exists()).toBe(false)
+
+    // The refreshed first page still reports more rows, but every page was
+    // already on screen: the button must not come back.
+    mocks.api.runHistory.mockResolvedValueOnce(
+      historyPage([historyRun({ id: 20, created_at: iso(-200_000) })], {
+        has_more: true,
+        next_before: 20,
+        next_created_at: cursor,
+      }),
+    )
+    const [registration] = live.registrations
+    await registration.reload()
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-run-card]')).toHaveLength(2)
+    expect(wrapper.find('[data-runs-more]').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  it('recovers from a failed first load when a silent refresh succeeds', async () => {
+    mocks.api.activeRuns.mockRejectedValue(new Error('sin conexión'))
+    mocks.api.runHistory.mockRejectedValue(new Error('sin conexión'))
+
+    const { wrapper } = await mountRuns()
+    expect(wrapper.get('.form-error').text()).toContain('No se pudieron cargar las revisiones')
+
+    mocks.api.activeRuns.mockResolvedValue({ runs: [activeRun()] })
+    mocks.api.runHistory.mockResolvedValue(historyPage([]))
+    const [registration] = live.registrations
+    await registration.reload()
+    await flushPromises()
+
+    expect(wrapper.find('.form-error').exists()).toBe(false)
+    expect(wrapper.findAll('[data-run-card]')).toHaveLength(1)
+
+    wrapper.unmount()
+  })
+
   it('keeps the active list on a silent refresh failure', async () => {
     mocks.api.activeRuns.mockResolvedValue({ runs: [activeRun()] })
     const { wrapper } = await mountRuns()

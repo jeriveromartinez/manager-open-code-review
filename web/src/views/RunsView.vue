@@ -39,6 +39,10 @@ const activeRuns = ref<ActiveRun[]>([])
 const historyRuns = ref<RunHistoryRow[]>([])
 const cursor = ref<{ before: number; createdAt: string } | null>(null)
 const hasMore = ref(false)
+// Once the user has loaded a page past the first one, a refresh must not
+// re-arm the cursor: the refreshed first page always reports more rows even
+// when every page was already on screen.
+const pagedBeyondFirst = ref(false)
 const loading = ref(true)
 const loadingMore = ref(false)
 const error = ref<string | null>(null)
@@ -220,7 +224,9 @@ async function load(): Promise<void> {
     const { active, page } = await fetchFirstPage()
     activeRuns.value = active
     historyRuns.value = page.runs
+    pagedBeyondFirst.value = false
     applyCursor(page)
+    error.value = null
     refreshError.value = null
   } catch {
     error.value = 'No se pudieron cargar las revisiones'
@@ -236,7 +242,8 @@ async function refresh(): Promise<void> {
     const { active, page } = await fetchFirstPage()
     activeRuns.value = active
     historyRuns.value = mergeHistory(page.runs, historyRuns.value)
-    if (!hasMore.value) applyCursor(page)
+    if (!pagedBeyondFirst.value) applyCursor(page)
+    error.value = null
     refreshError.value = null
   } catch {
     refreshError.value = 'No se pudo actualizar; se muestran las últimas revisiones.'
@@ -253,6 +260,7 @@ async function loadMore(): Promise<void> {
       limit: HISTORY_LIMIT,
     })
     historyRuns.value = mergeHistory(page.runs, historyRuns.value)
+    pagedBeyondFirst.value = true
     applyCursor(page)
     refreshError.value = null
   } catch {
@@ -291,12 +299,7 @@ onBeforeUnmount(() => {
 
     <p v-if="loading && mergedRuns.length === 0" class="empty-state">Cargando revisiones…</p>
 
-    <template v-else-if="!error">
-      <p v-if="mergedRuns.length === 0" class="empty-state" data-runs-empty>
-        No hay revisiones en curso ni terminadas. Cuando un PR necesite revisión aparecerá aquí.
-      </p>
-
-      <template v-else>
+    <template v-else-if="mergedRuns.length > 0">
         <FilterBar
           :q="q"
           :shown="filteredRuns.length"
@@ -409,8 +412,11 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </div>
-      </template>
     </template>
+
+    <p v-else-if="!error" class="empty-state" data-runs-empty>
+      No hay revisiones en curso ni terminadas. Cuando un PR necesite revisión aparecerá aquí.
+    </p>
 
     <FilterSheet
       :id="sheetId"
