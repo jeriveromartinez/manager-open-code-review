@@ -707,55 +707,43 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 	path := p.repoPath(fmt.Sprintf("check-runs/%d", checkID))
 	const pageSize = 50
 
-	// GitHub appends annotations on every PATCH instead of replacing them. An
-	// earlier attempt may have been accepted even when its response was lost, so
-	// reconcile with what the check already holds and with the durable cursor
-	// before sending anything: resending a page would duplicate its annotations.
-	state, err := p.fetchCheckRun(ctx, path)
+	// GitHub appends annotations on every PATCH instead of replacing them, and
+	// the open-finding set can change between deliveries that reuse this head's
+	// check. Reconcile by content: resend only the expected annotations GitHub
+	// does not already hold, so neither an accepted page nor a stale annotation
+	// from an earlier publication can duplicate or suppress one.
+	existing, err := p.fetchCheckAnnotations(ctx, checkID)
 	if err != nil {
 		return err
 	}
-	if state.Output.AnnotationsCount > len(annotations) {
-		// A delivery from before the cursor appended duplicates that cannot be
-		// removed. Every expected annotation is present, so stop appending.
-		slog.Warn("check run holds more annotations than expected",
-			"check_run_id", checkID,
-			"stored", state.Output.AnnotationsCount,
-			"expected", len(annotations))
-	}
-	start := state.Output.AnnotationsCount
-	if p.progress.CheckAnnotations > start {
-		start = p.progress.CheckAnnotations
-	}
-	if start > len(annotations) {
-		start = len(annotations)
-	}
+	missing := missingAnnotations(annotations, existing)
 
-	posted := false
-	for start < len(annotations) {
+	// Every PATCH carries the full output, not just the first one: a reused
+	// check must not keep the text of a previous delivery after the gate, the
+	// pending coverage or the human verdict changed.
+	confirmed := len(annotations) - len(missing)
+	for start := 0; start < len(missing); start += pageSize {
 		end := start + pageSize
-		if end > len(annotations) {
-			end = len(annotations)
+		if end > len(missing) {
+			end = len(missing)
 		}
-		page := map[string]any{"title": title, "summary": summary}
-		if start == 0 {
-			page["text"] = output["text"]
+		page := map[string]any{
+			"title": title, "summary": summary, "text": output["text"],
+			"annotations": missing[start:end],
 		}
-		page["annotations"] = annotations[start:end]
 		payload := map[string]any{"status": "completed", "conclusion": conclusion, "output": page}
 		if err := p.request(ctx, http.MethodPatch, path, payload, nil); err != nil {
 			return fmt.Errorf("complete check run %d: %w", checkID, err)
 		}
-		if err := p.advanceCheckCursor(ctx, end); err != nil {
+		confirmed += end - start
+		if err := p.advanceCheckCursor(ctx, confirmed); err != nil {
 			return err
 		}
-		posted = true
-		start = end
 	}
-	if !posted {
-		// A retry that resumes after the last accepted page still has to assert
-		// the conclusion, and a run without annotations still has to close the
-		// check. Both send one page with no annotations.
+	if len(missing) == 0 {
+		// Nothing to annotate, but the shared output and conclusion still have
+		// to be asserted, both for a retry that resumed after the last page and
+		// for a run without annotations.
 		page := map[string]any{
 			"title": title, "summary": summary, "text": output["text"],
 			"annotations": []checkAnnotation{},
@@ -768,7 +756,7 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 
 	// The step is recorded only after GitHub confirms the effect, not after a
 	// 2xx: an accepted-then-lost page must not make completion an assumption.
-	return p.verifyCheckEffect(ctx, path, checkID, conclusion, len(annotations))
+	return p.verifyCheckEffect(ctx, path, checkID, conclusion, annotations)
 }
 
 // checkRunState is the subset of a check run the publisher reconciles against.
@@ -788,11 +776,48 @@ func (p *publishContext) fetchCheckRun(ctx context.Context, path string) (checkR
 	return state, nil
 }
 
+// fetchCheckAnnotations lists the annotations GitHub already holds for a check.
+// Content, not position, is what reconciliation needs.
+func (p *publishContext) fetchCheckAnnotations(ctx context.Context, checkID int64) ([]checkAnnotation, error) {
+	base := p.repoPath(fmt.Sprintf("check-runs/%d/annotations", checkID))
+	var all []checkAnnotation
+	for page := 1; ; page++ {
+		var batch []checkAnnotation
+		path := fmt.Sprintf("%s?per_page=100&page=%d", base, page)
+		if err := p.request(ctx, http.MethodGet, path, nil, &batch); err != nil {
+			return nil, fmt.Errorf("list check annotations: %w", err)
+		}
+		all = append(all, batch...)
+		if len(batch) < 100 {
+			return all, nil
+		}
+	}
+}
+
+// missingAnnotations returns the expected annotations absent from existing,
+// comparing content as a multiset. Positional comparison would skip a finding
+// added between two deliveries of the same head and duplicate one removed.
+func missingAnnotations(expected, existing []checkAnnotation) []checkAnnotation {
+	counts := make(map[checkAnnotation]int, len(existing))
+	for _, annotation := range existing {
+		counts[annotation]++
+	}
+	missing := make([]checkAnnotation, 0, len(expected))
+	for _, want := range expected {
+		if counts[want] > 0 {
+			counts[want]--
+			continue
+		}
+		missing = append(missing, want)
+	}
+	return missing
+}
+
 // verifyCheckEffect confirms that GitHub actually stored the completion and
-// every expected annotation. More annotations than expected are tolerated
-// because a previous delivery may have duplicated them and the API cannot
-// remove them.
-func (p *publishContext) verifyCheckEffect(ctx context.Context, path string, checkID int64, conclusion string, expected int) error {
+// every expected annotation. Stale annotations from an earlier publication are
+// tolerated because the API cannot remove them, but a missing expected one
+// keeps the step unsettled.
+func (p *publishContext) verifyCheckEffect(ctx context.Context, path string, checkID int64, conclusion string, expected []checkAnnotation) error {
 	state, err := p.fetchCheckRun(ctx, path)
 	if err != nil {
 		return err
@@ -804,9 +829,17 @@ func (p *publishContext) verifyCheckEffect(ctx context.Context, path string, che
 		return fmt.Errorf("complete check run %d: conclusion is %q, want %q",
 			checkID, state.Conclusion, conclusion)
 	}
-	if state.Output.AnnotationsCount < expected {
+	if state.Output.AnnotationsCount < len(expected) {
 		return fmt.Errorf("complete check run %d: GitHub holds %d annotations, want %d",
-			checkID, state.Output.AnnotationsCount, expected)
+			checkID, state.Output.AnnotationsCount, len(expected))
+	}
+	remote, err := p.fetchCheckAnnotations(ctx, checkID)
+	if err != nil {
+		return err
+	}
+	if missing := missingAnnotations(expected, remote); len(missing) > 0 {
+		return fmt.Errorf("complete check run %d: GitHub is missing %d of %d expected annotations",
+			checkID, len(missing), len(expected))
 	}
 	return nil
 }

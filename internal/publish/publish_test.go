@@ -387,6 +387,25 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		g.replies = append(g.replies, in.Body)
 		writeJSON(map[string]any{"id": 7000}, http.StatusCreated)
 
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/check-runs/555/annotations":
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		if perPage < 1 {
+			perPage = 30
+		}
+		start := (page - 1) * perPage
+		if start > len(g.checkAnnotations) {
+			start = len(g.checkAnnotations)
+		}
+		end := start + perPage
+		if end > len(g.checkAnnotations) {
+			end = len(g.checkAnnotations)
+		}
+		writeJSON(g.checkAnnotations[start:end], http.StatusOK)
+
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/check-runs/555":
 		status := g.checkStatus
 		if status == "" {
@@ -2552,6 +2571,96 @@ func TestPublishCheckResumesAfterAcceptedPage(t *testing.T) {
 	}
 	if state.Accepted != 60 {
 		t.Errorf("durable cursor = %d, want 60", state.Accepted)
+	}
+}
+
+// A lost response after the last page must not append that page again: the
+// retry sees every expected annotation already on GitHub and only refreshes the
+// shared output (#138).
+func TestPublishCheckCompletesAfterLastPageResponseLost(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	for i := 0; i < 10; i++ {
+		seedFinding(t, st, pr.ID, run.ID, fmt.Sprintf("f%02d", i), 2, "major", store.FindingOpen)
+	}
+	gh := newFakeGitHub(t)
+	gh.failCheckAppliedOnce = true
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err == nil {
+		t.Fatal("first Publish() error = nil, want the lost response after the last page")
+	}
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("retry Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	annotations := append([]fakeCheckAnnotation(nil), gh.checkAnnotations...)
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	gh.mu.Unlock()
+	if len(annotations) != 10 {
+		t.Errorf("check annotations = %d, want 10 without a repeated last page", len(annotations))
+	}
+	if len(patches) < 2 || patches[1].Output.Text == "" {
+		t.Errorf("retry patches = %+v, want a refresh with the check text", patches)
+	}
+}
+
+// Republishing after the open-finding set changed must reconcile by content: a
+// removed finding plus a new one cannot leave the new annotation skipped just
+// because the check already has one annotation (#138).
+func TestPublishRepublishReconcilesChangedAnnotationsByContent(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	old := seedFinding(t, st, pr.ID, run.ID, "old", 2, "major", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("first Publish() error = %v", err)
+	}
+	if err := st.DB.WithContext(ctx).Model(&store.Finding{}).Where("id = ?", old.ID).
+		Update("status", store.FindingWithdrawn).Error; err != nil {
+		t.Fatalf("withdraw the old finding: %v", err)
+	}
+	seedFinding(t, st, pr.ID, run.ID, "new", 3, "major", store.FindingOpen)
+
+	if err := w.Republish(ctx, pr.ID); err != nil {
+		t.Fatalf("Republish() error = %v", err)
+	}
+	gh.mu.Lock()
+	annotations := append([]fakeCheckAnnotation(nil), gh.checkAnnotations...)
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	gh.mu.Unlock()
+	var found bool
+	for _, annotation := range annotations {
+		if annotation.Title == "Título new" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("check annotations = %+v, want the new finding appended by content", annotations)
+	}
+	if len(patches) == 0 || patches[len(patches)-1].Output.Text == "" {
+		t.Errorf("republish patches = %+v, want a fresh check text", patches)
+	}
+
+	// With nothing missing, the shared output is still refreshed instead of
+	// keeping the text of the previous delivery.
+	before := len(patches)
+	if err := w.Republish(ctx, pr.ID); err != nil {
+		t.Fatalf("second Republish() error = %v", err)
+	}
+	gh.mu.Lock()
+	patches = append([]checkPatch(nil), gh.checkPatches...)
+	gh.mu.Unlock()
+	if len(patches) <= before {
+		t.Error("republish without missing annotations did not refresh the check output")
+	}
+	if patches[len(patches)-1].Output.Text == "" {
+		t.Error("refreshed check output has no text")
 	}
 }
 
