@@ -1898,6 +1898,9 @@ func classifyCloneError(ctx context.Context, out runOutcome, err error) (runOutc
 			return out.inconclusive(err, "token_expired"), nil
 		}
 	}
+	if isTransientFetchError(err) {
+		return out.inconclusive(err, "git_transient"), nil
+	}
 	return out.failed(err, "git_error"), nil
 }
 

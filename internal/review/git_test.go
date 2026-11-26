@@ -2,11 +2,13 @@ package review
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // runGit ejecuta git en dir y devuelve stdout recortado; falla el test si git falla.
@@ -199,4 +201,158 @@ func TestCloneDepthCapFails(t *testing.T) {
 			t.Errorf("error = %q, want que mencione merge-base", err)
 		}
 	})
+}
+
+const (
+	// transientFetchFailure is the wording git uses when the transport cannot
+	// reach the remote, as opposed to a rejected credential or a missing ref.
+	transientFetchFailure = "git fetch: exit status 128: fatal: unable to access " +
+		"'https://github.com/acme/app.git/': Failed to connect to github.com port 443: Connection timed out"
+	permanentFetchFailure = "git fetch: exit status 128: fatal: couldn't find remote ref refs/pull/1/head"
+)
+
+// stubFetch replaces fetchGit for the duration of the test, shrinks the retry
+// backoff and returns a counter of the attempts it observed. fail receives the
+// 1-based attempt number; returning nil delegates to the real fetch.
+func stubFetch(t *testing.T, fail func(attempt int) error) *int {
+	t.Helper()
+	previousFetch, previousBase := fetchGit, fetchRetryBase
+	t.Cleanup(func() { fetchGit, fetchRetryBase = previousFetch, previousBase })
+	fetchRetryBase = time.Millisecond
+
+	attempts := 0
+	fetchGit = func(ctx context.Context, dir string, args ...string) (string, error) {
+		attempts++
+		if err := fail(attempts); err != nil {
+			return "", err
+		}
+		return previousFetch(ctx, dir, args...)
+	}
+	return &attempts
+}
+
+func TestCloneRetriesTransientFetchFailure(t *testing.T) {
+	bare, mainSHA, _, _ := newBareRepo(t)
+	attempts := stubFetch(t, func(attempt int) error {
+		if attempt == 1 {
+			return errors.New(transientFetchFailure)
+		}
+		return nil
+	})
+	dir := filepath.Join(t.TempDir(), "checkout")
+
+	mergeBase, err := Clone(context.Background(), dir, "file://"+bare, "main", "refs/heads/feature", 20)
+	if err != nil {
+		t.Fatalf("Clone() after a transient fetch failure = %v, want the retry to recover", err)
+	}
+	if mergeBase != mainSHA {
+		t.Errorf("mergeBase = %q, want %q", mergeBase, mainSHA)
+	}
+	if *attempts < 2 {
+		t.Errorf("fetch attempts = %d, want the first failure retried", *attempts)
+	}
+}
+
+func TestCloneDoesNotRetryPermanentFetchFailure(t *testing.T) {
+	bare, _, _, _ := newBareRepo(t)
+	tests := []struct {
+		name    string
+		message string
+	}{
+		{"missing ref", permanentFetchFailure},
+		{"tls certificate", "git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': SSL certificate problem: unable to get local issuer certificate"},
+		{"handshake", "git fetch: exit status 128: gnutls_handshake() failed: The TLS connection was non-properly terminated."},
+		{"corrupt pack", "git fetch: exit status 128: fatal: index-pack failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attempts := stubFetch(t, func(int) error { return errors.New(tt.message) })
+			dir := filepath.Join(t.TempDir(), "checkout")
+
+			if _, err := Clone(context.Background(), dir, "file://"+bare, "main", "refs/heads/feature", 20); err == nil {
+				t.Fatal("Clone() with a permanent fetch failure: want an error")
+			}
+			if *attempts != 1 {
+				t.Errorf("fetch attempts = %d, want 1: a permanent failure is not retried", *attempts)
+			}
+		})
+	}
+}
+
+func TestCloneExhaustedRetryReportsCause(t *testing.T) {
+	bare, _, _, _ := newBareRepo(t)
+	attempts := stubFetch(t, func(int) error { return errors.New(transientFetchFailure) })
+	dir := filepath.Join(t.TempDir(), "checkout")
+
+	_, err := Clone(context.Background(), dir, "file://"+bare, "main", "refs/heads/feature", 20)
+	if err == nil {
+		t.Fatal("Clone() with an unreachable remote: want an error")
+	}
+	if *attempts != fetchMaxAttempts {
+		t.Errorf("fetch attempts = %d, want the cap %d", *attempts, fetchMaxAttempts)
+	}
+	if !strings.Contains(err.Error(), "Connection timed out") {
+		t.Errorf("error = %q, want the transport cause preserved", err)
+	}
+	if !strings.Contains(err.Error(), "intentos") {
+		t.Errorf("error = %q, want the number of attempts in the cause", err)
+	}
+}
+
+func TestCloneRetryStopsWhenContextIsDone(t *testing.T) {
+	bare, _, _, _ := newBareRepo(t)
+	previousFetch, previousBase := fetchGit, fetchRetryBase
+	t.Cleanup(func() { fetchGit, fetchRetryBase = previousFetch, previousBase })
+	// A wait longer than the test would tolerate: it must be interrupted by the
+	// context instead of sleeping past the run deadline.
+	fetchRetryBase = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+	fetchGit = func(context.Context, string, ...string) (string, error) {
+		attempts++
+		cancel()
+		return "", errors.New(transientFetchFailure)
+	}
+	dir := filepath.Join(t.TempDir(), "checkout")
+
+	started := time.Now()
+	if _, err := Clone(ctx, dir, "file://"+bare, "main", "refs/heads/feature", 20); err == nil {
+		t.Fatal("Clone() with a canceled context: want an error")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("Clone() took %v, want the retry to stop at the deadline", elapsed)
+	}
+	if attempts != 1 {
+		t.Errorf("fetch attempts = %d, want 1: no retry after cancellation", attempts)
+	}
+}
+
+func TestCloneRetrySkipsWaitBeyondDeadline(t *testing.T) {
+	bare, _, _, _ := newBareRepo(t)
+	previousFetch, previousBase := fetchGit, fetchRetryBase
+	t.Cleanup(func() { fetchGit, fetchRetryBase = previousFetch, previousBase })
+	// The backoff is far longer than the remaining budget: the retry must not
+	// start a wait it cannot finish.
+	fetchRetryBase = time.Hour
+
+	attempts := 0
+	fetchGit = func(context.Context, string, ...string) (string, error) {
+		attempts++
+		return "", errors.New(transientFetchFailure)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dir := filepath.Join(t.TempDir(), "checkout")
+
+	started := time.Now()
+	if _, err := Clone(ctx, dir, "file://"+bare, "main", "refs/heads/feature", 20); err == nil {
+		t.Fatal("Clone() with an unreachable remote: want an error")
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Errorf("Clone() took %v, want no wait that exceeds the deadline", elapsed)
+	}
+	if attempts != 1 {
+		t.Errorf("fetch attempts = %d, want 1: the backoff does not fit the deadline", attempts)
+	}
 }
