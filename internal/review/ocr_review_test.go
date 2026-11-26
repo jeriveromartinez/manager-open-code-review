@@ -746,6 +746,15 @@ func TestAnalysisStopDeadlineUsesTheSoonerBound(t *testing.T) {
 	}
 }
 
+// TestAnalysisTimeoutHasItsOwnCode pins the phase split: the analysis share is
+// not the run's global deadline, so its expiry must not be reported as
+// timeout_global and must not be treated as a review failure.
+func TestAnalysisTimeoutHasItsOwnCode(t *testing.T) {
+	if got := timeoutCodeFromKind("analysis"); got != "timeout_analysis" {
+		t.Fatalf("analysis timeout code = %q, want timeout_analysis", got)
+	}
+}
+
 // TestVerifyStopDeadlineKeepsShare pins #151: the verifier's full share is
 // available to it even when it is smaller than the main run's 2m reserve.
 func TestVerifyStopDeadlineKeepsShare(t *testing.T) {

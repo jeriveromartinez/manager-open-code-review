@@ -879,9 +879,10 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		reviewBudget = 0
 	}
 
-	// The architectural analysis shares the invocation but has its own budget
-	// and state. The diff inventory decides whether an explicit signal fires;
-	// the same inventory is reused to confront coverage after the review.
+	// The architectural analysis runs as its own phase after the review report
+	// is persisted, with its own budget and state. The diff inventory decides
+	// whether an explicit signal fires; the same inventory is reused to confront
+	// coverage after the review.
 	inventory, invErr := gitChangedFiles(runCtx, workDir, fromSHA, headSHA)
 	archStats, statsErr := gitArchitectureStats(runCtx, workDir, fromSHA, headSHA)
 	if statsErr != nil {
@@ -953,14 +954,27 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			"evidencia arquitectónica previa pendiente de revalidación: se repite el análisis sobre el rango acumulado")
 	}
 	analysisBudget := architectureBudget(cfg.Policy, timeout, reviewBudget)
-	// The analysis spends from the same aggregate budget. Carve its cap out
-	// before the verifier's share so analysis + review + verification cannot
-	// exceed ReviewTokenBudget. Its time window runs concurrently with the
-	// review, so only the token cap is additive.
+	// The analysis phase keeps the run's original remaining time as its outer
+	// bound; the analysis share is enforced inside it. The verifier reserve
+	// below shrinks the review pass, not the observation.
+	analysisRunTimeout := timeout
+	// The analysis phase spends from the same aggregate budget. OCR applies
+	// --max-tokens-budget to the discarded re-review and the analysis cap
+	// separately, so carve both shares out before the verifier's share; the
+	// phase cannot exceed ReviewTokenBudget. Its time share bounds its own
+	// phase; the run deadline still caps the total.
 	if analysisRequested && reviewBudget > 0 {
-		reviewBudget -= analysisBudget.TokenBudget
-		if reviewBudget < 0 {
-			reviewBudget = 0
+		// A phase pass may not take more than half the configured budget: the
+		// other half must remain a positive cap for the review itself.
+		if half := reviewBudget / 2; analysisBudget.TokenBudget > half {
+			analysisBudget.TokenBudget = half
+		}
+		if analysisBudget.TokenBudget < 1 {
+			analysisBudget.TokenBudget = 1
+		}
+		reviewBudget -= 2 * analysisBudget.TokenBudget
+		if reviewBudget < 1 {
+			reviewBudget = 1
 		}
 	}
 
@@ -1110,9 +1124,6 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		reviewer        *NativeReviewer
 		budgetBlocked   bool
 		failedUsageLost bool
-		// analysisSkippedResume records that the observation was omitted because
-		// OCR cannot combine --analysis with --resume.
-		analysisSkippedResume bool
 	)
 	// A return after an attempt started closes it with the work it actually did.
 	// Usage is the delta over the attempt's own snapshot, so the run total keeps
@@ -1214,10 +1225,6 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		reviewer = newNativeReviewer(r.Cfg.OCRBin, workDir, home, candidate, key,
 			excludes, background, fromSHA, headSHA,
 			effort, ceiling, attemptBudget, timeout, log.OCRLogger(runCtx, "main"))
-		reviewer.Analysis = analysisRequested
-		reviewer.AnalysisTokenBudget = analysisBudget.TokenBudget
-		reviewer.AnalysisTimeout = time.Duration(analysisBudget.TimeBudgetSeconds) * time.Second
-		analysisSkippedResume = false
 
 		r.setPhase(runCtx, run.ID, store.RunPhaseReviewing, log)
 		slog.Info("native OCR review started", "run_id", run.ID, "profile_id", candidate.ID,
@@ -1228,15 +1235,6 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		sessionBefore := snapshotOCRSessions(reviewer.Home)
 		if session := resumeSession(run, scope); session != "" {
 			reviewer.ResumeSession = session
-			if analysisRequested {
-				// OCR rejects --analysis together with --resume. The analysis is
-				// observational, so it is skipped rather than failing the review.
-				reviewer.Analysis = false
-				reviewer.AnalysisTokenBudget = 0
-				analysisSkippedResume = true
-				log.Log(runCtx, "worker", "analysis", "warn", logPhaseOCR,
-					"análisis arquitectónico omitido: OCR no combina --resume con --analysis")
-			}
 			log.Log(runCtx, "worker", "main", "info", logPhaseOCR,
 				"reanudando la sesión de OCR de un intento anterior")
 		}
@@ -1254,11 +1252,6 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 				fmt.Sprintf("la sesión de OCR no se pudo reanudar; se reintenta la pasada completa: %v", nativeErr))
 			r.clearSession(runCtx, run.ID)
 			reviewer.ResumeSession = ""
-			if analysisRequested {
-				reviewer.Analysis = true
-				reviewer.AnalysisTokenBudget = analysisBudget.TokenBudget
-				analysisSkippedResume = false
-			}
 			sessionBefore = snapshotOCRSessions(reviewer.Home)
 			res, mainRaw, nativeErr = r.runNativeReview(runCtx, candidate.ID, reviewer, log, "main")
 		}
@@ -1357,48 +1350,6 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			r.persistUnit(runCtx, completedMainUnit(run.ID, activeMainKey, res, mainRaw))
 		}
 	}
-	architectureVerdict = applyNativeArchitectureAnalysis(architectureVerdict, res)
-	architectureVerdict, analysisDeadlineHit := applyAnalysisDeadline(architectureVerdict, res, analysisBudget)
-	if analysisDeadlineHit {
-		log.Log(runCtx, "worker", "analysis", "warn", logPhaseOCR, fmt.Sprintf(
-			"análisis arquitectónico inconcluso: agotó su plazo de %ds; la revisión conserva su resultado",
-			analysisBudget.TimeBudgetSeconds))
-	}
-	if analysisSkippedResume {
-		architectureVerdict.Status = store.ArchitectureInconclusive
-		architectureVerdict.Errors = append(architectureVerdict.Errors,
-			"analysis skipped: OCR resume is incompatible with --analysis")
-	}
-	if analysisRequested {
-		// Bind every fresh section to the current rule version and sources,
-		// including partial reports, and keep earlier evidence the re-check did
-		// not cover.
-		architectureVerdict = finalizeArchitectureVerdict(
-			architectureVerdict, carried, carryEvidence, ruleVersion, sourceDigests)
-	}
-	// applyNativeArchitectureAnalysis rebuilds the dimensions and the risk and
-	// uncertainty lists from the report, so the deterministic evidence is
-	// integrated again: the trusted baseline, the contract comparison and the
-	// operational dimensions. The baseline violation wins over the inconclusive
-	// status a skipped analysis leaves behind; neither the contract result nor
-	// the operational evidence changes the status.
-	if baselineEvaluated {
-		architectureVerdict = applyArchitectureBaseline(architectureVerdict, baseline)
-	}
-	architectureVerdict = attachContractComparison(architectureVerdict, contracts)
-	if opsEvaluated {
-		architectureVerdict = applyOpsEvidence(architectureVerdict, opsEvidence)
-	}
-	architectureVerdict = applyConsumerImpact(architectureVerdict)
-	architectureVerdict = store.MaskRedactedConsumers(architectureVerdict)
-	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
-	if analysisRequested {
-		log.Log(runCtx, "worker", "analysis", architectureLogLevel(architectureVerdict.Status), logPhaseOCR,
-			fmt.Sprintf("análisis arquitectónico %s (%s): %d dimensión(es), %d token(s)",
-				architectureVerdict.Status, architectureVerdict.ExecutionStatus,
-				len(architectureVerdict.Dimensions), architectureVerdict.Usage.Total))
-	}
-
 	reviewed, skipped, excluded := nativeCoverageCounts(res)
 	closeInfo := ""
 	if res.closeReason != "" {
@@ -1420,6 +1371,73 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	resume.adopt(out.tokens)
 	out.executedProfile = activeProfile
 	out.summary = nativeSummaryText(res, status)
+
+	// The analysis is its own phase, run after the review report and its unit
+	// were persisted. Its expiry can therefore only downgrade the observation:
+	// the review findings, coverage and usage are already part of the outcome.
+	// OCR 1.14.1 has no analysis-only mode, so the range is reviewed again and
+	// that review output is deliberately ignored.
+	var analysisRes nativeReview
+	var analysisErr error
+	if analysisRequested {
+		analysisRes, analysisErr = r.runArchitecturePhase(runCtx, run, activeProfile, activeKey,
+			workDir, excludes, background, fromSHA, headSHA, effort, ceiling,
+			analysisRunTimeout, analysisBudget, log)
+		if analysisRes.hasSummary {
+			out.tokens.add(nativeTokenUsage(analysisRes))
+		} else {
+			log.Log(runCtx, "worker", "analysis", "warn", logPhaseOCR,
+				"consumo del análisis desconocido: no se atribuye a la revisión")
+		}
+		resume.adopt(out.tokens)
+	}
+	if analysisErr != nil {
+		reason := analysisErr.Error()
+		var timeout *nativeTimeoutError
+		if errors.As(analysisErr, &timeout) {
+			reason = timeoutCodeFromKind(timeout.Kind) + ": " + reason
+		}
+		log.Log(runCtx, "worker", "analysis", "warn", logPhaseOCR, reason)
+		architectureVerdict = markArchitectureTimedOut(architectureVerdict, reason)
+	} else {
+		architectureVerdict = applyNativeArchitectureAnalysis(architectureVerdict, analysisRes)
+		var analysisDeadlineHit bool
+		architectureVerdict, analysisDeadlineHit = applyAnalysisDeadline(architectureVerdict, analysisRes, analysisBudget)
+		if analysisDeadlineHit {
+			log.Log(runCtx, "worker", "analysis", "warn", logPhaseOCR, fmt.Sprintf(
+				"análisis arquitectónico inconcluso (%s): agotó su plazo de %ds; la revisión conserva su resultado",
+				timeoutCodeFromKind("analysis"), analysisBudget.TimeBudgetSeconds))
+		}
+	}
+	if analysisRequested {
+		// Bind every fresh section to the current rule version and sources,
+		// including partial reports, and keep earlier evidence the re-check did
+		// not cover.
+		architectureVerdict = finalizeArchitectureVerdict(
+			architectureVerdict, carried, carryEvidence, ruleVersion, sourceDigests)
+	}
+	// applyNativeArchitectureAnalysis rebuilds the dimensions and the risk and
+	// uncertainty lists from the report, so the deterministic evidence is
+	// integrated again: the trusted baseline, the contract comparison and the
+	// operational dimensions. The baseline violation wins over the inconclusive
+	// status a failed analysis leaves behind; neither the contract result nor
+	// the operational evidence changes the status.
+	if baselineEvaluated {
+		architectureVerdict = applyArchitectureBaseline(architectureVerdict, baseline)
+	}
+	architectureVerdict = attachContractComparison(architectureVerdict, contracts)
+	if opsEvaluated {
+		architectureVerdict = applyOpsEvidence(architectureVerdict, opsEvidence)
+	}
+	architectureVerdict = applyConsumerImpact(architectureVerdict)
+	architectureVerdict = store.MaskRedactedConsumers(architectureVerdict)
+	out.architecture = store.ArchitectureVerdictJSON(architectureVerdict)
+	if analysisRequested {
+		log.Log(runCtx, "worker", "analysis", architectureLogLevel(architectureVerdict.Status), logPhaseOCR,
+			fmt.Sprintf("análisis arquitectónico %s (%s): %d dimensión(es), %d token(s)",
+				architectureVerdict.Status, architectureVerdict.ExecutionStatus,
+				len(architectureVerdict.Dimensions), architectureVerdict.Usage.Total))
+	}
 
 	comments := append([]nativeComment(nil), res.Comments...)
 	out.merged = mergeNativeFindings(run.PullRequestID, comments, out.anchors)
@@ -1635,6 +1653,29 @@ func (r *Runner) runNativeReview(ctx context.Context, profileID uint, reviewer n
 	log.Log(ctx, "worker", invocation, "info", logPhaseOCR,
 		fmt.Sprintf("slot del perfil %d adquirido; ejecutando OCR", profileID))
 	return reviewer.Review(ctx)
+}
+
+// runArchitecturePhase runs the observational analysis in its own OCR
+// invocation, after the review report is persisted. The analysis share bounds
+// this invocation, so its expiry has its own close kind and cannot reach the
+// review outcome or start a backup review. The aggregate token cap is the share
+// already carved out of the run budget.
+func (r *Runner) runArchitecturePhase(ctx context.Context, run store.ReviewRun, profile store.LLMProfile,
+	key []byte, workDir, excludes, background, baseRef, headRef, effort string,
+	maxTokens int, runTimeout time.Duration, budget store.ArchitectureBudget,
+	log *runLogSink) (nativeReview, error) {
+	home := filepath.Join(runStateDir(r.Cfg.WorkspaceDir, run.ID), "home-analysis")
+	reviewer := newNativeReviewer(r.Cfg.OCRBin, workDir, home, profile, key,
+		excludes, background, baseRef, headRef, effort, maxTokens,
+		budget.TokenBudget, runTimeout, log.OCRLogger(ctx, "analysis"))
+	reviewer.Analysis = true
+	reviewer.AnalysisTokenBudget = budget.TokenBudget
+	reviewer.AnalysisTimeout = time.Duration(budget.TimeBudgetSeconds) * time.Second
+	log.Log(ctx, "worker", "analysis", "info", logPhaseOCR, fmt.Sprintf(
+		"fase de análisis arquitectónico: presupuesto %d tokens, %ds",
+		budget.TokenBudget, budget.TimeBudgetSeconds))
+	res, _, err := r.runNativeReview(ctx, profile.ID, reviewer, log, "analysis")
+	return res, err
 }
 
 func (r *Runner) boxOpen(sealed string) ([]byte, error) {
