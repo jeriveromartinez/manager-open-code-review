@@ -914,6 +914,10 @@ func TestRunErrorClassification(t *testing.T) {
 		{"red transitoria", errors.New(transientFetchFailure), store.RunInconclusive, "git_transient"},
 		{"5xx del remote", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': The requested URL returned error: 503"), store.RunInconclusive, "git_transient"},
 		{"HTTP 502", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': HTTP 502"), store.RunInconclusive, "git_transient"},
+		// Certificate and pack failures are configuration or corruption, not a
+		// transport blip: they stay terminal instead of looking retryable.
+		{"certificado TLS", errors.New("git fetch: exit status 128: fatal: unable to access 'https://github.com/acme/app.git/': SSL certificate problem: unable to get local issuer certificate"), store.RunFailed, "git_error"},
+		{"pack corrupto", errors.New("git fetch: exit status 128: fatal: index-pack failed"), store.RunFailed, "git_error"},
 		// A bare "401" inside a path, a SHA or an unrelated count is not an HTTP
 		// status: telling the operator to reinstall the App for those is a
 		// misleading and expensive action. A DNS failure is transient, not

@@ -21,11 +21,10 @@ const (
 )
 
 var (
-	// fetchRetryBase is the wait before the first retry; each later wait
-	// doubles, capped by fetchRetryMax. Variables so tests can shrink the
-	// backoff instead of sleeping for real.
+	// fetchRetryBase is the wait before the first retry; each later retry
+	// doubles it. A variable so tests can shrink the backoff instead of
+	// sleeping for real.
 	fetchRetryBase = 250 * time.Millisecond
-	fetchRetryMax  = 2 * time.Second
 )
 
 // cloneURL construye la URL de clonado inyectando un token de lectura solo en
@@ -108,10 +107,6 @@ var transientFetchPhrases = []string{
 	"unexpected eof",
 	"rpc failed",
 	"transfer closed",
-	"ssl_error",
-	"gnutls_handshake",
-	"tls connection",
-	"index-pack failed",
 }
 
 // isTransientFetchError reports whether a fetch failure is a transport problem
@@ -176,9 +171,6 @@ func fetchWithRetry(ctx context.Context, dir string, args ...string) (string, er
 			break
 		}
 		wait *= 2
-		if wait > fetchRetryMax {
-			wait = fetchRetryMax
-		}
 	}
 	if attempts == 1 {
 		return "", lastErr
