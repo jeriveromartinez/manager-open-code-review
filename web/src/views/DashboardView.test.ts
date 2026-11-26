@@ -1,5 +1,6 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia } from 'pinia'
+import { nextTick } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import DashboardView from './DashboardView.vue'
@@ -132,6 +133,31 @@ function mountDashboard(): VueWrapper {
 
 function tile(wrapper: VueWrapper, key: string) {
   return wrapper.get(`[data-tile="${key}"]`)
+}
+
+function cardTitles(wrapper: VueWrapper): string[] {
+  return wrapper.findAll('.pr-card__link').map((link) => link.text())
+}
+
+async function chooseOption(scope: ParentNode, dropdownLabel: string, optionLabel: string): Promise<void> {
+  const pill = Array.from(scope.querySelectorAll<HTMLButtonElement>('.filter-dropdown__pill')).find((button) =>
+    button.textContent?.includes(dropdownLabel),
+  )
+  if (!pill) throw new Error(`dropdown ${dropdownLabel} not found`)
+  pill.click()
+  await nextTick()
+
+  const option = Array.from(scope.querySelectorAll<HTMLElement>('[role="option"]')).find((item) =>
+    item.textContent?.includes(optionLabel),
+  )
+  if (!option) throw new Error(`option ${optionLabel} not found`)
+  option.click()
+  await nextTick()
+  await flushPromises()
+}
+
+function minutesAgo(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString()
 }
 
 describe('DashboardView', () => {
@@ -412,4 +438,147 @@ describe('DashboardView', () => {
     idle.unmount()
   })
 
+  it('filters the queue by search text', async () => {
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    const search = wrapper.get('input[type="search"]')
+    await search.setValue('carrito')
+
+    expect(cardTitles(wrapper)).toEqual(['Corrige el carrito'])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('1 DE 2')
+
+    await search.setValue('frontend-app')
+    expect(cardTitles(wrapper)).toEqual(['Corrige el carrito'])
+
+    await search.setValue('octocat')
+    expect(wrapper.findAll('.pr-card')).toHaveLength(2)
+    wrapper.unmount()
+  })
+
+  it('filters by team and sorts by wait, newest or findings', async () => {
+    mocks.api.me.mockResolvedValue({
+      id: 1,
+      login: 'mvega',
+      avatar_url: '',
+      is_admin: true,
+      teams: [
+        { id: 3, name: 'Pagos', role: 'qa' },
+        { id: 4, name: 'Web', role: 'qa' },
+      ],
+    })
+    mocks.api.prs.mockResolvedValue([
+      pr({ id: 11, repo: 'api', title: 'Alpha', team_id: 3, status_since: minutesAgo(30) }),
+      pr({
+        id: 12,
+        repo: 'web',
+        title: 'Beta',
+        team_id: 4,
+        status_since: minutesAgo(120),
+        open_findings: { blocker: 2, major: 4, minor: 0, nit: 0 },
+      }),
+      pr({
+        id: 13,
+        repo: 'infra',
+        title: 'Gamma',
+        team_id: 4,
+        status_since: minutesAgo(10),
+        open_findings: { blocker: 0, major: 5, minor: 0, nit: 0 },
+      }),
+    ])
+
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    expect(cardTitles(wrapper)).toEqual(['Beta', 'Alpha', 'Gamma'])
+
+    await chooseOption(wrapper.element, 'Equipo', 'Web')
+    expect(cardTitles(wrapper)).toEqual(['Beta', 'Gamma'])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('2 DE 3')
+
+    await chooseOption(wrapper.element, 'Orden', 'Más recientes')
+    expect(cardTitles(wrapper)).toEqual(['Gamma', 'Beta'])
+
+    await chooseOption(wrapper.element, 'Orden', 'Más hallazgos')
+    expect(cardTitles(wrapper)).toEqual(['Beta', 'Gamma'])
+
+    await chooseOption(wrapper.element, 'Orden', 'Más espera')
+    expect(cardTitles(wrapper)).toEqual(['Beta', 'Gamma'])
+    wrapper.unmount()
+  })
+
+  it('keeps the status tabs and their counts while other filters apply', async () => {
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    const countsBefore = wrapper.findAll('.filter-tab__count').map((count) => count.text())
+    expect(countsBefore).toEqual(['2', '0', '1', '1', '0', '4'])
+
+    await wrapper.get('input[type="search"]').setValue('carrito')
+
+    expect(wrapper.findAll('.filter-tab__count').map((count) => count.text())).toEqual(countsBefore)
+    expect(wrapper.get('[data-tab="ready"]').classes()).toContain('filter-tab--active')
+
+    await wrapper.get('[data-tab="all"]').trigger('click')
+    expect(cardTitles(wrapper)).toEqual(['Corrige el carrito'])
+    expect(wrapper.get('.filter-bar__count').text()).toBe('1 DE 4')
+    wrapper.unmount()
+  })
+
+  it('opens the mobile sheet and applies the same filters', async () => {
+    mocks.api.me.mockResolvedValue({
+      id: 1,
+      login: 'mvega',
+      avatar_url: '',
+      is_admin: true,
+      teams: [
+        { id: 3, name: 'Pagos', role: 'qa' },
+        { id: 4, name: 'Web', role: 'qa' },
+      ],
+    })
+    mocks.api.prs.mockResolvedValue([
+      pr({ id: 11, repo: 'api', title: 'Alpha', team_id: 3 }),
+      pr({ id: 12, repo: 'web', title: 'Beta', team_id: 4, status_since: minutesAgo(90) }),
+      pr({ id: 13, repo: 'infra', title: 'Gamma', team_id: 4, status_since: minutesAgo(5) }),
+    ])
+
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    await wrapper.get('.filter-bar__sheet').trigger('click')
+    await flushPromises()
+
+    const sheet = document.body.querySelector('.filter-sheet') as HTMLElement
+    expect(sheet).not.toBeNull()
+    expect(wrapper.get('.filter-bar__sheet').attributes('aria-expanded')).toBe('true')
+
+    await chooseOption(sheet, 'Equipo', 'Web')
+    expect(cardTitles(wrapper)).toEqual(['Beta', 'Gamma'])
+
+    const apply = document.body.querySelector('.filter-sheet__apply') as HTMLElement
+    expect(apply.textContent?.trim()).toBe('VER 2 PRs')
+    apply.click()
+    await flushPromises()
+
+    expect(document.body.querySelector('.filter-sheet')).toBeNull()
+    expect(wrapper.get('.filter-bar__sheet').attributes('aria-expanded')).toBe('false')
+    expect(cardTitles(wrapper)).toEqual(['Beta', 'Gamma'])
+    wrapper.unmount()
+  })
+
+  it('shows the filters empty state with LIMPIAR', async () => {
+    const wrapper = mountDashboard()
+    await flushPromises()
+
+    await wrapper.get('input[type="search"]').setValue('ninguno-de-estos')
+
+    expect(wrapper.findAll('.pr-card')).toHaveLength(0)
+    const empty = wrapper.get('.empty')
+    expect(empty.get('.empty__title').text()).toBe('NADA COINCIDE CON ESTOS FILTROS')
+
+    await empty.get('button').trigger('click')
+    expect(wrapper.findAll('.pr-card')).toHaveLength(2)
+    expect(wrapper.get('.filter-bar__count').text()).toBe('2 DE 2')
+    wrapper.unmount()
+  })
 })
