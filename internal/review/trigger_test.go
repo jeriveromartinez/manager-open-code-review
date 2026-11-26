@@ -119,6 +119,37 @@ func triggerTestPEM(t *testing.T) string {
 	}))
 }
 
+// recordingComparison resolves both the merge base and the changed files while
+// keeping the base each call was made for.
+type recordingComparison struct {
+	mu         sync.Mutex
+	mergeBases []string
+	fileBases  []string
+}
+
+func (r *recordingComparison) MergeBase(_ context.Context, _ int64, _, base, _ string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.mergeBases = append(r.mergeBases, base)
+	return "mb-1", nil
+}
+
+func (r *recordingComparison) ComparisonFiles(_ context.Context, _ int64, _, base, _ string) (github.Comparison, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.fileBases = append(r.fileBases, base)
+	return github.Comparison{
+		MergeBase: "mb-1",
+		Files:     []github.ChangedFile{{Filename: "api/openapi.yaml"}},
+	}, nil
+}
+
+func (r *recordingComparison) comparedFileBases() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.fileBases...)
+}
+
 type triggerFixture struct {
 	t            *testing.T
 	ctx          context.Context
@@ -167,6 +198,7 @@ type seedOpts struct {
 	externalRuns   int
 	externalBudget int64
 	externalAssocs []string
+	consumerRefs   []store.ConsumerRef
 }
 
 func newTriggerFixture(t *testing.T) *triggerFixture {
@@ -373,6 +405,13 @@ func (f *triggerFixture) seed(name string, opts seedOpts) store.PullRequest {
 				f.t.Fatalf("encode external associations: %v", err)
 			}
 			policy.ExternalTrustedAssociations = raw
+		}
+		if len(opts.consumerRefs) > 0 {
+			refs, err := store.NormalizeConsumerAllowList(opts.consumerRefs)
+			if err != nil {
+				f.t.Fatalf("encode consumer allow list: %v", err)
+			}
+			policy.ConsumerAllowList = refs
 		}
 		if _, err := f.st.SaveQAPolicy(f.ctx, policy); err != nil {
 			f.t.Fatalf("SaveQAPolicy(%q): %v", name, err)
@@ -926,6 +965,30 @@ func TestTriggerAdoptedRunRemainsCurrentForRepublish(t *testing.T) {
 	}
 	if current.BaseTipSHA != "tip-2" {
 		t.Errorf("adopted run base tip = %q, want tip-2", current.BaseTipSHA)
+	}
+}
+
+// The consumer diff must resolve against the same recorded base tip as the
+// review comparison. Pinning only the merge base would leave the consumer
+// lookup reading the mutable branch name and evaluating another commit.
+func TestTriggerPinsConsumerDiffToRecordedBaseTip(t *testing.T) {
+	f := newTriggerFixture(t)
+	opts := eligibleOpts()
+	opts.consumerRefs = []store.ConsumerRef{{
+		Repository: "acme/consumer", Contract: "api/openapi.yaml", Ref: "v1",
+		Visibility: store.ConsumerVisibilityPublic,
+	}}
+	pr := f.seed("app", opts)
+	pr = f.setPRComparison(pr, "main", "tip-2", "")
+	differ := &recordingComparison{}
+	f.trigger.Compare = differ
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() error = %v", err)
+	}
+
+	if got := differ.comparedFileBases(); len(got) != 1 || got[0] != "tip-2" {
+		t.Errorf("consumer ComparisonFiles bases = %v, want [tip-2]", got)
 	}
 }
 

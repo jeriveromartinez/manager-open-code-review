@@ -249,33 +249,33 @@ func TestSetPRMergeBaseKeepsTheComparisonItResolved(t *testing.T) {
 	repo := f.repo(installID, installID, "acme/merge-base", nil, true)
 	pr := f.openPR(repo.ID, 1, store.StatusPending, false)
 
-	stored, err := f.s.SetPRMergeBase(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, pr.BaseSHA, "mb-1")
-	if err != nil || !stored {
-		t.Fatalf("SetPRMergeBase(new) = %v, %v; want true", stored, err)
+	affected, err := f.s.SetPRMergeBase(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, pr.BaseSHA, "mb-1")
+	if err != nil || affected != 1 {
+		t.Fatalf("SetPRMergeBase(new) = %d, %v; want 1", affected, err)
 	}
-	stored, err = f.s.SetPRMergeBase(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, pr.BaseSHA, "mb-1")
-	if err != nil || !stored {
-		t.Fatalf("SetPRMergeBase(same) = %v, %v; want true", stored, err)
+	affected, err = f.s.SetPRMergeBase(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, pr.BaseSHA, "mb-1")
+	if err != nil || affected != 1 {
+		t.Fatalf("SetPRMergeBase(same) = %d, %v; want 1", affected, err)
 	}
-	stored, err = f.s.SetPRMergeBase(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, pr.BaseSHA, "mb-2")
-	if err != nil || stored {
-		t.Fatalf("SetPRMergeBase(other merge base) = %v, %v; want false", stored, err)
+	affected, err = f.s.SetPRMergeBase(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, pr.BaseSHA, "mb-2")
+	if err != nil || affected != 0 {
+		t.Fatalf("SetPRMergeBase(other merge base) = %d, %v; want 0", affected, err)
 	}
 	if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).
 		Update("base_sha", "tip-1").Error; err != nil {
 		t.Fatalf("move the base tip: %v", err)
 	}
-	stored, err = f.s.SetPRMergeBase(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, "tip-0", "mb-1")
-	if err != nil || stored {
-		t.Fatalf("SetPRMergeBase(stale base tip) = %v, %v; want false", stored, err)
+	affected, err = f.s.SetPRMergeBase(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, "tip-0", "mb-1")
+	if err != nil || affected != 0 {
+		t.Fatalf("SetPRMergeBase(stale base tip) = %d, %v; want 0", affected, err)
 	}
-	stored, err = f.s.SetPRMergeBase(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, "tip-1", "mb-1")
-	if err != nil || !stored {
-		t.Fatalf("SetPRMergeBase(current base tip) = %v, %v; want true", stored, err)
+	affected, err = f.s.SetPRMergeBase(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, "tip-1", "mb-1")
+	if err != nil || affected != 1 {
+		t.Fatalf("SetPRMergeBase(current base tip) = %d, %v; want 1", affected, err)
 	}
-	stored, err = f.s.SetPRMergeBase(f.ctx, pr.ID, "another-head", pr.BaseRef, "tip-1", "mb-1")
-	if err != nil || stored {
-		t.Fatalf("SetPRMergeBase(moved head) = %v, %v; want false", stored, err)
+	affected, err = f.s.SetPRMergeBase(f.ctx, pr.ID, "another-head", pr.BaseRef, "tip-1", "mb-1")
+	if err != nil || affected != 0 {
+		t.Fatalf("SetPRMergeBase(moved head) = %d, %v; want 0", affected, err)
 	}
 
 	var saved store.PullRequest
@@ -284,6 +284,55 @@ func TestSetPRMergeBaseKeepsTheComparisonItResolved(t *testing.T) {
 	}
 	if saved.MergeBaseSHA != "mb-1" {
 		t.Errorf("merge_base_sha = %q, want mb-1", saved.MergeBaseSHA)
+	}
+}
+
+// Adoption records the pull request merge base and the adopted run's re-pinned
+// base tip together. When the run does not match, the rollback leaves the pull
+// request comparison untouched so a retry cannot take the "covered" early
+// return with a stale run snapshot.
+func TestAdoptReviewComparisonRollsBackWhenRunDoesNotMatch(t *testing.T) {
+	f := newFixture(t)
+	installID := f.nextID()
+	f.installation(installID)
+	repo := f.repo(installID, installID, "acme/adopt", nil, true)
+	pr := f.openPR(repo.ID, 1, store.StatusPending, false)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", pr.ID).
+		Update("base_sha", "tip-2").Error; err != nil {
+		t.Fatalf("set base tip: %v", err)
+	}
+	run := f.run(pr, store.RunSucceeded)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+		Updates(map[string]any{
+			"base_ref": "main", "base_sha": "mb-1", "base_tip_sha": "tip-1",
+		}).Error; err != nil {
+		t.Fatalf("seed run comparison: %v", err)
+	}
+
+	affected, err := f.s.AdoptReviewComparison(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, "tip-2", "mb-1", run.ID+1000)
+	if err == nil {
+		t.Fatal("AdoptReviewComparison() error = nil, want the run mismatch")
+	}
+	if affected != 0 {
+		t.Errorf("affected = %d, want 0", affected)
+	}
+	if saved := f.pullRequest(t, pr.ID); saved.MergeBaseSHA != "" {
+		t.Errorf("merge_base_sha = %q, want the rollback to leave it empty", saved.MergeBaseSHA)
+	}
+
+	affected, err = f.s.AdoptReviewComparison(f.ctx, pr.ID, pr.HeadSHA, pr.BaseRef, "tip-2", "mb-1", run.ID)
+	if err != nil || affected != 1 {
+		t.Fatalf("AdoptReviewComparison(matching run) = %d, %v; want 1", affected, err)
+	}
+	if saved := f.pullRequest(t, pr.ID); saved.MergeBaseSHA != "mb-1" {
+		t.Errorf("merge_base_sha = %q, want mb-1", saved.MergeBaseSHA)
+	}
+	var adopted store.ReviewRun
+	if err := f.s.DB.WithContext(f.ctx).Take(&adopted, run.ID).Error; err != nil {
+		t.Fatalf("reload review run: %v", err)
+	}
+	if adopted.BaseTipSHA != "tip-2" {
+		t.Errorf("adopted base tip = %q, want tip-2", adopted.BaseTipSHA)
 	}
 }
 

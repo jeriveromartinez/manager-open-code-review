@@ -571,22 +571,20 @@ func (t *Trigger) enqueueForHead(ctx context.Context, prID uint, expectedHead, t
 		case hint.matches(cfg) && !hint.failed:
 			mergeBase = hint.mergeBase
 			if adopted := runForMergeBase(runs, cfg.PR, mergeBase); adopted != nil {
-				stored, err := t.Store.SetPRMergeBase(ctx, prID, cfg.PR.HeadSHA, cfg.PR.BaseRef, cfg.PR.BaseSHA, mergeBase)
+				// The merge-base write and the run re-pin share one transaction:
+				// committing only the pull request would leave the adopted run
+				// naming the old base tip, and the retry would take the "covered"
+				// early return without ever making it current again.
+				stored, err := t.Store.AdoptReviewComparison(ctx, prID, cfg.PR.HeadSHA,
+					cfg.PR.BaseRef, cfg.PR.BaseSHA, mergeBase, adopted.ID)
 				if err != nil {
 					return false, err
 				}
-				if !stored {
+				if stored == 0 {
 					// The pull request moved while the comparison was being
 					// adopted. The delivery that moved it owns the new run; this
 					// one must not supersede it with a stale target.
 					return false, nil
-				}
-				// The run's merge base now describes the tip Compare resolved.
-				// Re-pin the snapshot so the run stays the current comparison
-				// for publication and later republications instead of being
-				// dropped by the base-tip guard once the tip advances.
-				if err := t.Store.SetReviewRunBaseTip(ctx, adopted.ID, adopted.HeadSHA, adopted.BaseRef, cfg.PR.BaseSHA); err != nil {
-					return false, err
 				}
 				switch adopted.Status {
 				case store.RunQueued:
