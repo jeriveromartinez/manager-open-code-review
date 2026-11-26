@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -63,11 +64,13 @@ func TestBuildBackgroundMissingBodyAndCriteria(t *testing.T) {
 func TestBuildBackgroundTruncatesLongBodyAndCriteria(t *testing.T) {
 	long := strings.Repeat("x", maxPRBodyBytes+25)
 	bg := buildBackground(store.PullRequest{Number: 2, HeadSHA: "head", Body: long}, "", backgroundExtras{})
-	if !strings.Contains(bg, "[Descripción truncada a 8000 bytes de 8025.]") {
+	// The budget is dynamic, but the cut must be recorded with the original
+	// length instead of the old fixed 8000-byte cap.
+	if !regexp.MustCompile(`\[Descripción truncada a \d+ bytes de 8025\.\]`).MatchString(bg) {
 		t.Errorf("background did not record the body truncation:\n%s", bg)
 	}
-	if len(bg) > maxPRBodyBytes*3 {
-		t.Errorf("background is %d bytes, want a bounded body", len(bg))
+	if len(bg) > backgroundMaxBytes {
+		t.Errorf("background is %d bytes, want at most %d", len(bg), backgroundMaxBytes)
 	}
 
 	body := "## Acceptance criteria\n" + strings.Repeat("- [ ] criterion\n", maxCriteriaItems+5)
@@ -302,6 +305,81 @@ func TestBuildBackgroundDisabledByZeroBudget(t *testing.T) {
 	}
 	if strings.Contains(bg, "## Descripción del PR") {
 		t.Errorf("background sent the description despite the zero budget:\n%s", bg)
+	}
+}
+
+func TestBuildBackgroundStaysBelowOCRLimit(t *testing.T) {
+	giant := strings.Repeat("x", backgroundMaxBytes*2)
+	pr := store.PullRequest{
+		Number:            220,
+		Title:             giant,
+		AuthorLogin:       giant,
+		AuthorAssociation: giant,
+		BaseRef:           giant,
+		HeadRef:           giant,
+		HeadRepoFullName:  giant,
+		HTMLURL:           giant,
+		HeadSHA:           giant,
+		Body: giant + "\n\n## Acceptance criteria\n" +
+			strings.Repeat("- [ ] criterion\n", maxCriteriaItems+5),
+	}
+	issues := make([]linkedIssue, 0, maxLinkedIssues)
+	for i := 0; i < maxLinkedIssues; i++ {
+		issues = append(issues, linkedIssue{
+			Number: i + 1,
+			Title:  giant,
+			Body:   giant,
+		})
+	}
+	repoMarkdown := "<untrusted>" + giant + "</untrusted>\n\n<untrusted>" + giant + "</untrusted>\n"
+	bg := buildBackground(pr, giant, backgroundExtras{
+		linked:          linkedContext{Issues: issues, Omitted: 2},
+		repo:            repositoryContext{Markdown: repoMarkdown},
+		contextBytes:    backgroundContextMaxBytes,
+		contextBytesSet: true,
+	})
+
+	if len(bg) > backgroundMaxBytes {
+		t.Fatalf("background is %d bytes, want at most %d", len(bg), backgroundMaxBytes)
+	}
+	assertBalancedFences(t, bg)
+	for _, want := range []string{
+		"[Descripción truncada",
+		"[Criterios recortados",
+		"Contexto del repositorio truncado",
+		"Instrucciones del equipo truncadas",
+	} {
+		if !strings.Contains(bg, want) {
+			t.Errorf("background missing %q:\n%s", want, bg)
+		}
+	}
+}
+
+// assertBalancedFences fails when the document closes a fence it never opened
+// or leaves one open, which would put untrusted content outside its fence.
+func assertBalancedFences(t *testing.T, document string) {
+	t.Helper()
+	rest := document
+	depth := 0
+	for {
+		open := strings.Index(rest, "<untrusted>")
+		close := strings.Index(rest, "</untrusted>")
+		if open < 0 && close < 0 {
+			break
+		}
+		if open >= 0 && (close < 0 || open < close) {
+			depth++
+			rest = rest[open+len("<untrusted>"):]
+			continue
+		}
+		depth--
+		if depth < 0 {
+			t.Fatalf("background closes an untrusted fence it never opened")
+		}
+		rest = rest[close+len("</untrusted>"):]
+	}
+	if depth != 0 {
+		t.Fatalf("background leaves %d untrusted fence(s) open", depth)
 	}
 }
 
