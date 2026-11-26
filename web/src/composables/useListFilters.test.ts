@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, h, nextTick } from 'vue'
+import { defineComponent, h, nextTick, ref } from 'vue'
 import { createMemoryHistory, createRouter, type LocationQueryRaw } from 'vue-router'
 import { describe, expect, it } from 'vitest'
 import { useListFilters, type FacetValues } from './useListFilters'
@@ -95,11 +95,11 @@ describe('useListFilters', () => {
   })
 
   it('applies text and facets and reports activity', async () => {
-    const items: Pr[] = [
+    const items = ref<Pr[]>([
       { title: 'Fix login', status: 'open', severity: ['high'] },
       { title: 'Rework login form', status: 'draft', severity: ['low'] },
       { title: 'Write docs', status: 'open', severity: ['low'] },
-    ]
+    ])
     const { filters } = await mountFilters({ q: ' LOGIN ', status: ['open'] })
 
     const visible = filters.apply(
@@ -112,6 +112,9 @@ describe('useListFilters', () => {
     expect(filters.isActive.value).toBe(true)
     expect(filters.activeCount.value).toBe(1)
 
+    items.value = [...items.value, { title: 'Login redesign', status: 'open', severity: ['high'] }]
+    expect(visible.value.map((item) => item.title)).toEqual(['Fix login', 'Login redesign'])
+
     filters.setSort('recent')
     expect(filters.isActive.value).toBe(true)
     expect(filters.activeCount.value).toBe(1)
@@ -121,9 +124,9 @@ describe('useListFilters', () => {
     const items: Pr[] = [
       { title: 'Fix auth', status: 'open', severity: ['high'] },
       { title: 'Fix login', status: 'open', severity: ['low'] },
-      { title: 'Write docs', status: 'closed', severity: ['high'] },
+      { title: 'Fix docs', status: 'closed', severity: ['high'] },
     ]
-    const { filters } = await mountFilters({ q: 'fix', status: ['open'] })
+    const { filters } = await mountFilters({ q: 'fix', status: ['open'], severity: ['high'] })
 
     const counts = filters.facetCounts(
       items,
@@ -132,7 +135,7 @@ describe('useListFilters', () => {
     )
 
     expect(counts.value.severity).toEqual({ high: 1, low: 1 })
-    expect(counts.value.status).toEqual({ open: 2 })
+    expect(counts.value.status).toEqual({ open: 1, closed: 1 })
   })
 
   it('falls back to the default sort', async () => {

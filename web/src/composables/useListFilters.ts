@@ -1,4 +1,4 @@
-import { computed, ref, watch, type ComputedRef } from 'vue'
+import { computed, ref, toValue, watch, type ComputedRef, type MaybeRefOrGetter } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
 
 export type FacetValues = Record<string, string[]>
@@ -78,7 +78,20 @@ export function useListFilters(options: ListFiltersOptions) {
     return next
   }
 
-  watch([q, facets, sort], () => void router.replace({ query: currentQuery() }), { deep: true })
+  // Limitación conocida: la URL se hidrata una sola vez al crear el composable.
+  // Un cambio externo en la misma ruta (atrás/adelante, editar el query a mano)
+  // no vuelve a hidratar; se resolverá si las vistas lo necesitan.
+  watch(
+    [q, facets, sort],
+    () => {
+      // Un guard que falle rechaza la promesa; el estado local sigue siendo
+      // válido, pero el fallo no debe pasar desapercibido.
+      void router.replace({ query: currentQuery() }).catch((error: unknown) => {
+        console.error('No se pudo sincronizar los filtros con la URL', error)
+      })
+    },
+    { deep: true },
+  )
 
   function setFacet(facet: string, values: readonly string[]): void {
     if (!options.facets.includes(facet)) return
@@ -102,13 +115,13 @@ export function useListFilters(options: ListFiltersOptions) {
   }
 
   function apply<T>(
-    items: T[],
+    items: MaybeRefOrGetter<T[]>,
     text: (item: T) => string,
     match: (item: T, facets: FacetValues) => boolean,
   ): ComputedRef<T[]> {
     return computed(() => {
       const needle = q.value.trim().toLowerCase()
-      return items.filter((item) => {
+      return toValue(items).filter((item) => {
         if (needle !== '' && !text(item).toLowerCase().includes(needle)) return false
         return match(item, facets.value)
       })
@@ -119,11 +132,15 @@ export function useListFilters(options: ListFiltersOptions) {
    * Cuenta cada valor de cada faceta contra el texto y las demás dimensiones:
    * la faceta que se cuenta se ignora a sí misma para que una opción elegida
    * nunca desaparezca del desplegable.
+   *
+   * Contrato: los valores de `valuesOf` deben significar lo mismo que el
+   * predicado de `apply` (pertenencia a la selección de esa faceta); si no,
+   * los recuentos no coincidirán con la lista filtrada.
    */
   function facetCounts<T>(
-    items: T[],
+    items: MaybeRefOrGetter<T[]>,
     valuesOf: (item: T, facet: string) => string[],
-    text?: (item: T) => string,
+    text: (item: T) => string,
   ): ComputedRef<Record<string, Record<string, number>>> {
     return computed(() => {
       const needle = q.value.trim().toLowerCase()
@@ -132,8 +149,8 @@ export function useListFilters(options: ListFiltersOptions) {
         const perValue: Record<string, number> = {}
         for (const selected of facets.value[facet] ?? []) perValue[selected] = 0
         const others = options.facets.filter((other) => other !== facet)
-        for (const item of items) {
-          if (needle !== '' && text && !text(item).toLowerCase().includes(needle)) continue
+        for (const item of toValue(items)) {
+          if (needle !== '' && !text(item).toLowerCase().includes(needle)) continue
           const matchesOthers = others.every((other) => {
             const selected = facets.value[other] ?? []
             if (selected.length === 0) return true
