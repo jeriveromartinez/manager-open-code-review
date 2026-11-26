@@ -109,17 +109,20 @@ func (c *Checks) storeValidations(ctx context.Context, client *gh.Client, ownApp
 	state, observation, err := ReadObservation(ctx, client, owner, name, pr.HeadSHA, ownAppID)
 	if err != nil {
 		// The previous counters must not survive a failed lookup: the gate would
-		// keep using a verdict GitHub did not confirm.
-		if _, markErr := c.Store.SetPRValidationLookupFailure(ctx, pr.ID, pr.HeadSHA, stamp); markErr != nil {
+		// keep using a verdict GitHub did not confirm. The write still reports
+		// whether it cleared a previous verdict, so polling can re-drive the
+		// check it just invalidated.
+		write, markErr := c.Store.SetPRValidationLookupFailure(ctx, pr.ID, pr.HeadSHA, stamp)
+		if markErr != nil {
 			return store.PRValidations{}, false, errors.Join(err, markErr)
 		}
-		return store.PRValidations{}, false, err
+		return store.PRValidations{}, write.Changed, err
 	}
-	changed, err := c.Store.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA, state, observation, stamp)
+	write, err := c.Store.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA, state, observation, stamp)
 	if err != nil {
 		return store.PRValidations{}, false, err
 	}
-	return state, changed, nil
+	return state, write.Changed, nil
 }
 
 // ReadValidations reads the check runs and commit statuses GitHub reports for

@@ -2,8 +2,11 @@ package store_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
@@ -55,12 +58,12 @@ func TestValidationObservationIsTiedToTheHead(t *testing.T) {
 	if !verdict.Green() {
 		t.Fatalf("verdict = %+v, want green", verdict)
 	}
-	changed, err := st.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA,
+	write, err := st.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA,
 		store.PRValidations{Passed: 1, Total: 1}, observation, stamp)
 	if err != nil {
 		t.Fatalf("SetPRValidationObservation again: %v", err)
 	}
-	if changed {
+	if write.Changed {
 		t.Error("repeating the same observation reported a change")
 	}
 
@@ -91,13 +94,13 @@ func TestValidationObservationIsTiedToTheHead(t *testing.T) {
 	}
 
 	// A late write for the previous head must not label the new one.
-	changed, err = st.SetPRValidationObservation(ctx, pr.ID, "sha-1",
+	write, err = st.SetPRValidationObservation(ctx, pr.ID, "sha-1",
 		store.PRValidations{Passed: 1, Total: 1}, observation, stamp)
 	if err != nil {
 		t.Fatalf("SetPRValidationObservation(old head): %v", err)
 	}
-	if changed {
-		t.Error("a write for the previous head changed the new head")
+	if write.Changed || write.Accepted {
+		t.Errorf("a write for the previous head was accepted/change = %v/%v", write.Accepted, write.Changed)
 	}
 }
 
@@ -158,14 +161,14 @@ func TestStaleValidationObservationDoesNotOverwriteANewerOne(t *testing.T) {
 
 	// A read that started before the stored one and finishes later must be
 	// discarded instead of turning the head red.
-	changed, err := st.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA,
+	write, err := st.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA,
 		store.PRValidations{Failed: 1, Total: 1}, red,
 		store.ObservationStamp{At: older, Source: store.ObservationSourceWebhook})
 	if err != nil {
 		t.Fatalf("SetPRValidationObservation(late red): %v", err)
 	}
-	if changed {
-		t.Error("a stale observation reported a change")
+	if write.Changed || write.Accepted {
+		t.Errorf("a stale observation was accepted/change = %v/%v", write.Accepted, write.Changed)
 	}
 	verdict, err := st.CIVerdictFor(ctx, pr.ID, pr.HeadSHA, required)
 	if err != nil {
@@ -187,14 +190,14 @@ func TestStaleValidationObservationDoesNotOverwriteANewerOne(t *testing.T) {
 	}
 
 	// A newer reading does replace the stored one.
-	changed, err = st.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA,
+	write, err = st.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA,
 		store.PRValidations{Failed: 1, Total: 1}, red,
 		store.ObservationStamp{At: newer.Add(time.Minute), Source: store.ObservationSourceWebhook})
 	if err != nil {
 		t.Fatalf("SetPRValidationObservation(newer red): %v", err)
 	}
-	if !changed {
-		t.Error("a newer observation did not report a change")
+	if !write.Changed || !write.Accepted {
+		t.Errorf("a newer observation was accepted/change = %v/%v, want true/true", write.Accepted, write.Changed)
 	}
 	verdict, err = st.CIVerdictFor(ctx, pr.ID, pr.HeadSHA, required)
 	if err != nil {
@@ -202,6 +205,63 @@ func TestStaleValidationObservationDoesNotOverwriteANewerOne(t *testing.T) {
 	}
 	if verdict.State != store.CIFailed {
 		t.Fatalf("verdict after a newer red = %+v, want failed", verdict)
+	}
+}
+
+func TestConcurrentValidationWriteLosesToANewerObservation(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	pr := seedCIPullRequest(t, st, 1, "sha-1")
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	green := store.ValidationObservation{
+		Result: store.ObservationOK,
+		Checks: []store.CheckObservation{{Name: "build", Origin: "app:7", State: store.CheckPassed}},
+	}
+	red := store.ValidationObservation{
+		Result: store.ObservationOK,
+		Checks: []store.CheckObservation{{Name: "build", Origin: "app:7", State: store.CheckFailed}},
+	}
+	if _, err := st.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA,
+		store.PRValidations{Passed: 1, Total: 1}, green,
+		store.ObservationStamp{At: base, Source: store.ObservationSourcePolling}); err != nil {
+		t.Fatalf("seed observation: %v", err)
+	}
+
+	// Simulate a second writer landing a newer observation between this write's
+	// read and its conditional update, so the update matches no row.
+	newer := base.Add(time.Minute)
+	var injected atomic.Bool
+	var injectErr error
+	if err := st.DB.Callback().Update().Before("gorm:update").Register("test:newer_writer", func(*gorm.DB) {
+		if !injected.CompareAndSwap(false, true) {
+			return
+		}
+		injectErr = st.DB.Exec(
+			"UPDATE pull_requests SET validations_observed_at = ? WHERE id = ?", newer, pr.ID,
+		).Error
+	}); err != nil {
+		t.Fatalf("register update callback: %v", err)
+	}
+
+	write, err := st.SetPRValidationObservation(ctx, pr.ID, pr.HeadSHA,
+		store.PRValidations{Failed: 1, Total: 1}, red,
+		store.ObservationStamp{At: base.Add(time.Second), Source: store.ObservationSourceWebhook})
+	if err != nil {
+		t.Fatalf("SetPRValidationObservation: %v", err)
+	}
+	if injectErr != nil {
+		t.Fatalf("inject newer observation: %v", injectErr)
+	}
+	if write.Accepted || write.Changed {
+		t.Errorf("write that lost the race was accepted/change = %v/%v", write.Accepted, write.Changed)
+	}
+
+	verdict, err := st.CIVerdictFor(ctx, pr.ID, pr.HeadSHA, nil)
+	if err != nil {
+		t.Fatalf("CIVerdictFor: %v", err)
+	}
+	if !verdict.Green() {
+		t.Fatalf("verdict after the race = %+v, want the seeded green", verdict)
 	}
 }
 

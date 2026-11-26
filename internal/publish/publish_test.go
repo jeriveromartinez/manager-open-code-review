@@ -2200,6 +2200,39 @@ func TestPublishDoesNotSucceedWhenCITurnedRed(t *testing.T) {
 	}
 }
 
+// A publication read that lands after a newer observation must not patch the
+// check with its own stale verdict: it publishes the stored one instead, so the
+// check and the panel cannot contradict each other.
+func TestPublishUsesTheStoredVerdictWhenItsObservationIsStale(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableCI(t, st, pr, store.RequiredCheck{Name: "build", Origin: "app:7"})
+
+	if _, err := st.SetPRValidationObservation(ctx, pr.ID, run.HeadSHA,
+		store.PRValidations{Passed: 1, Total: 1},
+		store.ValidationObservation{
+			Result: store.ObservationOK,
+			Checks: []store.CheckObservation{{Name: "build", Origin: "app:7", State: store.CheckPassed}},
+		},
+		store.ObservationStamp{At: time.Now().UTC().Add(time.Minute), Source: store.ObservationSourcePolling}); err != nil {
+		t.Fatalf("seed newer observation: %v", err)
+	}
+	gh := newFakeGitHub(t)
+	gh.setCheckTasks(store.CheckObservation{Name: "build", Origin: "app:7", State: store.CheckFailed})
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if got := publishedConclusion(t, gh); got != "success" {
+		t.Errorf("check conclusion = %q, want the stored green verdict", got)
+	}
+	if got := storedQAStatus(t, st, pr.ID); got != store.StatusReadyForHuman {
+		t.Errorf("qa_status = %q, want %q", got, store.StatusReadyForHuman)
+	}
+}
+
 func TestPublishWaitsForPendingCI(t *testing.T) {
 	st := testutil.NewStore(t)
 	ctx := context.Background()

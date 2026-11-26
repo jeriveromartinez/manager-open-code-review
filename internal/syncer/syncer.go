@@ -407,28 +407,26 @@ func (s *Syncer) refreshChecks(ctx context.Context, client *gh.Client, pr store.
 	if s.Checks == nil || pr.HeadSHA == "" {
 		return nil
 	}
-	_, changed, err := s.Checks.RefreshPRWith(ctx, client, pr, store.ObservationSourcePolling)
-	if err != nil {
-		return err
-	}
-	if !changed {
-		return nil
-	}
-	if err := s.publish(ctx, events.Event{
-		Type: "pr.updated",
-		ID:   strconv.FormatUint(uint64(pr.ID), 10),
-	}); err != nil {
-		return err
-	}
-	// The counters moved but the App check run still shows the previous
-	// conclusion. Without a webhook delivery, this is the only path that can
-	// correct it, so the same gate the delivery uses is re-evaluated here.
-	if s.CIGate != nil && !pr.Draft {
-		if err := s.CIGate.OnChecksUpdated(ctx, pr.ID); err != nil {
-			return fmt.Errorf("re-evaluate CI gate of pull request %d: %w", pr.ID, err)
+	_, changed, refreshErr := s.Checks.RefreshPRWith(ctx, client, pr, store.ObservationSourcePolling)
+	if changed {
+		if err := s.publish(ctx, events.Event{
+			Type: "pr.updated",
+			ID:   strconv.FormatUint(uint64(pr.ID), 10),
+		}); err != nil {
+			return errors.Join(refreshErr, err)
+		}
+		// The counters moved but the App check run still shows the previous
+		// conclusion. Without a webhook delivery, this is the only path that can
+		// correct it, so the same gate the delivery uses is re-evaluated here.
+		// A failed lookup clears the counters, so this also withdraws a success
+		// the publication wrote before GitHub stopped answering.
+		if s.CIGate != nil && !pr.Draft {
+			if err := s.CIGate.OnChecksUpdated(ctx, pr.ID); err != nil {
+				return errors.Join(refreshErr, fmt.Errorf("re-evaluate CI gate of pull request %d: %w", pr.ID, err))
+			}
 		}
 	}
-	return nil
+	return refreshErr
 }
 
 // requestForkReview hands an external contribution the engine may not review

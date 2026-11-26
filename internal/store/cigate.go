@@ -36,6 +36,9 @@ const (
 	ObservationSourceWebhook = "webhook"
 	ObservationSourcePolling = "polling"
 	ObservationSourcePublish = "publish"
+	// ObservationSourceLegacy is the counters-only writer kept for pre-named
+	// observations. It goes through the same stamped path as the others.
+	ObservationSourceLegacy  = "legacy"
 	ObservationSourceUnknown = "unknown"
 )
 
@@ -45,6 +48,14 @@ const (
 type ObservationStamp struct {
 	At     time.Time
 	Source string
+}
+
+// ObservationWrite reports the outcome of storing one observation. Accepted is
+// false when the write was discarded: the pull request points at another head,
+// or a newer observation is already stored.
+type ObservationWrite struct {
+	Changed  bool
+	Accepted bool
 }
 
 // Gate states. Only Green opens the gate or publishes a success.
@@ -325,13 +336,13 @@ func decodeObservation(raw datatypes.JSON) *ValidationObservation {
 // headSHA. A write for a head the pull request no longer points at, or one
 // older than the stored observation, is discarded. changed reports whether
 // anything stored actually moved.
-func (s *Store) SetPRValidationObservation(ctx context.Context, prID uint, headSHA string, v PRValidations, obs ValidationObservation, stamp ObservationStamp) (bool, error) {
+func (s *Store) SetPRValidationObservation(ctx context.Context, prID uint, headSHA string, v PRValidations, obs ValidationObservation, stamp ObservationStamp) (ObservationWrite, error) {
 	if obs.Result == "" {
 		obs.Result = ObservationOK
 	}
 	raw, err := json.Marshal(obs)
 	if err != nil {
-		return false, fmt.Errorf("encode validations of pull request %d: %w", prID, err)
+		return ObservationWrite{}, fmt.Errorf("encode validations of pull request %d: %w", prID, err)
 	}
 	return s.storeValidations(ctx, prID, headSHA, v, datatypes.JSON(raw), stamp)
 }
@@ -339,10 +350,10 @@ func (s *Store) SetPRValidationObservation(ctx context.Context, prID uint, headS
 // SetPRValidationLookupFailure records that the check lookup for headSHA
 // failed. Counters are cleared so the previous verdict cannot be mistaken for
 // the current one.
-func (s *Store) SetPRValidationLookupFailure(ctx context.Context, prID uint, headSHA string, stamp ObservationStamp) (bool, error) {
+func (s *Store) SetPRValidationLookupFailure(ctx context.Context, prID uint, headSHA string, stamp ObservationStamp) (ObservationWrite, error) {
 	raw, err := json.Marshal(ValidationObservation{Result: ObservationLookupFailed})
 	if err != nil {
-		return false, fmt.Errorf("encode validation failure of pull request %d: %w", prID, err)
+		return ObservationWrite{}, fmt.Errorf("encode validation failure of pull request %d: %w", prID, err)
 	}
 	return s.storeValidations(ctx, prID, headSHA, PRValidations{}, datatypes.JSON(raw), stamp)
 }
@@ -358,7 +369,7 @@ func normalizeObservationStamp(stamp ObservationStamp) ObservationStamp {
 	return stamp
 }
 
-func (s *Store) storeValidations(ctx context.Context, prID uint, headSHA string, v PRValidations, detail datatypes.JSON, stamp ObservationStamp) (bool, error) {
+func (s *Store) storeValidations(ctx context.Context, prID uint, headSHA string, v PRValidations, detail datatypes.JSON, stamp ObservationStamp) (ObservationWrite, error) {
 	stamp = normalizeObservationStamp(stamp)
 	var current PullRequest
 	err := quietDB(s.DB.WithContext(ctx)).Select(
@@ -366,25 +377,27 @@ func (s *Store) storeValidations(ctx context.Context, prID uint, headSHA string,
 		"validations_observed_at",
 	).Take(&current, prID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, fmt.Errorf("pull request %d: %w", prID, ErrNotFound)
+		return ObservationWrite{}, fmt.Errorf("pull request %d: %w", prID, ErrNotFound)
 	}
 	if err != nil {
-		return false, fmt.Errorf("find pull request %d: %w", prID, err)
+		return ObservationWrite{}, fmt.Errorf("find pull request %d: %w", prID, err)
 	}
 	if headSHA == "" || current.HeadSHA != headSHA {
-		return false, nil
+		return ObservationWrite{}, nil
 	}
 	// A reading that started before the stored one was already superseded on its
 	// way back. Letting it land would re-open a verdict a newer delivery fixed.
 	if !current.ValidationsObservedAt.IsZero() && stamp.At.Before(current.ValidationsObservedAt.UTC()) {
-		return false, nil
+		return ObservationWrite{}, nil
 	}
+	// A nil detail is the counters-only legacy write: it must not erase a named
+	// observation a newer path already stored.
 	same := current.ValidationsPassed == v.Passed &&
 		current.ValidationsFailed == v.Failed &&
 		current.ValidationsTotal == v.Total &&
-		sameObservation(current.ValidationsDetail, detail)
+		(detail == nil || sameObservation(current.ValidationsDetail, detail))
 	if same && !stamp.At.After(current.ValidationsObservedAt.UTC()) {
-		return false, nil
+		return ObservationWrite{Accepted: true}, nil
 	}
 
 	updates := map[string]any{
@@ -395,7 +408,9 @@ func (s *Store) storeValidations(ctx context.Context, prID uint, headSHA string,
 		updates["validations_passed"] = v.Passed
 		updates["validations_failed"] = v.Failed
 		updates["validations_total"] = v.Total
-		updates["validations_detail"] = detail
+		if detail != nil {
+			updates["validations_detail"] = detail
+		}
 		updates["updated_at"] = time.Now().UTC()
 	}
 
@@ -404,13 +419,13 @@ func (s *Store) storeValidations(ctx context.Context, prID uint, headSHA string,
 			prID, headSHA, stamp.At).
 		Updates(updates)
 	if res.Error != nil {
-		return false, fmt.Errorf("set validations of pull request %d: %w", prID, res.Error)
+		return ObservationWrite{}, fmt.Errorf("set validations of pull request %d: %w", prID, res.Error)
 	}
 	if res.RowsAffected == 0 {
 		// A newer reading won the race after the row was read.
-		return false, nil
+		return ObservationWrite{}, nil
 	}
-	return !same, nil
+	return ObservationWrite{Changed: !same, Accepted: true}, nil
 }
 
 // sameObservation compares the decoded observations: jsonb normalizes key
