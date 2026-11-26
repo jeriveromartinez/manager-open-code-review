@@ -2133,8 +2133,8 @@ func TestPublishDoesNotTrustAConfirmationWithoutEvidence(t *testing.T) {
 	}
 
 	conclusion, status := publishConclusion(t, st, gh, pr.ID)
-	if conclusion != "success" || status != store.StatusReadyForHuman {
-		t.Errorf("conclusion/status = %q/%q, want an evidence-less confirmation not to block", conclusion, status)
+	if conclusion != "action_required" || status != store.StatusInconclusive {
+		t.Errorf("conclusion/status = %q/%q, want an evidence-less confirmation to leave the review inconclusive", conclusion, status)
 	}
 	body := publishedSummary(t, gh)
 	if !strings.Contains(body, "0 validados · 1 para tu criterio") {
@@ -2158,6 +2158,7 @@ func TestPublishDoesNotTrustAVerdictFromAnotherHead(t *testing.T) {
 	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
 	enableAutoTriage(t, st, store.AutoTriageApply)
 	setRunVerificationSession(t, st, run.ID, "verify-session")
+	setReviewTarget(t, st, "qa-reviewer", "")
 	seedFinding(t, st, pr.ID, run.ID, "stale", 2, "major", store.FindingOpen)
 	markVerifiedAtHead(t, st, "stale", "confirm", store.VerdictConfirmed, "oldsha111")
 	gh := newFakeGitHub(t)
@@ -2168,8 +2169,11 @@ func TestPublishDoesNotTrustAVerdictFromAnotherHead(t *testing.T) {
 	}
 
 	conclusion, status := publishConclusion(t, st, gh, pr.ID)
-	if conclusion != "success" || status != store.StatusReadyForHuman {
-		t.Errorf("conclusion/status = %q/%q, want a stale verdict not to block", conclusion, status)
+	if conclusion != "action_required" || status != store.StatusInconclusive {
+		t.Errorf("conclusion/status = %q/%q, want a stale verdict to leave the review inconclusive", conclusion, status)
+	}
+	if calls := reviewRequestCalls(gh); len(calls) != 1 {
+		t.Errorf("review requests = %d, want the stale verdict to reach a human", len(calls))
 	}
 	body := publishedSummary(t, gh)
 	for _, want := range []string{

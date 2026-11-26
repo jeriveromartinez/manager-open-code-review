@@ -499,9 +499,10 @@ func (p *publishContext) blocksOnVerification(f store.Finding) bool {
 }
 
 // hasMaterialUncertainty reports whether an open finding at or above the
-// blocking threshold has a verdict the apply policy could not resolve. That
-// uncertainty can change the conclusion, so the review must stay inconclusive
-// instead of passing, and a human must be asked.
+// blocking threshold has a verdict that cannot settle it: an uncertainty, or
+// any answer recorded for another head. That uncertainty can change the
+// conclusion, so the review must stay inconclusive instead of passing, and a
+// human must be asked.
 func (p *publishContext) hasMaterialUncertainty(findings []store.Finding) bool {
 	if p.policy.AutoTriageMode != store.AutoTriageApply {
 		return false
@@ -518,15 +519,20 @@ func (p *publishContext) hasMaterialUncertainty(findings []store.Finding) bool {
 			continue
 		}
 		v := parseVerification(f)
-		if v.Verdict != "uncertain" {
+		if v.Verdict == "" {
+			// No stored answer: blocksOnVerification keeps the pre-verifier gate.
 			continue
 		}
-		if _, trusted := p.verificationAtHead(f); !trusted {
-			// A verdict from another head is not an uncertainty about this one:
-			// blocksOnVerification already keeps the pre-verifier gate.
-			continue
+		atHead, trusted := p.verificationAtHead(f)
+		if !trusted {
+			// A verdict from another head cannot settle or unblock this one.
+			return true
 		}
-		return true
+		if atHead.Verdict == "uncertain" {
+			return true
+		}
+		// A trusted confirmation blocks, and a trusted refutation of a blocking
+		// finding keeps the block; neither is an uncertainty.
 	}
 	return false
 }

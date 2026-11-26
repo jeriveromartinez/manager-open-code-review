@@ -80,6 +80,12 @@ func TestReadCitedBlobsReadsBothSides(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "kept.go"), []byte("package a\nfunc kept() {}\n"), 0o644); err != nil {
 		t.Fatalf("write kept.go: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "pkg"), 0o755); err != nil {
+		t.Fatalf("create pkg dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pkg", "util.go"), []byte("package pkg\n"), 0o644); err != nil {
+		t.Fatalf("write pkg/util.go: %v", err)
+	}
 	runGit(t, dir, "add", "-A")
 	runGit(t, dir, "commit", "-qm", "base")
 	baseSHA := runGit(t, dir, "rev-parse", "HEAD")
@@ -97,6 +103,12 @@ func TestReadCitedBlobsReadsBothSides(t *testing.T) {
 			}}),
 		},
 		{ID: "head", Path: "kept.go", StartLine: 2, EndLine: 2},
+		{
+			ID: "dir", Path: "pkg", StartLine: 1, EndLine: 1,
+			Citations: store.EncodeFindingCitations([]store.FindingCitation{{
+				Path: "pkg", StartLine: 1, EndLine: 1, Side: store.FindingCitationBase,
+			}}),
+		},
 	}
 	blobs := readCitedBlobs(context.Background(), dir, baseSHA, findings)
 	if got := string(blobs.base["gone.go"]); got != "package a\nfunc removed() {}\n" {
@@ -107,6 +119,31 @@ func TestReadCitedBlobsReadsBothSides(t *testing.T) {
 	}
 	if got := string(blobs.head["kept.go"]); got != "package a\nfunc kept() {}\n" {
 		t.Errorf("head blob = %q, want the checked-out content", got)
+	}
+	if _, ok := blobs.base["pkg"]; ok {
+		t.Error("a directory citation was read as a blob")
+	}
+	if _, err := readBaseBlob(context.Background(), dir, baseSHA, "pkg"); err == nil {
+		t.Error("readBaseBlob accepted a directory, want cat-file to reject the tree")
+	}
+}
+
+func TestCleanRepoPathRejectsEscapingPaths(t *testing.T) {
+	for _, bad := range []string{"", "../a.go", `..\a.go`, "/a.go", `\a.go`, "../dir/a.go"} {
+		if _, err := cleanRepoPath(bad); err == nil {
+			t.Errorf("path %q was accepted, want rejected", bad)
+		}
+	}
+	if abs, err := filepath.Abs("a.go"); err != nil {
+		t.Fatalf("absolute path: %v", err)
+	} else if _, err := cleanRepoPath(abs); err == nil {
+		t.Errorf("absolute path %q was accepted, want rejected", abs)
+	}
+	if got, err := cleanRepoPath(`dir\a.go`); err != nil || got != "dir/a.go" {
+		t.Errorf("cleanRepoPath() = %q (err=%v), want dir/a.go", got, err)
+	}
+	if got, err := cleanRepoPath("./a.go"); err != nil || got != "a.go" {
+		t.Errorf("cleanRepoPath() = %q (err=%v), want a.go", got, err)
 	}
 }
 

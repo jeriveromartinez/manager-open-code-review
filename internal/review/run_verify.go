@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -408,9 +409,10 @@ func readCitedBlobs(ctx context.Context, workDir, baseSHA string, findings []sto
 	return blobs
 }
 
-// readBaseBlob reads one path from the base commit. It never follows a
+// readBaseBlob reads one blob from the base commit. It never follows a
 // filesystem path, so a file that only exists in the base is available and the
-// path cannot escape the repository.
+// path cannot escape the repository. cat-file fails for a tree, so a citation
+// pointing at a directory can never validate a quote against its entries.
 func readBaseBlob(ctx context.Context, workDir, baseSHA, path string) ([]byte, error) {
 	if baseSHA == "" {
 		return nil, fmt.Errorf("no base commit for %q", path)
@@ -419,7 +421,7 @@ func readBaseBlob(ctx context.Context, workDir, baseSHA, path string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	content, err := gitRaw(ctx, workDir, "read base blob", "show", baseSHA+":"+clean)
+	content, err := gitRaw(ctx, workDir, "read base blob", "cat-file", "blob", baseSHA+":"+clean)
 	if err != nil {
 		return nil, err
 	}
@@ -429,15 +431,21 @@ func readBaseBlob(ctx context.Context, workDir, baseSHA, path string) ([]byte, e
 	return content, nil
 }
 
-func cleanRepoPath(path string) (string, error) {
-	if path == "" || filepath.IsAbs(path) {
-		return "", fmt.Errorf("invalid finding path %q", path)
+// cleanRepoPath canonicalizes a repository-relative path with slash semantics
+// and rejects anything that could address outside the tree.
+func cleanRepoPath(value string) (string, error) {
+	if value == "" || filepath.IsAbs(value) {
+		return "", fmt.Errorf("invalid finding path %q", value)
 	}
-	clean := filepath.Clean(path)
-	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("finding path escapes the checkout: %q", path)
+	slash := strings.ReplaceAll(value, `\`, "/")
+	if strings.HasPrefix(slash, "/") {
+		return "", fmt.Errorf("invalid finding path %q", value)
 	}
-	return filepath.ToSlash(clean), nil
+	clean := path.Clean(slash)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("finding path escapes the checkout: %q", value)
+	}
+	return clean, nil
 }
 
 func readRepoFile(workDir, path string) ([]byte, error) {
