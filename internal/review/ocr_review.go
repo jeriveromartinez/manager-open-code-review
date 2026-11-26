@@ -65,9 +65,10 @@ type nativeReview struct {
 	Analysis     *string         `json:"analysis"`
 	AnalysisRaw  *string         `json:"analysis_raw"`
 	AnalysisMeta json.RawMessage `json:"analysis_meta"`
-	// closeReason records the worker's gradual close when OCR overran the
-	// global deadline ("global"). Empty means OCR ended on its own. It is not
-	// part of the OCR JSON and never leaves the review package.
+	// closeReason records the worker's gradual close. It is "global" when OCR
+	// overran the run deadline and "analysis" when only the analysis phase's own
+	// share expired. Empty means OCR ended on its own. It is not part of the OCR
+	// JSON and never leaves the review package.
 	closeReason string
 	// analysisTimedOut records that the analysis share, not the run deadline,
 	// closed the invocation. The review outcome stays whatever OCR reported;
@@ -400,14 +401,16 @@ func (e *nativeTimeoutError) Error() string {
 func (e *nativeTimeoutError) Unwrap() error { return e.Err }
 
 // timeoutCodeFromKind maps the internal close kind onto the run error code the
-// panel and the log display. An analysis close shares the run-wide timeout code
-// because it only downgrades the observation, never the review outcome.
+// panel and the log display. An analysis close has its own code: it ends only
+// the observation phase, never the review it ran after.
 func timeoutCodeFromKind(kind string) string {
 	switch kind {
 	case "http":
 		return "timeout_http"
 	case "group":
 		return "timeout_group"
+	case "analysis":
+		return "timeout_analysis"
 	default:
 		return "timeout_global"
 	}
@@ -619,8 +622,11 @@ func (n *NativeReviewer) Review(ctx context.Context) (nativeReview, []byte, erro
 	if signalled || hardStopped || (hasDeadline && !time.Now().Before(deadline)) {
 		// OCR wrote a report after the worker asked it to close. Keep it: the
 		// caller persists its coverage, findings and usage even though the
-		// run ends inconclusive.
+		// phase ends inconclusive.
 		res.closeReason = "global"
+		if analysisBounded {
+			res.closeReason = "analysis"
+		}
 		res.analysisTimedOut = analysisBounded
 		res.closeElapsed = closer.closeElapsed()
 		res.hardStopped = hardStopped

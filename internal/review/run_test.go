@@ -1245,12 +1245,12 @@ func TestRunStoresArchitectureBaselineInObservationMode(t *testing.T) {
 	}
 }
 
-// TestRunAnalysisDeadlineKeepsReviewOutcome is the run-level guard for the
-// analysis share: the budget reaches the reviewer, the invocation is closed at
-// the share, and the expiry downgrades only the observation. The Go fake runs
-// on every platform; Windows has no graceful close, so it is hard-stopped and
-// the run is inconclusive instead of succeeded.
-func TestRunAnalysisDeadlineKeepsReviewOutcome(t *testing.T) {
+// TestRunAnalysisPhaseExpiryKeepsReviewOutcome is the run-level guard for the
+// phase split: the review runs and is persisted without --analysis, and the
+// analysis is a second invocation with its own deadline. When that deadline
+// expires, the review findings, coverage and usage stay on the run and only the
+// observation is inconclusive.
+func TestRunAnalysisPhaseExpiryKeepsReviewOutcome(t *testing.T) {
 	f := newRunTestFixture(t)
 
 	// Two code roots make the inventory fire the module-boundary signal, which
@@ -1277,9 +1277,10 @@ func TestRunAnalysisDeadlineKeepsReviewOutcome(t *testing.T) {
 		t.Fatalf("update policy: %v", err)
 	}
 
-	// The analysis claims completion; only the worker's own deadline can make
-	// it inconclusive.
-	report := strings.Replace(runTestNativeCovering(
+	// The review report is complete and carries the analysis section the second
+	// invocation will produce. Only the worker's analysis deadline can make the
+	// observation inconclusive.
+	report := strings.Replace(runTestNativeFindingCovering(
 		"auth.go", "internal/review/a.go", "internal/store/b.go"),
 		"\n  \"manifest\": {",
 		"\n  \"review_status\": \"complete\",\n"+
@@ -1302,21 +1303,53 @@ func TestRunAnalysisDeadlineKeepsReviewOutcome(t *testing.T) {
 	runner := f.runner()
 	runner.Cfg.Timeout = 12 * time.Second
 
+	// A fallback is authorized: the analysis expiry must not consume it with a
+	// second full review.
+	backup := f.addReviewProfile(t, "analysis-backup", store.HealthOK)
+	f.setFallbackProfiles(t, backup.ID)
+
 	started := time.Now()
 	if err := runner.Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > 8*time.Second {
-		t.Errorf("Run() took %s, want the analysis share to close OCR before the run deadline", elapsed)
+		t.Errorf("Run() took %s, want the analysis share to close its own phase before the run deadline", elapsed)
 	}
 
-	wantStatus, wantCode := store.RunSucceeded, ""
-	if !gracefulStopSupported() {
-		// Without a graceful close the report is lost with the process; the
-		// run is inconclusive, never failed.
-		wantStatus, wantCode = store.RunInconclusive, "timeout_global"
+	// The analysis expiry never reaches the review outcome, on any platform.
+	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+	if got := f.ocrCalls(t); got != 2 {
+		t.Fatalf("ocr invocations = %d, want review + analysis", got)
 	}
-	run := assertRunTerminal(t, f, wantStatus, wantCode)
+	argv := f.ocrArgs(t)
+	if len(argv) != 2 {
+		t.Fatalf("ocr argv lines = %d, want 2", len(argv))
+	}
+	if strings.Contains(argv[0], "--analysis") {
+		t.Errorf("review invocation carries --analysis: %s", argv[0])
+	}
+	if !strings.Contains(argv[1], "--analysis") {
+		t.Errorf("analysis invocation lacks --analysis: %s", argv[1])
+	}
+	if run.TotalTokens == nil || *run.TotalTokens < 150 {
+		t.Errorf("total tokens = %v, want the review usage preserved", run.TotalTokens)
+	}
+	var coverage struct {
+		ReviewedFiles int `json:"reviewed_files"`
+	}
+	if err := json.Unmarshal(run.Coverage, &coverage); err != nil {
+		t.Fatalf("decode coverage %q: %v", run.Coverage, err)
+	}
+	if coverage.ReviewedFiles == 0 {
+		t.Errorf("coverage = %s, want the reviewed files preserved", run.Coverage)
+	}
+	findings, err := f.s.FindingsForPR(f.ctx, f.pr.ID)
+	if err != nil {
+		t.Fatalf("FindingsForPR: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Error("findings = 0, want the review findings preserved")
+	}
 	verdict := store.DecodeArchitectureVerdict(run.ArchitectureAnalysis)
 	if verdict.Status != store.ArchitectureInconclusive {
 		t.Fatalf("analysis status = %q, want inconclusive (errors: %v)", verdict.Status, verdict.Errors)

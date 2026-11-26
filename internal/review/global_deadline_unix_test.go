@@ -176,8 +176,8 @@ while :; do sleep 0.2; done
 	if !res.analysisTimedOut {
 		t.Error("analysisTimedOut = false, want the analysis share to be recorded")
 	}
-	if res.closeReason != "global" || res.hardStopped {
-		t.Errorf("closeReason/hardStopped = %q/%v, want the cooperative close", res.closeReason, res.hardStopped)
+	if res.closeReason != "analysis" || res.hardStopped {
+		t.Errorf("closeReason/hardStopped = %q/%v, want the analysis close kind", res.closeReason, res.hardStopped)
 	}
 	if status, code := nativeOutcome(res); status != store.RunSucceeded || code != "" {
 		t.Errorf("review outcome = %s/%q, want succeeded", status, code)
@@ -222,10 +222,10 @@ while :; do sleep 0.2; done
 	}
 }
 
-// A process that ignores the analysis close and writes nothing must still be
-// inconclusive, never failed: the analysis shares the invocation but not the
-// review's terminal state.
-func TestReviewAnalysisDeadlineWithoutReportIsInconclusive(t *testing.T) {
+// A process that ignores the analysis close and writes nothing must end as an
+// analysis timeout, never as the run's global timeout: the phase ran after the
+// review report was persisted.
+func TestReviewAnalysisPhaseWithoutReportIsAnalysisTimeout(t *testing.T) {
 	bin := writeDeadlineOCR(t, `#!/bin/sh
 trap '' INT
 while :; do sleep 0.2; done
@@ -244,8 +244,8 @@ while :; do sleep 0.2; done
 		t.Fatalf("Review() error = %v, want an analysis timeout", err)
 	}
 	out, _ := classifyNativeError(context.Background(), runOutcome{}, err)
-	if out.status != store.RunInconclusive || out.code != "timeout_global" {
-		t.Errorf("outcome = %q/%q, want inconclusive/timeout_global", out.status, out.code)
+	if out.status != store.RunInconclusive || out.code != "timeout_analysis" {
+		t.Errorf("outcome = %q/%q, want inconclusive/timeout_analysis", out.status, out.code)
 	}
 }
 

@@ -41,8 +41,11 @@ func main() {
 			output = filepath.Join(dir, "main.json")
 		}
 		// The analysis hang flushes the report only when the worker asks OCR to
-		// close, which is how a deadline close preserves the review outcome.
-		if phase == "0" && os.Getenv("RUN_FAKE_OCR_ANALYSIS_HANG") == "1" {
+		// close, which is how a deadline close preserves the review outcome. It
+		// fires only for the analysis phase, so the review invocation can finish
+		// first.
+		if phase == "0" && os.Getenv("RUN_FAKE_OCR_ANALYSIS_HANG") == "1" &&
+			hasArg(os.Args[1:], "--analysis") {
 			writeFile(os.Getenv("RUN_FAKE_OCR_READY"), "ready")
 			signals := make(chan os.Signal, 1)
 			signal.Notify(signals, os.Interrupt)
@@ -87,6 +90,15 @@ func argValue(args []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+func hasArg(args []string, flag string) bool {
+	for _, arg := range args {
+		if arg == flag {
+			return true
+		}
+	}
+	return false
 }
 
 func printFile(path string) {
