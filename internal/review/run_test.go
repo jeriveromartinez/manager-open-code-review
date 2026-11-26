@@ -1081,39 +1081,52 @@ func TestRunCanceledContextRequeuesRun(t *testing.T) {
 
 func TestRunBlockingThreshold(t *testing.T) {
 	const head = "head-1"
+	const apply = store.AutoTriageApply
 	findings := []store.Finding{
 		{Status: store.FindingOpen, Severity: "minor"},
 		{Status: store.FindingResolved, Severity: "blocker"},
 	}
-	if hasBlockingFinding(findings, "major", head) {
+	if hasBlockingFinding(findings, "major", head, apply) {
 		t.Error("minor open finding should not block at major threshold")
 	}
 	findings[0].Severity = "major"
-	if !hasBlockingFinding(findings, "major", head) {
+	if !hasBlockingFinding(findings, "major", head, apply) {
 		t.Error("major open finding should block at major threshold")
 	}
-	if hasBlockingFinding(findings, "blocker", head) {
+	if hasBlockingFinding(findings, "blocker", head, apply) {
 		t.Error("resolved blocker should never block")
 	}
 
 	findings[0].Verification = datatypes.JSON([]byte(`{"verdict":"uncertain","head_sha":"head-1"}`))
-	if hasBlockingFinding(findings, "major", head) {
-		t.Error("an uncertainty must not block")
+	if hasBlockingFinding(findings, "major", head, apply) {
+		t.Error("an applied uncertainty must not block")
+	}
+	// Observation records the answer without applying it, so the gate must stay
+	// exactly the one off would compute.
+	for _, mode := range []string{store.AutoTriageOff, store.AutoTriageDryRun} {
+		if !hasBlockingFinding(findings, "major", head, mode) {
+			t.Errorf("%s: an uncertain major must block like off", mode)
+		}
 	}
 	findings[0].Verification = datatypes.JSON([]byte(`{"verdict":"confirm","evidence":"if x {","head_sha":"head-0"}`))
-	if hasBlockingFinding(findings, "major", head) {
+	if hasBlockingFinding(findings, "major", head, apply) {
 		t.Error("a confirmation from another head must not block")
 	}
 	findings[0].Verification = datatypes.JSON([]byte(`{"verdict":"confirm","head_sha":"head-1"}`))
-	if hasBlockingFinding(findings, "major", head) {
+	if hasBlockingFinding(findings, "major", head, apply) {
 		t.Error("a confirmation without evidence must not block")
 	}
 	findings[0].Verification = datatypes.JSON([]byte(`{"verdict":"confirm","evidence":"if x {","head_sha":"head-1"}`))
-	if !hasBlockingFinding(findings, "major", head) {
+	if !hasBlockingFinding(findings, "major", head, apply) {
 		t.Error("a validated confirmation should block")
 	}
+	for _, mode := range []string{store.AutoTriageOff, store.AutoTriageDryRun} {
+		if !hasBlockingFinding(findings, "major", head, mode) {
+			t.Errorf("%s: a stored confirmation must not change the off gate", mode)
+		}
+	}
 	findings[0].Verification = nil
-	if !hasBlockingFinding(findings, "major", head) {
+	if !hasBlockingFinding(findings, "major", head, apply) {
 		t.Error("an unverified major finding keeps blocking")
 	}
 }

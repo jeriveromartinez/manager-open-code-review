@@ -118,19 +118,58 @@ func parseVerdict(raw string) (Verdict, bool) {
 	}
 }
 
+// evidenceBlobs holds the checked-out content of the files a finding cites,
+// split by the side of the comparison. A missing entry means the cited
+// coordinate cannot be validated on that side; it never means the quote is
+// valid.
+type evidenceBlobs struct {
+	head map[string][]byte
+	base map[string][]byte
+}
+
+// headOnlyBlobs adapts content that was fetched at the reviewed head.
+func headOnlyBlobs(files map[string][]byte) evidenceBlobs {
+	return evidenceBlobs{head: files}
+}
+
+func (b evidenceBlobs) content(side, path string) ([]byte, bool) {
+	if side == store.FindingCitationBase {
+		content, ok := b.base[path]
+		return content, ok
+	}
+	content, ok := b.head[path]
+	return content, ok
+}
+
+// findingEvidenceCitations returns the coordinates a finding cites. Rows
+// written before citations existed fall back to their single head-side path and
+// range; a finding without any coordinate cannot validate evidence.
+func findingEvidenceCitations(f store.Finding) []store.FindingCitation {
+	if citations := store.DecodeFindingCitations(f.Citations); len(citations) > 0 {
+		return citations
+	}
+	if f.Path == "" || f.StartLine <= 0 {
+		return nil
+	}
+	end := f.EndLine
+	if end < f.StartLine {
+		end = f.StartLine
+	}
+	return []store.FindingCitation{{
+		Path: f.Path, StartLine: f.StartLine, EndLine: end, Side: store.FindingCitationHead,
+	}}
+}
+
 // validateEvidence is the single gate for a verdict that would confirm or
-// dismiss a finding. It requires the answer to describe the reviewed head, the
-// cited path to exist at that head, and the quoted line to match exactly one of
-// the lines the finding cited (or its own ExistingCode). Anything else is not
-// evidence: the caller degrades the verdict to uncertain instead of trusting a
-// quote from another commit, another file or another part of the file.
-func validateEvidence(f store.Finding, v Verification, files map[string][]byte, headSHA string) string {
+// dismiss a finding. It requires the answer to describe the reviewed head and
+// the quoted line to match the blob the finding cites, on the side that
+// citation belongs to: the head checkout for a head citation and the base
+// commit for a deleted or removed line. The model-authored ExistingCode is
+// never a source of truth, and a quote from another commit, file, range or
+// side degrades the verdict to uncertain.
+func validateEvidence(f store.Finding, v Verification, blobs evidenceBlobs, headSHA string) string {
 	if headSHA == "" || !strings.EqualFold(strings.TrimSpace(v.HeadSHA), headSHA) {
 		return "la verificación no corresponde al head revisado"
-	}
-	content, ok := files[f.Path]
-	if !ok {
-		return "el archivo citado no existe en el head revisado"
 	}
 	evidence := strings.TrimSpace(v.Evidence)
 	if evidence == "" {
@@ -139,23 +178,35 @@ func validateEvidence(f store.Finding, v Verification, files map[string][]byte, 
 	if strings.ContainsAny(evidence, "\r\n") {
 		return "la evidencia no es una sola línea del archivo"
 	}
-	start, end := f.StartLine, f.EndLine
-	if end < start {
-		end = start
-	}
-	if start <= 0 {
+	citations := findingEvidenceCitations(f)
+	if len(citations) == 0 {
 		return "el hallazgo no cita un rango de líneas"
 	}
-	lines := strings.Split(string(content), "\n")
-	for line := start; line <= end && line <= len(lines); line++ {
-		if strings.TrimSpace(lines[line-1]) == evidence {
-			return ""
+	resolved := false
+	for _, citation := range citations {
+		content, ok := blobs.content(citation.Side, citation.Path)
+		if !ok {
+			continue
+		}
+		resolved = true
+		lines := strings.Split(string(content), "\n")
+		start, end := citation.StartLine, citation.EndLine
+		if end < start {
+			end = start
+		}
+		for line := start; line <= end && line <= len(lines); line++ {
+			if strings.TrimSpace(lines[line-1]) == evidence {
+				return ""
+			}
 		}
 	}
-	for _, line := range strings.Split(f.ExistingCode, "\n") {
-		if strings.TrimSpace(line) == evidence {
-			return ""
+	if !resolved {
+		for _, citation := range citations {
+			if citation.Side != store.FindingCitationBase {
+				return "el archivo citado no existe en el head revisado"
+			}
 		}
+		return "el archivo citado no existe en la base comparada"
 	}
 	return "la evidencia no coincide con las líneas citadas del hallazgo"
 }
@@ -163,7 +214,7 @@ func validateEvidence(f store.Finding, v Verification, files map[string][]byte, 
 // Decide applies the policy to every finding of the run. Human-triaged
 // findings are not touched at all; the rest always get a decision, applied
 // only in apply mode and only when the policy accepts it.
-func Decide(findings []store.Finding, verdicts map[string]Verification, files map[string][]byte, headSHA string, p VerifyPolicy) []Decision {
+func Decide(findings []store.Finding, verdicts map[string]Verification, blobs evidenceBlobs, headSHA string, p VerifyPolicy) []Decision {
 	decisions := make([]Decision, 0, len(findings))
 	for _, f := range findings {
 		// Advisory evidence has no QA verdict to confirm or refute; recording an
@@ -179,7 +230,7 @@ func Decide(findings []store.Finding, verdicts map[string]Verification, files ma
 				Reason:  "OCR no respondió por este hallazgo",
 			}
 		}
-		decisions = append(decisions, decideFinding(f, verdict, files, headSHA, p))
+		decisions = append(decisions, decideFinding(f, verdict, blobs, headSHA, p))
 	}
 	return decisions
 }
@@ -209,7 +260,7 @@ func degradePolicy(decision Decision, f store.Finding, reason string) Decision {
 	return decision
 }
 
-func decideFinding(f store.Finding, verification Verification, files map[string][]byte, headSHA string, p VerifyPolicy) Decision {
+func decideFinding(f store.Finding, verification Verification, blobs evidenceBlobs, headSHA string, p VerifyPolicy) Decision {
 	decision := Decision{
 		FindingID:    f.ID,
 		Verdict:      verification.Verdict,
@@ -218,7 +269,7 @@ func decideFinding(f store.Finding, verification Verification, files map[string]
 	}
 	switch verification.Verdict {
 	case VerdictConfirm:
-		if reason := validateEvidence(f, verification, files, headSHA); reason != "" {
+		if reason := validateEvidence(f, verification, blobs, headSHA); reason != "" {
 			return degradeEvidence(decision, f, reason)
 		}
 		decision.Status = store.FindingOpen
@@ -231,7 +282,7 @@ func decideFinding(f store.Finding, verification Verification, files map[string]
 		case !p.AutoWithdraw:
 			return degradePolicy(decision, f, "el descarte automático está apagado")
 		}
-		if reason := validateEvidence(f, verification, files, headSHA); reason != "" {
+		if reason := validateEvidence(f, verification, blobs, headSHA); reason != "" {
 			return degradeEvidence(decision, f, reason)
 		}
 		decision.Status = store.FindingWithdrawn

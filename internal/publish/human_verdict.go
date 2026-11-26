@@ -47,6 +47,11 @@ func (p *publishContext) gateOutcome(ctx context.Context, open []store.Finding) 
 		switch {
 		case p.hasBlocking(open):
 			return "failure", store.StatusChangesRequested
+		case p.hasMaterialUncertainty(open):
+			// The verifier could not settle a finding that could change the
+			// conclusion. The engine did not fail, but it did not conclude: the
+			// case belongs to a person, not to a silent success.
+			return "action_required", store.StatusInconclusive
 		case ci.Green():
 			return "success", store.StatusReadyForHuman
 		default:

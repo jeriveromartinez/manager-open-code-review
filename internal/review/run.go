@@ -456,7 +456,7 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 				if err != nil {
 					return fmt.Errorf("list open findings of pull request %d: %w", run.PullRequestID, err)
 				}
-				if hasBlockingFinding(open, cfg.Policy.BlockingThreshold, run.HeadSHA) {
+				if hasBlockingFinding(open, cfg.Policy.BlockingThreshold, run.HeadSHA, cfg.Policy.AutoTriageMode) {
 					prStatus = store.StatusChangesRequested
 				}
 			}
@@ -1549,7 +1549,10 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		// Verification runs against the checkout before it is deleted. It only
 		// annotates the findings; applying the decisions happens after they are
 		// persisted, so a crash here loses verdicts but never corrupts state.
-		r.verifyFindings(runCtx, run, cfg, activeProfile, activeKey, workDir, headSHA, &out, reserved, log)
+		// The verifier reads the same comparison the review saw, so a base-side
+		// citation resolves against fromSHA (the merge base, or the previous
+		// head on an incremental push), not against the persisted base.
+		r.verifyFindings(runCtx, run, cfg, activeProfile, activeKey, workDir, headSHA, fromSHA, &out, reserved, log)
 		r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
 		return out, nil
 	case store.RunInconclusive:
@@ -1746,24 +1749,29 @@ func incrementalSource(run, prev store.ReviewRun, reviewedBase, headSHA string) 
 	return prev.HeadSHA, true
 }
 
-func hasBlockingFinding(findings []store.Finding, threshold, headSHA string) bool {
+func hasBlockingFinding(findings []store.Finding, threshold, headSHA, mode string) bool {
 	limit := severityRank(threshold)
 	for _, f := range findings {
 		if f.Status != store.FindingOpen || severityRank(f.Severity) < limit {
 			continue
 		}
-		if findingBlocks(f, headSHA) {
+		if findingBlocks(f, headSHA, mode) {
 			return true
 		}
 	}
 	return false
 }
 
-// findingBlocks mirrors the publisher's gate: an uncertainty or a verdict from
-// another head never blocks, and a confirmation needs its cited evidence. A
-// finding the verifier never answered keeps the pre-verifier behaviour.
-func findingBlocks(f store.Finding, headSHA string) bool {
+// findingBlocks mirrors the publisher's gate. In apply mode an uncertainty or a
+// verdict from another head never blocks, and a confirmation needs its cited
+// evidence. The observation modes (off and dry_run) never let a stored verdict
+// suppress the block: they keep exactly the gate the pull request would have
+// without verification.
+func findingBlocks(f store.Finding, headSHA, mode string) bool {
 	if f.TriageSource == store.TriageSourceHuman {
+		return true
+	}
+	if mode != store.AutoTriageApply {
 		return true
 	}
 	if len(f.Verification) == 0 {

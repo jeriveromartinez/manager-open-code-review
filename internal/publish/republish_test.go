@@ -71,6 +71,52 @@ func TestRepublishRestoresFailureWhenFindingsReopen(t *testing.T) {
 	}
 }
 
+func TestRepublishKeepsTheVerificationGateOfEachMode(t *testing.T) {
+	cases := []struct {
+		mode       string
+		verified   bool
+		conclusion string
+		status     string
+	}{
+		{store.AutoTriageOff, false, "failure", store.StatusChangesRequested},
+		{store.AutoTriageDryRun, true, "failure", store.StatusChangesRequested},
+		{store.AutoTriageApply, true, "action_required", store.StatusInconclusive},
+	}
+	for _, tc := range cases {
+		t.Run(tc.mode, func(t *testing.T) {
+			st := testutil.NewStore(t)
+			ctx := context.Background()
+			run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+			enableAutoTriage(t, st, tc.mode)
+			seedFinding(t, st, pr.ID, run.ID, "uncertain", 2, "major", store.FindingOpen)
+			if tc.verified {
+				setRunVerificationSession(t, st, run.ID, "verify-session")
+				markVerified(t, st, "uncertain", "uncertain", "")
+			}
+			gh := newFakeGitHub(t)
+			w, _ := newPublishWorker(t, st, gh)
+
+			if err := w.Republish(ctx, pr.ID); err != nil {
+				t.Fatalf("Republish() error = %v", err)
+			}
+
+			gh.mu.Lock()
+			patches := append([]checkPatch(nil), gh.checkPatches...)
+			gh.mu.Unlock()
+			if len(patches) != 1 || patches[0].Conclusion != tc.conclusion {
+				t.Fatalf("check patches = %+v, want one %s", patches, tc.conclusion)
+			}
+			var reloaded store.PullRequest
+			if err := st.DB.WithContext(ctx).Take(&reloaded, pr.ID).Error; err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.QAStatus != tc.status {
+				t.Errorf("qa_status = %q, want %q", reloaded.QAStatus, tc.status)
+			}
+		})
+	}
+}
+
 // The gate of another comparison must not be rewritten from a stale terminal
 // run, and the shared review thread must not be moved either.
 func TestRepublishSkipsRunOfAnotherComparison(t *testing.T) {

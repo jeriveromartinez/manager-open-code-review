@@ -33,7 +33,7 @@ func DecideObjection(f store.Finding, verification Verification, files map[strin
 
 	switch verification.Verdict {
 	case VerdictConfirm:
-		if reason := validateEvidence(f, verification, files, headSHA); reason != "" {
+		if reason := validateEvidence(f, verification, headOnlyBlobs(files), headSHA); reason != "" {
 			return degradeObjectionEvidence(decision, f, reason)
 		}
 		decision.Action = store.ObjectionUphold
@@ -41,7 +41,7 @@ func DecideObjection(f store.Finding, verification Verification, files map[strin
 		return decision
 
 	case VerdictRefute:
-		if reason := validateEvidence(f, verification, files, headSHA); reason != "" {
+		if reason := validateEvidence(f, verification, headOnlyBlobs(files), headSHA); reason != "" {
 			return degradeObjectionEvidence(decision, f, reason)
 		}
 		// A blocking finding is never downgraded or withdrawn by the verifier,

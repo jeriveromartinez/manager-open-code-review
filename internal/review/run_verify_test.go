@@ -68,6 +68,48 @@ func TestReusedVerdictRequiresSameHeadAndCitedCode(t *testing.T) {
 	}
 }
 
+func TestReadCitedBlobsReadsBothSides(t *testing.T) {
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q", "-b", "main")
+	runGit(t, dir, "config", "user.email", "qa@example.com")
+	runGit(t, dir, "config", "user.name", "QA")
+	runGit(t, dir, "config", "core.autocrlf", "false")
+	if err := os.WriteFile(filepath.Join(dir, "gone.go"), []byte("package a\nfunc removed() {}\n"), 0o644); err != nil {
+		t.Fatalf("write gone.go: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kept.go"), []byte("package a\nfunc kept() {}\n"), 0o644); err != nil {
+		t.Fatalf("write kept.go: %v", err)
+	}
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-qm", "base")
+	baseSHA := runGit(t, dir, "rev-parse", "HEAD")
+	if err := os.Remove(filepath.Join(dir, "gone.go")); err != nil {
+		t.Fatalf("remove gone.go: %v", err)
+	}
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-qm", "delete gone.go")
+
+	findings := []store.Finding{
+		{
+			ID: "base", Path: "gone.go", StartLine: 2, EndLine: 2,
+			Citations: store.EncodeFindingCitations([]store.FindingCitation{{
+				Path: "gone.go", StartLine: 2, EndLine: 2, Side: store.FindingCitationBase,
+			}}),
+		},
+		{ID: "head", Path: "kept.go", StartLine: 2, EndLine: 2},
+	}
+	blobs := readCitedBlobs(context.Background(), dir, baseSHA, findings)
+	if got := string(blobs.base["gone.go"]); got != "package a\nfunc removed() {}\n" {
+		t.Errorf("base blob = %q, want the deleted file content", got)
+	}
+	if _, ok := blobs.head["gone.go"]; ok {
+		t.Error("a file deleted at head was read from the head checkout")
+	}
+	if got := string(blobs.head["kept.go"]); got != "package a\nfunc kept() {}\n" {
+		t.Errorf("head blob = %q, want the checked-out content", got)
+	}
+}
+
 func TestReadRepoFileRejectsEscapingPaths(t *testing.T) {
 	workDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workDir, "a.go"), []byte("package main\n"), 0o644); err != nil {
@@ -292,7 +334,7 @@ func TestMarkUnverifiedKeepsStatusAndRecordsTheReason(t *testing.T) {
 	if verdicts["stored"].Verdict != VerdictConfirm {
 		t.Errorf("stored verdict = %+v, want the reused confirm untouched", verdicts["stored"])
 	}
-	decisions := Decide(findings, verdicts, map[string][]byte{}, "head-1",
+	decisions := Decide(findings, verdicts, evidenceBlobs{}, "head-1",
 		VerifyPolicy{Mode: store.AutoTriageApply, AutoWithdraw: true})
 	var pending Decision
 	for _, d := range decisions {
