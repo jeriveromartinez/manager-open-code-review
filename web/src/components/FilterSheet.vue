@@ -1,16 +1,26 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
 
-const props = defineProps<{
-  open: boolean
-  activeCount: number
-  shown: number
-}>()
+const props = withDefaults(
+  defineProps<{
+    open: boolean
+    activeCount: number
+    shown: number
+    clearable?: boolean
+    applyLabel?: string
+  }>(),
+  { clearable: undefined, applyLabel: undefined },
+)
 
 const emit = defineEmits<{
   close: []
   clear: []
 }>()
+
+// `activeCount` only counts facets, so the parent must pass `clearable` when the
+// search box can also clear (e.g. q set with no facet chips).
+const canClear = computed(() => props.clearable ?? props.activeCount > 0)
+const applyText = computed(() => props.applyLabel ?? `VER ${props.shown} PRs`)
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
@@ -140,13 +150,13 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="filter-sheet__clear"
-            :disabled="activeCount === 0"
+            :disabled="!canClear"
             @click="emit('clear')"
           >
             LIMPIAR
           </button>
           <button type="button" class="filter-sheet__apply" @click="emit('close')">
-            VER {{ shown }} PRs
+            {{ applyText }}
           </button>
         </footer>
       </div>

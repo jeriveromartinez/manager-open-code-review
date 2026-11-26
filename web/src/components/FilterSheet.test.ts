@@ -163,6 +163,39 @@ describe('FilterSheet', () => {
     wrapper.unmount()
   })
 
+  it('allows clearing when the parent marks the sheet clearable', async () => {
+    const wrapper = mount(FilterSheet, {
+      attachTo: document.body,
+      props: { open: true, activeCount: 0, shown: 3, clearable: true },
+      slots: { default: slot },
+    })
+    await nextTick()
+
+    const clear = document.body.querySelector('.filter-sheet__clear') as HTMLButtonElement
+    expect(clear.disabled).toBe(false)
+
+    clear.click()
+    expect(wrapper.emitted('clear')).toHaveLength(1)
+
+    await wrapper.setProps({ open: false })
+    wrapper.unmount()
+  })
+
+  it('renders the apply label supplied by the parent', async () => {
+    const wrapper = mount(FilterSheet, {
+      attachTo: document.body,
+      props: { open: true, activeCount: 1, shown: 4, applyLabel: 'VER 4 RUNS' },
+      slots: { default: slot },
+    })
+    await nextTick()
+
+    const apply = document.body.querySelector('.filter-sheet__apply') as HTMLButtonElement
+    expect(apply.textContent?.trim()).toBe('VER 4 RUNS')
+
+    await wrapper.setProps({ open: false })
+    wrapper.unmount()
+  })
+
   it('locks body and panel scroll while open and restores it on close', async () => {
     document.body.style.overflow = 'auto'
 
