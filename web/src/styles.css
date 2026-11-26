@@ -315,10 +315,10 @@ img {
   }
 }
 
-/* Once the view is split into columns, the filter bar stays in view while
- * only the list beside it scrolls. */
+/* Once the view is split into columns, the filter bar of an opted-in list
+ * view stays in view while only the list beside it scrolls. */
 @media (min-width: 2200px) {
-  .filter-bar {
+  .list-view .filter-bar {
     position: sticky;
     top: 0;
     z-index: 5;

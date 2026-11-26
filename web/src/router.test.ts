@@ -35,3 +35,17 @@ describe('admin guard', () => {
     expect(router.currentRoute.value.name).toBe('dashboard')
   })
 })
+
+describe('flush container opt-in', () => {
+  it('marks the list views as flush', () => {
+    for (const path of ['/', '/repos', '/lead', '/prs/1']) {
+      expect(router.resolve(path).meta.flushContainer).toBe(true)
+    }
+  })
+
+  it('leaves the remaining routes on the default container', () => {
+    for (const path of ['/runs', '/teams', '/agents', '/settings']) {
+      expect(router.resolve(path).meta.flushContainer).toBeUndefined()
+    }
+  })
+})

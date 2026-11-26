@@ -33,7 +33,7 @@ async function mountShell(path = '/'): Promise<VueWrapper> {
     routes: ['/', '/lead', '/repos', '/teams', '/agents', '/settings'].map((p) => ({
       path: p,
       component: page,
-      meta: { wide: p === '/' || p === '/lead' },
+      meta: { flushContainer: p === '/' || p === '/lead' },
     })),
   })
   await router.push(path)
@@ -134,5 +134,21 @@ describe('AppShell', () => {
     expect(wrapper.get('.shell__bar').element.nextElementSibling).toBe(body.element)
     expect(body.element.nextElementSibling).toBeNull()
     expect(body.find('.container [data-page]').exists()).toBe(true)
+  })
+
+  it('uses the flush container for routes that opt in', async () => {
+    const wrapper = await mountShell('/')
+
+    const main = wrapper.get('main.container')
+    expect(main.classes()).toContain('container--flush')
+    expect(main.classes()).toContain('list-view')
+  })
+
+  it('keeps the default container for other routes', async () => {
+    const wrapper = await mountShell('/teams')
+
+    const main = wrapper.get('main.container')
+    expect(main.classes()).not.toContain('container--flush')
+    expect(main.classes()).not.toContain('list-view')
   })
 })
