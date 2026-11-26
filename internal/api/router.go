@@ -110,6 +110,9 @@ func NewRouter(d Deps) http.Handler {
 			// The run log is scoped through its pull request, so a user who
 			// cannot see the PR cannot read the log either.
 			r.Get("/review-runs", s.activeRuns)
+			// /review-runs/history must stay before the {id}/logs pattern so chi
+			// resolves the static segment first.
+			r.Get("/review-runs/history", s.runHistory)
 			r.Get("/review-runs/{id}/logs", s.reviewRunLogs)
 			r.Get("/repos", s.repos)
 			r.Get("/teams", s.teams)
