@@ -40,6 +40,11 @@ func main() {
 		if output == "" {
 			output = filepath.Join(dir, "main.json")
 		}
+		if hasArg(os.Args[1:], "--analysis") {
+			if analysisOutput := os.Getenv("RUN_FAKE_OCR_ANALYSIS_OUTPUT"); analysisOutput != "" {
+				output = analysisOutput
+			}
+		}
 		// The analysis hang flushes the report only when the worker asks OCR to
 		// close, which is how a deadline close preserves the review outcome. It
 		// fires only for the analysis phase, so the review invocation can finish

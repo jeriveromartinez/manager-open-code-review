@@ -1359,6 +1359,115 @@ func TestRunAnalysisPhaseExpiryKeepsReviewOutcome(t *testing.T) {
 	}
 }
 
+// TestRunAnalysisPhaseAppliesItsReport proves the second invocation, not the
+// review pass, feeds the verdict: the analysis_meta status, usage and evidence
+// reach the persisted observation even though both invocations review the range.
+func TestRunAnalysisPhaseAppliesItsReport(t *testing.T) {
+	f := newRunTestFixture(t)
+
+	work := filepath.Join(f.root, "work")
+	// A trusted baseline with no violation keeps the deterministic evidence from
+	// downgrading the complete analysis to inconclusive.
+	runGit(t, work, "checkout", "-q", "--detach", f.baseSHA)
+	if err := os.MkdirAll(filepath.Join(work, ".architecture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRunTestFile(t, filepath.Join(work, "go.mod"), "module example.com/app\n\ngo 1.22\n")
+	writeRunTestFile(t, filepath.Join(work, ".architecture", "baseline.json"),
+		`{"version":"1","rules":[{"id":"ARCH-001","version":"1",`+
+			`"from":"internal/store","to":"internal/review","reason":"store must not depend on review"}]}`)
+	runGit(t, work, "add", "-A")
+	runGit(t, work, "commit", "-qm", "trusted baseline")
+	baseSHA := runGit(t, work, "rev-parse", "HEAD")
+	runGit(t, work, "push", "-q", f.bare, "HEAD:refs/heads/main")
+
+	runGit(t, work, "checkout", "-qb", "two-modules")
+	for _, dir := range []string{"internal/review", "internal/store"} {
+		if err := os.MkdirAll(filepath.Join(work, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRunTestFile(t, filepath.Join(work, "internal", "review", "a.go"), "package review\n")
+	writeRunTestFile(t, filepath.Join(work, "internal", "store", "b.go"), "package store\n")
+	runGit(t, work, "add", "-A")
+	runGit(t, work, "commit", "-qm", "two modules")
+	headSHA := f.publishWorkHead(t)
+	f.updateRun(t, f.runID, map[string]any{"head_sha": headSHA, "base_sha": baseSHA})
+
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.QAPolicy{}).
+		Where("id = ?", f.policy.ID).
+		Updates(map[string]any{
+			"architecture_analysis_mode": store.ArchitectureAnalysisObservation,
+			"architecture_time_share":    50,
+		}).Error; err != nil {
+		t.Fatalf("update policy: %v", err)
+	}
+
+	dir := filepath.Join(f.root, "fake-ocr-analysis")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRunTestFile(t, filepath.Join(dir, "main.json"),
+		runTestNativeFindingCovering("auth.go", "internal/review/a.go", "internal/store/b.go"))
+	analysisReport := `{
+  "status": "complete",
+  "summary": {"files_reviewed": 3, "comments": 0, "total_tokens": 77,
+    "input_tokens": 60, "output_tokens": 17},
+  "review_status": "complete",
+  "analysis_raw": "## Impacto\n- límite de módulo\n\n## Riesgos\n- ninguno",
+  "analysis_meta": {
+    "schema_version": "ocr.review-analysis/v2",
+    "execution_status": "completed",
+    "usage": {"total_tokens": 77, "input_tokens": 60, "output_tokens": 17}
+  },
+  "manifest": {
+    "terminal_state": "complete",
+    "coverage": {"completed": [{"path": "auth.go"}, {"path": "internal/review/a.go"},
+      {"path": "internal/store/b.go"}]}
+  }
+}`
+	analysisPath := filepath.Join(dir, "analysis.json")
+	writeRunTestFile(t, analysisPath, analysisReport)
+
+	f.ocrBin = fakeOCRBatch(t)
+	t.Setenv("RUN_FAKE_OCR_DIR", dir)
+	t.Setenv("RUN_FAKE_OCR_PHASE", "0")
+	t.Setenv("RUN_FAKE_OCR_CALLS", f.ocrCallLog)
+	t.Setenv("RUN_FAKE_OCR_ARGV", f.ocrArgv)
+	t.Setenv("RUN_FAKE_OCR_ANALYSIS_OUTPUT", analysisPath)
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 30 * time.Second
+	if err := runner.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+	if got := f.ocrCalls(t); got != 2 {
+		t.Fatalf("ocr invocations = %d, want review + analysis", got)
+	}
+	argv := f.ocrArgs(t)
+	if len(argv) != 2 || !strings.Contains(argv[1], "--analysis") {
+		t.Fatalf("ocr argv = %v, want the analysis as the second invocation", argv)
+	}
+	for _, flag := range []string{"--max-tokens-budget", "--analysis-max-tokens-budget"} {
+		if !strings.Contains(argv[1], flag) {
+			t.Errorf("analysis invocation lacks %s: %s", flag, argv[1])
+		}
+	}
+	verdict := store.DecodeArchitectureVerdict(run.ArchitectureAnalysis)
+	if verdict.Status != store.ArchitectureComplete {
+		t.Fatalf("analysis status = %q, want complete (errors: %v, baseline: %+v)", verdict.Status, verdict.Errors, verdict.Baseline)
+	}
+	if verdict.ExecutionStatus != "completed" || verdict.Usage.Total != 77 {
+		t.Errorf("analysis execution/usage = %q/%d, want completed/77",
+			verdict.ExecutionStatus, verdict.Usage.Total)
+	}
+	if !strings.Contains(verdict.Evidence.Markdown, "límite de módulo") {
+		t.Errorf("analysis evidence = %q, want the reported markdown", verdict.Evidence.Markdown)
+	}
+}
+
 // TestRunUsesSingleOCRReview is the #71 acceptance test: one invocation covers
 // the whole pull request.
 func TestRunUsesSingleOCRReview(t *testing.T) {

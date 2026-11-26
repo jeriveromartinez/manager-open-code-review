@@ -46,10 +46,16 @@ func TestBuildReviewArgsRequestsAnalysisOnlyWhenEnabled(t *testing.T) {
 
 	withAnalysis := base
 	withAnalysis.Analysis = true
+	withAnalysis.TokenBudget = 12000
 	withAnalysis.AnalysisTokenBudget = 12000
 	args = buildReviewArgs(withAnalysis)
 	if !containsArgValue(args, "--analysis") {
 		t.Fatalf("--analysis missing: %v", args)
+	}
+	// OCR budgets the discarded re-review and the analysis independently, so
+	// the phase must cap both flags.
+	if !containsArgPair(args, "--max-tokens-budget", "12000") {
+		t.Fatalf("discarded re-review token budget missing: %v", args)
 	}
 	if !containsArgPair(args, "--analysis-max-tokens-budget", "12000") {
 		t.Fatalf("analysis token budget missing: %v", args)
@@ -379,6 +385,9 @@ func TestApplyAnalysisDeadlineDowngradesOnlyTheObservation(t *testing.T) {
 	}
 	if got.Status != store.ArchitectureInconclusive {
 		t.Errorf("status = %q, want inconclusive", got.Status)
+	}
+	if !strings.Contains(strings.Join(got.Errors, " "), "timeout_analysis") {
+		t.Errorf("errors = %v, want the analysis phase code recorded", got.Errors)
 	}
 	if status, code := nativeOutcome(res); status != store.RunSucceeded || code != "" {
 		t.Errorf("review outcome = %s/%q, want succeeded", status, code)

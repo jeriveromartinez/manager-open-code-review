@@ -958,14 +958,23 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	// bound; the analysis share is enforced inside it. The verifier reserve
 	// below shrinks the review pass, not the observation.
 	analysisRunTimeout := timeout
-	// The analysis spends from the same aggregate budget. Carve its token cap
-	// out before the verifier's share so analysis + review + verification cannot
-	// exceed ReviewTokenBudget. Its time share bounds its own phase; the run
-	// deadline still caps the total.
+	// The analysis phase spends from the same aggregate budget. OCR applies
+	// --max-tokens-budget to the discarded re-review and the analysis cap
+	// separately, so carve both shares out before the verifier's share; the
+	// phase cannot exceed ReviewTokenBudget. Its time share bounds its own
+	// phase; the run deadline still caps the total.
 	if analysisRequested && reviewBudget > 0 {
-		reviewBudget -= analysisBudget.TokenBudget
-		if reviewBudget < 0 {
-			reviewBudget = 0
+		// A phase pass may not take more than half the configured budget: the
+		// other half must remain a positive cap for the review itself.
+		if half := reviewBudget / 2; analysisBudget.TokenBudget > half {
+			analysisBudget.TokenBudget = half
+		}
+		if analysisBudget.TokenBudget < 1 {
+			analysisBudget.TokenBudget = 1
+		}
+		reviewBudget -= 2 * analysisBudget.TokenBudget
+		if reviewBudget < 1 {
+			reviewBudget = 1
 		}
 	}
 
@@ -1383,15 +1392,21 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		resume.adopt(out.tokens)
 	}
 	if analysisErr != nil {
-		architectureVerdict = markArchitectureTimedOut(architectureVerdict, analysisErr.Error())
+		reason := analysisErr.Error()
+		var timeout *nativeTimeoutError
+		if errors.As(analysisErr, &timeout) {
+			reason = timeoutCodeFromKind(timeout.Kind) + ": " + reason
+		}
+		log.Log(runCtx, "worker", "analysis", "warn", logPhaseOCR, reason)
+		architectureVerdict = markArchitectureTimedOut(architectureVerdict, reason)
 	} else {
 		architectureVerdict = applyNativeArchitectureAnalysis(architectureVerdict, analysisRes)
 		var analysisDeadlineHit bool
 		architectureVerdict, analysisDeadlineHit = applyAnalysisDeadline(architectureVerdict, analysisRes, analysisBudget)
 		if analysisDeadlineHit {
 			log.Log(runCtx, "worker", "analysis", "warn", logPhaseOCR, fmt.Sprintf(
-				"análisis arquitectónico inconcluso: agotó su plazo de %ds; la revisión conserva su resultado",
-				analysisBudget.TimeBudgetSeconds))
+				"análisis arquitectónico inconcluso (%s): agotó su plazo de %ds; la revisión conserva su resultado",
+				timeoutCodeFromKind("analysis"), analysisBudget.TimeBudgetSeconds))
 		}
 	}
 	if analysisRequested {

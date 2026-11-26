@@ -19,6 +19,23 @@ Nada de esto cambia la conclusión del check, el estado de QA ni los comentarios
 inline: solo el resumen, el texto del check y el panel. La promoción es lo que
 está pendiente.
 
+## Coste de la fase de análisis
+
+El análisis corre en una invocación OCR propia después de persistir el informe de
+revisión, para que su plazo no pueda descartar hallazgos, cobertura ni consumo.
+OCR 1.14.1 no tiene un modo solo-análisis: esa invocación vuelve a revisar el
+rango completo y su salida de revisión se descarta.
+
+- **Tokens.** Cada PR analizado paga una segunda lectura del diff. La revisión
+  descartada se limita con `--max-tokens-budget` y el análisis con
+  `--analysis-max-tokens-budget`, ambos iguales a `architecture_token_share`
+  (tope `architecture_token_max`). Como OCR presupuesta esas dos partes por
+  separado, la reserva descuenta **dos veces** esa cuota de `review_token_budget`;
+  la fase no puede exceder el presupuesto agregado.
+- **Latencia.** La fase es serie y su plazo es `architecture_time_share`, siempre
+  recortado por el deadline total del run; el reservado para verificación y
+  publicación no se toca.
+
 ## 1. Escalera de verificación
 
 La política es por equipo (y por repositorio como override) en **Agentes LLM →

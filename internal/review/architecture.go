@@ -470,7 +470,8 @@ func applyAnalysisDeadline(verdict store.ArchitectureVerdict, res nativeReview, 
 	if !res.analysisTimedOut {
 		return verdict, false
 	}
-	reason := fmt.Sprintf("analysis deadline exceeded: %ds share", budget.TimeBudgetSeconds)
+	reason := fmt.Sprintf("%s: analysis deadline exceeded: %ds share",
+		timeoutCodeFromKind("analysis"), budget.TimeBudgetSeconds)
 	return markArchitectureTimedOut(verdict, reason), true
 }
 

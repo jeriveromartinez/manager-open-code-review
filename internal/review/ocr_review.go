@@ -221,8 +221,8 @@ func buildReviewArgs(in nativeInvocation) []string {
 		"--background-file", in.BackgroundFile,
 	)
 	// --analysis cannot be combined with --resume or --preview. The wrapper is
-	// never a preview; when a session is resumed the analysis stays skipped and
-	// the run records an inconclusive observation instead of failing.
+	// never a preview; the analysis runs in its own phase without --resume, so a
+	// resumed main pass does not stand in its way.
 	if in.Analysis && in.ResumeSession == "" {
 		args = append(args, "--analysis")
 		if in.AnalysisTokenBudget > 0 {
