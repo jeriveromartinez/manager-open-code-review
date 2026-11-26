@@ -12,8 +12,10 @@ const props = withDefaults(
     activeCount?: number
     sheetOpen?: boolean
     sheetId?: string
+    /** The list pages in more rows server-side; label the count as loaded-only. */
+    loadedOnly?: boolean
   }>(),
-  { activeCount: 0, sheetOpen: false },
+  { activeCount: 0, sheetOpen: false, loadedOnly: false },
 )
 
 const emit = defineEmits<{
@@ -87,7 +89,7 @@ function onOpenSheet(): void {
         :class="{ 'filter-bar__count--active': hasFilters }"
         aria-live="polite"
       >
-        {{ shown }} DE {{ total }}
+        {{ shown }} DE {{ total }}{{ loadedOnly ? ' cargados' : '' }}
       </span>
       <button
         type="button"

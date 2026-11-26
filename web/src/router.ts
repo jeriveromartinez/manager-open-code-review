@@ -36,7 +36,7 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'dashboard', component: DashboardView, meta: { flushContainer: true } },
-    { path: '/runs', name: 'runs', component: RunsView },
+    { path: '/runs', name: 'runs', component: RunsView, meta: { flushContainer: true } },
     { path: '/lead', name: 'lead', component: LeadView, meta: { flushContainer: true } },
     { path: '/repos', name: 'repos', component: ReposView, meta: { flushContainer: true } },
     { path: '/teams', name: 'teams', component: TeamsView },
