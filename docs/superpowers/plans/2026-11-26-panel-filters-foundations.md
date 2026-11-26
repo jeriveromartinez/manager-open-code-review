@@ -21,7 +21,7 @@
 
 ## Review Focus
 
-- Facetas en la URL con valores desconocidos o repetidos: se ignoran, no rompen ni dejan la lista vacía.
+- Facetas en la URL: los nombres desconocidos se ignoran y los valores repetidos se deduplican; un valor desconocido de una faceta válida se conserva y simplemente no coincide (el estado vacío permite limpiarlo).
 - El recuento de cada opción refleja **el resto** de filtros (no su propia dimensión), así que una opción seleccionada nunca desaparece.
 - Teclado en el desplegable: flechas con retorno circular, Enter selecciona, Esc cierra sin cambiar nada, clic fuera cierra.
 - Hoja móvil: trampa y restauración de foco, Escape cierra, el fondo no hace scroll.

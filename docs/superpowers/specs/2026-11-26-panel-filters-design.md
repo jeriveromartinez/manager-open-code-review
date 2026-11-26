@@ -28,7 +28,9 @@ propio y hoja inferior en móvil. Cada vista ocupa una pantalla y solo su lista 
 - Los recuentos y el filtrado son **en cliente** sobre las listas completas que ya devuelve la API
   (no hay paginación hoy). Si se añade paginación, harán falta facetas en servidor.
 - Estado en URL: `q` más una clave por dimensión (`status`, `team`, `repo`, `severity`, `triage`,
-  `reason`, `sort`), con `router.replace` y sin recargar.
+  `reason`, `sort`), con `router.replace` y sin recargar. Los nombres de faceta desconocidos se
+  ignoran y los valores repetidos se deduplican; un valor desconocido de una faceta válida se
+  conserva y no coincide con nada, y el estado vacío permite limpiarlo.
 
 ## Layout
 
