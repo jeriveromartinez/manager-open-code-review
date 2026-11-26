@@ -477,7 +477,7 @@ describe('TeamsView', () => {
     const dialog = wrapper.get('[data-delete-dialog]')
     const button = dialog.get('[data-reassign-none]')
     expect(button.attributes('type')).toBe('button')
-    expect(button.attributes('aria-label')).toBe('Quitar el equipo a acme/api')
+    expect(button.attributes('aria-label')).toBe('Sin equipo: quitar acme/api')
     expect(button.text()).toBe('Sin equipo')
 
     await button.trigger('click')
@@ -489,6 +489,84 @@ describe('TeamsView', () => {
       'Escribe el nombre exacto del equipo para confirmar',
     )
     wrapper.unmount()
+  })
+
+  it('ignores a second click while a reassignment is in flight', async () => {
+    mocks.session.me = admin
+    let resolvePatch: (() => void) | undefined
+    mocks.api.patchRepo.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolvePatch = resolve
+        }),
+    )
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    await card(wrapper, 2).get('[data-delete-team]').trigger('click')
+    await flushPromises()
+
+    const button = wrapper.get('[data-reassign-none]')
+    const first = button.trigger('click')
+    const second = button.trigger('click')
+    await second
+
+    expect(mocks.api.patchRepo).toHaveBeenCalledTimes(1)
+    expect(button.attributes('disabled')).toBeDefined()
+
+    resolvePatch?.()
+    await first
+    await flushPromises()
+    wrapper.unmount()
+  })
+
+  it('explains a server block even when the assigned repositories cannot be reloaded', async () => {
+    mocks.session.me = admin
+    mocks.api.repos.mockResolvedValue([])
+    mocks.api.deleteTeam.mockRejectedValue(
+      new ApiError(409, 'conflict', {
+        error: 'team has repositories',
+        repositories: [{ id: 40, full_name: 'acme/late-repo' }],
+      }),
+    )
+
+    const wrapper = mountTeams()
+    await flushPromises()
+
+    await card(wrapper, 1).get('[data-delete-team]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-delete-confirm]').setValue('T1')
+    await wrapper.get('[data-delete-dialog] form').trigger('submit')
+    await flushPromises()
+
+    const dialog = wrapper.get('[data-delete-dialog]')
+    expect(dialog.get('[data-delete-reason]').text()).toBe(
+      'Reasigna el repositorio que indica el servidor para poder eliminar',
+    )
+    expect(dialog.get('[data-delete-submit]').attributes('disabled')).toBeDefined()
+    wrapper.unmount()
+  })
+
+  it('moves focus to the confirm input when the last repository row is removed', async () => {
+    mocks.session.me = admin
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const wrapper = mount(TeamsView, { attachTo: host })
+    await flushPromises()
+
+    await card(wrapper, 2).get('[data-delete-team]').trigger('click')
+    await flushPromises()
+
+    const button = wrapper.get('[data-reassign-none]')
+    ;(button.element as HTMLElement).focus()
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-delete-repo="30"]').exists()).toBe(false)
+    expect(document.activeElement).toBe(wrapper.get('[data-delete-confirm]').element)
+    wrapper.unmount()
+    host.remove()
   })
 
   it('reassigns a repository before deleting', async () => {

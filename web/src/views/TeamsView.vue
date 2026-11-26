@@ -43,6 +43,7 @@ const deleteConfirmName = ref('')
 const deleteError = ref<string | null>(null)
 const deleteBlocked = ref<BlockingRepository[]>([])
 const deleteSaving = ref(false)
+const reassigningIds = ref<number[]>([])
 const deleteDialog = ref<HTMLElement | null>(null)
 const deleteInput = ref<HTMLInputElement | null>(null)
 let deleteReturnFocus: HTMLElement | null = null
@@ -80,6 +81,11 @@ const deleteReason = computed(() => {
     return deleteRepos.value.length === 1
       ? 'Reasigna el repositorio pendiente para poder eliminar'
       : `Reasigna los ${deleteRepos.value.length} repositorios pendientes para poder eliminar`
+  }
+  if (deleteBlocked.value.length > 0) {
+    return deleteBlocked.value.length === 1
+      ? 'Reasigna el repositorio que indica el servidor para poder eliminar'
+      : 'Reasigna los repositorios que indica el servidor para poder eliminar'
   }
   if (team !== null && deleteConfirmName.value !== team.name) {
     return 'Escribe el nombre exacto del equipo para confirmar'
@@ -319,8 +325,19 @@ function closeDelete(restoreFocus = true): void {
   if (restoreFocus) returnTo?.focus()
 }
 
+function focusAfterReassign(index: number): void {
+  const rows = deleteDialog.value?.querySelectorAll<HTMLElement>('.delete-repos__row')
+  const nextButton =
+    index >= 0 ? rows?.[index]?.querySelector<HTMLElement>('[data-reassign-none]') : null
+  if (nextButton) nextButton.focus()
+  else deleteInput.value?.focus()
+}
+
 async function reassign(repo: Repository, teamId: number | null): Promise<boolean> {
-  if (teamId === repo.team_id) return true
+  if (teamId === repo.team_id || reassigningIds.value.includes(repo.id)) return false
+  const focused = activeElement()
+  const index = deleteRepos.value.findIndex((candidate) => candidate.id === repo.id)
+  reassigningIds.value = [...reassigningIds.value, repo.id]
   deleteError.value = null
   try {
     await api.patchRepo(repo.id, { team_id: teamId })
@@ -329,10 +346,14 @@ async function reassign(repo: Repository, teamId: number | null): Promise<boolea
     if (deleteTarget.value && deleteTarget.value.repository_count > 0) {
       deleteTarget.value.repository_count -= 1
     }
+    await nextTick()
+    if (focused !== null && !focused.isConnected) focusAfterReassign(index)
     return true
   } catch {
     deleteError.value = 'No se pudo reasignar el repositorio'
     return false
+  } finally {
+    reassigningIds.value = reassigningIds.value.filter((id) => id !== repo.id)
   }
 }
 
@@ -615,9 +636,11 @@ onMounted(() => {
             </p>
           </header>
           <div class="modal__body">
-            <p v-if="deleteLoading" class="field__hint">Cargando repositorios…</p>
-            <div v-else-if="deleteRepos.length > 0" class="delete-repos" data-delete-repos>
-              <p class="field__hint">Reasigna cada repositorio antes de eliminar el equipo.</p>
+            <div
+              v-if="!deleteLoading && deleteRepos.length > 0"
+              class="delete-repos"
+              data-delete-repos
+            >
               <ul class="delete-repos__list">
                 <li v-for="repo in deleteRepos" :key="repo.id" class="delete-repos__row">
                   <span class="delete-repos__name">{{ repo.full_name }}</span>
@@ -626,6 +649,7 @@ onMounted(() => {
                     :value="repo.team_id === null ? '' : repo.team_id"
                     :aria-label="`Reasignar ${repo.full_name}`"
                     :data-delete-repo="repo.id"
+                    :disabled="reassigningIds.includes(repo.id)"
                     @change="reassignFromSelect(repo, $event)"
                   >
                     <option
@@ -646,7 +670,8 @@ onMounted(() => {
                   <button
                     class="button button--ghost delete-repos__none"
                     type="button"
-                    :aria-label="`Quitar el equipo a ${repo.full_name}`"
+                    :aria-label="`Sin equipo: quitar ${repo.full_name}`"
+                    :disabled="reassigningIds.includes(repo.id)"
                     data-reassign-none
                     @click="reassign(repo, null)"
                   >
