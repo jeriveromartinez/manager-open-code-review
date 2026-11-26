@@ -43,6 +43,7 @@ const deleteConfirmName = ref('')
 const deleteError = ref<string | null>(null)
 const deleteBlocked = ref<BlockingRepository[]>([])
 const deleteSaving = ref(false)
+const reassigningIds = ref<number[]>([])
 const deleteDialog = ref<HTMLElement | null>(null)
 const deleteInput = ref<HTMLInputElement | null>(null)
 let deleteReturnFocus: HTMLElement | null = null
@@ -71,6 +72,25 @@ const canDelete = computed(() => {
     deleteBlocked.value.length === 0 &&
     deleteConfirmName.value === team.name
   )
+})
+
+const deleteReason = computed(() => {
+  const team = deleteTarget.value
+  if (deleteLoading.value) return 'Cargando repositorios…'
+  if (deleteRepos.value.length > 0) {
+    return deleteRepos.value.length === 1
+      ? 'Reasigna el repositorio pendiente para poder eliminar'
+      : `Reasigna los ${deleteRepos.value.length} repositorios pendientes para poder eliminar`
+  }
+  if (deleteBlocked.value.length > 0) {
+    return deleteBlocked.value.length === 1
+      ? 'Reasigna el repositorio que indica el servidor para poder eliminar'
+      : 'Reasigna los repositorios que indica el servidor para poder eliminar'
+  }
+  if (team !== null && deleteConfirmName.value !== team.name) {
+    return 'Escribe el nombre exacto del equipo para confirmar'
+  }
+  return null
 })
 
 /** Solo quien gestiona miembros necesita el listado de usuarios. */
@@ -305,10 +325,19 @@ function closeDelete(restoreFocus = true): void {
   if (restoreFocus) returnTo?.focus()
 }
 
-async function reassignRepository(repo: Repository, event: Event): Promise<void> {
-  const select = event.target as HTMLSelectElement
-  const teamId = select.value === '' ? null : Number(select.value)
-  if (teamId === repo.team_id) return
+function focusAfterReassign(index: number): void {
+  const rows = deleteDialog.value?.querySelectorAll<HTMLElement>('.delete-repos__row')
+  const nextButton =
+    index >= 0 ? rows?.[index]?.querySelector<HTMLElement>('[data-reassign-none]') : null
+  if (nextButton) nextButton.focus()
+  else deleteInput.value?.focus()
+}
+
+async function reassign(repo: Repository, teamId: number | null): Promise<boolean> {
+  if (teamId === repo.team_id || reassigningIds.value.includes(repo.id)) return false
+  const focused = activeElement()
+  const index = deleteRepos.value.findIndex((candidate) => candidate.id === repo.id)
+  reassigningIds.value = [...reassigningIds.value, repo.id]
   deleteError.value = null
   try {
     await api.patchRepo(repo.id, { team_id: teamId })
@@ -317,10 +346,22 @@ async function reassignRepository(repo: Repository, event: Event): Promise<void>
     if (deleteTarget.value && deleteTarget.value.repository_count > 0) {
       deleteTarget.value.repository_count -= 1
     }
+    await nextTick()
+    if (focused !== null && !focused.isConnected) focusAfterReassign(index)
+    return true
   } catch {
-    select.value = repo.team_id === null ? '' : String(repo.team_id)
     deleteError.value = 'No se pudo reasignar el repositorio'
+    return false
+  } finally {
+    reassigningIds.value = reassigningIds.value.filter((id) => id !== repo.id)
   }
+}
+
+async function reassignFromSelect(repo: Repository, event: Event): Promise<void> {
+  const select = event.target as HTMLSelectElement
+  const teamId = select.value === '' ? null : Number(select.value)
+  const ok = await reassign(repo, teamId)
+  if (!ok) select.value = repo.team_id === null ? '' : String(repo.team_id)
 }
 
 function conflictRepositories(err: unknown): BlockingRepository[] {
@@ -595,9 +636,11 @@ onMounted(() => {
             </p>
           </header>
           <div class="modal__body">
-            <p v-if="deleteLoading" class="field__hint">Cargando repositorios…</p>
-            <div v-else-if="deleteRepos.length > 0" class="delete-repos" data-delete-repos>
-              <p class="field__hint">Reasigna cada repositorio antes de eliminar el equipo.</p>
+            <div
+              v-if="!deleteLoading && deleteRepos.length > 0"
+              class="delete-repos"
+              data-delete-repos
+            >
               <ul class="delete-repos__list">
                 <li v-for="repo in deleteRepos" :key="repo.id" class="delete-repos__row">
                   <span class="delete-repos__name">{{ repo.full_name }}</span>
@@ -606,7 +649,8 @@ onMounted(() => {
                     :value="repo.team_id === null ? '' : repo.team_id"
                     :aria-label="`Reasignar ${repo.full_name}`"
                     :data-delete-repo="repo.id"
-                    @change="reassignRepository(repo, $event)"
+                    :disabled="reassigningIds.includes(repo.id)"
+                    @change="reassignFromSelect(repo, $event)"
                   >
                     <option
                       v-if="repo.team_id !== null"
@@ -623,6 +667,16 @@ onMounted(() => {
                       {{ candidate.name }}
                     </option>
                   </select>
+                  <button
+                    class="button button--ghost delete-repos__none"
+                    type="button"
+                    :aria-label="`Sin equipo: quitar ${repo.full_name}`"
+                    :disabled="reassigningIds.includes(repo.id)"
+                    data-reassign-none
+                    @click="reassign(repo, null)"
+                  >
+                    Sin equipo
+                  </button>
                 </li>
               </ul>
             </div>
@@ -654,6 +708,9 @@ onMounted(() => {
             <p v-if="deleteError" class="form-error" role="alert">{{ deleteError }}</p>
           </div>
           <footer class="modal__actions">
+            <p v-if="deleteReason" class="field__hint modal__actions__reason" data-delete-reason>
+              {{ deleteReason }}
+            </p>
             <button class="button button--ghost" type="button" @click="closeDelete()">
               Cancelar
             </button>
@@ -894,6 +951,11 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+.modal__actions__reason {
+  align-self: center;
+  margin-right: auto;
+}
+
 .delete-repos__list {
   display: flex;
   flex-direction: column;
@@ -905,7 +967,7 @@ onMounted(() => {
 
 .delete-repos__row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 220px);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 220px) auto;
   align-items: center;
   gap: var(--space-2) var(--space-3);
 }
@@ -918,6 +980,13 @@ onMounted(() => {
 
 .delete-repos__select {
   width: 100%;
+}
+
+.delete-repos__none {
+  min-height: 40px;
+  padding: var(--space-1) var(--space-2);
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .delete-blocked {
