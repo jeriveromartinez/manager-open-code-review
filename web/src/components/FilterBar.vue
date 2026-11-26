@@ -3,21 +3,30 @@ import { computed } from 'vue'
 
 type FilterChip = { key: string; label: string }
 
-const props = defineProps<{
-  q: string
-  shown: number
-  total: number
-  chips: FilterChip[]
-}>()
+const props = withDefaults(
+  defineProps<{
+    q: string
+    shown: number
+    total: number
+    chips: FilterChip[]
+    activeCount?: number
+  }>(),
+  { activeCount: 0 },
+)
 
 const emit = defineEmits<{
   'update:q': [value: string]
   clear: []
   remove: [key: string]
+  'open-sheet': []
 }>()
 
+// Single source of truth for "filters are on": the counter tint and LIMPIAR
+// eligibility both read it, and plan B must reuse this exact rule.
 const hasFilters = computed(() => props.q.trim() !== '' || props.chips.length > 0)
 
+// The parent must mirror the input back into `q` synchronously. Any debounce
+// belongs downstream so the counter and LIMPIAR track what the user sees.
 function onSearch(event: Event): void {
   emit('update:q', (event.target as HTMLInputElement).value)
 }
@@ -28,6 +37,10 @@ function onClear(): void {
 
 function onRemove(key: string): void {
   emit('remove', key)
+}
+
+function onOpenSheet(): void {
+  emit('open-sheet')
 }
 </script>
 
@@ -49,6 +62,16 @@ function onRemove(key: string): void {
       />
     </label>
 
+    <button
+      type="button"
+      class="filter-bar__sheet"
+      @click="onOpenSheet"
+    >
+      FILTROS · {{ activeCount }}
+    </button>
+
+    <!-- Hidden below 760px but kept mounted: views must render their own
+         dropdowns inside the mobile sheet; this bar only owns the trigger. -->
     <div class="filter-bar__filters">
       <slot />
     </div>
@@ -69,10 +92,6 @@ function onRemove(key: string): void {
       >
         LIMPIAR
       </button>
-    </div>
-
-    <div v-if="$slots.sheet" class="filter-bar__sheet">
-      <slot name="sheet" />
     </div>
 
     <ul v-if="chips.length > 0" class="filter-bar__chips" aria-label="Filtros activos">
@@ -210,7 +229,30 @@ function onRemove(key: string): void {
 }
 
 .filter-bar__sheet {
+  appearance: none;
   display: none;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  border: var(--rule-hair) solid var(--border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-micro) ease,
+    color var(--dur-micro) ease;
+}
+
+.filter-bar__sheet:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
 }
 
 .filter-bar__chips {

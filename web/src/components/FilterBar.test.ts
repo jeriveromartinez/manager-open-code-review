@@ -71,15 +71,23 @@ describe('FilterBar', () => {
     expect(idle.get('.filter-bar__clear').attributes('disabled')).toBeDefined()
   })
 
-  it('keeps the bar in normal flow at narrow widths', () => {
-    const originalWidth = window.innerWidth
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 480 })
+  it('renders the mobile trigger with the active count and emits open-sheet', async () => {
+    const wrapper = mount(FilterBar, {
+      props: { q: '', shown: 2, total: 12, chips, activeCount: 2 },
+    })
 
+    const trigger = wrapper.get('.filter-bar__sheet')
+    expect(trigger.text()).toBe('FILTROS · 2')
+
+    await trigger.trigger('click')
+    expect(wrapper.emitted('open-sheet')).toHaveLength(1)
+  })
+
+  it('renders the desktop slot inside the bar', () => {
     const wrapper = mount(FilterBar, {
       props: { q: '', shown: 3, total: 8, chips: [] },
       slots: {
         default: '<button type="button" data-desktop-filter>Estado</button>',
-        sheet: '<button type="button" data-sheet-trigger>FILTROS · 0</button>',
       },
     })
 
@@ -87,10 +95,6 @@ describe('FilterBar', () => {
     expect(bar.element).toBe(wrapper.element)
     expect(bar.attributes('style')).toBeUndefined()
     expect(bar.find('[data-desktop-filter]').exists()).toBe(true)
-    expect(bar.find('[data-sheet-trigger]').exists()).toBe(true)
     expect(bar.element.contains(bar.get('[data-desktop-filter]').element)).toBe(true)
-    expect(bar.element.contains(bar.get('[data-sheet-trigger]').element)).toBe(true)
-
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
   })
 })
