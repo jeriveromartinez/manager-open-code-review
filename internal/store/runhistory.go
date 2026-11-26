@@ -3,18 +3,23 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
 // RunHistoryFilter narrows the finished-run history. Zero values mean "no
 // filter"; Limit falls back to the default page size.
 type RunHistoryFilter struct {
-	BeforeID int64
-	Limit    int
-	Statuses []string
-	RepoID   int64
-	Trigger  string
-	Query    string
+	// BeforeID and BeforeCreatedAt together are the keyset cursor: pass the
+	// previous page's NextBefore and NextCreatedAt. Both are required for a
+	// stable cursor because a newer run id can carry an older creation time.
+	BeforeID        int64
+	BeforeCreatedAt *time.Time
+	Limit           int
+	Statuses        []string
+	RepoID          int64
+	Trigger         string
+	Query           string
 }
 
 // RunHistoryRow is one finished run with the pull request, repository, team and
@@ -39,11 +44,13 @@ type RunHistoryRow struct {
 }
 
 // RunHistoryPage is one page of finished runs plus the cursor for the next
-// page. NextBefore is the id of the last returned row, or zero on an empty page.
+// page. NextBefore and NextCreatedAt are the id and creation time of the last
+// returned row, or zero/nil on an empty page.
 type RunHistoryPage struct {
-	Runs       []RunHistoryRow
-	NextBefore int64
-	HasMore    bool
+	Runs          []RunHistoryRow
+	NextBefore    int64
+	NextCreatedAt *time.Time
+	HasMore       bool
 }
 
 const (
@@ -52,7 +59,8 @@ const (
 )
 
 // terminalRunStatuses are the statuses a run can no longer leave. Queued and
-// running runs belong to the live view instead.
+// running runs belong to the live view instead. Shared with the publication
+// reconciler so the terminal set has a single definition.
 var terminalRunStatuses = []string{RunSucceeded, RunInconclusive, RunFailed, RunSuperseded}
 
 // ReviewRunHistory lists the finished runs the user may see, newest first. It
@@ -85,7 +93,13 @@ func (s *Store) ReviewRunHistory(ctx context.Context, u User, filter RunHistoryF
 		Where("rr.status IN ?", terminalRunStatuses)
 
 	if filter.BeforeID > 0 {
-		q = q.Where("rr.id < ?", filter.BeforeID)
+		if filter.BeforeCreatedAt != nil {
+			q = q.Where("(rr.created_at, rr.id) < (?, ?)", *filter.BeforeCreatedAt, filter.BeforeID)
+		} else {
+			// Id-only callers keep the older behaviour, but only the pair is a
+			// stable cursor: a newer id can carry an older creation time.
+			q = q.Where("rr.id < ?", filter.BeforeID)
+		}
 	}
 	if len(filter.Statuses) > 0 {
 		q = q.Where("rr.status IN ?", filter.Statuses)
@@ -97,8 +111,8 @@ func (s *Store) ReviewRunHistory(ctx context.Context, u User, filter RunHistoryF
 		q = q.Where("rr.trigger = ?", filter.Trigger)
 	}
 	if filter.Query != "" {
-		like := "%" + filter.Query + "%"
-		q = q.Where("(pr.title ILIKE ? OR r.full_name ILIKE ?)", like, like)
+		like := "%" + escapeLike(filter.Query) + "%"
+		q = q.Where(`(pr.title ILIKE ? ESCAPE '\' OR r.full_name ILIKE ? ESCAPE '\')`, like, like)
 	}
 
 	var rows []RunHistoryRow
@@ -113,7 +127,16 @@ func (s *Store) ReviewRunHistory(ctx context.Context, u User, filter RunHistoryF
 		page.HasMore = true
 	}
 	if len(page.Runs) > 0 {
-		page.NextBefore = int64(page.Runs[len(page.Runs)-1].ID)
+		last := page.Runs[len(page.Runs)-1]
+		page.NextBefore = int64(last.ID)
+		next := last.CreatedAt
+		page.NextCreatedAt = &next
 	}
 	return page, nil
+}
+
+// escapeLike makes the search box literal: % and _ are user text, not
+// wildcards.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

@@ -49,8 +49,7 @@ func (s *Store) LockPublishPR(ctx context.Context, prID uint) (unlock func(), er
 func (s *Store) PendingPublishRuns(ctx context.Context, limit int) ([]ReviewRun, error) {
 	var runs []ReviewRun
 	err := s.DB.WithContext(ctx).
-		Where("publish_pending = ? AND status IN ?", true,
-			[]string{RunSucceeded, RunInconclusive, RunFailed, RunSuperseded}).
+		Where("publish_pending = ? AND status IN ?", true, terminalRunStatuses).
 		Order("id").Limit(limit).Find(&runs).Error
 	if err != nil {
 		return nil, fmt.Errorf("list review runs pending publication: %w", err)

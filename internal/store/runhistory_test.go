@@ -100,6 +100,14 @@ func TestReviewRunHistoryReturnsTerminalRunsNewestFirst(t *testing.T) {
 	if page.NextBefore != int64(oldest.ID) {
 		t.Errorf("NextBefore = %d, want the last returned id %d", page.NextBefore, oldest.ID)
 	}
+	if page.NextCreatedAt == nil || !page.NextCreatedAt.Equal(oldest.CreatedAt) {
+		t.Errorf("NextCreatedAt = %v, want the last returned creation time %v", page.NextCreatedAt, oldest.CreatedAt)
+	}
+
+	if untouched := page.Runs[3]; untouched.StartedAt != nil || untouched.FinishedAt != nil {
+		t.Errorf("run without timestamps decoded as %v/%v, want nil/nil",
+			untouched.StartedAt, untouched.FinishedAt)
+	}
 
 	row := page.Runs[2]
 	if row.PullRequestID != failedPR.ID || row.PRNumber != 2 || row.PRTitle != "PR 2" {
@@ -126,20 +134,30 @@ func TestReviewRunHistoryPaginatesWithCursor(t *testing.T) {
 	f, repo, _, admin := historySetup(t)
 	base := time.Now().UTC().Truncate(time.Millisecond)
 
-	var all []uint // oldest to newest
+	var monotonic []uint // oldest to newest by creation time
 	for i := 1; i <= 5; i++ {
 		pr := f.openPR(repo.ID, i, store.StatusPending, false)
 		run := f.historyRun(pr, store.RunSucceeded, "webhook", base.Add(time.Duration(i)*time.Minute))
-		all = append(all, run.ID)
+		monotonic = append(monotonic, run.ID)
 	}
-	want := []uint{all[4], all[3], all[2], all[1], all[0]}
+	// Inserted last, so its id is the highest, but its creation time is the
+	// oldest. An id-only cursor would skip it.
+	outlierPR := f.openPR(repo.ID, 6, store.StatusPending, false)
+	outlier := f.historyRun(outlierPR, store.RunSucceeded, "webhook", base.Add(-time.Minute))
+
+	want := []uint{
+		monotonic[4], monotonic[3], monotonic[2], monotonic[1], monotonic[0], outlier.ID,
+	}
 
 	var got []uint
 	seen := make(map[uint]bool)
-	before := int64(0)
+	var beforeID int64
+	var beforeAt *time.Time
 	pages := 0
 	for {
-		page, err := f.s.ReviewRunHistory(f.ctx, admin, store.RunHistoryFilter{BeforeID: before, Limit: 2})
+		page, err := f.s.ReviewRunHistory(f.ctx, admin, store.RunHistoryFilter{
+			BeforeID: beforeID, BeforeCreatedAt: beforeAt, Limit: 2,
+		})
 		if err != nil {
 			t.Fatalf("ReviewRunHistory(page %d) error = %v", pages+1, err)
 		}
@@ -156,27 +174,34 @@ func TestReviewRunHistoryPaginatesWithCursor(t *testing.T) {
 			seen[id] = true
 			got = append(got, id)
 		}
-		if page.NextBefore != int64(ids[len(ids)-1]) {
-			t.Errorf("page %d NextBefore = %d, want last returned id %d", pages, page.NextBefore, ids[len(ids)-1])
+		last := page.Runs[len(page.Runs)-1]
+		if page.NextBefore != int64(last.ID) {
+			t.Errorf("page %d NextBefore = %d, want last returned id %d", pages, page.NextBefore, last.ID)
+		}
+		if page.NextCreatedAt == nil || !page.NextCreatedAt.Equal(last.CreatedAt) {
+			t.Errorf("page %d NextCreatedAt = %v, want %v", pages, page.NextCreatedAt, last.CreatedAt)
 		}
 		if !page.HasMore {
 			break
 		}
-		before = page.NextBefore
+		beforeID = page.NextBefore
+		beforeAt = page.NextCreatedAt
 	}
 
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("paged ids = %v, want %v", got, want)
+		t.Fatalf("paged ids = %v, want every run exactly once %v", got, want)
 	}
 	if pages != 3 {
-		t.Errorf("pages = %d, want 3 for five runs at two per page", pages)
+		t.Errorf("pages = %d, want 3 for six runs at two per page", pages)
 	}
 
-	page, err := f.s.ReviewRunHistory(f.ctx, admin, store.RunHistoryFilter{BeforeID: int64(all[0]), Limit: 2})
+	page, err := f.s.ReviewRunHistory(f.ctx, admin, store.RunHistoryFilter{
+		BeforeID: int64(outlier.ID), BeforeCreatedAt: &outlier.CreatedAt, Limit: 2,
+	})
 	if err != nil {
 		t.Fatalf("ReviewRunHistory(past end) error = %v", err)
 	}
-	if len(page.Runs) != 0 || page.HasMore || page.NextBefore != 0 {
+	if len(page.Runs) != 0 || page.HasMore || page.NextBefore != 0 || page.NextCreatedAt != nil {
 		t.Errorf("past-end page = %+v, want empty with no cursor and no more", page)
 	}
 }
@@ -226,11 +251,18 @@ func TestReviewRunHistorySearchesTitleAndRepo(t *testing.T) {
 	base := time.Now().UTC().Truncate(time.Millisecond)
 
 	plainPR := f.openPR(repoA.ID, 10, store.StatusPending, false)
-	plain := f.historyRun(plainPR, store.RunSucceeded, "webhook", base.Add(-2*time.Minute))
+	plain := f.historyRun(plainPR, store.RunSucceeded, "webhook", base.Add(-3*time.Minute))
+
+	itemsPR := f.openPR(repoA.ID, 12, store.StatusPending, false)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", itemsPR.ID).
+		Update("title", "100 items").Error; err != nil {
+		t.Fatalf("rename pull request: %v", err)
+	}
+	items := f.historyRun(itemsPR, store.RunSucceeded, "webhook", base.Add(-2*time.Minute))
 
 	titlePR := f.openPR(repoB.ID, 11, store.StatusPending, false)
 	if err := f.s.DB.WithContext(f.ctx).Model(&store.PullRequest{}).Where("id = ?", titlePR.ID).
-		Update("title", "Fix the widget").Error; err != nil {
+		Update("title", "Fix 100% of widgets").Error; err != nil {
 		t.Fatalf("rename pull request: %v", err)
 	}
 	titled := f.historyRun(titlePR, store.RunSucceeded, "webhook", base.Add(-1*time.Minute))
@@ -243,7 +275,8 @@ func TestReviewRunHistorySearchesTitleAndRepo(t *testing.T) {
 		{"repository", "searchtarget", []uint{titled.ID}},
 		{"title case-insensitive", "WIDGET", []uint{titled.ID}},
 		{"title by number", "pr 10", []uint{plain.ID}},
-		{"account matches both", "acme/", []uint{titled.ID, plain.ID}},
+		{"literal percent", "100%", []uint{titled.ID}},
+		{"account matches all", "acme/", []uint{titled.ID, items.ID, plain.ID}},
 		{"no match", "nothing-here", nil},
 	}
 
