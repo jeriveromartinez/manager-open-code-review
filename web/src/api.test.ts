@@ -76,6 +76,66 @@ describe('api team mutations', () => {
   })
 })
 
+describe('api.runHistory', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const page = {
+    runs: [],
+    next_before: 42,
+    next_created_at: '2026-11-26T10:00:00.123456789Z',
+    has_more: true,
+  }
+
+  function stubPage(body: unknown = page) {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    return fetchMock
+  }
+
+  it('sends the filters and the full keyset cursor', async () => {
+    const fetchMock = stubPage()
+
+    await expect(
+      api.runHistory({
+        status: ['failed', 'inconclusive'],
+        repo: 'acme/api',
+        trigger: 'manual',
+        q: 'login fix',
+        before: 42,
+        beforeCreatedAt: '2026-11-26T10:00:00.123456789Z',
+        limit: 25,
+      }),
+    ).resolves.toEqual(page)
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(init.method).toBe('GET')
+    const params = new URL(url, 'http://localhost').searchParams
+    expect(params.getAll('status')).toEqual(['failed', 'inconclusive'])
+    expect(params.get('repo')).toBe('acme/api')
+    expect(params.get('trigger')).toBe('manual')
+    expect(params.get('q')).toBe('login fix')
+    expect(params.get('before')).toBe('42')
+    // RFC 3339 nano precision must survive untouched.
+    expect(params.get('before_created_at')).toBe('2026-11-26T10:00:00.123456789Z')
+    expect(params.get('limit')).toBe('25')
+  })
+
+  it('omits the parameters that were not set', async () => {
+    const fetchMock = stubPage({ runs: [], next_before: 0, next_created_at: null, has_more: false })
+
+    await api.runHistory()
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/review-runs/history')
+  })
+})
+
 describe('openEventStream', () => {
   afterEach(() => {
     vi.unstubAllGlobals()

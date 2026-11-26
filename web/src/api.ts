@@ -173,6 +173,33 @@ export type ActiveRun = {
   created_at: string
 }
 
+/** Una revisión terminada del historial; conserva la forma del run activo. */
+export type RunHistoryRow = ActiveRun & {
+  error_code: string
+  error_message: string
+  finished_at: string | null
+  /** null cuando la ejecución no registró inicio o fin. */
+  duration_seconds: number | null
+}
+
+export type RunHistoryParams = {
+  status?: string[]
+  repo?: string
+  trigger?: string
+  q?: string
+  before?: number
+  /** Timestamp RFC 3339 nano del cursor; viaja tal cual lo devolvió el servidor. */
+  beforeCreatedAt?: string
+  limit?: number
+}
+
+export type RunHistoryPage = {
+  runs: RunHistoryRow[]
+  next_before: number
+  next_created_at: string | null
+  has_more: boolean
+}
+
 /** Una línea del log de una ejecución; el panel la muestra en vivo (#124). */
 export type ReviewRunLogEntry = {
   seq: number
@@ -759,6 +786,20 @@ export const api = {
   prs: () => request<PRView[]>('/api/prs'),
   prDetail: (id: number) => request<PRDetail>(`/api/prs/${id}`),
   activeRuns: () => request<{ runs: ActiveRun[] }>('/api/review-runs'),
+  runHistory: (params: RunHistoryParams = {}) => {
+    const query = new URLSearchParams()
+    for (const status of params.status ?? []) query.append('status', status)
+    if (params.repo) query.set('repo', params.repo)
+    if (params.trigger) query.set('trigger', params.trigger)
+    if (params.q) query.set('q', params.q)
+    if (params.before !== undefined) query.set('before', String(params.before))
+    if (params.beforeCreatedAt) query.set('before_created_at', params.beforeCreatedAt)
+    if (params.limit !== undefined) query.set('limit', String(params.limit))
+    const search = query.toString()
+    return request<RunHistoryPage>(
+      search === '' ? '/api/review-runs/history' : `/api/review-runs/history?${search}`,
+    )
+  },
   reviewRunLogs: (id: number, after = 0, limit = 500) =>
     request<ReviewRunLogPage>(`/api/review-runs/${id}/logs?after=${after}&limit=${limit}`),
   retryPR: (id: number) =>
