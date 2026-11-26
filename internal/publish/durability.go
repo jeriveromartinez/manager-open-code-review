@@ -3,9 +3,12 @@ package publish
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
+	appgithub "github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
@@ -202,4 +205,44 @@ func (w *Worker) ReconcilePendingPublishes(ctx context.Context, limit int) (int,
 		enqueued++
 	}
 	return enqueued, nil
+}
+
+// ReconcileReviewRequests resumes human review requests the delivery path left
+// unfinished: a sending row whose lease expired, a pending row after a crash,
+// or a rejected row whose destination was corrected. Only the pull request's
+// current comparison is resumed, and an ambiguous POST is reconciled with
+// GitHub before anything is sent again.
+func (w *Worker) ReconcileReviewRequests(ctx context.Context, limit int) (int, error) {
+	if w.Apps == nil {
+		return 0, nil
+	}
+	rows, err := w.Store.RecoverableReviewRequests(ctx, limit)
+	if err != nil {
+		return 0, err
+	}
+	service := &appgithub.ReviewRequestService{
+		Store: w.Store, Apps: w.Apps, RetryDelay: appgithub.ReviewRequestRetryDelay,
+	}
+	resumed := 0
+	for _, row := range rows {
+		cfg, err := w.Store.ReviewRequestConfigForPR(ctx, row.PullRequestID)
+		if errors.Is(err, store.ErrNoReviewConfig) {
+			continue
+		}
+		if err != nil {
+			slog.Error("load review request config", "review_request_id", row.ID, "error", err)
+			continue
+		}
+		if !cfg.PR.Comparison().Same(row.Comparison()) {
+			// The pull request moved after the row was selected; its new
+			// comparison is served by its own run.
+			continue
+		}
+		if _, err := service.Request(ctx, cfg, row.Cause); err != nil {
+			slog.Error("resume review request", "review_request_id", row.ID, "error", err)
+			continue
+		}
+		resumed++
+	}
+	return resumed, nil
 }

@@ -12,11 +12,13 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	ghapp "github.com/jeriveromartinez/qa-control-center/internal/github"
 	"github.com/jeriveromartinez/qa-control-center/internal/jobs"
+	"github.com/jeriveromartinez/qa-control-center/internal/publish"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/syncer"
 	"github.com/jeriveromartinez/qa-control-center/internal/testutil"
@@ -344,5 +346,107 @@ func TestControlClientRunsReviewTriggerJob(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("review_trigger job was not worked within 10s")
+	}
+}
+
+// A review request left in "sending" by a crash must be resumed by the
+// reconciliation job, not only by a new publish or sync.
+func TestControlClientHealsStrandedReviewRequest(t *testing.T) {
+	s := testutil.NewStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var posts, gets atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/app/installations/1/access_tokens" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"token":"[SECRET]","expires_at":%q}`,
+				time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+			return
+		}
+		if r.URL.Path != "/repos/acme/repo/pulls/7/requested_reviewers" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodGet:
+			gets.Add(1)
+			_, _ = w.Write([]byte(`{"users":[{"login":"qa-reviewer"}],"teams":[]}`))
+		case http.MethodPost:
+			posts.Add(1)
+			http.Error(w, "duplicate request", http.StatusUnprocessableEntity)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	team := store.Team{ID: 1, Name: "qa", Slug: "qa"}
+	profile := store.LLMProfile{ID: 1, Name: "default", Enabled: true}
+	inst := store.Installation{ID: 1, AccountLogin: "acme", AccountType: "Organization"}
+	for _, row := range []any{&team, &profile, &inst} {
+		if err := s.DB.WithContext(ctx).Create(row).Error; err != nil {
+			t.Fatalf("seed %T: %v", row, err)
+		}
+	}
+	repo := store.Repository{
+		ID: 1, InstallationID: inst.ID, FullName: "acme/repo", Enabled: true, TeamID: &team.ID,
+	}
+	if err := s.DB.WithContext(ctx).Create(&repo).Error; err != nil {
+		t.Fatalf("seed repository: %v", err)
+	}
+	policy := store.QAPolicy{TeamID: team.ID, LLMProfileID: profile.ID, ReviewerLogin: "qa-reviewer"}
+	if err := s.DB.WithContext(ctx).Create(&policy).Error; err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+	pr := store.PullRequest{
+		RepositoryID: repo.ID, Number: 7, HeadSHA: "head", BaseRef: "main",
+		MergeBaseSHA: "mb", State: "open", GitHubUpdatedAt: time.Now().UTC(),
+	}
+	if err := s.DB.WithContext(ctx).Create(&pr).Error; err != nil {
+		t.Fatalf("seed pull request: %v", err)
+	}
+	_, request, err := s.CreateReviewRequest(ctx, store.ReviewRequest{
+		PullRequestID: pr.ID, HeadSHA: pr.HeadSHA, BaseRef: pr.BaseRef, MergeBaseSHA: pr.MergeBaseSHA,
+		Cause: store.ReviewRequestCauseInconclusive, ReviewerLogin: "qa-reviewer",
+		Status: store.ReviewRequestSending, Attempts: 1,
+	})
+	if err != nil {
+		t.Fatalf("seed sending request: %v", err)
+	}
+	if err := s.DB.WithContext(ctx).Model(&store.ReviewRequest{}).Where("id = ?", request.ID).
+		Update("updated_at", time.Now().Add(-2*store.ReviewRequestClaimLease)).Error; err != nil {
+		t.Fatalf("age the sending row: %v", err)
+	}
+
+	app := &ghapp.App{Creds: ghapp.AppCredentials{AppID: 12345, PEM: testPEM(t)}, APIURL: srv.URL}
+	worker := &publish.Worker{Store: s, Apps: stubAppProvider{app: app}}
+	client, err := jobs.NewControlClient(s.Pool, &syncer.Syncer{Store: s, Apps: unavailableAppProvider{}},
+		jobs.ControlDeps{Publisher: worker})
+	if err != nil {
+		t.Fatalf("NewControlClient() error = %v", err)
+	}
+	startClient(t, ctx, client)
+	if err := jobs.NewEnqueuer(client).EnqueueReconcile(ctx); err != nil {
+		t.Fatalf("EnqueueReconcile() error = %v", err)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		saved, err := s.ReviewRequestFor(ctx, pr.ID, pr.HeadSHA)
+		if err == nil && saved.Status == store.ReviewRequestDelivered {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("reconciliation did not resume the request: status %q error %v", saved.Status, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if gets.Load() == 0 {
+		t.Error("GET requested_reviewers was never called")
+	}
+	if posts.Load() != 0 {
+		t.Errorf("POST calls = %d, want 0: GitHub already had the reviewer", posts.Load())
 	}
 }

@@ -121,7 +121,7 @@ func (t *Trigger) OnPullRequestIneligible(ctx context.Context, prID uint) error 
 // engine will not review: disabled external reviews, an indeterminate origin,
 // an untrusted author or a contribution outside the limits. Authorized external
 // pull requests are left to the normal review path. The request is deduplicated
-// by pull request and head.
+// by pull request and comparison.
 func (t *Trigger) requestForkReview(ctx context.Context, prID uint) error {
 	pr, err := t.Store.PullRequest(ctx, prID)
 	if errors.Is(err, store.ErrNotFound) {

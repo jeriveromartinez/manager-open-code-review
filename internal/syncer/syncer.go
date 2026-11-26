@@ -413,9 +413,10 @@ func (s *Syncer) refreshChecks(ctx context.Context, client *gh.Client, pr store.
 // requestForkReview hands an external contribution the engine may not review
 // to a person. Authorized contributions are left to the pending-review poller,
 // which applies size, rate and spend limits again before queueing. The request
-// is deduplicated by pull request and head, so walking the open pull requests
-// on every poll is cheap and never asks GitHub twice. A failure is logged and
-// does not abort the rest of the installation.
+// is deduplicated by pull request and comparison, so walking the open pull
+// requests on every poll is cheap and never asks GitHub twice for the same
+// comparison. A failure is logged and does not abort the rest of the
+// installation.
 func (s *Syncer) requestForkReview(ctx context.Context, pr store.PullRequest) {
 	if s.ReviewRequests == nil || !pr.External() || !pr.IsOpen() || pr.Draft || pr.HeadSHA == "" {
 		return

@@ -308,6 +308,18 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(body, &in)
 		g.reviewRequests = append(g.reviewRequests, in)
 		writeJSON(map[string]any{"number": 7}, http.StatusCreated)
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/7/requested_reviewers":
+		users := []map[string]any{}
+		teams := []map[string]any{}
+		for _, request := range g.reviewRequests {
+			for _, login := range request.Reviewers {
+				users = append(users, map[string]any{"login": login})
+			}
+			for _, slug := range request.TeamReviewers {
+				teams = append(teams, map[string]any{"slug": slug})
+			}
+		}
+		writeJSON(map[string]any{"users": users, "teams": teams}, http.StatusOK)
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/repo/pulls/7/comments":
 		page := 1
 		if raw := r.URL.Query().Get("page"); raw != "" {

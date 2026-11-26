@@ -58,6 +58,42 @@ func TestAppRequestReview(t *testing.T) {
 	}
 }
 
+func TestAppRequestedReviewers(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/app/installations/9/access_tokens" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"token":"[SECRET]","expires_at":%q}`,
+				time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+			return
+		}
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/acme/repo/pulls/7/requested_reviewers" {
+			http.NotFound(w, r)
+			return
+		}
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"users":[{"login":"qa-reviewer"}],"teams":[{"slug":"qa-team"}]}`))
+	}))
+	defer srv.Close()
+
+	app := &ghapp.App{
+		Creds:  ghapp.AppCredentials{AppID: 12345, PEM: testAppPEM(t)},
+		APIURL: srv.URL,
+	}
+	reviewers, teams, err := app.RequestedReviewers(context.Background(), 9, "acme/repo", 7)
+	if err != nil {
+		t.Fatalf("RequestedReviewers() error = %v", err)
+	}
+	if gotPath == "" {
+		t.Error("request path was not the requested_reviewers endpoint")
+	}
+	if len(reviewers) != 1 || reviewers[0] != "qa-reviewer" ||
+		len(teams) != 1 || teams[0] != "qa-team" {
+		t.Errorf("reviewers = %v teams = %v, want qa-reviewer/qa-team", reviewers, teams)
+	}
+}
+
 func TestAppRequestReviewLocalErrorsAreNotRetryable(t *testing.T) {
 	app := &ghapp.App{}
 	for _, tc := range []struct {
