@@ -58,6 +58,12 @@ describe('prStatusLabel', () => {
     ).toEqual({ tag: 'Revisando IA', action: 'Análisis en curso', tone: 'busy' })
   })
 
+  it('distingue un PR en cola de una ejecución en curso', () => {
+    expect(
+      prStatusLabel({ qa_status: 'pending', review_state: 'queued', review_reason: '' }),
+    ).toEqual({ tag: 'En cola para revisión', action: 'Esperando turno del worker', tone: 'muted' })
+  })
+
   it('solo reinterpreta el estado pending', () => {
     expect(
       prStatusLabel({

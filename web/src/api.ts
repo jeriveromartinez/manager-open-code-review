@@ -22,7 +22,7 @@ export type PRView = {
   html_url: string
   qa_status: QAStatus
   group: PRGroup
-  review_state: 'running' | 'scheduled' | 'blocked' | ''
+  review_state: 'queued' | 'running' | 'scheduled' | 'blocked' | ''
   review_reason: string
   validations: { passed: number; total: number }
   open_findings: SeverityCounts
