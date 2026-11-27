@@ -455,10 +455,24 @@ var severityRank = map[string]int{
 // storedVerification is the subset of the verifier's JSON the publisher needs
 // to decide whether a finding may be presented as validated or block a check.
 type storedVerification struct {
-	Verdict  string `json:"verdict"`
-	Evidence string `json:"evidence"`
-	HeadSHA  string `json:"head_sha"`
-	Reason   string `json:"reason"`
+	Verdict      string              `json:"verdict"`
+	Evidence     string              `json:"evidence"`
+	HeadSHA      string              `json:"head_sha"`
+	Reason       string              `json:"reason"`
+	Differential *storedDifferential `json:"differential,omitempty"`
+}
+
+// storedDifferential mirrors the executable evidence review stores on the
+// verification record. It is rendered only inside the verification block, so
+// publication still depends on the confirmed verdict.
+type storedDifferential struct {
+	Status     string `json:"status"`
+	Reason     string `json:"reason"`
+	Case       string `json:"case"`
+	BaseSHA    string `json:"base_sha"`
+	HeadSHA    string `json:"head_sha"`
+	BasePassed bool   `json:"base_passed"`
+	HeadPassed bool   `json:"head_passed"`
 }
 
 func parseVerification(f store.Finding) storedVerification {

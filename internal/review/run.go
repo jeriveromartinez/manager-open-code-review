@@ -154,6 +154,10 @@ type Runner struct {
 	// reply on a finding's thread. Nil builds the native OCR verifier.
 	ObjectionVerifier ObjectionVerifier
 
+	// Differential overrides the executable base–head evidence executor. Nil
+	// builds the isolated git-worktree executor; tests inject a fake.
+	Differential DifferentialExecutor
+
 	// CriteriaEvaluator overrides the focused pass that checks the linked
 	// issue's criteria (#232). Nil builds the native OCR evaluator.
 	CriteriaEvaluator CriterionEvaluator
