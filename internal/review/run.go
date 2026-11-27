@@ -458,6 +458,10 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 
 	if outcome.status == store.RunSucceeded {
 		r.applyAutoTriage(persistCtx, run, cfg, outcome, log)
+		// Human-approved rules are data, not code: they run after the findings
+		// and the verifier are durable, and only a rule whose observed evidence
+		// still applies can withdraw a repeated false positive.
+		r.applyReviewRules(persistCtx, cfg.Repo.ID, outcome.findings, log)
 	}
 
 	if outcome.status != store.RunSuperseded {

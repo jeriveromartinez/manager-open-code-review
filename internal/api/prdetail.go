@@ -123,6 +123,8 @@ type findingDTO struct {
 	Citations []store.FindingCitation `json:"citations"`
 	// Advisory marks evidence from the observational architectural analysis.
 	Advisory bool `json:"advisory"`
+	// RuleInfluences is the audit of the review rules that matched this finding.
+	RuleInfluences json.RawMessage `json:"rule_influences"`
 	// GithubThreadResolved is GitHub's thread state, reported apart from the QA
 	// verdict and the finding status.
 	GithubThreadResolved bool   `json:"github_thread_resolved"`
@@ -145,6 +147,7 @@ func findingDTOOf(f store.Finding) findingDTO {
 		TriageSource: f.TriageSource, Verification: jsonObject(f.Verification),
 		Scope: store.NormalizeFindingScope(f.Scope, citations), Citations: citations,
 		Advisory:             f.Advisory,
+		RuleInfluences:       jsonObject(f.RuleInfluences),
 		GithubThreadResolved: f.GithubThreadResolved,
 		CreatedAt:            f.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:            f.UpdatedAt.UTC().Format(time.RFC3339),

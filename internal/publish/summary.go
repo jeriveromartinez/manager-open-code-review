@@ -188,6 +188,7 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 	fmt.Fprintf(&b, "**Resueltos desde la revisión anterior:** %d\n\n", resolvedSincePrevious)
 
 	b.WriteString(p.buildVerificationBlock())
+	b.WriteString(p.buildRuleBlock())
 
 	coverage := decodeReviewCoverage(p.run.Coverage)
 	fmt.Fprintf(&b, "**Cobertura:** %d/%d (revisados/omitidos)", coverage.ReviewedFiles, coverage.SkippedFiles)
@@ -729,6 +730,90 @@ func (p *publishContext) buildVerificationBlock() string {
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// buildRuleBlock renders the auditable review rules that influenced the run's
+// findings (#233). It is evidence only: an observation rule never changed a
+// finding, and a severe finding affected by a rule stays visible until a person
+// reviews the evidence.
+func (p *publishContext) buildRuleBlock() string {
+	type ruleEntry struct {
+		finding    store.Finding
+		influences []store.RuleInfluence
+	}
+	var entries []ruleEntry
+	applied, observed, severe := 0, 0, 0
+	for _, f := range p.findingSnapshot {
+		if f.Advisory {
+			continue
+		}
+		influences := store.DecodeRuleInfluences(f.RuleInfluences)
+		if len(influences) == 0 {
+			continue
+		}
+		entries = append(entries, ruleEntry{finding: f, influences: influences})
+		for _, influence := range influences {
+			switch {
+			case influence.Applied:
+				applied++
+			case influence.Status == store.RuleStatusObservation:
+				observed++
+			case f.Status == store.FindingOpen && severityRank[f.Severity] >= severityRank["major"]:
+				severe++
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "**Reglas de revisión:** %d aplicada(s) · %d en observación\n", applied, observed)
+	for _, entry := range entries {
+		severity := entry.finding.Severity
+		if severity == "" {
+			severity = "sin severidad"
+		}
+		fmt.Fprintf(&b, "\n- **%s** · `%s` — %s\n",
+			p.sanitize(severity), p.findingLocation(entry.finding), p.sanitize(entry.finding.Title))
+		for _, influence := range entry.influences {
+			fmt.Fprintf(&b, "  - Regla #%d v%d · %s · %s — %s\n",
+				influence.RuleID, influence.Version,
+				ruleStatusLabel(influence.Status), ruleDecisionLabel(influence.Decision),
+				p.sanitize(influence.Reason))
+		}
+	}
+	if severe > 0 {
+		b.WriteString("\n> Un hallazgo grave afectado por una regla se conserva visible hasta que se revise su evidencia.\n")
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func ruleStatusLabel(status string) string {
+	switch status {
+	case store.RuleStatusObservation:
+		return "observación"
+	case store.RuleStatusActive:
+		return "activa"
+	case store.RuleStatusDisabled:
+		return "desactivada"
+	case store.RuleStatusProposed:
+		return "propuesta"
+	default:
+		return status
+	}
+}
+
+func ruleDecisionLabel(decision string) string {
+	switch decision {
+	case store.RuleDecisionWithdraw:
+		return "retirar"
+	case store.RuleDecisionConfirm:
+		return "confirmar"
+	default:
+		return decision
+	}
 }
 
 // findingVerdict is the verifier's answer for a finding. The stored record is
