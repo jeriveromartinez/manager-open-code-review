@@ -501,12 +501,13 @@ func TestMergeNativeFindingsUsesAnchorIdentity(t *testing.T) {
 }
 
 type nativeCustomProvider struct {
-	URL        string            `json:"url"`
-	Protocol   string            `json:"protocol"`
-	Model      string            `json:"model"`
-	APIKeyCmd  string            `json:"api_key_cmd"`
-	ExtraBody  map[string]string `json:"extra_body"`
-	TimeoutSec int               `json:"timeout_sec"`
+	URL          string            `json:"url"`
+	Protocol     string            `json:"protocol"`
+	Model        string            `json:"model"`
+	APIKeyCmd    string            `json:"api_key_cmd"`
+	ExtraBody    map[string]string `json:"extra_body"`
+	ExtraHeaders map[string]string `json:"extra_headers"`
+	TimeoutSec   int               `json:"timeout_sec"`
 }
 
 type nativeConfigFile struct {
@@ -577,6 +578,28 @@ func TestNativeConfigKeepsKeyOffDisk(t *testing.T) {
 	}
 	if string(out) != "sk-secret" {
 		t.Errorf("helper output = %q, want the injected key", out)
+	}
+}
+
+// TestNativeConfigOpenCodeGoSessionHeader pins the routing header OpenCode Go
+// requires: without it every chat completion is rejected with 400.
+func TestNativeConfigOpenCodeGoSessionHeader(t *testing.T) {
+	home := t.TempDir()
+	profile := store.LLMProfile{Provider: "opencode-go", Model: "deepseek-v4.1-flash"}
+	keyPath, err := writeNativeKeyHelper(home)
+	if err != nil {
+		t.Fatalf("writeNativeKeyHelper: %v", err)
+	}
+	if err := writeNativeConfig(home, profile, keyPath, 0); err != nil {
+		t.Fatalf("writeNativeConfig: %v", err)
+	}
+
+	custom := readNativeConfig(t, home)
+	if custom.URL != "https://opencode.ai/inference/go/openai/v1" {
+		t.Errorf("url = %q, want the OpenCode Go endpoint", custom.URL)
+	}
+	if strings.TrimSpace(custom.ExtraHeaders["x-opencode-session"]) == "" {
+		t.Fatalf("extra_headers = %v, want x-opencode-session", custom.ExtraHeaders)
 	}
 }
 

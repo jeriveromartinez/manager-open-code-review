@@ -5,6 +5,8 @@ package llmmodels
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -318,6 +320,11 @@ func (c *Client) PingUsage(ctx context.Context, providerID, baseURL, model, apiK
 		req.Header.Set("x-api-key", apiKey)
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
+	// OpenCode Go routes chat completions by conversation; without this header
+	// every request is rejected with 400 MissingSessionID.
+	if providerID == "opencode-go" {
+		req.Header.Set("x-opencode-session", NewSessionID())
+	}
 
 	httpClient := c.HTTP
 	if httpClient == nil {
@@ -340,6 +347,17 @@ func (c *Client) PingUsage(ctx context.Context, providerID, baseURL, model, apiK
 		return nil, &UpstreamError{Status: resp.StatusCode, Message: "el proveedor devolvió una respuesta vacía"}
 	}
 	return parseUsage(provider.Shape, raw), nil
+}
+
+// NewSessionID returns a fresh identifier for the x-opencode-session header
+// OpenCode Go requires on chat requests. One id per conversation is enough;
+// the gateway only uses it to route and cache.
+func NewSessionID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "qa-review"
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // parseUsage reads the token accounting of a successful response. Each shape
