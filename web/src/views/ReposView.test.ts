@@ -80,6 +80,7 @@ function basePolicy(overrides: Partial<QAPolicy> = {}): QAPolicy {
     blocking_threshold: 'major',
     extra_instructions: '',
     exclude_globs: [],
+    critical_globs: [],
     max_files: 40,
     max_diff_lines: 3000,
     max_passes: 4,
@@ -132,6 +133,7 @@ function repoPolicyResponse(overrides: Partial<RepositoryPolicy> = {}): Reposito
       blocking_threshold: null,
       extra_instructions: null,
       exclude_globs: null,
+      critical_globs: null,
       max_files: null,
       max_diff_lines: null,
       max_passes: null,
@@ -759,6 +761,8 @@ describe('ReposView', () => {
     await wrapper.get('[data-policy-field="exclude_globs"]').setValue('vendor/**\n**/*.pb.go')
     await wrapper.get('[data-policy-override="required_checks"]').setValue(true)
     await wrapper.get('[data-policy-field="required_checks"]').setValue('build | app:7\nci/test | status')
+    await wrapper.get('[data-policy-override="critical_globs"]').setValue(true)
+    await wrapper.get('[data-policy-field="critical_globs"]').setValue('internal/payments/**\n\nmigrations/**')
     await wrapper.get('[data-repo-policy-save]').trigger('click')
     await flushPromises()
 
@@ -768,6 +772,7 @@ describe('ReposView', () => {
         { name: 'build', origin: 'app:7' },
         { name: 'ci/test', origin: 'status' },
       ],
+      critical_globs: ['internal/payments/**', 'migrations/**'],
     })
     wrapper.unmount()
   })

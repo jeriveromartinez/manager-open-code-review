@@ -110,6 +110,7 @@ const policy: QAPolicy = {
   blocking_threshold: 'major',
   extra_instructions: '',
   exclude_globs: [],
+  critical_globs: [],
   max_files: 40,
   max_diff_lines: 3000,
   max_passes: 3,

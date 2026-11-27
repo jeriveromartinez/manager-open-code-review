@@ -80,6 +80,7 @@ func (s *Store) SaveRepositoryPolicy(ctx context.Context, p RepositoryPolicy) (R
 		Columns: []clause.Column{{Name: "repository_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"observation_mode", "blocking_threshold", "extra_instructions", "exclude_globs",
+			"critical_globs",
 			"max_files_per_pass", "max_diff_lines_per_pass", "max_passes",
 			"require_green_ci", "required_checks", "review_context_ceiling", "review_effort",
 			"review_token_budget", "auto_triage_mode", "auto_withdraw",
@@ -163,6 +164,10 @@ func ResolvePolicy(repoID int64, team QAPolicy, override *RepositoryPolicy) Reso
 		if override.ExcludeGlobs != nil {
 			effective.ExcludeGlobs = override.ExcludeGlobs
 			provenance["exclude_globs"] = PolicySourceRepo
+		}
+		if override.CriticalGlobs != nil {
+			effective.CriticalGlobs = override.CriticalGlobs
+			provenance["critical_globs"] = PolicySourceRepo
 		}
 		if override.MaxFilesPerPass != nil {
 			effective.MaxFilesPerPass = *override.MaxFilesPerPass
@@ -248,6 +253,7 @@ func policyProvenance(team QAPolicy) map[string]string {
 		"blocking_threshold":  PolicySourceTeam,
 		"extra_instructions":  PolicySourceTeam,
 		"exclude_globs":       PolicySourceTeam,
+		"critical_globs":      PolicySourceTeam,
 		"max_files":           PolicySourceTeam,
 		"max_diff_lines":      PolicySourceTeam,
 		"max_passes":          PolicySourceTeam,
@@ -279,6 +285,7 @@ type policyRevisionFields struct {
 	BlockingThreshold    string          `json:"blocking_threshold"`
 	ExtraInstructions    string          `json:"extra_instructions"`
 	ExcludeGlobs         []string        `json:"exclude_globs"`
+	CriticalGlobs        []string        `json:"critical_globs"`
 	MaxFiles             int             `json:"max_files"`
 	MaxDiffLines         int             `json:"max_diff_lines"`
 	MaxPasses            int             `json:"max_passes"`
@@ -309,6 +316,7 @@ func PolicyRevision(p QAPolicy, observation bool) string {
 		BlockingThreshold:    p.BlockingThreshold,
 		ExtraInstructions:    p.ExtraInstructions,
 		ExcludeGlobs:         decodeStringList(p.ExcludeGlobs),
+		CriticalGlobs:        decodeStringList(p.CriticalGlobs),
 		MaxFiles:             p.MaxFilesPerPass,
 		MaxDiffLines:         p.MaxDiffLinesPerPass,
 		MaxPasses:            p.MaxPasses,
@@ -331,6 +339,9 @@ func PolicyRevision(p QAPolicy, observation bool) string {
 	if fields.ExcludeGlobs == nil {
 		fields.ExcludeGlobs = []string{}
 	}
+	if fields.CriticalGlobs == nil {
+		fields.CriticalGlobs = []string{}
+	}
 	if fields.RequiredChecks == nil {
 		fields.RequiredChecks = []RequiredCheck{}
 	}
@@ -351,6 +362,28 @@ func decodeStringList(raw datatypes.JSON) []string {
 		return nil
 	}
 	return values
+}
+
+// normalizePolicyGlobs encodes a glob list, turning nil and null into an
+// explicit empty list. A malformed document is rejected instead of silently
+// dropping the whole list.
+func normalizePolicyGlobs(raw datatypes.JSON) (datatypes.JSON, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return datatypes.JSON([]byte(`[]`)), nil
+	}
+	var globs []string
+	if err := json.Unmarshal(trimmed, &globs); err != nil {
+		return nil, err
+	}
+	if globs == nil {
+		globs = []string{}
+	}
+	encoded, err := json.Marshal(globs)
+	if err != nil {
+		return nil, err
+	}
+	return datatypes.JSON(encoded), nil
 }
 
 func validateRepositoryPolicy(p RepositoryPolicy) (RepositoryPolicy, error) {
@@ -484,6 +517,14 @@ func validateRepositoryPolicy(p RepositoryPolicy) (RepositoryPolicy, error) {
 			}
 			p.ExcludeGlobs = datatypes.JSON(encoded)
 		}
+	}
+	if p.CriticalGlobs != nil {
+		normalized, err := normalizePolicyGlobs(p.CriticalGlobs)
+		if err != nil {
+			return RepositoryPolicy{}, fmt.Errorf("save repository policy %d: invalid critical globs: %w",
+				p.RepositoryID, err)
+		}
+		p.CriticalGlobs = normalized
 	}
 
 	if p.RequiredChecks != nil {
