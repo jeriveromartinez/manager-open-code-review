@@ -30,7 +30,11 @@ type NativeVerifier struct {
 	Timeout     time.Duration
 	// CloseMargin overrides ocrCloseMargin for tests; zero keeps the default.
 	CloseMargin time.Duration
-	OnLog       func(line string)
+	// RuleJSON overrides the finding-verification rule contract. A focused scan
+	// with another contract (criteria evaluation) sets it; nil keeps the
+	// QA-VERIFY contract.
+	RuleJSON []byte
+	OnLog    func(line string)
 }
 
 // verifyInvocation is the flag set of one `ocr scan`. It has no effort: scan
@@ -196,8 +200,12 @@ func (v *NativeVerifier) Review(ctx context.Context) (nativeReview, []byte, erro
 	if err := writeNativeConfig(home, v.Profile, keyPath, requestTimeout); err != nil {
 		return nativeReview{}, nil, err
 	}
+	ruleJSON := v.RuleJSON
+	if len(ruleJSON) == 0 {
+		ruleJSON = verifyRuleJSON()
+	}
 	rulePath := filepath.Join(home, "verify-rule.json")
-	if err := os.WriteFile(rulePath, verifyRuleJSON(), 0o600); err != nil {
+	if err := os.WriteFile(rulePath, ruleJSON, 0o600); err != nil {
 		return nativeReview{}, nil, fmt.Errorf("verify: write rule: %w", err)
 	}
 
