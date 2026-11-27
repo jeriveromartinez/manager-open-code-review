@@ -314,6 +314,10 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 	}
 	blobs := readCitedBlobs(ctx, workDir, baseSHA, out.findings)
 	out.decisions = Decide(out.findings, verdicts, blobs, headSHA, policy)
+	// Executable evidence is observation only and never changes a decision: it
+	// runs after the verdicts are settled and travels through the same stored
+	// verification record (#230).
+	r.attachDifferentialEvidence(ctx, workDir, baseSHA, headSHA, out, log)
 }
 
 // reusedVerdict returns the stored verdict when it still refers to the same

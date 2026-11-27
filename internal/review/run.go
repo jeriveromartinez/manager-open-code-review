@@ -154,6 +154,10 @@ type Runner struct {
 	// reply on a finding's thread. Nil builds the native OCR verifier.
 	ObjectionVerifier ObjectionVerifier
 
+	// Differential overrides the executable base–head evidence executor. Nil
+	// builds the isolated git-worktree executor; tests inject a fake.
+	Differential DifferentialExecutor
+
 	// heartbeatEvery overrides heartbeatInterval in tests. Zero uses the
 	// production interval.
 	heartbeatEvery time.Duration

@@ -35,6 +35,10 @@ type Verification struct {
 	// finding. Objection reevaluation records it but never applies it: the gate
 	// severity only changes with a human decision.
 	DowngradeTo string `json:"downgrade_to,omitempty"`
+	// Differential is the executable base–head evidence for a high-impact
+	// finding (#230). It is observation only: it never changes the verdict, and
+	// the confirmed-verdict path still owns publication.
+	Differential *DifferentialEvidence `json:"differential,omitempty"`
 }
 
 // VerifyPolicy is the deterministic policy applied to the verifier's answers.
