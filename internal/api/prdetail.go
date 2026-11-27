@@ -163,6 +163,9 @@ type prDetailResponse struct {
 	HumanVerdict *humanVerdictResponse `json:"human_verdict"`
 	Runs         []reviewRunDTO        `json:"runs"`
 	Findings     []findingDTO          `json:"findings"`
+	// Criteria is the per-criterion verdict of the linked issue at the current
+	// head (#232). Empty when no issue criterion was evaluated for this head.
+	Criteria []criterionDTO `json:"criteria"`
 }
 
 // visiblePRView returns the caller's view of a pull request, or writes the
@@ -214,6 +217,24 @@ func (s *server) prDetail(w http.ResponseWriter, r *http.Request) {
 		findingDTOs = append(findingDTOs, findingDTOOf(finding))
 	}
 
+	// Criteria verdicts are current only for the pull request's head; the panel
+	// shows the uncertainty of a moved or unevaluated head instead of the last
+	// answer (#232).
+	pr, err := s.Store.PullRequest(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "load pull request")
+		return
+	}
+	criteria, err := s.Store.CurrentCriterionAssessments(r.Context(), id, pr.HeadSHA)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "list criterion assessments")
+		return
+	}
+	criterionDTOs := make([]criterionDTO, 0, len(criteria))
+	for _, assessment := range criteria {
+		criterionDTOs = append(criterionDTOs, criterionDTOOf(assessment))
+	}
+
 	var humanVerdict *humanVerdictResponse
 	latest, found, err := s.Store.LatestHumanVerdict(r.Context(), id)
 	if err != nil {
@@ -221,11 +242,6 @@ func (s *server) prDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if found {
-		pr, err := s.Store.PullRequest(r.Context(), id)
-		if err != nil {
-			writeAPIError(w, http.StatusInternalServerError, "load pull request")
-			return
-		}
 		current := latest.InvalidatedAt == nil && latest.Covers(pr)
 		dto := humanVerdictDTO(latest, current)
 		humanVerdict = &dto
@@ -236,6 +252,7 @@ func (s *server) prDetail(w http.ResponseWriter, r *http.Request) {
 		HumanVerdict: humanVerdict,
 		Runs:         runDTOs,
 		Findings:     findingDTOs,
+		Criteria:     criterionDTOs,
 	})
 }
 

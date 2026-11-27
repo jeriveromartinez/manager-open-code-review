@@ -455,6 +455,7 @@ type qaPolicyResponse struct {
 	BlockingThreshold           string                `json:"blocking_threshold"`
 	ExtraInstructions           string                `json:"extra_instructions"`
 	ExcludeGlobs                []string              `json:"exclude_globs"`
+	CriticalGlobs               []string              `json:"critical_globs"`
 	MaxFiles                    int                   `json:"max_files"`
 	MaxDiffLines                int                   `json:"max_diff_lines"`
 	MaxPasses                   int                   `json:"max_passes"`
@@ -539,6 +540,10 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 	if globs == nil {
 		globs = []string{}
 	}
+	criticalGlobs := []string{}
+	if parsed := optionalGlobs(p.CriticalGlobs); parsed != nil {
+		criticalGlobs = *parsed
+	}
 	effort := p.ReviewEffort
 	if effort == "" {
 		effort = store.ReviewEffortLow
@@ -590,7 +595,7 @@ func qaPolicyDTO(p store.QAPolicy, globalCeiling int, promptCache bool) qaPolicy
 		ID: p.ID, TeamID: p.TeamID, LLMProfileID: p.LLMProfileID,
 		FallbackProfileIDs: fallbacks,
 		BlockingThreshold:  p.BlockingThreshold, ExtraInstructions: p.ExtraInstructions,
-		ExcludeGlobs: globs, MaxFiles: p.MaxFilesPerPass,
+		ExcludeGlobs: globs, CriticalGlobs: criticalGlobs, MaxFiles: p.MaxFilesPerPass,
 		MaxDiffLines: p.MaxDiffLinesPerPass, MaxPasses: p.MaxPasses,
 		RequireGreenCI:       p.RequireGreenCI,
 		RequiredChecks:       store.ParseRequiredChecks(p.RequiredChecks),
@@ -776,6 +781,19 @@ func (s *server) putPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		policy.ExcludeGlobs = encoded
+	}
+	if value, present := raw["critical_globs"]; present {
+		var globs []string
+		if err := json.Unmarshal(value, &globs); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid critical_globs")
+			return
+		}
+		encoded, err := json.Marshal(globs)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid critical_globs")
+			return
+		}
+		policy.CriticalGlobs = encoded
 	}
 	for _, field := range []struct {
 		key string

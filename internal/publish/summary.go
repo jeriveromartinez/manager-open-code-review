@@ -189,6 +189,7 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 
 	b.WriteString(p.buildVerificationBlock())
 	b.WriteString(p.buildRuleBlock())
+	b.WriteString(p.buildCriteriaBlock(ctx))
 
 	coverage := decodeReviewCoverage(p.run.Coverage)
 	fmt.Fprintf(&b, "**Cobertura:** %d/%d (revisados/omitidos)", coverage.ReviewedFiles, coverage.SkippedFiles)

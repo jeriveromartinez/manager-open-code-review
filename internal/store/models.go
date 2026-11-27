@@ -377,10 +377,13 @@ type QAPolicy struct {
 	// FallbackProfileIDs is the ordered, explicitly authorized list of backup
 	// profiles. The worker tries them in order after a recoverable failure
 	// (#150); an empty list disables fallback.
-	FallbackProfileIDs  datatypes.JSON `gorm:"column:fallback_profile_ids;default:'[]'"`
-	BlockingThreshold   string         `gorm:"column:blocking_threshold"`
-	ExtraInstructions   string         `gorm:"column:extra_instructions"`
-	ExcludeGlobs        datatypes.JSON `gorm:"column:exclude_globs"`
+	FallbackProfileIDs datatypes.JSON `gorm:"column:fallback_profile_ids;default:'[]'"`
+	BlockingThreshold  string         `gorm:"column:blocking_threshold"`
+	ExtraInstructions  string         `gorm:"column:extra_instructions"`
+	ExcludeGlobs       datatypes.JSON `gorm:"column:exclude_globs"`
+	// CriticalGlobs marks the repository areas whose changes the review plan
+	// prioritises before the run budget is spent (#231).
+	CriticalGlobs       datatypes.JSON `gorm:"column:critical_globs;default:'[]'"`
 	MaxFilesPerPass     int            `gorm:"column:max_files_per_pass"`
 	MaxDiffLinesPerPass int            `gorm:"column:max_diff_lines_per_pass"`
 	MaxPasses           int            `gorm:"column:max_passes"`
@@ -482,6 +485,7 @@ type RepositoryPolicy struct {
 	BlockingThreshold    *string        `gorm:"column:blocking_threshold"`
 	ExtraInstructions    *string        `gorm:"column:extra_instructions"`
 	ExcludeGlobs         datatypes.JSON `gorm:"column:exclude_globs"`
+	CriticalGlobs        datatypes.JSON `gorm:"column:critical_globs"`
 	MaxFilesPerPass      *int           `gorm:"column:max_files_per_pass"`
 	MaxDiffLinesPerPass  *int           `gorm:"column:max_diff_lines_per_pass"`
 	MaxPasses            *int           `gorm:"column:max_passes"`

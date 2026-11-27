@@ -105,6 +105,8 @@ const policyRequiredChecks = ref('')
 const policyExtraInstructions = ref('')
 // One glob per line: a comma inside a pattern must survive editing.
 const policyExcludeGlobs = ref('')
+// Paths whose change the coverage plan must cover first (#231).
+const policyCriticalGlobs = ref('')
 // Empty means "inherit the global review_context_ceiling".
 const policyContextCeiling = ref<number | ''>('')
 const policyReviewEffort = ref<ReviewEffort>('low')
@@ -179,6 +181,7 @@ function applyPolicy(saved: QAPolicy): void {
   policyRequiredChecks.value = formatRequiredChecks(saved.required_checks ?? [])
   policyExtraInstructions.value = saved.extra_instructions
   policyExcludeGlobs.value = saved.exclude_globs.join('\n')
+  policyCriticalGlobs.value = (saved.critical_globs ?? []).join('\n')
   policyContextCeiling.value = saved.review_context_ceiling ?? ''
   policyReviewEffort.value = saved.review_effort || 'low'
   policyReviewTokenBudget.value = saved.review_token_budget ?? 0
@@ -240,6 +243,7 @@ const policyDirty = computed(
       policyRequiredChecks.value !== formatRequiredChecks(policy.value.required_checks ?? []) ||
       policyExtraInstructions.value !== policy.value.extra_instructions ||
       policyExcludeGlobs.value !== policy.value.exclude_globs.join('\n') ||
+      policyCriticalGlobs.value !== (policy.value.critical_globs ?? []).join('\n') ||
       policyContextCeiling.value !== (policy.value.review_context_ceiling ?? '') ||
       policyReviewEffort.value !== (policy.value.review_effort || 'low') ||
       policyReviewTokenBudget.value !== (policy.value.review_token_budget ?? 0) ||
@@ -594,6 +598,7 @@ async function savePolicy(): Promise<void> {
     blocking_threshold: policy.value?.blocking_threshold ?? 'major',
     extra_instructions: policyExtraInstructions.value.trim(),
     exclude_globs: parseGlobs(policyExcludeGlobs.value),
+    critical_globs: parseGlobs(policyCriticalGlobs.value),
     max_files: policy.value?.max_files ?? 40,
     max_diff_lines: policy.value?.max_diff_lines ?? 3000,
     max_passes: policy.value?.max_passes ?? 4,
@@ -1090,6 +1095,20 @@ onMounted(() => {
               <span class="field__hint">
                 Un patrón por línea, estilo gitignore. No se envían al modelo ni generan hallazgos.
                 Los patrones con comas (por ejemplo <code>**/*.{go,js}</code>) no se pueden pasar a OCR y se ignoran.
+              </span>
+            </label>
+            <label class="field">
+              <span class="field__label">Zonas críticas</span>
+              <textarea
+                v-model="policyCriticalGlobs"
+                class="field__input"
+                rows="4"
+                data-policy-critical
+                placeholder="internal/payments/**&#10;migrations/**"
+              ></textarea>
+              <span class="field__hint">
+                Un patrón por línea. El plan de cobertura revisa estos cambios antes de agotar el
+                presupuesto y, si quedan sin verificar, la revisión no termina como aprobada.
               </span>
             </label>
           </div>
