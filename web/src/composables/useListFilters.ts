@@ -32,6 +32,22 @@ function emptyFacets(facets: readonly string[]): FacetValues {
   return Object.fromEntries(facets.map((facet) => [facet, []]))
 }
 
+// Search is case- and accent-insensitive and every whitespace-separated term
+// must appear, so "cafe plataforma" finds "Café de la plataforma".
+function normalizeSearch(value: string): string {
+  return value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+}
+
+function searchTerms(query: string): string[] {
+  return normalizeSearch(query).trim().split(/\s+/).filter(Boolean)
+}
+
+function matchesSearchTerms(haystack: string, terms: string[]): boolean {
+  if (terms.length === 0) return true
+  const text = normalizeSearch(haystack)
+  return terms.every((term) => text.includes(term))
+}
+
 /**
  * List filters shared by the panel views. `q`, the facets and the sort order
  * live in refs and are mirrored to the URL with `replace`, so a reload or a
@@ -120,9 +136,9 @@ export function useListFilters(options: ListFiltersOptions) {
     match: (item: T, facets: FacetValues) => boolean,
   ): ComputedRef<T[]> {
     return computed(() => {
-      const needle = q.value.trim().toLowerCase()
+      const terms = searchTerms(q.value)
       return toValue(items).filter((item) => {
-        if (needle !== '' && !text(item).toLowerCase().includes(needle)) return false
+        if (!matchesSearchTerms(text(item), terms)) return false
         return match(item, facets.value)
       })
     })
@@ -143,14 +159,14 @@ export function useListFilters(options: ListFiltersOptions) {
     text: (item: T) => string,
   ): ComputedRef<Record<string, Record<string, number>>> {
     return computed(() => {
-      const needle = q.value.trim().toLowerCase()
+      const terms = searchTerms(q.value)
       const counts: Record<string, Record<string, number>> = {}
       for (const facet of options.facets) {
         const perValue: Record<string, number> = {}
         for (const selected of facets.value[facet] ?? []) perValue[selected] = 0
         const others = options.facets.filter((other) => other !== facet)
         for (const item of toValue(items)) {
-          if (needle !== '' && !text(item).toLowerCase().includes(needle)) continue
+          if (!matchesSearchTerms(text(item), terms)) continue
           const matchesOthers = others.every((other) => {
             const selected = facets.value[other] ?? []
             if (selected.length === 0) return true

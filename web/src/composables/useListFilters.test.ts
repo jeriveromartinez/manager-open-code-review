@@ -120,6 +120,35 @@ describe('useListFilters', () => {
     expect(filters.activeCount.value).toBe(1)
   })
 
+  it('matches every search term without accents', async () => {
+    const items: Pr[] = [
+      { title: 'Café de la plataforma', status: 'open', severity: ['high'] },
+      { title: 'Plataforma de café', status: 'open', severity: ['low'] },
+      { title: 'Facturación', status: 'draft', severity: ['high'] },
+    ]
+    const { filters } = await mountFilters({ q: ' CAFE plataforma ' })
+    const visible = filters.apply(items, (item) => item.title, () => true)
+
+    expect(visible.value.map((item) => item.title)).toEqual([
+      'Café de la plataforma',
+      'Plataforma de café',
+    ])
+
+    filters.q.value = 'facturacion'
+    expect(visible.value.map((item) => item.title)).toEqual(['Facturación'])
+
+    filters.q.value = 'cafe inexistente'
+    expect(visible.value).toEqual([])
+
+    const counts = filters.facetCounts(
+      items,
+      (item, facet) => (facet === 'severity' ? item.severity : [item.status]),
+      (item) => item.title,
+    )
+    filters.q.value = 'cafe'
+    expect(counts.value.severity).toEqual({ high: 1, low: 1 })
+  })
+
   it('counts facet options against the other filters only', async () => {
     const items: Pr[] = [
       { title: 'Fix auth', status: 'open', severity: ['high'] },

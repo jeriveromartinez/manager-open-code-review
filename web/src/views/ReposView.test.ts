@@ -364,6 +364,22 @@ describe('ReposView', () => {
     wrapper.unmount()
   })
 
+  it('refresca la política heredada al cambiar el equipo del repositorio', async () => {
+    mocks.session.me = admin
+
+    const wrapper = mountRepos()
+    await flushPromises()
+
+    expect(wrapper.find('[data-repo-policy-warning="20"]').exists()).toBe(false)
+    mocks.api.repos.mockResolvedValue([repos[0], { ...repos[1], team_id: 2, has_policy: false }])
+
+    await wrapper.get('select[data-repo-team="20"]').setValue('2')
+    await flushPromises()
+
+    expect(wrapper.get('[data-repo-policy-warning="20"]').text()).toContain('no tiene política')
+    wrapper.unmount()
+  })
+
   it('muestra un estado vacío en español cuando no hay repositorios', async () => {
     mocks.session.me = admin
     mocks.api.repos.mockResolvedValue([])
