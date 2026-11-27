@@ -120,6 +120,11 @@ services:
     # 45s soft stop and then up to 15s more to requeue whatever was cancelled.
     # Docker's 10s default would SIGKILL the process halfway through.
     stop_grace_period: 90s
+    # Docker's default seccomp profile blocks CLONE_NEWUSER, which bubblewrap
+    # needs for the base–head differential evidence (#230). The container keeps
+    # running as uid 10001 and only the differential executor uses bwrap.
+    security_opt:
+      - seccomp=unconfined
     # Sin env_file: el worker nunca debe recibir QA_MASTER_KEY.
     environment:
       QA_DATABASE_URL: ${QA_DATABASE_URL}

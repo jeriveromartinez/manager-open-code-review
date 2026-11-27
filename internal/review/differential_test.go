@@ -404,6 +404,58 @@ func TestGitWorktreeDifferentialRunsBothSides(t *testing.T) {
 	}
 }
 
+// TestBubblewrapSandboxRunsDifferentialTest runs the real executor inside the
+// real sandbox. It is skipped unless bwrap can create namespaces, which is how
+// the worker image runs (seccomp=unconfined). The regular suite uses the
+// passthrough sandbox so it stays independent from the host.
+func TestBubblewrapSandboxRunsDifferentialTest(t *testing.T) {
+	path, err := exec.LookPath("bwrap")
+	if err != nil {
+		t.Skip("bubblewrap is not installed")
+	}
+	sandbox := &bubblewrapSandbox{path: path}
+	if !sandbox.Available() {
+		t.Skip("bubblewrap cannot create namespaces in this environment")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not available")
+	}
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("the Go toolchain is not available")
+	}
+
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q", "-b", "main")
+	runGit(t, dir, "config", "user.email", "qa@example.com")
+	runGit(t, dir, "config", "user.name", "QA")
+	runGit(t, dir, "config", "core.autocrlf", "false")
+	writeDifferentialFixture(t, dir, "func Add(a, b int) int { return a + b }\n")
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-qm", "base")
+	baseSHA := runGit(t, dir, "rev-parse", "HEAD")
+
+	writeDifferentialFixture(t, dir, "func Add(a, b int) int { return a - b }\n")
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-qm", "regression")
+	headSHA := runGit(t, dir, "rev-parse", "HEAD")
+
+	executor := &gitWorktreeDifferential{RepoDir: dir, Timeout: 90 * time.Second, Sandbox: sandbox}
+	execution, err := executor.Run(context.Background(), DifferentialCase{
+		ID: "calc-sum", Paths: []string{"calc/*.go"}, Package: "./calc", Test: "TestAdd",
+	}, baseSHA, headSHA)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	evidence := buildDifferentialEvidence(DifferentialCase{ID: "calc-sum", Package: "./calc", Test: "TestAdd"},
+		baseSHA, headSHA, execution)
+	if evidence.Status != DifferentialRegression {
+		t.Fatalf("evidence = %+v, want a regression inside the real sandbox", evidence)
+	}
+	if evidence.Isolation != sandbox.Name() {
+		t.Errorf("isolation = %q, want %q", evidence.Isolation, sandbox.Name())
+	}
+}
+
 func TestAttachDifferentialEvidenceSkipsExternalContribution(t *testing.T) {
 	out := &runOutcome{
 		findings:  []store.Finding{{ID: "f1", Path: "internal/review/a.go", Severity: "major"}},
