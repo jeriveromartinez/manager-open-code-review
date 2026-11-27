@@ -895,6 +895,7 @@ func TestReviewStateScenarios(t *testing.T) {
 	disabledRepo := f.repo(6205, inst.ID, "acme/disabled-profile", &brokenTeam.ID, true)
 	readyRepo := f.repo(6206, inst.ID, "acme/ready", &configuredTeam.ID, true)
 	runningRepo := f.repo(6207, inst.ID, "acme/running", nil, true)
+	activeRunningRepo := f.repo(6208, inst.ID, "acme/active-running", nil, true)
 
 	prFork := f.markFork(f.openPR(forkRepo.ID, 1, store.StatusPending, false))
 	prDraft := f.openPR(draftRepo.ID, 1, store.StatusPending, true)
@@ -903,6 +904,7 @@ func TestReviewStateScenarios(t *testing.T) {
 	prDisabled := f.openPR(disabledRepo.ID, 1, store.StatusPending, false)
 	prScheduled := f.openPR(readyRepo.ID, 1, store.StatusPending, false)
 	prRunning := f.openPR(runningRepo.ID, 1, store.StatusPending, false)
+	prActiveRunning := f.openPR(activeRunningRepo.ID, 1, store.StatusPending, false)
 
 	// The active run must win even though this repository has no configuration
 	// at all, so a queued review is never hidden as blocked.
@@ -910,7 +912,13 @@ func TestReviewStateScenarios(t *testing.T) {
 		PullRequestID: prRunning.ID, ProfileID: enabledProfile.ID,
 		HeadSHA: prRunning.HeadSHA, Status: store.RunQueued,
 	}); err != nil {
-		t.Fatalf("CreateReviewRun: %v", err)
+		t.Fatalf("CreateReviewRun(queued): %v", err)
+	}
+	if _, err := f.s.CreateReviewRun(f.ctx, store.ReviewRun{
+		PullRequestID: prActiveRunning.ID, ProfileID: enabledProfile.ID,
+		HeadSHA: prActiveRunning.HeadSHA, Status: store.RunRunning,
+	}); err != nil {
+		t.Fatalf("CreateReviewRun(running): %v", err)
 	}
 
 	admin := f.user("admin", true)
@@ -935,7 +943,8 @@ func TestReviewStateScenarios(t *testing.T) {
 		{"no policy", prNoPolicy.ID, "blocked", "El equipo no tiene política QA"},
 		{"disabled profile", prDisabled.ID, "blocked", "La política apunta a un perfil LLM deshabilitado"},
 		{"scheduled", prScheduled.ID, "scheduled", ""},
-		{"active run", prRunning.ID, "running", ""},
+		{"queued run", prRunning.ID, "queued", ""},
+		{"running run", prActiveRunning.ID, "running", ""},
 	}
 	for _, tc := range cases {
 		view, ok := byID[tc.id]
@@ -963,7 +972,8 @@ func TestReviewStateFor(t *testing.T) {
 		state  string
 		reason string
 	}{
-		{"active run ignores config", store.ReviewSignals{ActiveRun: true}, "running", ""},
+		{"queued run ignores config", store.ReviewSignals{ActiveRunStatus: store.RunQueued}, "queued", ""},
+		{"running run ignores config", store.ReviewSignals{ActiveRunStatus: store.RunRunning}, "running", ""},
 		{"draft", with(full, func(s *store.ReviewSignals) { s.Draft = true }), "blocked", "Borrador: se revisará cuando pase a listo"},
 		{"fork", with(full, func(s *store.ReviewSignals) { s.Fork = true }), "blocked", "PR externo: el equipo no permite aportes externos"},
 		{"fork allowed", with(full, func(s *store.ReviewSignals) {

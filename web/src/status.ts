@@ -27,7 +27,8 @@ export function statusLabel(status: QAStatus): StatusLabel {
 /**
  * El estado `pending` del PR no siempre significa que haya un análisis en
  * curso: también cubre PRs que nunca se revisarán (borrador, fork, sin equipo
- * o sin política). El backend clasifica ese caso en `review_state`.
+ * o sin política) y PRs con una revisión encolada. El backend clasifica esos
+ * casos en `review_state`; solo `running` es una ejecución en marcha.
  */
 export function prStatusLabel(pr: {
   qa_status: QAStatus
@@ -39,6 +40,9 @@ export function prStatusLabel(pr: {
   }
   if (pr.qa_status === 'pending' && pr.review_state === 'scheduled') {
     return { tag: 'Pendiente de revisión', action: 'Se encolará en la próxima reconciliación', tone: 'muted' }
+  }
+  if (pr.qa_status === 'pending' && pr.review_state === 'queued') {
+    return { tag: 'En cola para revisión', action: 'Esperando turno del worker', tone: 'muted' }
   }
   return statusLabel(pr.qa_status)
 }

@@ -332,8 +332,8 @@ type PRFilter struct{ Group string }
 
 // PRView is the dashboard representation of a pull request. Validations are the
 // stored counters of the current head; they stay 0/0 until the check state of
-// that head has been read from GitHub. ReviewState tells the panel whether a
-// review is actually running, can be scheduled, or never will be, and
+// that head has been read from GitHub. ReviewState tells the panel whether the
+// review is queued, actually running, can be scheduled, or never will be, and
 // ReviewReason explains the blocked cases.
 type PRView struct {
 	ID           uint
@@ -418,19 +418,22 @@ type prViewRow struct {
 	ReviewRequestDeliveredAt   *time.Time
 }
 
-// Review states reported to the panel.
+// Review states reported to the panel. A PR with an active run reports the
+// run's own status, so the panel can tell a queued review from a running one.
 const (
+	ReviewStateQueued    = "queued"
 	ReviewStateRunning   = "running"
 	ReviewStateScheduled = "scheduled"
 	ReviewStateBlocked   = "blocked"
 )
 
 // ReviewSignals are the facts that decide whether a pull request can be
-// reviewed. ActiveRun means the current head already has a queued or running
-// run. Origin and ExternalAllowed describe the external-contribution policy;
-// Fork stays for rows written before the origin column existed.
+// reviewed. ActiveRunStatus is the status of the current head's queued or
+// running run (empty when there is none). Origin and ExternalAllowed describe
+// the external-contribution policy; Fork stays for rows written before the
+// origin column existed.
 type ReviewSignals struct {
-	ActiveRun       bool
+	ActiveRunStatus string
 	Draft           bool
 	Fork            bool
 	Origin          string
@@ -459,8 +462,12 @@ func (s ReviewSignals) external() bool {
 // decision pure lets tests cover it without a database.
 func ReviewStateFor(s ReviewSignals) (state, reason string) {
 	// A run in flight is the truth, even if the configuration was removed or
-	// disabled after it was queued.
-	if s.ActiveRun {
+	// disabled after it was queued. The run status is kept as-is: a queued run
+	// has not started yet and must not be shown as being reviewed.
+	if s.ActiveRunStatus != "" {
+		if s.ActiveRunStatus == RunQueued {
+			return ReviewStateQueued, ""
+		}
 		return ReviewStateRunning, ""
 	}
 	switch {
@@ -590,7 +597,7 @@ func (s *Store) ListVisiblePullRequests(ctx context.Context, u User, f PRFilter)
 	views := make([]PRView, len(rows))
 	for i, row := range rows {
 		state, reason := ReviewStateFor(ReviewSignals{
-			ActiveRun:       row.ActiveRun != "",
+			ActiveRunStatus: row.ActiveRun,
 			Draft:           row.Draft,
 			Fork:            row.IsFork,
 			Origin:          row.Origin,
