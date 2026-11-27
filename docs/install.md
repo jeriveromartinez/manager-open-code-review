@@ -81,12 +81,12 @@ La App necesita además la suscripción a `pull_request_review_thread`: una App 
 
 ### Gate de CI y checks requeridos
 
-Con `require_green_ci` activo en la política del equipo, la revisión no se encola y el check de QA no publica `success` hasta que el SHA actual tenga el CI aceptable. El estado se relee de GitHub en cada entrega de `check_suite`/`check_run`/`status`, al terminar la revisión y al republicar; una observación de otro SHA no se reutiliza. Si la consulta a GitHub falla, el gate queda en **desconocido** (nunca en verde) y el PR pasa a «esperando CI»: espera a la siguiente entrega o a la reconciliación.
+Con `require_green_ci` activo en la política del equipo, la revisión no se encola y el check de QA no publica `success` hasta que el SHA actual tenga el CI aceptable. El estado se relee de GitHub en cada entrega de `check_suite`/`check_run`/`status`, al terminar la revisión y al republicar; una observación de otro SHA no se reutiliza. Si la consulta a GitHub falla, el gate queda en **desconocido** (nunca en verde) y el PR pasa a «esperando CI»: espera a la siguiente entrega o a la reconciliación. Si GitHub responde correctamente sin ningún check y la política no exige checks concretos, no hay CI que verificar: el gate abre y la revisión continúa, para que un repositorio sin CI no quede esperando indefinidamente.
 
 `required_checks` en la política del equipo es una lista JSON de checks que deben estar en verde. Se guarda con el resto de la política (`PUT /api/teams/<id>/policy`); si se omite al crear la política queda vacía, y en una actualización se conserva la lista ya guardada salvo que se envíe una lista explícita (una lista vacía la borra). Cada entrada es `{"name": "...", "origin": "..."}`:
 - `name` es el nombre del check run o el `context` del commit status.
 - `origin` es `app:<id>` para un check run de una App concreta o `status` para un commit status; si se omite, el nombre basta y se acepta cualquier origen.
-- Una lista vacía exige que **todos** los checks reportados estén en verde.
+- Una lista vacía exige que **todos** los checks reportados estén en verde; si GitHub no reporta ninguno, no hay nada que verificar y el gate abre.
 
 Un check requerido que no aparece se trata como **ausente** y bloquea el gate; uno en cola o en ejecución se trata como **pendiente**. Esto permite, por ejemplo, exigir solo `{"name":"build","origin":"app:12345"}` aunque otro job opcional falle. El check `QA Control Center` de la propia App nunca cuenta como entrada: es el resultado de la revisión, no CI.
 

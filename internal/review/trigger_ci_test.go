@@ -218,8 +218,25 @@ func TestTriggerCIGateAllowsGreenChecks(t *testing.T) {
 	}
 }
 
-// A head with no checks, or with checks still running, cannot be green: the
-// gate waits for the later delivery that completes them.
+// A policy without required checks on a head GitHub reports without any checks
+// has nothing to verify: the gate must not leave the review waiting forever.
+func TestTriggerCIGateOpensWhenThereIsNoCIToVerify(t *testing.T) {
+	f := newTriggerFixture(t)
+	pr := f.seed("gated-no-checks", gatedOpts())
+	f.setObservation(pr)
+
+	if err := f.trigger.OnPullRequest(f.ctx, pr.ID); err != nil {
+		t.Fatalf("OnPullRequest() with no checks error = %v", err)
+	}
+	runs := f.runsOf(pr)
+	if len(runs) != 1 || runs[0].Status != store.RunQueued || runs[0].HeadSHA != pr.HeadSHA {
+		t.Fatalf("runs = %+v, want one queued run", runs)
+	}
+}
+
+// A head whose CI has not been observed yet, or whose checks are still
+// running, cannot be green: the gate waits for the later delivery that
+// completes them.
 func TestTriggerCIGateWaitsThenReleases(t *testing.T) {
 	f := newTriggerFixture(t)
 	pr := f.seed("gated-pending", gatedOpts())

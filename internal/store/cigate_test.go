@@ -100,7 +100,7 @@ func TestEvaluateCIWithoutRequiredChecks(t *testing.T) {
 		{name: "all passed", obs: obs(CheckObservation{Name: "a", State: CheckPassed}), want: CIGreen},
 		{name: "one failed", obs: obs(CheckObservation{Name: "a", State: CheckFailed}), want: CIFailed},
 		{name: "one pending", obs: obs(CheckObservation{Name: "a", State: CheckPending}), want: CIPending},
-		{name: "no checks", obs: obs(), want: CIUnknown},
+		{name: "no checks to verify", obs: obs(), want: CIGreen},
 		{name: "no observation", obs: nil, want: CIUnknown},
 	}
 	for _, tt := range tests {

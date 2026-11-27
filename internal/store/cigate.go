@@ -219,8 +219,11 @@ func EvaluateCI(obs *ValidationObservation, legacy PRValidations, required []Req
 	if len(required) > 0 {
 		return evaluateRequired(*obs, required)
 	}
+	// A policy without required checks only needs the reported checks green. A
+	// head with none has nothing to verify, so the gate must not block it
+	// forever: a repository without CI would never get a review.
 	if len(obs.Checks) == 0 {
-		return CIVerdict{State: CIUnknown, Reason: "GitHub reported no checks for this head"}
+		return CIVerdict{State: CIGreen, Reason: "GitHub reported no checks for this head"}
 	}
 	return evaluateAll(obs.Checks)
 }
