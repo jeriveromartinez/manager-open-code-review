@@ -753,7 +753,56 @@ func (p *publishContext) findingBullet(f store.Finding) string {
 	if reason := strings.TrimSpace(p.findingReason(f)); reason != "" {
 		bullet += fmt.Sprintf("  _%s_\n", p.sanitize(reason))
 	}
+	bullet += p.differentialLine(f)
 	return bullet
+}
+
+// differentialLine renders the executable evidence stored on a trusted
+// verification. It stays inside the verification block: a diff-only result
+// never promotes a finding, and an inconclusive run says why.
+func (p *publishContext) differentialLine(f store.Finding) string {
+	v, trusted := p.verificationAtHead(f)
+	if !trusted || v.Verdict != "confirm" || v.Differential == nil {
+		return ""
+	}
+	differential := v.Differential
+	line := fmt.Sprintf("  _Prueba diferencial: %s · `%s`",
+		differentialStatusLabel(differential.Status), p.sanitize(differential.Case))
+	switch differential.Status {
+	case "inconclusive":
+		if reason := strings.TrimSpace(differential.Reason); reason != "" {
+			line += " — " + p.sanitize(reason)
+		}
+	case "regression", "pre_existing", "passing", "improved":
+		line += fmt.Sprintf(" · base %s: %s · head %s: %s",
+			shortSHA(differential.BaseSHA), differentialSideLabel(differential.BasePassed),
+			shortSHA(differential.HeadSHA), differentialSideLabel(differential.HeadPassed))
+	}
+	return line + "_\n"
+}
+
+func differentialStatusLabel(status string) string {
+	switch status {
+	case "regression":
+		return "regresión confirmada"
+	case "pre_existing":
+		return "defecto preexistente"
+	case "passing":
+		return "pasa en ambos lados"
+	case "improved":
+		return "mejora"
+	case "inconclusive":
+		return "inconclusa"
+	default:
+		return status
+	}
+}
+
+func differentialSideLabel(passed bool) string {
+	if passed {
+		return "pasa"
+	}
+	return "falla"
 }
 
 // findingReason explains why the verifier's answer could not be used, so the
