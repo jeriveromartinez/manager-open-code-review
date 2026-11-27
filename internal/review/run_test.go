@@ -947,6 +947,12 @@ func TestRunErrorClassification(t *testing.T) {
 	if got, _ := classifyNativeError(deadline, out, context.DeadlineExceeded); got.status != store.RunInconclusive || got.code != "timeout_global" {
 		t.Errorf("deadline classification = %q/%q, want inconclusive/timeout_global", got.status, got.code)
 	}
+	if got, _ := classifyNativeError(deadline, out, context.DeadlineExceeded); !strings.Contains(got.message, "fase revisión") {
+		t.Errorf("deadline message = %q, want the review phase named", got.message)
+	}
+	if got, _ := classifyCloneError(ctx, out, errors.New("git fetch: exit status 128")); !strings.Contains(got.message, "fase clonado") {
+		t.Errorf("clone message = %q, want the clone phase named", got.message)
+	}
 	if got, _ := classifyNativeError(ctx, out, errors.New("invalid JSON")); got.code != "ocr_error" {
 		t.Errorf("OCR classification code = %q, want ocr_error", got.code)
 	}
@@ -1614,6 +1620,34 @@ func TestRunVerifierFailureLeavesFindingsUntriaged(t *testing.T) {
 	}
 	if len(out.decisions) != 0 {
 		t.Errorf("decisions = %+v, want none", out.decisions)
+	}
+	if out.verificationSkipped != "verifier_error" {
+		t.Errorf("verificationSkipped = %q, want verifier_error", out.verificationSkipped)
+	}
+}
+
+// In apply mode the verifier's confirmation is part of the contract: a failed
+// verifier cannot leave the run succeeded and publish unconfirmed findings.
+// The run becomes inconclusive, names the phase, and keeps the technical detail
+// for the panel and logs.
+func TestRunVerifierFailureInApplyModeIsInconclusive(t *testing.T) {
+	skipWithoutShellFake(t)
+	f := newRunTestFixture(t)
+	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
+	t.Setenv("RUN_FAKE_SCAN_FAIL", "1")
+
+	runner := f.runner()
+	runner.Cfg.Timeout = 10 * time.Minute
+	out := f.executeForTest(t, runner)
+
+	if out.status != store.RunInconclusive {
+		t.Fatalf("status = %q, want inconclusive", out.status)
+	}
+	if out.code != "verifier_error" {
+		t.Errorf("code = %q, want verifier_error", out.code)
+	}
+	if !strings.Contains(out.message, "fase verificación") {
+		t.Errorf("message = %q, want the verification phase named", out.message)
 	}
 	if out.verificationSkipped != "verifier_error" {
 		t.Errorf("verificationSkipped = %q, want verifier_error", out.verificationSkipped)

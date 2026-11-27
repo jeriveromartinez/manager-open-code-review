@@ -173,36 +173,34 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 		}
 		return p.settle(ctx)
 	case store.RunSucceeded, store.RunInconclusive:
-		// Continue with the full publication below.
+		// Continue with the delivery below. Only a stored verdict for the
+		// current comparison may write to the PR conversation; the check and the
+		// QA status are always closed, even when a comment write fails.
 	default:
 		return nil
 	}
 
+	conversationVerdict := p.conversationVerdict(ctx)
+	var writeErr error
+	record := func(err error) {
+		if err != nil && writeErr == nil {
+			writeErr = err
+		}
+	}
+
 	// Inline comments are published first so the summary lists only findings
-	// that are genuinely left without one; reloading the snapshot afterwards
-	// keeps a retried publish from re-listing findings that already have a
-	// comment, and from posting a second review for the same run.
-	if !p.stepDone(store.PublishStepInline) {
+	// genuinely left without one. They are a claim about confirmed code, so a
+	// run without a conclusive verdict never posts one: an incomplete run (or a
+	// failed verifier) must not publish review comments.
+	if p.run.Status == store.RunSucceeded && !p.stepDone(store.PublishStepInline) {
 		if ok, err := p.guard(ctx); err != nil {
 			return err
 		} else if !ok {
 			return nil
 		}
-		added, err := p.fetchAddedLines(ctx)
-		if err != nil {
-			return err
-		}
-		if err := p.publishInlineComments(ctx, added, findings); err != nil {
-			if !errors.Is(err, errInlineRejected) {
-				return err
-			}
-			// GitHub refused the whole review: no finding was lost. Settle the
-			// step so a retry does not resend a review that will be refused
-			// again, and let the summary carry them once.
-			slog.Warn("inline review rejected; findings move to the summary",
-				"pull_request_id", p.pr.ID, "run_id", p.run.ID, "error", err)
-		}
-		if err := p.markStep(ctx, store.PublishStepInline); err != nil {
+		if err := p.publishInlineStep(ctx, findings); err != nil {
+			record(err)
+		} else if err := p.markStep(ctx, store.PublishStepInline); err != nil {
 			return err
 		}
 	}
@@ -221,16 +219,21 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 		}
 	}
 
-	if !p.stepDone(store.PublishStepSummary) {
+	// The summary is the single conversation entry of the run. Editing it or
+	// creating it without a stored verdict would tell the PR that QA concluded
+	// when it did not.
+	if !p.stepDone(store.PublishStepSummary) && conversationVerdict {
 		if ok, err := p.guard(ctx); err != nil {
 			return err
 		} else if !ok {
 			return nil
 		}
 		if err := p.publishSummary(ctx, findings, resolvedSincePrevious); err != nil {
-			return err
-		}
-		if err := p.markStep(ctx, store.PublishStepSummary); err != nil {
+			// A rejected comment must not leave the check in progress: the
+			// failure is remembered and returned after the check and status are
+			// settled, so a retry resumes only the missing comment work.
+			record(fmt.Errorf("publish summary: %w", err))
+		} else if err := p.markStep(ctx, store.PublishStepSummary); err != nil {
 			return err
 		}
 	}
@@ -241,9 +244,8 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 			return nil
 		}
 		if err := p.publishResolutions(ctx, findings); err != nil {
-			return err
-		}
-		if err := p.markStep(ctx, store.PublishStepResolutions); err != nil {
+			record(err)
+		} else if err := p.markStep(ctx, store.PublishStepResolutions); err != nil {
 			return err
 		}
 	}
@@ -257,9 +259,8 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 		// still written so the panel and GitHub agree.
 		if err := p.completeCheck(ctx, conclusion, open); err != nil &&
 			!errors.Is(err, store.ErrNotFound) {
-			return err
-		}
-		if err := p.markStep(ctx, store.PublishStepCheck); err != nil {
+			record(fmt.Errorf("complete check: %w", err))
+		} else if err := p.markStep(ctx, store.PublishStepCheck); err != nil {
 			return err
 		}
 	}
@@ -271,16 +272,48 @@ func (w *Worker) Publish(ctx context.Context, runID uint) (err error) {
 			return nil
 		}
 		if err := p.setPRStatus(ctx, qaStatus); err != nil {
-			return err
-		}
-		if err := p.markStep(ctx, store.PublishStepStatus); err != nil {
+			record(err)
+		} else if err := p.markStep(ctx, store.PublishStepStatus); err != nil {
 			return err
 		}
 	}
-	if err := p.requestHumanReview(ctx, store.ReviewRequestCauseInconclusive); err != nil {
-		return err
+	record(p.requestHumanReview(ctx, store.ReviewRequestCauseInconclusive))
+	if writeErr != nil {
+		return writeErr
 	}
 	return p.settle(ctx)
+}
+
+// publishInlineStep posts the run's one inline review and reports whether GitHub
+// accepted it. A rejected review is not an error: its findings move to the
+// summary, so the step is still settled and a retry does not resend it.
+func (p *publishContext) publishInlineStep(ctx context.Context, findings []store.Finding) error {
+	added, err := p.fetchAddedLines(ctx)
+	if err != nil {
+		return fmt.Errorf("list pull request files: %w", err)
+	}
+	if err := p.publishInlineComments(ctx, added, findings); err != nil {
+		if !errors.Is(err, errInlineRejected) {
+			return err
+		}
+		slog.Warn("inline review rejected; findings move to the summary",
+			"pull_request_id", p.pr.ID, "run_id", p.run.ID, "error", err)
+	}
+	return nil
+}
+
+// conversationVerdict reports whether a stored verdict authorises writing to the
+// PR conversation. A conclusive automated run owns its result; an incomplete
+// run may only write when a human recorded the decision for this comparison.
+func (p *publishContext) conversationVerdict(ctx context.Context) bool {
+	if p.run.Status == store.RunSucceeded {
+		return true
+	}
+	if p.run.Status != store.RunInconclusive && p.run.Status != store.RunFailed {
+		return false
+	}
+	_, ok := p.humanVerdict(ctx)
+	return ok
 }
 
 func openFindings(findings []store.Finding) []store.Finding {
@@ -714,10 +747,12 @@ func (p *publishContext) completeCheck(ctx context.Context, conclusion string, o
 	link := strings.TrimRight(p.w.PublicURL, "/") + "/prs/" + strconv.FormatUint(uint64(p.pr.ID), 10)
 	text := p.run.Summary
 	if p.run.Status == store.RunInconclusive || p.run.Status == store.RunFailed {
-		if p.run.ErrorMessage != "" {
-			text = p.run.ErrorMessage
-		} else if p.run.ErrorCode != "" {
-			text = p.run.ErrorCode
+		// The check tells that QA could not conclude. Phase, parameter and raw
+		// stderr stay in the panel and the run logs; a required check that also
+		// echoed the technical detail would leak it to every PR reader.
+		text = "QA no pudo concluir la revisión automática."
+		if p.run.ErrorCode != "" {
+			text += " · " + p.run.ErrorCode
 		}
 	}
 	if pending := p.pendingCoverageLine(); pending != "" {
