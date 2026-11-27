@@ -119,6 +119,7 @@ type fakeGitHub struct {
 	failResolveOnce        bool
 	failCheckOnce          bool
 	failReviewCommentsOnce bool
+	failSummaryOnce        bool
 	reviewRequests         []reviewRequestCall
 	reviewRequestAttempts  int
 	reviewRequestStatus    int
@@ -242,6 +243,11 @@ func (g *fakeGitHub) handler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(comments, http.StatusOK)
 
 	case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/repo/issues/7/comments":
+		if g.failSummaryOnce {
+			g.failSummaryOnce = false
+			http.Error(w, "summary temporarily unavailable", http.StatusInternalServerError)
+			return
+		}
 		var in struct {
 			Body string `json:"body"`
 		}
@@ -863,11 +869,22 @@ func TestPublishInconclusiveDoesNotResolve(t *testing.T) {
 			t.Error("resolveReviewThread called for inconclusive run")
 		}
 	}
-	if len(bodies) != 1 || !strings.Contains(bodies[0], "cobertura parcial") {
-		t.Errorf("summary = %q, want the inconclusive warning", bodies)
+	if len(bodies) != 0 {
+		t.Errorf("summary comments = %q, want none for an inconclusive run without a verdict", bodies)
 	}
 	if len(patches) != 1 || patches[0].Conclusion != "action_required" {
 		t.Errorf("check conclusion = %+v, want action_required", patches)
+	}
+	if len(patches) == 1 {
+		if !strings.Contains(patches[0].Output.Text, "QA no pudo concluir") {
+			t.Errorf("check text = %q, want it to say QA could not conclude", patches[0].Output.Text)
+		}
+		if !strings.Contains(patches[0].Output.Text, "/prs/") {
+			t.Errorf("check text = %q, want the panel link", patches[0].Output.Text)
+		}
+		if strings.Contains(patches[0].Output.Text, "cobertura parcial") {
+			t.Errorf("check text = %q, must not include the run error text", patches[0].Output.Text)
+		}
 	}
 	var savedPR store.PullRequest
 	if err := st.DB.WithContext(ctx).Take(&savedPR, pr.ID).Error; err != nil {
@@ -903,13 +920,8 @@ func TestPublishMixedPRSurfacesPendingCoverage(t *testing.T) {
 	}
 
 	bodies := summaryBodies(t, gh)
-	if len(bodies) != 1 {
-		t.Fatalf("summary comments = %d, want 1", len(bodies))
-	}
-	for _, want := range []string{"Archivos pendientes de revisión", "`notes.md`", "unsupported_ext"} {
-		if !strings.Contains(bodies[0], want) {
-			t.Errorf("summary %q does not contain %q", bodies[0], want)
-		}
+	if len(bodies) != 0 {
+		t.Errorf("summary comments = %d, want none without a stored verdict", len(bodies))
 	}
 
 	gh.mu.Lock()
@@ -921,11 +933,155 @@ func TestPublishMixedPRSurfacesPendingCoverage(t *testing.T) {
 	if !strings.Contains(patches[0].Output.Text, "notes.md") {
 		t.Errorf("check output %q does not list the pending file", patches[0].Output.Text)
 	}
+	if !strings.Contains(patches[0].Output.Text, "QA no pudo concluir") {
+		t.Errorf("check output %q does not say QA could not conclude", patches[0].Output.Text)
+	}
+	if strings.Contains(patches[0].Output.Text, "cobertura incompleta") {
+		t.Errorf("check output %q leaks the run error text", patches[0].Output.Text)
+	}
 }
 
-// TestPublishSummaryNamesFilesNeedingHumanReview pins #147: binaries and
-// submodules have no automatic analysis, so the summary names them instead of
-// letting them pass silently.
+// An inconclusive run must not publish inline review comments even when a
+// finding could be anchored to an added line: an incomplete run has no verdict
+// that authorises a claim on the PR conversation.
+func TestPublishInconclusiveDoesNotPublishInlineReview(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunInconclusive, "major")
+	seedFinding(t, st, pr.ID, run.ID, "anchorable", 3, "major", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	gh.mu.Lock()
+	posts, reviews := len(gh.comments), len(gh.reviews)
+	gh.mu.Unlock()
+	if posts != 0 {
+		t.Errorf("summary comments = %d, want none", posts)
+	}
+	if reviews != 0 {
+		t.Errorf("inline reviews = %d, want none without a stored verdict", reviews)
+	}
+}
+
+// A comment write failure must never leave the check in progress: the check is
+// settled first and the failure is reported afterwards so a retry resumes only
+// the missing comment.
+func TestPublishSummaryFailureStillClosesCheck(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	seedFinding(t, st, pr.ID, run.ID, "f1", 3, "major", store.FindingOpen)
+	gh := newFakeGitHub(t)
+	gh.failSummaryOnce = true
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err == nil {
+		t.Fatal("Publish() error = nil, want the injected summary failure")
+	}
+
+	gh.mu.Lock()
+	patches := append([]checkPatch(nil), gh.checkPatches...)
+	posts := len(gh.comments)
+	gh.mu.Unlock()
+	if len(patches) == 0 || patches[len(patches)-1].Conclusion != "failure" {
+		t.Fatalf("check patches = %+v, want the check closed with failure", patches)
+	}
+	if posts != 0 {
+		t.Errorf("summary comments = %d, want the failed write to remain missing", posts)
+	}
+	if got := storedQAStatus(t, st, pr.ID); got != store.StatusChangesRequested {
+		t.Errorf("qa_status = %q, want %q", got, store.StatusChangesRequested)
+	}
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("retry Publish() error = %v", err)
+	}
+	if got := len(summaryBodies(t, gh)); got != 1 {
+		t.Errorf("summary comments after retry = %d, want 1", got)
+	}
+}
+
+// A later inconclusive attempt of the same head must not edit the summary a
+// conclusive run already published.
+func TestPublishInconclusiveDoesNotOverwriteConfirmedSummary(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "minor")
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	before := publishedSummary(t, gh)
+	gh.mu.Lock()
+	editsBefore := len(gh.commentPatches)
+	gh.mu.Unlock()
+
+	retry := store.ReviewRun{
+		PullRequestID: pr.ID, ProfileID: run.ProfileID, HeadSHA: run.HeadSHA,
+		Status: store.RunInconclusive, ErrorCode: "timeout_global",
+		ErrorMessage: "deadline exceeded: ocr review: exit status 1",
+	}
+	if err := st.DB.WithContext(ctx).Create(&retry).Error; err != nil {
+		t.Fatalf("create inconclusive retry: %v", err)
+	}
+	if err := w.Publish(ctx, retry.ID); err != nil {
+		t.Fatalf("Publish(inconclusive) error = %v", err)
+	}
+
+	gh.mu.Lock()
+	editsAfter := len(gh.commentPatches)
+	posts := len(gh.comments)
+	gh.mu.Unlock()
+	if editsAfter != editsBefore {
+		t.Errorf("summary edits = %d, want none for a later inconclusive attempt", editsAfter-editsBefore)
+	}
+	if posts != 1 {
+		t.Errorf("summary comments = %d, want the confirmed summary alone", posts)
+	}
+	if after := publishedSummary(t, gh); after != before {
+		t.Errorf("summary changed from %q to %q", before, after)
+	}
+}
+
+// A human verdict authorises the summary, but neither it nor the check may
+// publish the raw OCR detail.
+func TestPublishHumanVerdictOmitsTechnicalDetail(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedInconclusivePublishContext(t, st)
+	if err := st.DB.WithContext(ctx).Model(&store.ReviewRun{}).Where("id = ?", run.ID).
+		Update("error_message", "deadline exceeded: ocr review: exit status 1\nstderr: secret detail").Error; err != nil {
+		t.Fatalf("set error message: %v", err)
+	}
+	recordHumanOutcome(t, st, pr, store.HumanVerdictApproved, true)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+
+	summary := publishedSummary(t, gh)
+	check := lastCheckPatch(t, gh).Output.Text
+	for _, leaked := range []string{"deadline exceeded", "stderr", "secret detail"} {
+		if strings.Contains(summary, leaked) {
+			t.Errorf("summary %q leaks %q", summary, leaked)
+		}
+		if strings.Contains(check, leaked) {
+			t.Errorf("check text %q leaks %q", check, leaked)
+		}
+	}
+	if !strings.Contains(check, "QA no pudo concluir") || !strings.Contains(check, "/prs/") {
+		t.Errorf("check text = %q, want the inconclusive notice and the panel link", check)
+	}
+}
+
 func TestPublishSummaryNamesFilesNeedingHumanReview(t *testing.T) {
 	st := testutil.NewStore(t)
 	ctx := context.Background()
@@ -1208,7 +1364,7 @@ func TestPublishCheckConclusions(t *testing.T) {
 	}{
 		{"succeeded with blocker", store.RunSucceeded, "major", "failure", store.StatusChangesRequested, true},
 		{"succeeded clean", store.RunSucceeded, "minor", "success", store.StatusReadyForHuman, true},
-		{"inconclusive", store.RunInconclusive, "major", "action_required", store.StatusInconclusive, true},
+		{"inconclusive", store.RunInconclusive, "major", "action_required", store.StatusInconclusive, false},
 		{"failed", store.RunFailed, "major", "action_required", store.StatusInconclusive, false},
 	}
 	for _, tc := range cases {
@@ -1241,8 +1397,8 @@ func TestPublishCheckConclusions(t *testing.T) {
 			if (posts > 0) != tc.wantSumm {
 				t.Errorf("summary posts = %d, want presence %v", posts, tc.wantSumm)
 			}
-			if tc.status == store.RunFailed && reviews != 0 {
-				t.Errorf("reviews = %d, want 0 for failed runs", reviews)
+			if tc.status != store.RunSucceeded && reviews != 0 {
+				t.Errorf("reviews = %d, want 0 for a run without a conclusive verdict", reviews)
 			}
 			var saved store.PullRequest
 			if err := st.DB.WithContext(ctx).Take(&saved, pr.ID).Error; err != nil {

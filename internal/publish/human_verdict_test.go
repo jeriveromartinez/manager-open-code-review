@@ -136,9 +136,12 @@ func TestPublishAppliesScopedHumanVerdict(t *testing.T) {
 			}
 
 			summary := publishedSummary(t, gh)
-			if !strings.Contains(summary, "Revisión no concluyente") ||
+			if !strings.Contains(summary, "QA no pudo concluir") ||
 				!strings.Contains(summary, "Resultado humano") {
 				t.Errorf("summary %q does not show both results apart", summary)
+			}
+			if strings.Contains(summary, "coverage_incomplete") {
+				t.Errorf("summary %q leaks the technical error into the conversation", summary)
 			}
 		})
 	}

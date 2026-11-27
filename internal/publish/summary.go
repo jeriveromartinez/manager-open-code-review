@@ -151,16 +151,11 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 
 	automatedInconclusive := p.run.Status == store.RunInconclusive || p.run.Status == store.RunFailed
 	if automatedInconclusive {
-		reason := p.run.ErrorMessage
-		if reason == "" {
-			reason = p.run.ErrorCode
-		}
-		if reason == "" {
-			reason = "el run no terminó de forma concluyente"
-		}
-		b.WriteString("\n> ⚠️ **Revisión no concluyente:** ")
-		b.WriteString(p.sanitize(reason))
-		b.WriteString("\n")
+		// The technical detail (phase, parameter, stderr) belongs to the panel
+		// and the run logs. Publishing it here would overwrite a confirmed
+		// summary with error text, so the comment states only that QA could not
+		// conclude.
+		b.WriteString("\n> ⚠️ **QA no pudo concluir la revisión automática.** Revisa el panel para la fase y el detalle técnico.\n")
 	}
 
 	fmt.Fprintf(&b, "\n### Revisión #%d · %s\n\n", p.runNumber, shortSHA(p.run.HeadSHA))
@@ -340,7 +335,9 @@ func (p *publishContext) buildArchitectureBlock(itemsRendered bool) string {
 		fmt.Fprintf(&b, "\n_Evidencia: %s · %d cita(s)_\n",
 			p.sanitize(verdict.Evidence.SchemaVersion), len(verdict.Evidence.CitedObservationIDs))
 	}
-	if len(verdict.Errors) > 0 {
+	if len(verdict.Errors) > 0 && p.run.Status == store.RunSucceeded {
+		// An incomplete run keeps its technical detail in the panel and logs; a
+		// human-verdict comment must not carry error text into the conversation.
 		fmt.Fprintf(&b, "\n> Análisis incompleto: %s\n", p.sanitize(strings.Join(verdict.Errors, "; ")))
 	}
 	if opsShown {
@@ -361,7 +358,7 @@ func (p *publishContext) buildOpsEvidenceBlock() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n**Evidencia operativa:** %s · modo observación · `%s`\n",
 		opsStatusLabel(ops.Status), shortSHA(p.run.HeadSHA))
-	if errorText := strings.TrimSpace(ops.Error); errorText != "" {
+	if errorText := strings.TrimSpace(ops.Error); errorText != "" && p.run.Status == store.RunSucceeded {
 		fmt.Fprintf(&b, "\n> Evidencia operativa incompleta: %s\n", p.sanitize(errorText))
 	}
 	for _, dimension := range ops.Dimensions {

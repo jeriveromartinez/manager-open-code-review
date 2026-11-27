@@ -49,6 +49,7 @@ func TestE2EFlow(t *testing.T) {
 	t.Run("push before checkout supersedes and the new head is reviewed", testE2ESuperseded)
 	t.Run("only a successful run resolves an open finding", testE2EFindingsLifecycle)
 	t.Run("auto-triage withdraws the refuted finding and publishes a curated summary", testE2EAutoTriagePublishesCuratedSummary)
+	t.Run("a failed verifier in apply mode publishes nothing and asks for a person", testE2EVerifierFailureBlocksPublication)
 	t.Run("consumer impact is resolved by the control process and reaches the verdict", testE2EConsumerImpact)
 }
 
@@ -921,7 +922,7 @@ func testE2ESuccess(t *testing.T) {
 	body := assertE2ESummary(t, f, "Revisión #1", f.headSHA[:7], "major 1", "2/0",
 		"Revisión completada: 2 archivos revisados, 1 hallazgo",
 		"https://qa.example/prs/"+strconv.FormatUint(uint64(f.pr.ID), 10))
-	if strings.Contains(body, "Revisión no concluyente") {
+	if strings.Contains(body, "QA no pudo concluir") {
 		t.Errorf("successful summary carries the inconclusive warning: %q", body)
 	}
 
@@ -1005,10 +1006,11 @@ func testE2EMixedCoverage(t *testing.T) {
 	if !strings.Contains(check.Output.Text, "notes.md") {
 		t.Errorf("check output %q does not list the pending file", check.Output.Text)
 	}
-	body := assertE2ESummary(t, f,
-		"Archivos pendientes de revisión", "`notes.md`", "text_route_invalid")
-	if strings.Contains(body, "Revisión completada") {
-		t.Errorf("summary claims completion with pending coverage: %q", body)
+	if !strings.Contains(check.Output.Text, "QA no pudo concluir") {
+		t.Errorf("check output %q does not say QA could not conclude", check.Output.Text)
+	}
+	if bodies := f.gh.summaryBodies(); len(bodies) != 0 {
+		t.Errorf("summary comments = %q, want none without a stored verdict", bodies)
 	}
 
 	var coverage struct {
@@ -1097,8 +1099,17 @@ func testE2ETimeout(t *testing.T) {
 		t.Errorf("error_message = %q, want the agent deadline", run.ErrorMessage)
 	}
 	assertE2EPRStatus(t, f, store.StatusInconclusive)
-	assertE2ESummary(t, f, "Revisión no concluyente", "deadline exceeded")
 	check := assertE2ECheck(t, f, "action_required")
+	if bodies := f.gh.summaryBodies(); len(bodies) != 0 {
+		t.Errorf("summary comments = %q, want none without a stored verdict", bodies)
+	}
+	if !strings.Contains(check.Output.Text, "QA no pudo concluir") ||
+		!strings.Contains(check.Output.Text, "/prs/"+strconv.FormatUint(uint64(f.pr.ID), 10)) {
+		t.Errorf("check output %q, want the inconclusive notice and the panel link", check.Output.Text)
+	}
+	if strings.Contains(check.Output.Text, "deadline exceeded") {
+		t.Errorf("check output %q leaks the technical detail", check.Output.Text)
+	}
 	if len(check.Output.Annotations) != 1 || check.Output.Annotations[0].Path != "main.go" {
 		t.Errorf("check annotations = %+v, want the open finding", check.Output.Annotations)
 	}
@@ -1340,8 +1351,8 @@ func testE2EFindingsLifecycle(t *testing.T) {
 	assertE2ERun(t, f.loadRun(t, run4), store.RunSucceeded, "")
 	assertE2EPRStatus(t, f, store.StatusReadyForHuman)
 	assertE2ESummary(t, f, "Resueltos desde la revisión anterior:** 1")
-	if got := f.gh.commentPatchCount(); got != 2 {
-		t.Errorf("summary edits = %d, want the later runs to edit the same comment", got)
+	if got := f.gh.commentPatchCount(); got != 1 {
+		t.Errorf("summary edits = %d, want only the conclusive run to edit the comment", got)
 	}
 	assertE2ECheck(t, f, "success")
 
@@ -1452,6 +1463,41 @@ func testE2EAutoTriagePublishesCuratedSummary(t *testing.T) {
 	if comment.Path != "auth.go" || comment.Line != 5 {
 		t.Errorf("inline comment at %s:%d, want the confirmed finding's added line",
 			comment.Path, comment.Line)
+	}
+}
+
+func testE2EVerifierFailureBlocksPublication(t *testing.T) {
+	f := newE2EFixture(t)
+	f.runner.Cfg.Timeout = 10 * time.Minute
+	f.setOCR(t, runTestNativeTwoFindings())
+	f.setAutoTriage(t, store.AutoTriageApply, true, nil)
+	t.Setenv("RUN_FAKE_SCAN_FAIL", "1")
+
+	runID := f.enqueue(t, false)
+	f.events.reset()
+	f.execute(t, runID)
+
+	run := f.loadRun(t, runID)
+	assertE2ERun(t, run, store.RunInconclusive, "verifier_error")
+	if !strings.Contains(run.ErrorMessage, "fase verificación") {
+		t.Errorf("error_message = %q, want the verification phase named", run.ErrorMessage)
+	}
+	assertE2EPRStatus(t, f, store.StatusInconclusive)
+	if bodies := f.gh.summaryBodies(); len(bodies) != 0 {
+		t.Errorf("summary comments = %q, want none while the verifier failed", bodies)
+	}
+	if reviews := f.gh.reviewList(); len(reviews) != 0 {
+		t.Errorf("inline reviews = %+v, want none while the verifier failed", reviews)
+	}
+	check := assertE2ECheck(t, f, "action_required")
+	if !strings.Contains(check.Output.Text, "QA no pudo concluir") ||
+		strings.Contains(check.Output.Text, "scan no disponible") {
+		t.Errorf("check text = %q, want the inconclusive notice without the technical detail", check.Output.Text)
+	}
+	for _, finding := range f.findings(t) {
+		if finding.TriageSource == store.TriageSourceVerifier || finding.GithubCommentID != 0 {
+			t.Errorf("finding = %+v, want it untriaged and unpublished", finding)
+		}
 	}
 }
 
