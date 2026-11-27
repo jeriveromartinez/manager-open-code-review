@@ -38,6 +38,9 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 		{"relative webhook url", KeyAlertWebhookURL, "alerts.example.com/hook", KeyAlertWebhookURL},
 		{"url trimmed to empty", KeyGitBaseURL, "/", KeyGitBaseURL},
 		{"empty bin", KeyOCRBin, "  ", KeyOCRBin},
+		{"ocr bin with appended arguments", KeyOCRBin, "ocr --verbose", KeyOCRBin},
+		{"opencode bin with appended arguments", KeyOpencodeBin, "opencode --model x", KeyOpencodeBin},
+		{"absurd review timeout", KeyReviewTimeout, "1ns", KeyReviewTimeout},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -51,6 +54,25 @@ func TestApplyRejectsInvalidValuesByKey(t *testing.T) {
 				t.Errorf("KeyError.Key = %q, want %q", keyErr.Key, tc.want)
 			}
 		})
+	}
+}
+
+// A single executable path is the only accepted binary form, and one minute is
+// the shortest deadline that can still clone, review and publish.
+func TestApplyAcceptsExecutableBinsAndAUsableDeadline(t *testing.T) {
+	cfg := config.Default()
+	if err := Apply(&cfg, map[string]string{
+		KeyOCRBin:        "/usr/local/bin/ocr",
+		KeyOpencodeBin:   "/usr/local/bin/opencode",
+		KeyReviewTimeout: "1m",
+	}); err != nil {
+		t.Fatalf("Apply(bins, 1m) = %v, want it accepted", err)
+	}
+	if cfg.OCRBin != "/usr/local/bin/ocr" || cfg.OpencodeBin != "/usr/local/bin/opencode" {
+		t.Errorf("bins = %q/%q, want the stored paths", cfg.OCRBin, cfg.OpencodeBin)
+	}
+	if cfg.ReviewTimeout != time.Minute {
+		t.Errorf("ReviewTimeout = %s, want 1m", cfg.ReviewTimeout)
 	}
 }
 

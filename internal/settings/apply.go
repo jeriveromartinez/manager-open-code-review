@@ -80,9 +80,9 @@ func applyOne(cfg *config.Config, key, raw string) error {
 	case KeyWorkspaceDir:
 		return setString(&cfg.WorkspaceDir, key, raw)
 	case KeyOCRBin:
-		return setString(&cfg.OCRBin, key, raw)
+		return setExecutable(&cfg.OCRBin, key, raw)
 	case KeyOpencodeBin:
-		return setString(&cfg.OpencodeBin, key, raw)
+		return setExecutable(&cfg.OpencodeBin, key, raw)
 	case KeyWorkerHealthAddr:
 		return setString(&cfg.WorkerHealthAddr, key, raw)
 	case KeyWebhooksEnabled:
@@ -95,7 +95,7 @@ func applyOne(cfg *config.Config, key, raw string) error {
 	case KeyReconcileInterval:
 		return setDuration(&cfg.ReconcileInterval, key, raw)
 	case KeyReviewTimeout:
-		return setDuration(&cfg.ReviewTimeout, key, raw)
+		return setDurationAtLeast(&cfg.ReviewTimeout, key, raw, MinReviewTimeout)
 	case KeyReviewDebounce:
 		return setDuration(&cfg.ReviewDebounce, key, raw)
 	case KeyReviewStaleAfter:
@@ -135,6 +135,22 @@ func setString(dst *string, key, raw string) error {
 	return nil
 }
 
+// setExecutable rejects a command line: the worker runs the value as one
+// executable path, so an appended argument becomes part of the name. Existence
+// is checked by the worker's bounded --version probe, because the app and the
+// worker run from separate images and the app cannot see the worker's binaries.
+func setExecutable(dst *string, key, raw string) error {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return &KeyError{key, "must not be empty"}
+	}
+	if len(strings.Fields(v)) != 1 {
+		return &KeyError{key, "must be a single executable path; arguments are not allowed"}
+	}
+	*dst = v
+	return nil
+}
+
 // setURL trims the trailing slash because every consumer concatenates paths
 // onto it; an empty value is only accepted for keys allowed to be unset.
 func setURL(dst *string, key, raw string, optional bool) error {
@@ -163,6 +179,20 @@ func setDuration(dst *time.Duration, key, raw string) error {
 		return &KeyError{key, "must be greater than zero"}
 	}
 	*dst = d
+	return nil
+}
+
+// setDurationAtLeast rejects a value too small for the work the deadline has to
+// cover. The review budget starts before the clone, so a nanosecond deadline
+// can only guarantee a timeout.
+func setDurationAtLeast(dst *time.Duration, key, raw string, min time.Duration) error {
+	if err := setDuration(dst, key, raw); err != nil {
+		return err
+	}
+	if *dst < min {
+		return &KeyError{key, fmt.Sprintf(
+			"must be at least %s: the review deadline starts before cloning", min)}
+	}
 	return nil
 }
 
@@ -207,6 +237,11 @@ func setIntAtMost(dst *int, key, raw string, max int) error {
 // MinReviewStaleMargin is the room the watchdog needs between the OCR deadline
 // and the orphan threshold to clone, parse and publish (#130).
 const MinReviewStaleMargin = 5 * time.Minute
+
+// MinReviewTimeout is the shortest deadline the review budget accepts. The
+// aggregate budget starts before the clone, so anything below the minimum can
+// only expire before OCR runs.
+const MinReviewTimeout = time.Minute
 
 // validatePairs runs after every write because a partial save can still make
 // the resulting configuration incoherent.

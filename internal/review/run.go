@@ -1953,6 +1953,31 @@ func classifyCloneError(ctx context.Context, out runOutcome, err error) (runOutc
 	return out.failed(err, "git_error"), nil
 }
 
+// invalidParameterPatterns recognise the argument errors OCR returns before it
+// runs. The group names the flag so the panel can point at the exact setting
+// instead of reporting a generic ocr_error.
+var invalidParameterPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`invalid argument .* for "--([a-zA-Z0-9-]+)" flag`),
+	regexp.MustCompile(`unknown flag: --?([a-zA-Z0-9-]+)`),
+	regexp.MustCompile(`flag provided but not defined: --?([a-zA-Z0-9-]+)`),
+	regexp.MustCompile(`flag needs an argument: --?([a-zA-Z0-9-]+)`),
+}
+
+// invalidOCRParameter returns the flag OCR rejected, or an empty string when the
+// failure is not an argument error. OCR validates --effort in the template
+// layer with its own wording, so that value maps to the flag explicitly.
+func invalidOCRParameter(message string) string {
+	for _, pattern := range invalidParameterPatterns {
+		if match := pattern.FindStringSubmatch(message); len(match) > 1 {
+			return "--" + match[1]
+		}
+	}
+	if strings.Contains(strings.ToLower(message), `invalid effort "`) {
+		return "--effort"
+	}
+	return ""
+}
+
 // classifyNativeError handles failures that produced no parseable OCR result.
 // A configuration failure is terminal; a deadline is classified by its kind so
 // the panel can tell the run-wide deadline from OCR's own request or per-group
@@ -1969,6 +1994,9 @@ func classifyNativeError(ctx context.Context, out runOutcome, err error) (runOut
 		return out.inconclusive(err, "timeout"), nil
 	}
 	message := strings.ToLower(err.Error())
+	if param := invalidOCRParameter(err.Error()); param != "" {
+		return out.failed(fmt.Errorf("fase revisión: parámetro %s inválido: %w", param, err), "invalid_parameter"), nil
+	}
 	for _, signal := range []string{
 		"no valid llm endpoint", "configuration", "config file", "invalid config",
 	} {

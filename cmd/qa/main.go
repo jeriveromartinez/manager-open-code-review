@@ -24,6 +24,7 @@ import (
 	"github.com/jeriveromartinez/qa-control-center/internal/llmmodels"
 	"github.com/jeriveromartinez/qa-control-center/internal/publish"
 	"github.com/jeriveromartinez/qa-control-center/internal/review"
+	"github.com/jeriveromartinez/qa-control-center/internal/settings"
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 	"github.com/jeriveromartinez/qa-control-center/internal/syncer"
 	"github.com/jeriveromartinez/qa-control-center/internal/web"
@@ -234,16 +235,31 @@ func runServe() error {
 	}
 }
 
+// binaryProbeTimeout bounds the startup --version probe. A hung binary must not
+// keep the worker from starting or from reporting which setting is wrong.
+var binaryProbeTimeout = 10 * time.Second
+
 // checkBinary fails fast when a worker dependency is missing or broken. The
 // captured stderr is included so an operator can see why the tool refused to
-// start.
-func checkBinary(ctx context.Context, bin string) (string, error) {
+// start, and the setting key names the field to fix in the panel.
+func checkBinary(ctx context.Context, key, bin string) (string, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, binaryProbeTimeout)
+	defer cancel()
 	var stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, bin, "--version")
+	cmd := exec.CommandContext(probeCtx, bin, "--version")
 	cmd.Stderr = &stderr
+	// A shell wrapper can leave a child holding the pipes; WaitDelay bounds the
+	// wait after the context kills the process.
+	cmd.WaitDelay = 2 * time.Second
 	stdout, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("binary %q --version failed: %w; stderr: %s", bin, err, strings.TrimSpace(stderr.String()))
+		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf(
+				"%s: %q --version did not finish within %s; check the binary path and arguments",
+				key, bin, binaryProbeTimeout)
+		}
+		return "", fmt.Errorf("%s: binary %q --version failed: %w; stderr: %s",
+			key, bin, err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(stdout)), nil
 }
@@ -271,12 +287,15 @@ func runWorker() error {
 	if err != nil {
 		return fmt.Errorf("create worker key box: %w", err)
 	}
-	for _, bin := range []string{cfg.OCRBin, cfg.OpencodeBin} {
-		version, err := checkBinary(ctx, bin)
+	for _, dep := range []struct{ key, bin string }{
+		{settings.KeyOCRBin, cfg.OCRBin},
+		{settings.KeyOpencodeBin, cfg.OpencodeBin},
+	} {
+		version, err := checkBinary(ctx, dep.key, dep.bin)
 		if err != nil {
 			return err
 		}
-		slog.Info("worker dependency ready", "binary", bin, "version", version)
+		slog.Info("worker dependency ready", "setting", dep.key, "binary", dep.bin, "version", version)
 	}
 
 	eventsPublisher := events.NewPGPublisher(st.Pool)
@@ -351,10 +370,10 @@ func runWorker() error {
 		StaleQueueAfter: cfg.WorkerQueueStale,
 		Dependencies: []worker.Dependency{
 			{Name: cfg.OCRBin, Version: func(ctx context.Context) (string, error) {
-				return checkBinary(ctx, cfg.OCRBin)
+				return checkBinary(ctx, settings.KeyOCRBin, cfg.OCRBin)
 			}},
 			{Name: cfg.OpencodeBin, Version: func(ctx context.Context) (string, error) {
-				return checkBinary(ctx, cfg.OpencodeBin)
+				return checkBinary(ctx, settings.KeyOpencodeBin, cfg.OpencodeBin)
 			}},
 		},
 	})

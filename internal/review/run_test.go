@@ -953,6 +953,16 @@ func TestRunErrorClassification(t *testing.T) {
 	if got, _ := classifyNativeError(ctx, out, errors.New("no valid LLM endpoint configured")); got.status != store.RunFailed || got.code != "config" {
 		t.Errorf("config classification = %q/%q, want failed/config", got.status, got.code)
 	}
+	if got, _ := classifyNativeError(ctx, out, errors.New(`invalid effort "turbo": must be one of low, medium, high`)); got.code != "invalid_parameter" {
+		t.Errorf("invalid effort classification = %q/%q, want invalid_parameter", got.status, got.code)
+	} else if !strings.Contains(got.message, "--effort") || !strings.Contains(got.message, "fase revisión") {
+		t.Errorf("invalid effort message = %q, want the parameter and phase named", got.message)
+	}
+	if got, _ := classifyNativeError(ctx, out, errors.New("unknown flag: --path")); got.code != "invalid_parameter" {
+		t.Errorf("unknown flag classification = %q/%q, want invalid_parameter", got.status, got.code)
+	} else if !strings.Contains(got.message, "--path") {
+		t.Errorf("unknown flag message = %q, want the parameter named", got.message)
+	}
 	if got := truncateRunMessage(strings.Repeat("x", 2000)); len(got) != maxRunErrorMessage {
 		t.Errorf("truncated message has %d chars, want %d", len(got), maxRunErrorMessage)
 	}
