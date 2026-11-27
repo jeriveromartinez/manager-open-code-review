@@ -188,6 +188,7 @@ func (p *publishContext) buildSummary(ctx context.Context, findings []store.Find
 	fmt.Fprintf(&b, "**Resueltos desde la revisión anterior:** %d\n\n", resolvedSincePrevious)
 
 	b.WriteString(p.buildVerificationBlock())
+	b.WriteString(p.buildCriteriaBlock(ctx))
 
 	coverage := decodeReviewCoverage(p.run.Coverage)
 	fmt.Fprintf(&b, "**Cobertura:** %d/%d (revisados/omitidos)", coverage.ReviewedFiles, coverage.SkippedFiles)

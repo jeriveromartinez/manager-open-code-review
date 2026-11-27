@@ -154,6 +154,10 @@ type Runner struct {
 	// reply on a finding's thread. Nil builds the native OCR verifier.
 	ObjectionVerifier ObjectionVerifier
 
+	// CriteriaEvaluator overrides the focused pass that checks the linked
+	// issue's criteria (#232). Nil builds the native OCR evaluator.
+	CriteriaEvaluator CriterionEvaluator
+
 	// heartbeatEvery overrides heartbeatInterval in tests. Zero uses the
 	// production interval.
 	heartbeatEvery time.Duration
@@ -1678,6 +1682,11 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		// citation resolves against fromSHA (the merge base, or the previous
 		// head on an incremental push), not against the persisted base.
 		r.verifyFindings(runCtx, run, cfg, activeProfile, activeKey, workDir, headSHA, fromSHA, &out, reserved, log)
+		// Criteria evaluation is independent of the findings pass: it checks the
+		// linked issue's requirements against the same checkout, stores an answer
+		// per criterion and never changes the check. The publication reads only
+		// the rows stored for this head (#232, #227).
+		r.evaluateRequirements(runCtx, run, cfg, activeProfile, activeKey, workDir, headSHA, fromSHA, changedFiles, &out, log)
 		if cfg.Policy.AutoTriageMode == store.AutoTriageApply && out.verificationSkipped == "verifier_error" {
 			// The policy promised that only confirmed findings drive the gate and
 			// the publication. A failed verifier leaves them unconfirmed, so the
