@@ -67,6 +67,9 @@ const (
 	// TriageSource records who produced the last triage of a finding.
 	TriageSourceHuman    = "human"
 	TriageSourceVerifier = "verifier"
+	// TriageSourceRule is a versioned review rule approved by a person. It may
+	// suppress a repeated false positive, never a severe finding.
+	TriageSourceRule = "rule"
 
 	// Human verdicts of an inconclusive review (#146). A decision is either an
 	// approval or a request for changes; the automated run keeps its own result.
@@ -374,10 +377,13 @@ type QAPolicy struct {
 	// FallbackProfileIDs is the ordered, explicitly authorized list of backup
 	// profiles. The worker tries them in order after a recoverable failure
 	// (#150); an empty list disables fallback.
-	FallbackProfileIDs  datatypes.JSON `gorm:"column:fallback_profile_ids;default:'[]'"`
-	BlockingThreshold   string         `gorm:"column:blocking_threshold"`
-	ExtraInstructions   string         `gorm:"column:extra_instructions"`
-	ExcludeGlobs        datatypes.JSON `gorm:"column:exclude_globs"`
+	FallbackProfileIDs datatypes.JSON `gorm:"column:fallback_profile_ids;default:'[]'"`
+	BlockingThreshold  string         `gorm:"column:blocking_threshold"`
+	ExtraInstructions  string         `gorm:"column:extra_instructions"`
+	ExcludeGlobs       datatypes.JSON `gorm:"column:exclude_globs"`
+	// CriticalGlobs marks the repository areas whose changes the review plan
+	// prioritises before the run budget is spent (#231).
+	CriticalGlobs       datatypes.JSON `gorm:"column:critical_globs;default:'[]'"`
 	MaxFilesPerPass     int            `gorm:"column:max_files_per_pass"`
 	MaxDiffLinesPerPass int            `gorm:"column:max_diff_lines_per_pass"`
 	MaxPasses           int            `gorm:"column:max_passes"`
@@ -479,6 +485,7 @@ type RepositoryPolicy struct {
 	BlockingThreshold    *string        `gorm:"column:blocking_threshold"`
 	ExtraInstructions    *string        `gorm:"column:extra_instructions"`
 	ExcludeGlobs         datatypes.JSON `gorm:"column:exclude_globs"`
+	CriticalGlobs        datatypes.JSON `gorm:"column:critical_globs"`
 	MaxFilesPerPass      *int           `gorm:"column:max_files_per_pass"`
 	MaxDiffLinesPerPass  *int           `gorm:"column:max_diff_lines_per_pass"`
 	MaxPasses            *int           `gorm:"column:max_passes"`
@@ -496,6 +503,83 @@ type RepositoryPolicy struct {
 	VerifyTokenMax       *int64         `gorm:"column:verify_token_max"`
 	CreatedAt            time.Time      `gorm:"column:created_at"`
 	UpdatedAt            time.Time      `gorm:"column:updated_at"`
+}
+
+// RuleExample is one item of the sample a review rule is observed against. A
+// positive example is a false positive the rule must suppress; a negative one
+// is a real defect of the same class the rule must keep detecting. Title and
+// Anchor are the evidence the matcher compares, so an example without either
+// cannot support applying a rule.
+type RuleExample struct {
+	FindingID string `json:"finding_id,omitempty"`
+	Path      string `json:"path"`
+	Category  string `json:"category,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Anchor    string `json:"anchor,omitempty"`
+	Severity  string `json:"severity,omitempty"`
+}
+
+// RuleEvaluation is the measured sample of one rule version. Repeated false
+// positives is the share of positive examples the rule still matches; severe
+// omissions counts the major/blocker real defects it would suppress.
+type RuleEvaluation struct {
+	EvaluatedAt             time.Time `json:"evaluated_at"`
+	SampleSize              int       `json:"sample_size"`
+	MatchedPositive         int       `json:"matched_positive"`
+	FalsePositiveRepetition float64   `json:"false_positive_repetition"`
+	MatchedNegative         int       `json:"matched_negative"`
+	SevereOmissions         int       `json:"severe_omissions"`
+}
+
+// RuleInfluence is the audit of one rule that matched a finding. Applied is
+// false for an observed, expired, superseded or severe finding: those keep
+// their visibility until a person reviews the evidence.
+type RuleInfluence struct {
+	RuleID      uint      `json:"rule_id"`
+	RuleKey     string    `json:"rule_key"`
+	Version     int       `json:"version"`
+	Status      string    `json:"status"`
+	Decision    string    `json:"decision"`
+	Scope       string    `json:"scope"`
+	Applied     bool      `json:"applied"`
+	Reason      string    `json:"reason"`
+	EvaluatedAt time.Time `json:"evaluated_at,omitempty"`
+}
+
+// ReviewRule is one version of an auditable review rule (#233). Its identity
+// (repository, path scope and category) stays stable across versions; a new
+// decision or scope creates a new row and supersedes the previous one.
+type ReviewRule struct {
+	ID           uint   `gorm:"column:id;primaryKey"`
+	RepositoryID int64  `gorm:"column:repository_id"`
+	RuleKey      string `gorm:"column:rule_key"`
+	Version      int    `gorm:"column:version"`
+	Status       string `gorm:"column:status"`
+	Decision     string `gorm:"column:decision"`
+	// Reason is the human reason that produced the original decision, kept as
+	// the audit trail of why the rule exists.
+	Reason    string `gorm:"column:reason"`
+	PathScope string `gorm:"column:path_scope"`
+	Category  string `gorm:"column:category"`
+	// PositiveExamples and NegativeExamples are the observed sample.
+	PositiveExamples datatypes.JSON `gorm:"column:positive_examples"`
+	NegativeExamples datatypes.JSON `gorm:"column:negative_examples"`
+	Evaluation       datatypes.JSON `gorm:"column:evaluation"`
+	// SourceFindingID and SourceHeadSHA point at the human decision the rule
+	// was converted from.
+	SourceFindingID string     `gorm:"column:source_finding_id"`
+	SourceHeadSHA   string     `gorm:"column:source_head_sha"`
+	ProposedBy      string     `gorm:"column:proposed_by"`
+	ProposedByID    *uint      `gorm:"column:proposed_by_id"`
+	ApprovedBy      string     `gorm:"column:approved_by"`
+	ApprovedByID    *uint      `gorm:"column:approved_by_id"`
+	ApprovedAt      *time.Time `gorm:"column:approved_at"`
+	// EvidenceExpiresAt bounds how long the measured sample supports applying
+	// the rule. An expired rule is not applied until it is evaluated again.
+	EvidenceExpiresAt *time.Time `gorm:"column:evidence_expires_at"`
+	SupersededBy      *uint      `gorm:"column:superseded_by"`
+	CreatedAt         time.Time  `gorm:"column:created_at"`
+	UpdatedAt         time.Time  `gorm:"column:updated_at"`
 }
 
 // ReviewRun is one execution of the review pipeline for a pull request. At
@@ -708,6 +792,9 @@ type Finding struct {
 	// verdict stays observational (#157).
 	Advisory     bool           `gorm:"column:advisory;not null;default:false"`
 	Verification datatypes.JSON `gorm:"column:verification"`
+	// RuleInfluences is the audit of the review rules that matched this finding.
+	// It is written after the finding is durable; nil means no rule looked at it.
+	RuleInfluences datatypes.JSON `gorm:"column:rule_influences"`
 	// TriageSource is who produced the last triage: human or verifier.
 	TriageSource        string `gorm:"column:triage_source"`
 	Status              string `gorm:"column:status"`

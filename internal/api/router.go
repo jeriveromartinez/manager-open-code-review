@@ -135,6 +135,12 @@ func NewRouter(d Deps) http.Handler {
 			r.Get("/repos/{id}/policy", s.getRepoPolicy)
 			r.Put("/repos/{id}/policy", s.putRepoPolicy)
 			r.Delete("/repos/{id}/policy", s.deleteRepoPolicy)
+			// Auditable review rules (#233): a human decision becomes a
+			// versioned, repository-scoped rule that is observed before it can
+			// apply.
+			r.Get("/repos/{id}/rules", s.listRepoRules)
+			r.Post("/repos/{id}/rules", s.createRepoRule)
+			r.Put("/repos/{id}/rules/{ruleID}", s.transitionRepoRule)
 
 			// Retry, finding actions and the human verdict of an inconclusive
 			// review are limited to admins and the lead or QA of the repo's team.

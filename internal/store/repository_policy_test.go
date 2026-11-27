@@ -39,6 +39,53 @@ func (f *fixture) teamPolicy(team store.Team, profile store.LLMProfile) store.QA
 func stringPtr(v string) *string { return &v }
 func boolPtr(v bool) *bool       { return &v }
 
+func TestResolvePolicyAppliesCriticalGlobsOverride(t *testing.T) {
+	f := newFixture(t)
+	installationID := f.nextID()
+	f.installation(installationID)
+	team := f.team("critical-areas")
+	profile := f.profile("primary")
+	teamPolicy, err := f.s.SaveQAPolicy(f.ctx, store.QAPolicy{
+		TeamID: team.ID, LLMProfileID: profile.ID,
+		BlockingThreshold: "major", MaxFilesPerPass: 40, MaxDiffLinesPerPass: 3000,
+		MaxPasses: 4, ReviewEffort: "low",
+		CriticalGlobs: []byte(`["internal/store/**"]`),
+	})
+	if err != nil {
+		t.Fatalf("SaveQAPolicy: %v", err)
+	}
+	teamID := team.ID
+	repo := f.repo(201, installationID, "acme/payments", &teamID, true)
+
+	if _, err := f.s.SaveRepositoryPolicy(f.ctx, store.RepositoryPolicy{
+		RepositoryID:  repo.ID,
+		CriticalGlobs: []byte(`["internal/payments/**"]`),
+	}); err != nil {
+		t.Fatalf("SaveRepositoryPolicy: %v", err)
+	}
+
+	resolved, err := f.s.ResolveReviewPolicy(f.ctx, repo.ID)
+	if err != nil {
+		t.Fatalf("ResolveReviewPolicy: %v", err)
+	}
+	if string(resolved.Effective.CriticalGlobs) != `["internal/payments/**"]` {
+		t.Errorf("effective critical globs = %s, want the repository override", resolved.Effective.CriticalGlobs)
+	}
+	if resolved.Provenance["critical_globs"] != store.PolicySourceRepo {
+		t.Errorf("critical_globs provenance = %q, want repo", resolved.Provenance["critical_globs"])
+	}
+	if resolved.Revision == store.PolicyRevision(teamPolicy, false) {
+		t.Error("revision did not change with the critical globs override")
+	}
+
+	if _, err := f.s.SaveRepositoryPolicy(f.ctx, store.RepositoryPolicy{
+		RepositoryID:  repo.ID,
+		CriticalGlobs: []byte(`not-json`),
+	}); !errors.Is(err, store.ErrInvalidPolicy) {
+		t.Errorf("invalid critical globs error = %v, want ErrInvalidPolicy", err)
+	}
+}
+
 func TestResolvePolicyAppliesDifferentOverridesPerRepository(t *testing.T) {
 	f := newFixture(t)
 	installationID := f.nextID()

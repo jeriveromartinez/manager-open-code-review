@@ -153,6 +153,7 @@ const policy: QAPolicy = {
   blocking_threshold: 'major',
   extra_instructions: '',
   exclude_globs: ['*.pb.go'],
+  critical_globs: [],
   max_files: 40,
   max_diff_lines: 3000,
   max_passes: 4,
@@ -730,6 +731,7 @@ describe('AgentsView', () => {
 
     await wrapper.get('[data-policy-extra]').setValue('  No comentes estilo  ')
     await wrapper.get('[data-policy-exclude]').setValue('*.pb.go\n\n  vendor/**  \n')
+    await wrapper.get('[data-policy-critical]').setValue('internal/payments/**\n\n migrations/** \n')
     await wrapper.get('[data-policy-save]').trigger('click')
     await flushPromises()
 
@@ -738,6 +740,7 @@ describe('AgentsView', () => {
       expect.objectContaining({
         extra_instructions: 'No comentes estilo',
         exclude_globs: ['*.pb.go', 'vendor/**'],
+        critical_globs: ['internal/payments/**', 'migrations/**'],
       }),
     )
 

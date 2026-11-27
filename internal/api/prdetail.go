@@ -123,6 +123,8 @@ type findingDTO struct {
 	Citations []store.FindingCitation `json:"citations"`
 	// Advisory marks evidence from the observational architectural analysis.
 	Advisory bool `json:"advisory"`
+	// RuleInfluences is the audit of the review rules that matched this finding.
+	RuleInfluences json.RawMessage `json:"rule_influences"`
 	// GithubThreadResolved is GitHub's thread state, reported apart from the QA
 	// verdict and the finding status.
 	GithubThreadResolved bool   `json:"github_thread_resolved"`
@@ -145,6 +147,7 @@ func findingDTOOf(f store.Finding) findingDTO {
 		TriageSource: f.TriageSource, Verification: jsonObject(f.Verification),
 		Scope: store.NormalizeFindingScope(f.Scope, citations), Citations: citations,
 		Advisory:             f.Advisory,
+		RuleInfluences:       jsonObject(f.RuleInfluences),
 		GithubThreadResolved: f.GithubThreadResolved,
 		CreatedAt:            f.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:            f.UpdatedAt.UTC().Format(time.RFC3339),
@@ -160,6 +163,9 @@ type prDetailResponse struct {
 	HumanVerdict *humanVerdictResponse `json:"human_verdict"`
 	Runs         []reviewRunDTO        `json:"runs"`
 	Findings     []findingDTO          `json:"findings"`
+	// Criteria is the per-criterion verdict of the linked issue at the current
+	// head (#232). Empty when no issue criterion was evaluated for this head.
+	Criteria []criterionDTO `json:"criteria"`
 }
 
 // visiblePRView returns the caller's view of a pull request, or writes the
@@ -211,6 +217,24 @@ func (s *server) prDetail(w http.ResponseWriter, r *http.Request) {
 		findingDTOs = append(findingDTOs, findingDTOOf(finding))
 	}
 
+	// Criteria verdicts are current only for the pull request's head; the panel
+	// shows the uncertainty of a moved or unevaluated head instead of the last
+	// answer (#232).
+	pr, err := s.Store.PullRequest(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "load pull request")
+		return
+	}
+	criteria, err := s.Store.CurrentCriterionAssessments(r.Context(), id, pr.HeadSHA)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "list criterion assessments")
+		return
+	}
+	criterionDTOs := make([]criterionDTO, 0, len(criteria))
+	for _, assessment := range criteria {
+		criterionDTOs = append(criterionDTOs, criterionDTOOf(assessment))
+	}
+
 	var humanVerdict *humanVerdictResponse
 	latest, found, err := s.Store.LatestHumanVerdict(r.Context(), id)
 	if err != nil {
@@ -218,11 +242,6 @@ func (s *server) prDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if found {
-		pr, err := s.Store.PullRequest(r.Context(), id)
-		if err != nil {
-			writeAPIError(w, http.StatusInternalServerError, "load pull request")
-			return
-		}
 		current := latest.InvalidatedAt == nil && latest.Covers(pr)
 		dto := humanVerdictDTO(latest, current)
 		humanVerdict = &dto
@@ -233,6 +252,7 @@ func (s *server) prDetail(w http.ResponseWriter, r *http.Request) {
 		HumanVerdict: humanVerdict,
 		Runs:         runDTOs,
 		Findings:     findingDTOs,
+		Criteria:     criterionDTOs,
 	})
 }
 

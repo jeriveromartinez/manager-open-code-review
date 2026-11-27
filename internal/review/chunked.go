@@ -52,6 +52,10 @@ type chunkSummary struct {
 	statuses map[string]coverageFile
 	comments []nativeComment
 	tokens   tokenUsage
+	// reused and mixed track whether a path was fully served by persisted
+	// units. A path with at least one fresh chunk is not reported as reused.
+	reused map[string]bool
+	mixed  map[string]bool
 	// usageKnown is false once a chunk ran without reporting usage, or failed
 	// after possibly spending tokens. The run total is then unknown and the
 	// following steps must not assume the missing spend was zero.
@@ -59,7 +63,24 @@ type chunkSummary struct {
 }
 
 func newChunkSummary() chunkSummary {
-	return chunkSummary{statuses: make(map[string]coverageFile), usageKnown: true}
+	return chunkSummary{
+		statuses:   make(map[string]coverageFile),
+		reused:     make(map[string]bool),
+		mixed:      make(map[string]bool),
+		usageKnown: true,
+	}
+}
+
+// fullyReusedPaths returns the paths every chunk of which came from a persisted
+// unit. The plan reports those as reused instead of reviewed.
+func (s chunkSummary) fullyReusedPaths() map[string]bool {
+	paths := make(map[string]bool, len(s.reused))
+	for path := range s.reused {
+		if !s.mixed[path] {
+			paths[path] = true
+		}
+	}
+	return paths
 }
 
 func (s *chunkSummary) markNotReviewed(path, method, reason string) {
@@ -110,13 +131,21 @@ func fileCovered(file coverageFile) bool {
 // the panel already expects. files stays omitted when the engine reported no
 // manifest, so old runs and empty-coverage responses keep their previous shape.
 func coverageJSONWithFiles(reviewed, skipped, excluded, notRequired int, files []coverageFile) []byte {
+	return coverageJSONWithPlan(reviewed, skipped, excluded, notRequired, files, nil)
+}
+
+// coverageJSONWithPlan serializes the coverage of a run that built a priority
+// plan. The plan keeps the previous response shape intact: the field is only
+// present when a plan was built.
+func coverageJSONWithPlan(reviewed, skipped, excluded, notRequired int, files []coverageFile, plan *reviewPlan) []byte {
 	raw, err := json.Marshal(struct {
 		ReviewedFiles    int            `json:"reviewed_files"`
 		SkippedFiles     int            `json:"skipped_files"`
 		ExcludedFiles    int            `json:"excluded_files"`
 		NotRequiredFiles int            `json:"not_required_files"`
 		Files            []coverageFile `json:"files,omitempty"`
-	}{reviewed, skipped, excluded, notRequired, files})
+		Plan             *reviewPlan    `json:"plan,omitempty"`
+	}{reviewed, skipped, excluded, notRequired, files, plan})
 	if err != nil {
 		return []byte(`{}`)
 	}
@@ -320,6 +349,7 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 			if reused, ok := resume.reusableReview(unitKey); ok && !chunkExcludedTooLarge(reused, path) {
 				usage := nativeTokenUsage(reused)
 				summary.tokens.add(usage)
+				summary.reused[path] = true
 				if !reused.hasSummary {
 					summary.usageKnown = false
 					resume.markUsage(false)
@@ -338,6 +368,7 @@ func (r *Runner) reviewTooLargeFiles(ctx context.Context, runID, profileID uint,
 					fmt.Sprintf("trozo %d/%d de %s no ejecutado: la revisión se agotó", i+1, len(chunks), path))
 				break
 			}
+			summary.mixed[path] = true
 
 			chunkReviewer := chunkReviewerFor(reviewer, ch.Commit, log.OCRLogger(ctx, invocation))
 			if budget > 0 {
