@@ -221,6 +221,18 @@ func findingsForPath(t *testing.T, f *runTestFixture, path string) []store.Findi
 	return matched
 }
 
+func TestChunkSummaryFullyReusedPaths(t *testing.T) {
+	summary := newChunkSummary()
+	summary.reused["fully.go"] = true
+	summary.reused["mixed.go"] = true
+	summary.mixed["mixed.go"] = true
+
+	reused := summary.fullyReusedPaths()
+	if !reused["fully.go"] || reused["mixed.go"] {
+		t.Errorf("fullyReusedPaths = %v, want only fully.go", reused)
+	}
+}
+
 func TestFinishChunkMarksUsageUnknownWithoutSummary(t *testing.T) {
 	summary := newChunkSummary()
 	failures, reason := 0, ""

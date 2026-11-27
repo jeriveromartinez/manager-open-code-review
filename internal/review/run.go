@@ -1054,6 +1054,34 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			reserved.tokens, reserved.timeout.Round(time.Second)))
 	}
 
+	// The plan is built before the first OCR group. It links every changed file
+	// to its ranges and dependencies, records the evidence that makes a change
+	// critical, and decides the order in which the budget-limited routes spend
+	// their share (#231). The verification and persistence reserves were carved
+	// out above, so a unit can never spend the time meant for checking findings.
+	var plan reviewPlan
+	if invErr == nil {
+		verifyReserve := time.Duration(0)
+		if reserved.enabled {
+			verifyReserve = reserved.timeout
+		}
+		plan = buildReviewPlan(runCtx, planInputs{
+			Dir:             workDir,
+			BaseSHA:         fromSHA,
+			HeadSHA:         headSHA,
+			Changed:         inventory,
+			ExcludePatterns: excludePatterns,
+			CriticalGlobs:   planCriticalGlobs(cfg.Policy.CriticalGlobs),
+			Contracts:       contracts,
+			ContextBytes:    chunkByteBudget(ceiling),
+			ReviewTimeout:   timeout,
+			VerifyReserve:   verifyReserve,
+		})
+		log.Log(runCtx, "worker", "", "info", logPhasePolicy, fmt.Sprintf(
+			"plan de cobertura: %d unidad(es), %d crítica(s), %d archivo(s); reserva verificación %ds, persistencia %ds",
+			len(plan.Units), plan.CriticalTotal, len(inventory), plan.VerifyReserveSeconds, plan.PersistReserveSeconds))
+	}
+
 	architectureVerdict := newArchitectureVerdict(analysisMode, analysisRequested, signals, scope,
 		store.ArchitectureComparison{
 			Repository: cfg.Repo.FullName,
@@ -1508,6 +1536,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	// the pull request unreviewed.
 	var chunked chunkSummary
 	if paths := tooLargePaths(res); len(paths) > 0 && canChunkNativeRun(status, code) {
+		// The plan decides the order: critical units first and related paths
+		// together, so an exhausted budget leaves the least delicate work out.
+		paths = plan.orderPaths(paths)
 		r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhaseChunking, log)
 		log.Log(runCtx, "worker", "", "info", logPhaseChunks, fmt.Sprintf(
 			"%d archivo(s) demasiado grandes para el run principal; se revisan por partes", len(paths)))
@@ -1541,6 +1572,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			}
 		}
 		candidates := textRouteCandidates(inventory, excludePatterns, covered, attempted, res)
+		candidates = plan.orderPaths(candidates)
 		if len(candidates) > 0 {
 			r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhaseChunking, log)
 			log.Log(runCtx, "worker", "", "info", logPhaseChunks, fmt.Sprintf(
@@ -1560,6 +1592,12 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	routed := newChunkSummary()
 	for path, file := range chunked.statuses {
 		routed.statuses[path] = file
+	}
+	for path := range chunked.reused {
+		routed.reused[path] = true
+	}
+	for path := range chunked.mixed {
+		routed.mixed[path] = true
 	}
 	for path, file := range textRouted.statuses {
 		routed.statuses[path] = file
@@ -1587,10 +1625,30 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	reviewed, skipped, excluded = coverageCountsFromFiles(files)
 	notRequired := coverageNotRequiredFromFiles(files)
 	status, code = settledRunStatus(status, code, pending, routed, invErr == nil)
+	// Reconcile the plan with the final coverage and the units a previous
+	// attempt already paid for. An unverified critical unit makes the run
+	// inconclusive, which the existing gate already treats as not approvable.
+	reusedPaths := reusedCoveragePaths(res)
+	if mainReused {
+		// The whole main result came from a persisted unit, so every path it
+		// covers was reused rather than reviewed in this attempt.
+		for path := range reviewedPaths(res.Manifest.Coverage) {
+			reusedPaths[path] = true
+		}
+	}
+	for path := range routed.fullyReusedPaths() {
+		reusedPaths[path] = true
+	}
+	plan.applyCoverage(files, reusedPaths)
+	status, code = applyPlanGate(status, code, &plan)
 	reviewFindings := countReviewFindings(out.merged.Findings)
 	out.summary = coverageSummaryText(status, reviewed, reviewFindings)
 
-	out.coverage = coverageJSONWithFiles(reviewed, skipped, excluded, notRequired, files)
+	var planJSON *reviewPlan
+	if len(plan.Units) > 0 {
+		planJSON = &plan
+	}
+	out.coverage = coverageJSONWithPlan(reviewed, skipped, excluded, notRequired, files, planJSON)
 	r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhaseFinishing, log)
 	log.Log(runCtx, "worker", "", "info", logPhaseFinish, fmt.Sprintf(
 		"cobertura final: %d revisados, %d omitidos, %d excluidos; %d hallazgo(s) tras deduplicar",
@@ -1635,6 +1693,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		if coverageErr != nil {
 			message = coverageErr.Error()
 		}
+		message += plan.incompleteSuffix()
 		out = out.inconclusive(errors.New(message), code)
 		return out, nil
 	default:
