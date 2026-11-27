@@ -199,7 +199,7 @@ func TestModelsCap(t *testing.T) {
 func TestDefaultProviderTable(t *testing.T) {
 	want := []string{
 		"anthropic", "commandcode", "deepseek", "fireworks-ai", "google", "groq",
-		"mistral", "moonshotai", "openai", "opencode", "openrouter", "togetherai", "xai", "zai",
+		"mistral", "moonshotai", "openai", "opencode", "opencode-go", "openrouter", "togetherai", "xai", "zai",
 	}
 	var got []string
 	for id := range llmmodels.DefaultProviders {

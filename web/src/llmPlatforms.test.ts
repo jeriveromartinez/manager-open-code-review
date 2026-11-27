@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { llmPlatforms } from './llmPlatforms'
 
 describe('llmPlatforms', () => {
-  it('lists fourteen platforms with unique provider ids', () => {
-    expect(llmPlatforms).toHaveLength(14)
+  it('lists fifteen platforms with unique provider ids', () => {
+    expect(llmPlatforms).toHaveLength(15)
     const ids = llmPlatforms.map((platform) => platform.id)
     expect(new Set(ids).size).toBe(ids.length)
     for (const platform of llmPlatforms) {
@@ -22,5 +22,11 @@ describe('llmPlatforms', () => {
         expect(model.label.trim()).not.toBe('')
       }
     }
+  })
+
+  it('offers OpenCode Go as a provider separate from OpenCode Models', () => {
+    const platform = llmPlatforms.find((entry) => entry.id === 'opencode-go')
+    expect(platform?.name).toBe('OpenCode Go')
+    expect(platform?.models.map((model) => model.id)).toContain('deepseek-v4.1-flash')
   })
 })

@@ -56,6 +56,7 @@ var DefaultProviders = map[string]Provider{
 	"openai":       {BaseURL: "https://api.openai.com/v1", Shape: OpenAICompatible},
 	"anthropic":    {BaseURL: "https://api.anthropic.com/v1", Shape: Anthropic},
 	"opencode":     {BaseURL: "https://opencode.ai/inference/openai/v1", Shape: OpenAICompatible},
+	"opencode-go":  {BaseURL: "https://opencode.ai/inference/go/openai/v1", Shape: OpenAICompatible},
 	"google":       {BaseURL: "https://generativelanguage.googleapis.com/v1beta", Shape: Google},
 	"openrouter":   {BaseURL: "https://openrouter.ai/api/v1", Shape: OpenAICompatible},
 	"commandcode":  {BaseURL: "https://api.commandcode.ai/provider/v1", Shape: OpenAICompatible},
