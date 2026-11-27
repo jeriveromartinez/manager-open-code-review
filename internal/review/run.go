@@ -186,6 +186,7 @@ type runOutcome struct {
 	verifyUsage         []byte
 	verifySessionID     string
 	verificationSkipped string
+	verificationError   string
 	// executedProfile is the destination that actually produced the result,
 	// which may be a fallback rather than the profile the run was enqueued
 	// with. Verification and triage attribution use it (#150).
@@ -1619,6 +1620,14 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		// citation resolves against fromSHA (the merge base, or the previous
 		// head on an incremental push), not against the persisted base.
 		r.verifyFindings(runCtx, run, cfg, activeProfile, activeKey, workDir, headSHA, fromSHA, &out, reserved, log)
+		if cfg.Policy.AutoTriageMode == store.AutoTriageApply && out.verificationSkipped == "verifier_error" {
+			// The policy promised that only confirmed findings drive the gate and
+			// the publication. A failed verifier leaves them unconfirmed, so the
+			// run cannot claim a conclusive verdict: it becomes inconclusive,
+			// nothing is published, and the check asks for a person (#227).
+			out = out.inconclusive(fmt.Errorf(
+				"fase verificación: el verificador OCR falló: %s", out.verificationError), "verifier_error")
+		}
 		r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhaseFinishing, log)
 		return out, nil
 	case store.RunInconclusive:
@@ -1988,23 +1997,30 @@ var cloneCredentialPhrases = []string{
 
 func classifyCloneError(ctx context.Context, out runOutcome, err error) (runOutcome, error) {
 	if truncatedContext(ctx, err) {
-		return out.inconclusive(err, "timeout"), nil
+		return out.inconclusive(phaseError("clonado", err), "timeout"), nil
 	}
 	message := strings.ToLower(err.Error())
 	for _, signal := range cloneCredentialSignals {
 		if signal.MatchString(message) {
-			return out.inconclusive(err, "token_expired"), nil
+			return out.inconclusive(phaseError("clonado", err), "token_expired"), nil
 		}
 	}
 	for _, phrase := range cloneCredentialPhrases {
 		if strings.Contains(message, phrase) {
-			return out.inconclusive(err, "token_expired"), nil
+			return out.inconclusive(phaseError("clonado", err), "token_expired"), nil
 		}
 	}
 	if isTransientFetchError(err) {
-		return out.inconclusive(err, "git_transient"), nil
+		return out.inconclusive(phaseError("clonado", err), "git_transient"), nil
 	}
-	return out.failed(err, "git_error"), nil
+	return out.failed(phaseError("clonado", err), "git_error"), nil
+}
+
+// phaseError names the pipeline phase in the message the panel shows. The run
+// row no longer carries a phase once it is terminal, so this is what keeps the
+// step queryable next to the technical detail.
+func phaseError(phase string, err error) error {
+	return fmt.Errorf("fase %s: %w", phase, err)
 }
 
 // classifyNativeError handles failures that produced no parseable OCR result.
@@ -2014,23 +2030,23 @@ func classifyCloneError(ctx context.Context, out runOutcome, err error) (runOutc
 func classifyNativeError(ctx context.Context, out runOutcome, err error) (runOutcome, error) {
 	var timeout *nativeTimeoutError
 	if errors.As(err, &timeout) {
-		return out.inconclusive(err, timeoutCodeFromKind(timeout.Kind)), nil
+		return out.inconclusive(phaseError("revisión", err), timeoutCodeFromKind(timeout.Kind)), nil
 	}
 	if truncatedContext(ctx, err) {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return out.inconclusive(err, timeoutCodeFromKind("global")), nil
+			return out.inconclusive(phaseError("revisión", err), timeoutCodeFromKind("global")), nil
 		}
-		return out.inconclusive(err, "timeout"), nil
+		return out.inconclusive(phaseError("revisión", err), "timeout"), nil
 	}
 	message := strings.ToLower(err.Error())
 	for _, signal := range []string{
 		"no valid llm endpoint", "configuration", "config file", "invalid config",
 	} {
 		if strings.Contains(message, signal) {
-			return out.failed(err, "config"), nil
+			return out.failed(phaseError("revisión", err), "config"), nil
 		}
 	}
-	return out.inconclusive(err, "ocr_error"), nil
+	return out.inconclusive(phaseError("revisión", err), "ocr_error"), nil
 }
 
 // markArchitectureInconclusive records that a requested observation could not
