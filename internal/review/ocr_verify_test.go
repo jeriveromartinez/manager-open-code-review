@@ -34,7 +34,10 @@ func argValue(args []string, flag string) (string, bool) {
 }
 
 func TestBuildScanArgsCarriesPathRuleAndBudget(t *testing.T) {
-	args := buildScanArgs(scanInvocation())
+	args, err := buildScanArgs(scanInvocation())
+	if err != nil {
+		t.Fatalf("buildScanArgs() error = %v", err)
+	}
 	if len(args) == 0 || args[0] != "scan" {
 		t.Fatalf("args = %v, want the scan subcommand first", args)
 	}
@@ -68,7 +71,10 @@ func TestBuildScanArgsOmitsZeroBudget(t *testing.T) {
 	in := scanInvocation()
 	in.TokenBudget = 0
 	in.TaskTimeout = 0
-	args := buildScanArgs(in)
+	args, err := buildScanArgs(in)
+	if err != nil {
+		t.Fatalf("buildScanArgs() error = %v", err)
+	}
 	if _, ok := argValue(args, "--max-tokens-budget"); ok {
 		t.Error("zero budget must not reach OCR, which rejects it")
 	}
@@ -77,6 +83,40 @@ func TestBuildScanArgsOmitsZeroBudget(t *testing.T) {
 	}
 	if _, ok := argValue(args, "--path"); !ok {
 		t.Error("--path is required")
+	}
+}
+
+// OCR splits --path on commas without escaping, so a file whose name contains
+// one would silently resolve to a different path. Reject it with the parameter
+// named instead of running a scan over the wrong files.
+func TestBuildScanArgsRejectsCommaPath(t *testing.T) {
+	in := scanInvocation()
+	in.Paths = []string{"a.go", "weird,name.go"}
+	_, err := buildScanArgs(in)
+	if err == nil {
+		t.Fatal("buildScanArgs() error = nil, want a rejection")
+	}
+	for _, want := range []string{"--path", "weird,name.go", "coma"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want %q", err, want)
+		}
+	}
+}
+
+// The whole verification context travels in one argv value; scan has no
+// --background-file, so an oversized context must be rejected before it hits
+// the system argument limit.
+func TestBuildScanArgsRejectsOversizedBackground(t *testing.T) {
+	in := scanInvocation()
+	in.Background = strings.Repeat("x", maxVerifyBackgroundBytes+1)
+	_, err := buildScanArgs(in)
+	if err == nil {
+		t.Fatal("buildScanArgs() error = nil, want a rejection")
+	}
+	for _, want := range []string{"--background", "--background-file"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want %q", err, want)
+		}
 	}
 }
 
@@ -114,27 +154,27 @@ func TestBuildVerifyContextMarksExternalCheckoutAsData(t *testing.T) {
 	}
 }
 
-func TestVerifyRuleRequiresMachineReadablePrefix(t *testing.T) {
+func TestVerifyRuleUsesTheProjectRuleSchema(t *testing.T) {
+	// OCR's --rule file is a ProjectRule: {"rules":[{"path":...,"rule":...}]}.
+	// A "groups" array is silently ignored and leaves the default rule in
+	// charge, which is what #227 observed.
 	var rule struct {
-		SchemaVersion string `json:"schema_version"`
-		Groups        []struct {
-			GroupID int    `json:"group_id"`
-			Source  string `json:"source"`
-			Pattern string `json:"pattern"`
-			Rule    string `json:"rule"`
-		} `json:"groups"`
+		Rules []struct {
+			Path string `json:"path"`
+			Rule string `json:"rule"`
+		} `json:"rules"`
 	}
 	if err := json.Unmarshal(verifyRuleJSON(), &rule); err != nil {
 		t.Fatalf("verify rule is not valid JSON: %v", err)
 	}
-	if rule.SchemaVersion != "1" || len(rule.Groups) != 1 {
-		t.Fatalf("rule = %+v, want schema 1 with one group", rule)
+	if len(rule.Rules) != 1 {
+		t.Fatalf("rule = %+v, want exactly one entry in rules", rule)
 	}
-	group := rule.Groups[0]
-	if group.Pattern != "**/*" || group.Source != "system" || group.Rule == "" {
-		t.Fatalf("group = %+v", group)
+	entry := rule.Rules[0]
+	if entry.Path != "**/*" || entry.Rule == "" {
+		t.Fatalf("rule entry = %+v", entry)
 	}
-	normalized := strings.Join(strings.Fields(group.Rule), " ")
+	normalized := strings.Join(strings.Fields(entry.Rule), " ")
 	for _, want := range []string{"QA-VERIFY", "EVIDENCE:", "CONFIRM", "REFUTE", "UNCERTAIN", "Do not report new findings"} {
 		if !strings.Contains(normalized, want) {
 			t.Errorf("rule does not contain %q", want)

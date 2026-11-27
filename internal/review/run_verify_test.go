@@ -329,10 +329,13 @@ func TestVerifyBudgetKeepsTheFixtureReservation(t *testing.T) {
 	}
 
 	budget := verifyBudgetFrom(p.ReviewTokenBudget, reserved.tokens, 150, true)
-	args := buildScanArgs(verifyInvocation{
+	args, err := buildScanArgs(verifyInvocation{
 		RepoDir: "/repo", Paths: []string{"auth.go"}, RulePath: "/repo/rule.json",
 		MaxTokens: 1000, TokenBudget: budget,
 	})
+	if err != nil {
+		t.Fatalf("buildScanArgs() error = %v", err)
+	}
 	if got, ok := argValue(args, "--max-tokens-budget"); !ok || got != "20000" {
 		t.Errorf("scan --max-tokens-budget = %q (present=%v), want the reserved 20000 in %q",
 			got, ok, args)

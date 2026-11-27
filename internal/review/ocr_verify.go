@@ -47,7 +47,26 @@ type verifyInvocation struct {
 	TaskTimeout time.Duration
 }
 
-func buildScanArgs(in verifyInvocation) []string {
+// maxVerifyBackgroundBytes bounds the single --background argument. `ocr scan`
+// has no --background-file, so the context travels in argv and must stay well
+// below the system argument limit.
+const maxVerifyBackgroundBytes = 64 << 10
+
+func buildScanArgs(in verifyInvocation) ([]string, error) {
+	for _, path := range in.Paths {
+		if strings.Contains(path, ",") {
+			// OCR splits --path on commas without escaping, so this path would
+			// silently resolve to a different file and the verdicts would be
+			// attached to the wrong code.
+			return nil, fmt.Errorf(
+				"verify: parámetro --path: %q contiene una coma y OCR separa las rutas por comas", path)
+		}
+	}
+	if len(in.Background) > maxVerifyBackgroundBytes {
+		return nil, fmt.Errorf(
+			"verify: parámetro --background: %d bytes superan el límite de %d y OCR scan no acepta --background-file",
+			len(in.Background), maxVerifyBackgroundBytes)
+	}
 	args := []string{
 		"scan",
 		"--repo", in.RepoDir,
@@ -70,30 +89,25 @@ func buildScanArgs(in verifyInvocation) []string {
 		}
 		args = append(args, "--timeout", fmt.Sprint(minutes))
 	}
-	return args
+	return args, nil
 }
 
-// verifyRuleJSON is the system rule every scanned file receives. The contract
-// it pins is what ParseVerdicts reads.
+// verifyRuleJSON is the system rule every scanned file receives. OCR loads a
+// ProjectRule from --rule: {"rules":[{"path","rule"}]}. Any other shape is
+// silently ignored and leaves the default rule in charge, so QA-VERIFY would
+// never be issued (#227). The contract it pins is what ParseVerdicts reads.
 func verifyRuleJSON() []byte {
 	rule := struct {
-		SchemaVersion string `json:"schema_version"`
-		Groups        []struct {
-			GroupID int    `json:"group_id"`
-			Source  string `json:"source"`
-			Pattern string `json:"pattern"`
-			Rule    string `json:"rule"`
-		} `json:"groups"`
-	}{SchemaVersion: "1"}
-	rule.Groups = append(rule.Groups, struct {
-		GroupID int    `json:"group_id"`
-		Source  string `json:"source"`
-		Pattern string `json:"pattern"`
-		Rule    string `json:"rule"`
+		Rules []struct {
+			Path string `json:"path"`
+			Rule string `json:"rule"`
+		} `json:"rules"`
+	}{}
+	rule.Rules = append(rule.Rules, struct {
+		Path string `json:"path"`
+		Rule string `json:"rule"`
 	}{
-		GroupID: 1,
-		Source:  "system",
-		Pattern: "**/*",
+		Path: "**/*",
 		Rule: `You are verifying findings already reported. For each finding in the context,
 decide CONFIRM, REFUTE, or UNCERTAIN and emit exactly one comment placed at its
 lines. The first non-empty line MUST be:
@@ -191,7 +205,7 @@ func (v *NativeVerifier) Review(ctx context.Context) (nativeReview, []byte, erro
 	if bin == "" {
 		bin = "ocr"
 	}
-	args := buildScanArgs(verifyInvocation{
+	args, err := buildScanArgs(verifyInvocation{
 		RepoDir:     v.RepoDir,
 		Paths:       v.Paths,
 		RulePath:    rulePath,
@@ -201,6 +215,9 @@ func (v *NativeVerifier) Review(ctx context.Context) (nativeReview, []byte, erro
 		TokenBudget: v.TokenBudget,
 		TaskTimeout: taskTimeout,
 	})
+	if err != nil {
+		return nativeReview{}, nil, err
+	}
 
 	cmdCtx := ctx
 	if hasDeadline {
