@@ -275,6 +275,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 			res, _, err := r.runNativeReview(verifyCtx, profile.ID, verifier, log, "verify")
 			if err != nil {
 				out.verificationSkipped = "verifier_error"
+				out.verificationError = err.Error()
 				log.Log(ctx, "worker", "verify", "warn", logPhaseOCR,
 					fmt.Sprintf("la verificación falló; los hallazgos quedan sin triage: %v", err))
 			} else {
