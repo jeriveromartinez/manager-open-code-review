@@ -26,6 +26,7 @@ type repoPolicyOverridesResponse struct {
 	BlockingThreshold    *string                `json:"blocking_threshold"`
 	ExtraInstructions    *string                `json:"extra_instructions"`
 	ExcludeGlobs         *[]string              `json:"exclude_globs"`
+	CriticalGlobs        *[]string              `json:"critical_globs"`
 	MaxFiles             *int                   `json:"max_files"`
 	MaxDiffLines         *int                   `json:"max_diff_lines"`
 	MaxPasses            *int                   `json:"max_passes"`
@@ -64,6 +65,7 @@ func repoPolicyOverridesDTO(p store.RepositoryPolicy) repoPolicyOverridesRespons
 		BlockingThreshold:    p.BlockingThreshold,
 		ExtraInstructions:    p.ExtraInstructions,
 		ExcludeGlobs:         optionalGlobs(p.ExcludeGlobs),
+		CriticalGlobs:        optionalGlobs(p.CriticalGlobs),
 		MaxFiles:             p.MaxFilesPerPass,
 		MaxDiffLines:         p.MaxDiffLinesPerPass,
 		MaxPasses:            p.MaxPasses,
@@ -243,6 +245,19 @@ func (s *server) putRepoPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 		policy.ExcludeGlobs = datatypes.JSON(encoded)
 	}
+	if value, present := raw["critical_globs"]; present && !isJSONNull(value) {
+		var globs []string
+		if err := json.Unmarshal(value, &globs); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid critical_globs")
+			return
+		}
+		encoded, err := json.Marshal(globs)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid critical_globs")
+			return
+		}
+		policy.CriticalGlobs = datatypes.JSON(encoded)
+	}
 	if value, present := raw["required_checks"]; present && !isJSONNull(value) {
 		var checks []store.RequiredCheck
 		if err := json.Unmarshal(value, &checks); err != nil {
@@ -365,6 +380,7 @@ func hasRepositoryOverrides(p store.RepositoryPolicy) bool {
 	return p.ObservationMode ||
 		p.BlockingThreshold != nil || p.ExtraInstructions != nil ||
 		p.ExcludeGlobs != nil || p.MaxFilesPerPass != nil ||
+		p.CriticalGlobs != nil ||
 		p.MaxDiffLinesPerPass != nil || p.MaxPasses != nil ||
 		p.RequireGreenCI != nil || p.RequiredChecks != nil ||
 		p.ReviewContextCeiling != nil || p.ReviewEffort != nil ||

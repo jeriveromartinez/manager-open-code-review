@@ -552,6 +552,8 @@ export type QAPolicy = {
   blocking_threshold: string
   extra_instructions: string
   exclude_globs: string[]
+  /** Zonas cuyo cambio prioriza el plan de cobertura antes de agotar el presupuesto. */
+  critical_globs: string[]
   max_files: number
   max_diff_lines: number
   max_passes: number
@@ -611,6 +613,7 @@ export type QAPolicyInput = Pick<
   | 'blocking_threshold'
   | 'extra_instructions'
   | 'exclude_globs'
+  | 'critical_globs'
   | 'max_files'
   | 'max_diff_lines'
   | 'max_passes'
@@ -655,6 +658,7 @@ export type RepositoryPolicyInput = {
   blocking_threshold?: string | null
   extra_instructions?: string | null
   exclude_globs?: string[] | null
+  critical_globs?: string[] | null
   max_files?: number | null
   max_diff_lines?: number | null
   max_passes?: number | null
@@ -678,6 +682,7 @@ export type RepositoryPolicyOverrides = {
   blocking_threshold: string | null
   extra_instructions: string | null
   exclude_globs: string[] | null
+  critical_globs: string[] | null
   max_files: number | null
   max_diff_lines: number | null
   max_passes: number | null

@@ -392,6 +392,8 @@ const fieldEnabled = ref<Record<string, boolean>>({})
 const fieldValues = ref<Record<string, string | number>>({})
 const globsEnabled = ref(false)
 const globsRaw = ref('')
+const criticalGlobsEnabled = ref(false)
+const criticalGlobsRaw = ref('')
 const checksEnabled = ref(false)
 const checksRaw = ref('')
 
@@ -591,6 +593,7 @@ function teamPolicyBody(policy: QAPolicy): QAPolicyInput {
     blocking_threshold: policy.blocking_threshold,
     extra_instructions: policy.extra_instructions,
     exclude_globs: policy.exclude_globs,
+    critical_globs: policy.critical_globs,
     max_files: policy.max_files,
     max_diff_lines: policy.max_diff_lines,
     max_passes: policy.max_passes,
@@ -664,6 +667,8 @@ function fillFromPolicy(policy: RepositoryPolicy): void {
   fieldValues.value = values
   globsEnabled.value = policy.overrides.exclude_globs !== null
   globsRaw.value = (policy.overrides.exclude_globs ?? policy.effective.exclude_globs ?? []).join('\n')
+  criticalGlobsEnabled.value = policy.overrides.critical_globs !== null
+  criticalGlobsRaw.value = (policy.overrides.critical_globs ?? policy.effective.critical_globs ?? []).join('\n')
   checksEnabled.value = policy.overrides.required_checks !== null
   checksRaw.value = formatChecks(policy.overrides.required_checks ?? policy.effective.required_checks)
   consumerRows.value = (policy.effective.consumer_allow_list ?? []).map(newConsumerRow)
@@ -753,6 +758,7 @@ async function saveRepoPolicy(): Promise<void> {
     }
   }
   if (globsEnabled.value) body.exclude_globs = parseLines(globsRaw.value)
+  if (criticalGlobsEnabled.value) body.critical_globs = parseLines(criticalGlobsRaw.value)
   if (checksEnabled.value) body.required_checks = parseChecks(checksRaw.value)
 
   const consumerValidation = validateConsumers()
@@ -1279,6 +1285,31 @@ onMounted(() => {
               placeholder="vendor/**&#10;**/*.pb.go"
             ></textarea>
             <span class="field__hint">Un patrón por línea.</span>
+          </label>
+
+          <label class="field policy-field">
+            <span class="policy-field__head">
+              <input
+                v-model="criticalGlobsEnabled"
+                type="checkbox"
+                data-policy-override="critical_globs"
+              />
+              <span class="field__label">Zonas críticas</span>
+              <span class="badge badge--muted" :data-policy-source="'critical_globs'">
+                {{ provenanceLabel('critical_globs') }}
+              </span>
+            </span>
+            <textarea
+              v-model="criticalGlobsRaw"
+              class="field__input"
+              rows="3"
+              :disabled="!criticalGlobsEnabled"
+              data-policy-field="critical_globs"
+              placeholder="internal/payments/**&#10;migrations/**"
+            ></textarea>
+            <span class="field__hint">
+              El plan revisa estos cambios primero; si quedan sin verificar, la revisión no aprueba.
+            </span>
           </label>
 
           <label class="field policy-field">

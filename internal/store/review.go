@@ -873,6 +873,11 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 	if len(globs) == 0 || bytes.Equal(globs, []byte("null")) {
 		p.ExcludeGlobs = datatypes.JSON([]byte(`[]`))
 	}
+	critGlobs, critGlobsErr := normalizePolicyGlobs(p.CriticalGlobs)
+	if critGlobsErr != nil {
+		return QAPolicy{}, fmt.Errorf("save qa policy for team %d: invalid critical globs: %w", p.TeamID, critGlobsErr)
+	}
+	p.CriticalGlobs = critGlobs
 	p.ReviewerLogin = strings.TrimSpace(p.ReviewerLogin)
 	p.ReviewerTeam = strings.TrimSpace(p.ReviewerTeam)
 	if !ValidReviewRecipient(p.ReviewerLogin) {
@@ -922,6 +927,7 @@ func (s *Store) SaveQAPolicy(ctx context.Context, p QAPolicy) (QAPolicy, error) 
 		Columns: []clause.Column{{Name: "team_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"llm_profile_id", "fallback_profile_ids", "blocking_threshold", "extra_instructions", "exclude_globs",
+			"critical_globs",
 			"max_files_per_pass", "max_diff_lines_per_pass", "max_passes",
 			"require_green_ci", "required_checks", "review_context_ceiling", "review_effort",
 			"review_token_budget", "auto_triage_mode", "auto_withdraw",
