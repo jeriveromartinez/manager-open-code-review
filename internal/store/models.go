@@ -19,6 +19,10 @@ const (
 	// RunErrorInterrupted marks a run the watchdog failed because the worker
 	// that claimed it disappeared before writing a terminal state.
 	RunErrorInterrupted = "interrupted"
+	// RunErrorRecovering marks a running attempt whose previous worker lost its
+	// lease and is being resumed (#228). It is informational: the run is still
+	// in progress and the terminal write replaces it.
+	RunErrorRecovering = "recovering"
 
 	// ReviewUnitCompleted marks a unit whose result is reusable. Only completed
 	// units are persisted; anything else is pending for the next attempt (#149).
@@ -33,6 +37,9 @@ const (
 	RunPhaseChunking  = "chunking"
 	RunPhaseVerifying = "verifying"
 	RunPhaseFinishing = "finishing"
+	// RunPhaseRecovering marks an attempt resumed after its previous worker
+	// lost the lease (#228). It lasts until the pipeline records real progress.
+	RunPhaseRecovering = "recovering"
 
 	HealthUnknown = "unknown"
 	HealthOK      = "ok"
@@ -577,8 +584,16 @@ type ReviewRun struct {
 	OCRSessionID    string `gorm:"column:ocr_session_id"`
 	OCRSessionScope string `gorm:"column:ocr_session_scope"`
 	// HeartbeatAt is refreshed by the executing worker every minute. Nil on
-	// runs claimed before the heartbeat existed (#130).
+	// runs claimed before the heartbeat existed (#130). Its age is also the
+	// lease: silence past RunLeaseTTL means the owner is gone and the attempt
+	// is recoverable (#228).
 	HeartbeatAt *time.Time `gorm:"column:heartbeat_at"`
+	// LeaseOwner identifies the worker that currently owns a running attempt.
+	// An empty owner is a system write that does not belong to a worker lease.
+	LeaseOwner string `gorm:"column:lease_owner"`
+	// RecoveryCount counts the orphaned attempts recovered so far. It bounds
+	// the retries before the run is failed terminally (#228).
+	RecoveryCount int `gorm:"column:recovery_count"`
 	// PolicyRevision is the effective policy revision the run executed under
 	// (#153). Empty on runs created before the recording existed.
 	PolicyRevision string `gorm:"column:policy_revision"`

@@ -55,7 +55,7 @@ func TestReviewUnitsUpsertReplaceAndDelete(t *testing.T) {
 	}
 
 	// A terminal run drops its resumable state.
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{Status: store.RunSucceeded}); err != nil {
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{Status: store.RunSucceeded}); err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)
 	}
 	got, err = f.s.ReviewUnitsForRun(f.ctx, run.ID)
@@ -126,10 +126,10 @@ func TestClaimPreservesAggregateBudgetAndOCRSession(t *testing.T) {
 	}
 	first := *claimed.BudgetStartedAt
 
-	if err := f.s.SetReviewRunSession(f.ctx, run.ID, "session-1", "scope-1"); err != nil {
+	if err := f.s.SetReviewRunSession(f.ctx, run.ID, "", "session-1", "scope-1"); err != nil {
 		t.Fatalf("SetReviewRunSession: %v", err)
 	}
-	if err := f.s.RequeueReviewRun(f.ctx, run.ID, "interrupted", "worker stopped"); err != nil {
+	if err := f.s.RequeueReviewRun(f.ctx, run.ID, "", "interrupted", "worker stopped"); err != nil {
 		t.Fatalf("RequeueReviewRun: %v", err)
 	}
 
@@ -150,10 +150,10 @@ func TestClaimPreservesAggregateBudgetAndOCRSession(t *testing.T) {
 
 	// A queued run must not accept a session write: it may already belong to
 	// another worker's attempt.
-	if err := f.s.RequeueReviewRun(f.ctx, run.ID, "interrupted", "worker stopped"); err != nil {
+	if err := f.s.RequeueReviewRun(f.ctx, run.ID, "", "interrupted", "worker stopped"); err != nil {
 		t.Fatalf("RequeueReviewRun: %v", err)
 	}
-	if err := f.s.SetReviewRunSession(f.ctx, run.ID, "session-2", "scope-2"); !errors.Is(err, store.ErrRunNotActive) {
+	if err := f.s.SetReviewRunSession(f.ctx, run.ID, "", "session-2", "scope-2"); !errors.Is(err, store.ErrRunNotActive) {
 		t.Errorf("SetReviewRunSession on queued run = %v, want ErrRunNotActive", err)
 	}
 }

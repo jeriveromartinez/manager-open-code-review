@@ -36,8 +36,9 @@ func (j *recordingReviewJobs) EnqueueReview(_ context.Context, runID uint) error
 	return nil
 }
 
-func (j *recordingReviewJobs) EnqueuePublish(context.Context, uint) error   { return nil }
-func (j *recordingReviewJobs) EnqueueLLMHealth(context.Context, uint) error { return nil }
+func (j *recordingReviewJobs) EnqueueReviewRecovery(context.Context, uint, int) error { return nil }
+func (j *recordingReviewJobs) EnqueuePublish(context.Context, uint) error             { return nil }
+func (j *recordingReviewJobs) EnqueueLLMHealth(context.Context, uint) error           { return nil }
 func (j *recordingReviewJobs) EnqueueReviewTrigger(context.Context, uint, string, time.Duration) error {
 	return nil
 }

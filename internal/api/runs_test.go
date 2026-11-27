@@ -45,7 +45,7 @@ func TestActiveRunsAreScopedAndCarryThePhase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateReviewRun(running): %v", err)
 	}
-	if err := f.st.SetReviewRunPhase(f.ctx, running.ID, store.RunPhaseReviewing); err != nil {
+	if err := f.st.SetReviewRunPhase(f.ctx, running.ID, "", store.RunPhaseReviewing); err != nil {
 		t.Fatalf("SetReviewRunPhase: %v", err)
 	}
 

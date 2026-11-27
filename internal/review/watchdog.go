@@ -26,8 +26,11 @@ const (
 	// heartbeatInterval is how often a running review refreshes heartbeat_at.
 	heartbeatInterval = time.Minute
 	// heartbeatTimeout tolerates three missed beats, so one slow tick does not
-	// look like a dead worker.
-	heartbeatTimeout = 3 * time.Minute
+	// look like a dead worker. It is also the lease a claim holds (#228): the
+	// same silence that classifies a lost worker makes the attempt recoverable.
+	heartbeatTimeout = store.RunLeaseTTL
+	// leaseRecoveryBatch bounds how many orphans one sweep re-queues.
+	leaseRecoveryBatch = 50
 )
 
 // reviewMinutes renders a duration in whole minutes for operator-facing text.
@@ -35,9 +38,11 @@ func reviewMinutes(d time.Duration) string {
 	return fmt.Sprintf("%d min", int(d.Round(time.Minute)/time.Minute))
 }
 
-// Sweep interrupts every run started longer ago than StaleAfter and publishes
-// the consequence of each one exactly like a terminal failure: the publish
-// worker closes the check and moves the pull request to inconclusive.
+// Sweep first re-queues the runs whose lease expired, so an orphan resumes
+// inside the lease window instead of waiting for the global stale threshold;
+// then it interrupts the runs that stayed running past that threshold and
+// publishes the consequence of each one exactly like a terminal failure: the
+// publish worker closes the check and moves the pull request to inconclusive.
 func (w *Watchdog) Sweep(ctx context.Context) error {
 	if w.Store == nil {
 		return errors.New("review: watchdog has no store")
@@ -48,6 +53,26 @@ func (w *Watchdog) Sweep(ctx context.Context) error {
 
 	now := time.Now().UTC()
 	cutoff := now.Add(-w.StaleAfter)
+	var errs []error
+	// A run past the global threshold belongs to the interrupt below; only the
+	// ones that are still inside it are resumed.
+	orphans, err := w.Store.LeaseExpiredRuns(ctx, now.Add(-store.RunLeaseTTL), cutoff, leaseRecoveryBatch)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	for _, run := range orphans {
+		if w.Jobs == nil {
+			break
+		}
+		if err := w.Jobs.EnqueueReviewRecovery(ctx, run.ID, run.RecoveryCount+1); err != nil {
+			errs = append(errs, fmt.Errorf("enqueue recovery of review run %d: %w", run.ID, err))
+			continue
+		}
+		slog.Info("re-queued review run with an expired lease",
+			"run_id", run.ID, "pull_request_id", run.PullRequestID,
+			"last_heartbeat", run.HeartbeatAt)
+	}
+
 	runs, err := w.Store.InterruptStaleRuns(ctx, store.StaleRunPolicy{
 		StartedBefore:   cutoff,
 		HeartbeatBefore: now.Add(-heartbeatTimeout),
@@ -58,10 +83,9 @@ func (w *Watchdog) Sweep(ctx context.Context) error {
 			reviewMinutes(heartbeatTimeout)),
 	})
 	if err != nil {
-		return fmt.Errorf("interrupt stale review runs: %w", err)
+		return errors.Join(append(errs, fmt.Errorf("interrupt stale review runs: %w", err))...)
 	}
 
-	var errs []error
 	for _, run := range runs {
 		// run.go moves a failed run's PR to inconclusive before enqueueing
 		// publication. Doing the same here keeps the panel honest even when

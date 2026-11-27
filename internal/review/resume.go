@@ -214,22 +214,23 @@ func (r *Runner) persistUnit(ctx context.Context, unit store.ReviewUnit) bool {
 }
 
 // saveSession records OCR's session id for the main pass. It is best effort: a
-// lost id only means the next attempt reruns the main unit.
-func (r *Runner) saveSession(ctx context.Context, runID uint, sessionID, scope string) {
+// lost id only means the next attempt reruns the main unit. Only the current
+// lease owner may write it.
+func (r *Runner) saveSession(ctx context.Context, runID uint, owner, sessionID, scope string) {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unitWriteTimeout)
 	defer cancel()
-	if err := r.Store.SetReviewRunSession(writeCtx, runID, sessionID, scope); err != nil &&
-		!errors.Is(err, store.ErrRunNotActive) {
+	if err := r.Store.SetReviewRunSession(writeCtx, runID, owner, sessionID, scope); err != nil &&
+		!errors.Is(err, store.ErrRunNotActive) && !errors.Is(err, store.ErrRunLeaseLost) {
 		slog.Warn("save OCR session", "run_id", runID, "error", err)
 	}
 }
 
 // clearSession forgets the stored OCR session before retrying without it.
-func (r *Runner) clearSession(ctx context.Context, runID uint) {
+func (r *Runner) clearSession(ctx context.Context, runID uint, owner string) {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unitWriteTimeout)
 	defer cancel()
-	if err := r.Store.SetReviewRunSession(writeCtx, runID, "", ""); err != nil &&
-		!errors.Is(err, store.ErrRunNotActive) {
+	if err := r.Store.SetReviewRunSession(writeCtx, runID, owner, "", ""); err != nil &&
+		!errors.Is(err, store.ErrRunNotActive) && !errors.Is(err, store.ErrRunLeaseLost) {
 		slog.Warn("clear OCR session", "run_id", runID, "error", err)
 	}
 }

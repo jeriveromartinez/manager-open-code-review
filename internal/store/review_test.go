@@ -97,7 +97,7 @@ func TestCompleteReviewRunPersistsArchitectureAnalysis(t *testing.T) {
 		Signals:   []string{"persistence"},
 		Evidence:  store.ArchitectureEvidence{Markdown: "## Behavior\n- changed"},
 	}
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{
 		Status:               store.RunSucceeded,
 		ArchitectureAnalysis: store.ArchitectureVerdictJSON(verdict),
 	}); err != nil {
@@ -1272,7 +1272,7 @@ func TestRunLifecycle(t *testing.T) {
 	coverage := []byte(`{"reviewed_files":2,"skipped":["generated.pb.go"]}`)
 	usage := []byte(`{"input_tokens":123,"output_tokens":45}`)
 	maxContext := int64(1053)
-	err = f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+	err = f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{
 		Status:      store.RunSucceeded,
 		Summary:     "looks good",
 		Coverage:    coverage,
@@ -1349,7 +1349,7 @@ func TestRunLifecycle(t *testing.T) {
 		DB:   f.s.DB.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}),
 		Pool: f.s.Pool,
 	}
-	err = quiet.CompleteReviewRun(f.ctx, rollbackRun.ID, store.RunCompletion{
+	err = quiet.CompleteReviewRun(f.ctx, rollbackRun.ID, "", store.RunCompletion{
 		Status:   store.RunSucceeded,
 		Coverage: []byte("{not-json"),
 		Findings: []store.Finding{{
@@ -1394,7 +1394,7 @@ func TestCompleteReviewRunKeepsHumanTriage(t *testing.T) {
 		t.Fatalf("TriageFinding: %v", err)
 	}
 
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{
 		Status: store.RunSucceeded, Findings: []store.Finding{finding},
 		Resolved: []string{finding.ID},
 	}); err != nil {
@@ -1448,7 +1448,7 @@ func TestCompleteReviewRunResolvesFindingTriagedBeforeRun(t *testing.T) {
 		t.Fatalf("age run start: %v", err)
 	}
 
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{
 		Status: store.RunSucceeded, Resolved: []string{finding.ID},
 	}); err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)
@@ -1498,7 +1498,7 @@ func TestCompleteReviewRunKeepsThreadDecision(t *testing.T) {
 	redetected := finding
 	redetected.Status = store.FindingResolved
 	redetected.Title = "re-detectado"
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{
 		Status: store.RunSucceeded, Findings: []store.Finding{redetected}, Resolved: []string{finding.ID},
 	}); err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)
@@ -1564,7 +1564,7 @@ func TestCompleteReviewRunStoresNullTokensWithoutUsage(t *testing.T) {
 	}
 
 	unknown := runningRun()
-	if err := f.s.CompleteReviewRun(f.ctx, unknown.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, unknown.ID, "", store.RunCompletion{
 		Status: store.RunFailed, ErrorCode: "timeout",
 	}); err != nil {
 		t.Fatalf("CompleteReviewRun(unknown): %v", err)
@@ -1577,7 +1577,7 @@ func TestCompleteReviewRunStoresNullTokensWithoutUsage(t *testing.T) {
 	}
 
 	measured := runningRun()
-	if err := f.s.CompleteReviewRun(f.ctx, measured.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, measured.ID, "", store.RunCompletion{
 		Status: store.RunSucceeded, TokensKnown: true,
 	}); err != nil {
 		t.Fatalf("CompleteReviewRun(measured zero): %v", err)
@@ -1614,7 +1614,7 @@ func TestCompleteReviewRunRequiresRunningAndClearsToken(t *testing.T) {
 		Path: "main.go", Severity: "major", Status: store.FindingOpen,
 		FirstSeenRunID: run.ID, LastSeenRunID: run.ID,
 	}
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{
 		Status:   store.RunSucceeded,
 		Summary:  "ok",
 		Findings: []store.Finding{finding},
@@ -1649,7 +1649,7 @@ func TestCompleteReviewRunRequiresRunningAndClearsToken(t *testing.T) {
 		Path: "main.go", Severity: "major", Status: store.FindingOpen,
 		FirstSeenRunID: supersededRun.ID, LastSeenRunID: supersededRun.ID,
 	}
-	err = f.s.CompleteReviewRun(f.ctx, supersededRun.ID, store.RunCompletion{
+	err = f.s.CompleteReviewRun(f.ctx, supersededRun.ID, "", store.RunCompletion{
 		Status:   store.RunSucceeded,
 		Summary:  "stale",
 		Findings: []store.Finding{stale},
@@ -1738,7 +1738,7 @@ func TestCompleteReviewRunPersistsBaseSHA(t *testing.T) {
 	if _, ok, err := f.s.ClaimReviewRun(f.ctx, run.ID); err != nil || !ok {
 		t.Fatalf("ClaimReviewRun: ok = %v, err = %v", ok, err)
 	}
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{
 		Status: store.RunSucceeded, BaseSHA: "base-1",
 	}); err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)
@@ -1762,7 +1762,7 @@ func TestCompleteReviewRunPersistsBaseSHA(t *testing.T) {
 	if _, ok, err := f.s.ClaimReviewRun(f.ctx, keep.ID); err != nil || !ok {
 		t.Fatalf("ClaimReviewRun(keep): ok = %v, err = %v", ok, err)
 	}
-	if err := f.s.CompleteReviewRun(f.ctx, keep.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, keep.ID, "", store.RunCompletion{
 		Status: store.RunSucceeded,
 	}); err != nil {
 		t.Fatalf("CompleteReviewRun(keep): %v", err)
@@ -2030,7 +2030,7 @@ func TestReviewRunHeartbeat(t *testing.T) {
 		Where("id = ?", run.ID).Update("heartbeat_at", old).Error; err != nil {
 		t.Fatalf("age heartbeat: %v", err)
 	}
-	if err := f.s.HeartbeatReviewRun(f.ctx, run.ID); err != nil {
+	if err := f.s.HeartbeatReviewRun(f.ctx, run.ID, ""); err != nil {
 		t.Fatalf("HeartbeatReviewRun: %v", err)
 	}
 	stored, err := f.s.ReviewRun(f.ctx, run.ID)
@@ -2041,12 +2041,12 @@ func TestReviewRunHeartbeat(t *testing.T) {
 		t.Errorf("heartbeat_at = %v, want a time after %v", stored.HeartbeatAt, old)
 	}
 
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{
 		Status: store.RunFailed, ErrorCode: "timeout",
 	}); err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)
 	}
-	if err := f.s.HeartbeatReviewRun(f.ctx, run.ID); !errors.Is(err, store.ErrRunNotActive) {
+	if err := f.s.HeartbeatReviewRun(f.ctx, run.ID, ""); !errors.Is(err, store.ErrRunNotActive) {
 		t.Fatalf("HeartbeatReviewRun on a finished run = %v, want ErrRunNotActive", err)
 	}
 }

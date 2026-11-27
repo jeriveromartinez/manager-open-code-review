@@ -62,6 +62,13 @@ func (ReconcileArgs) InsertOpts() river.InsertOpts {
 // ReviewRunArgs executes one queued review run.
 type ReviewRunArgs struct {
 	RunID uint `json:"run_id"`
+	// Recovery is nonzero on a delivery that resumes an orphaned attempt and
+	// carries the recovery generation (#228). The worker treats it like any
+	// other delivery; the value exists to give the recovery job its own
+	// uniqueness key. The job that claimed the run and then died is still
+	// "running" in River, and a later generation must not be suppressed by it.
+	// The claim still lets only one worker recover each generation.
+	Recovery int `json:"recovery_generation,omitempty"`
 }
 
 func (ReviewRunArgs) Kind() string { return "review_run" }
@@ -361,6 +368,7 @@ type Enqueuer interface {
 type FullEnqueuer interface {
 	Enqueuer
 	EnqueueReview(ctx context.Context, runID uint) error
+	EnqueueReviewRecovery(ctx context.Context, runID uint, generation int) error
 	EnqueueReviewTrigger(ctx context.Context, prID uint, headSHA string, delay time.Duration) error
 	EnqueuePublish(ctx context.Context, runID uint) error
 	EnqueueObjection(ctx context.Context, objectionID uint) error
@@ -385,6 +393,18 @@ func (e clientEnqueuer) EnqueueSync(ctx context.Context, installationID int64) e
 func (e clientEnqueuer) EnqueueReview(ctx context.Context, runID uint) error {
 	if _, err := e.client.Insert(ctx, ReviewRunArgs{RunID: runID}, nil); err != nil {
 		return fmt.Errorf("enqueue review run %d: %w", runID, err)
+	}
+	return nil
+}
+
+// EnqueueReviewRecovery schedules the recovery of a run whose lease expired.
+// The generation is part of the args so an abandoned job of an earlier
+// recovery cannot suppress this one; a duplicate recovery job of the same
+// generation is deduplicated and, if it slips through, harmless because the
+// claim is the single gatekeeper (#228).
+func (e clientEnqueuer) EnqueueReviewRecovery(ctx context.Context, runID uint, generation int) error {
+	if _, err := e.client.Insert(ctx, ReviewRunArgs{RunID: runID, Recovery: generation}, nil); err != nil {
+		return fmt.Errorf("enqueue recovery of review run %d: %w", runID, err)
 	}
 	return nil
 }

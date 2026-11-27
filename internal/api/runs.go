@@ -31,6 +31,11 @@ type activeRunDTO struct {
 	PhaseStartedAt *string `json:"phase_started_at"`
 	StartedAt      *string `json:"started_at"`
 	CreatedAt      string  `json:"created_at"`
+	// ErrorCode and ErrorMessage explain a live run that is being recovered
+	// (#228): the reason and the progress before the previous worker was lost.
+	// They are also the fields the history rows already expose.
+	ErrorCode    string `json:"error_code"`
+	ErrorMessage string `json:"error_message"`
 }
 
 // activeRuns lists the queued and running runs the caller may see. The scope is
@@ -52,6 +57,7 @@ func (s *server) activeRuns(w http.ResponseWriter, r *http.Request) {
 			Phase: run.Phase, PhaseStartedAt: formatTimePtr(run.PhaseStartedAt),
 			StartedAt: formatTimePtr(run.StartedAt),
 			CreatedAt: run.CreatedAt.UTC().Format(time.RFC3339),
+			ErrorCode: run.ErrorCode, ErrorMessage: run.ErrorMessage,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runs": dtos})
