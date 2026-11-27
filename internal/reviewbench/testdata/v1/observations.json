@@ -1,0 +1,556 @@
+[
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "go-clean",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "own",
+      "name": "QA Manager Reviewer",
+      "kind": "own",
+      "version": "v1.2.3",
+      "config": {"provider": "fake", "model": "fake-model", "effort": "low"}
+    },
+    "date": "2026-11-26T10:00:00Z",
+    "comparison": {"base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222"},
+    "reviewed_head": "2222222222222222222222222222222222222222",
+    "result": "completed",
+    "latency_ms": 1000,
+    "cost_usd": 0.01,
+    "coverage": {"reviewed": ["pkg/orders/order.go"]},
+    "findings": []
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "go-defect-auth",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "own",
+      "name": "QA Manager Reviewer",
+      "kind": "own",
+      "version": "v1.2.3",
+      "config": {"provider": "fake", "model": "fake-model", "effort": "low"}
+    },
+    "date": "2026-11-26T10:01:00Z",
+    "comparison": {"base": "3333333333333333333333333333333333333333", "head": "4444444444444444444444444444444444444444"},
+    "reviewed_head": "4444444444444444444444444444444444444444",
+    "result": "completed",
+    "latency_ms": 1200,
+    "cost_usd": 0.02,
+    "coverage": {"reviewed": ["auth.go"]},
+    "findings": [
+      {
+        "comment_id": "own-auth-1",
+        "path": "auth.go",
+        "start_line": 7,
+        "end_line": 7,
+        "side": "RIGHT",
+        "severity": "major",
+        "category": "security",
+        "title": "Case-insensitive password comparison",
+        "body": "Lowercasing both sides hides case-only differences.",
+        "existing_code": "return strings.ToLower(stored) == strings.ToLower(provided)",
+        "blocking": true
+      },
+      {
+        "comment_id": "own-auth-2",
+        "path": "auth.go",
+        "start_line": 11,
+        "end_line": 11,
+        "side": "RIGHT",
+        "severity": "minor",
+        "category": "correctness",
+        "title": "Locale-dependent lowercasing",
+        "body": "strings.ToLower depends on Unicode mappings.",
+        "existing_code": "return strings.ToLower(value)"
+      },
+      {
+        "comment_id": "own-auth-3",
+        "path": "auth.go",
+        "start_line": 8,
+        "end_line": 8,
+        "side": "RIGHT",
+        "severity": "major",
+        "category": "security",
+        "title": "Case-insensitive password comparison",
+        "body": "Same issue reported again on the closing brace.",
+        "existing_code": "return strings.ToLower(stored) == strings.ToLower(provided)",
+        "blocking": true
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "ts-multi-push",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "own",
+      "name": "QA Manager Reviewer",
+      "kind": "own",
+      "version": "v1.2.3",
+      "config": {"provider": "fake", "model": "fake-model", "effort": "low"}
+    },
+    "date": "2026-11-26T10:02:00Z",
+    "comparison": {"base": "5555555555555555555555555555555555555555", "head": "6666666666666666666666666666666666666666"},
+    "reviewed_head": "6666666666666666666666666666666666666666",
+    "result": "completed",
+    "latency_ms": 1500,
+    "coverage": {"reviewed": ["web/src/merge.ts"]},
+    "findings": [
+      {
+        "comment_id": "own-merge-1",
+        "path": "web/src/merge.ts",
+        "start_line": 4,
+        "end_line": 4,
+        "side": "RIGHT",
+        "severity": "blocker",
+        "category": "correctness",
+        "title": "Shallow merge drops nested keys",
+        "body": "Object spread overwrites nested objects wholesale.",
+        "existing_code": "return { ...a, ...b }",
+        "blocking": true
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "py-bad-citation",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "own",
+      "name": "QA Manager Reviewer",
+      "kind": "own",
+      "version": "v1.2.3",
+      "config": {"provider": "fake", "model": "fake-model", "effort": "low"}
+    },
+    "date": "2026-11-26T10:03:00Z",
+    "comparison": {"base": "8888888888888888888888888888888888888888", "head": "9999999999999999999999999999999999999999"},
+    "reviewed_head": "9999999999999999999999999999999999999999",
+    "result": "completed",
+    "latency_ms": 1100,
+    "cost_usd": 0.03,
+    "coverage": {"reviewed": ["app/divide.py"]},
+    "findings": [
+      {
+        "comment_id": "own-divide-1",
+        "path": "app/divide.py",
+        "start_line": 3,
+        "end_line": 3,
+        "side": "RIGHT",
+        "severity": "minor",
+        "category": "correctness",
+        "title": "Missing zero guard",
+        "body": "Division by zero raises instead of returning an error.",
+        "existing_code": "return a + b"
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "docker-clean-block",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "own",
+      "name": "QA Manager Reviewer",
+      "kind": "own",
+      "version": "v1.2.3",
+      "config": {"provider": "fake", "model": "fake-model", "effort": "low"}
+    },
+    "date": "2026-11-26T10:04:00Z",
+    "comparison": {"base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "reviewed_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "result": "completed",
+    "latency_ms": 900,
+    "cost_usd": 0.04,
+    "coverage": {"reviewed": ["Dockerfile"]},
+    "findings": [
+      {
+        "comment_id": "own-docker-1",
+        "path": "Dockerfile",
+        "start_line": 3,
+        "end_line": 3,
+        "side": "RIGHT",
+        "severity": "blocker",
+        "category": "correctness",
+        "title": "Copying the entire build context",
+        "body": "COPY . . should be narrowed to the module files.",
+        "blocking": true
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "yaml-incomplete",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "own",
+      "name": "QA Manager Reviewer",
+      "kind": "own",
+      "version": "v1.2.3",
+      "config": {"provider": "fake", "model": "fake-model", "effort": "low"}
+    },
+    "date": "2026-11-26T10:05:00Z",
+    "comparison": {"base": "cccccccccccccccccccccccccccccccccccccccc", "head": "dddddddddddddddddddddddddddddddddddddddd"},
+    "reviewed_head": "dddddddddddddddddddddddddddddddddddddddd",
+    "result": "completed",
+    "latency_ms": 2000,
+    "coverage": {"reviewed": ["deploy/app.yaml"]},
+    "findings": [
+      {
+        "comment_id": "own-yaml-1",
+        "path": "deploy/app.yaml",
+        "start_line": 6,
+        "end_line": 6,
+        "side": "RIGHT",
+        "severity": "minor",
+        "category": "config",
+        "title": "Single replica deployment",
+        "existing_code": "replicas: 1"
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "sql-timeout",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "own",
+      "name": "QA Manager Reviewer",
+      "kind": "own",
+      "version": "v1.2.3",
+      "config": {"provider": "fake", "model": "fake-model", "effort": "low"}
+    },
+    "date": "2026-11-26T10:06:00Z",
+    "comparison": {"base": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "head": "ffffffffffffffffffffffffffffffffffffffff"},
+    "reviewed_head": "ffffffffffffffffffffffffffffffffffffffff",
+    "result": "timeout",
+    "latency_ms": 30000,
+    "coverage": {"reviewed": []},
+    "findings": []
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "go-abstention",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "own",
+      "name": "QA Manager Reviewer",
+      "kind": "own",
+      "version": "v1.2.3",
+      "config": {"provider": "fake", "model": "fake-model", "effort": "low"}
+    },
+    "date": "2026-11-26T10:07:00Z",
+    "comparison": {"base": "1212121212121212121212121212121212121212", "head": "3434343434343434343434343434343434343434"},
+    "reviewed_head": "3434343434343434343434343434343434343434",
+    "result": "abstention",
+    "latency_ms": 2500,
+    "coverage": {"reviewed": []},
+    "findings": []
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "go-delivery-error",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "own",
+      "name": "QA Manager Reviewer",
+      "kind": "own",
+      "version": "v1.2.3",
+      "config": {"provider": "fake", "model": "fake-model", "effort": "low"}
+    },
+    "date": "2026-11-26T10:08:00Z",
+    "comparison": {"base": "5656565656565656565656565656565656565656", "head": "7878787878787878787878787878787878787878"},
+    "reviewed_head": "7878787878787878787878787878787878787878",
+    "result": "delivery_error",
+    "latency_ms": 500,
+    "coverage": {"reviewed": ["internal/handler/handler.go"]},
+    "findings": [
+      {
+        "comment_id": "own-handler-1",
+        "path": "internal/handler/handler.go",
+        "start_line": 4,
+        "end_line": 4,
+        "side": "RIGHT",
+        "severity": "blocker",
+        "category": "correctness",
+        "title": "Nil dereference on optional value",
+        "existing_code": "return *value",
+        "blocking": true
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "go-clean",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "coderabbit",
+      "name": "CodeRabbit",
+      "kind": "external",
+      "version": "0.9.0-simulated",
+      "config": {"mode": "chill"}
+    },
+    "date": "2026-11-26T11:00:00Z",
+    "comparison": {"base": "1111111111111111111111111111111111111111", "head": "2222222222222222222222222222222222222222"},
+    "reviewed_head": "2222222222222222222222222222222222222222",
+    "result": "completed",
+    "latency_ms": 2000,
+    "coverage": {"reviewed": ["pkg/orders/order.go"]},
+    "findings": []
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "go-defect-auth",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "coderabbit",
+      "name": "CodeRabbit",
+      "kind": "external",
+      "version": "0.9.0-simulated",
+      "config": {"mode": "chill"}
+    },
+    "date": "2026-11-26T11:01:00Z",
+    "comparison": {"base": "3333333333333333333333333333333333333333", "head": "4444444444444444444444444444444444444444"},
+    "reviewed_head": "4444444444444444444444444444444444444444",
+    "result": "completed",
+    "latency_ms": 2200,
+    "coverage": {"reviewed": ["auth.go"]},
+    "findings": [
+      {
+        "comment_id": "cr-auth-1",
+        "path": "auth.go",
+        "start_line": 7,
+        "end_line": 7,
+        "side": "RIGHT",
+        "severity": "major",
+        "category": "security",
+        "title": "Case-insensitive password comparison",
+        "existing_code": "return strings.ToLower(stored) == strings.ToLower(provided)"
+      },
+      {
+        "comment_id": "cr-auth-2",
+        "path": "auth.go",
+        "start_line": 12,
+        "end_line": 12,
+        "side": "RIGHT",
+        "severity": "nit",
+        "category": "style",
+        "title": "Prefer constant-time comparison",
+        "body": "This file does not use subtle.ConstantTimeCompare."
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "ts-multi-push",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "coderabbit",
+      "name": "CodeRabbit",
+      "kind": "external",
+      "version": "0.9.0-simulated",
+      "config": {"mode": "chill"}
+    },
+    "date": "2026-11-26T11:02:00Z",
+    "comparison": {"base": "5555555555555555555555555555555555555555", "head": "6666666666666666666666666666666666666666"},
+    "reviewed_head": "6666666666666666666666666666666666666666",
+    "result": "completed",
+    "latency_ms": 1400,
+    "coverage": {"reviewed": ["web/src/merge.ts"]},
+    "findings": [
+      {
+        "comment_id": "cr-merge-1",
+        "path": "web/src/merge.ts",
+        "start_line": 4,
+        "end_line": 4,
+        "side": "RIGHT",
+        "severity": "blocker",
+        "category": "correctness",
+        "title": "Shallow merge drops nested keys",
+        "existing_code": "return { ...a, ...b }",
+        "blocking": true
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "py-bad-citation",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "coderabbit",
+      "name": "CodeRabbit",
+      "kind": "external",
+      "version": "0.9.0-simulated",
+      "config": {"mode": "chill"}
+    },
+    "date": "2026-11-26T11:03:00Z",
+    "comparison": {"base": "8888888888888888888888888888888888888888", "head": "9999999999999999999999999999999999999999"},
+    "reviewed_head": "9999999999999999999999999999999999999999",
+    "result": "completed",
+    "latency_ms": 1800,
+    "coverage": {"reviewed": ["app/divide.py"]},
+    "findings": [
+      {
+        "comment_id": "cr-divide-1",
+        "path": "app/divide.py",
+        "start_line": 3,
+        "end_line": 3,
+        "side": "RIGHT",
+        "severity": "major",
+        "category": "correctness",
+        "title": "Missing zero guard",
+        "existing_code": "return a / b"
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "docker-clean-block",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "coderabbit",
+      "name": "CodeRabbit",
+      "kind": "external",
+      "version": "0.9.0-simulated",
+      "config": {"mode": "chill"}
+    },
+    "date": "2026-11-26T11:04:00Z",
+    "comparison": {"base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "reviewed_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "result": "completed",
+    "latency_ms": 2100,
+    "coverage": {"reviewed": ["Dockerfile"]},
+    "findings": []
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "yaml-incomplete",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "coderabbit",
+      "name": "CodeRabbit",
+      "kind": "external",
+      "version": "0.9.0-simulated",
+      "config": {"mode": "chill"}
+    },
+    "date": "2026-11-26T11:05:00Z",
+    "comparison": {"base": "cccccccccccccccccccccccccccccccccccccccc", "head": "dddddddddddddddddddddddddddddddddddddddd"},
+    "reviewed_head": "dddddddddddddddddddddddddddddddddddddddd",
+    "result": "completed",
+    "latency_ms": 1900,
+    "coverage": {"reviewed": ["deploy/app.yaml", "deploy/service.yaml"]},
+    "findings": [
+      {
+        "comment_id": "cr-yaml-1",
+        "path": "deploy/app.yaml",
+        "start_line": 6,
+        "end_line": 6,
+        "side": "RIGHT",
+        "severity": "minor",
+        "category": "config",
+        "title": "Single replica deployment",
+        "existing_code": "replicas: 1"
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "sql-timeout",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "coderabbit",
+      "name": "CodeRabbit",
+      "kind": "external",
+      "version": "0.9.0-simulated",
+      "config": {"mode": "chill"}
+    },
+    "date": "2026-11-26T11:06:00Z",
+    "comparison": {"base": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "head": "ffffffffffffffffffffffffffffffffffffffff"},
+    "reviewed_head": "ffffffffffffffffffffffffffffffffffffffff",
+    "result": "completed",
+    "latency_ms": 1700,
+    "coverage": {"reviewed": ["db/query.sql"]},
+    "findings": [
+      {
+        "comment_id": "cr-sql-1",
+        "path": "db/query.sql",
+        "start_line": 3,
+        "end_line": 3,
+        "side": "RIGHT",
+        "severity": "major",
+        "category": "correctness",
+        "title": "Unbounded scan on users",
+        "existing_code": "WHERE active = true;",
+        "blocking": true
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "go-abstention",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "coderabbit",
+      "name": "CodeRabbit",
+      "kind": "external",
+      "version": "0.9.0-simulated",
+      "config": {"mode": "chill"}
+    },
+    "date": "2026-11-26T11:07:00Z",
+    "comparison": {"base": "1212121212121212121212121212121212121212", "head": "3434343434343434343434343434343434343434"},
+    "reviewed_head": "3434343434343434343434343434343434343434",
+    "result": "completed",
+    "latency_ms": 1600,
+    "coverage": {"reviewed": ["internal/cache/cache.go"]},
+    "findings": [
+      {
+        "comment_id": "cr-cache-1",
+        "path": "internal/cache/cache.go",
+        "start_line": 4,
+        "end_line": 4,
+        "side": "RIGHT",
+        "severity": "major",
+        "category": "correctness",
+        "title": "Nil map read on missing key",
+        "existing_code": "return cache[key]",
+        "blocking": true
+      }
+    ]
+  },
+  {
+    "schema_version": "reviewbench.observation/v1",
+    "case_id": "go-delivery-error",
+    "manifest_lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+    "simulated": true,
+    "reviewer": {
+      "id": "coderabbit",
+      "name": "CodeRabbit",
+      "kind": "external",
+      "version": "0.9.0-simulated",
+      "config": {"mode": "chill"}
+    },
+    "date": "2026-11-26T11:08:00Z",
+    "comparison": {"base": "5656565656565656565656565656565656565656", "head": "7878787878787878787878787878787878787878"},
+    "reviewed_head": "7878787878787878787878787878787878787878",
+    "result": "completed",
+    "latency_ms": 1500,
+    "coverage": {"reviewed": ["internal/handler/handler.go"]},
+    "findings": []
+  }
+]
