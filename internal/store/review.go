@@ -2698,7 +2698,7 @@ func (s *Store) TriageFinding(ctx context.Context, id, status string, entry Find
 		if current.Status == FindingResolved {
 			return fmt.Errorf("triage finding %q: %w", id, ErrFindingResolved)
 		}
-		if current.TriageSource == TriageSourceHuman && source == TriageSourceVerifier {
+		if current.TriageSource == TriageSourceHuman && source != TriageSourceHuman {
 			return fmt.Errorf("triage finding %q: %w", id, ErrFindingHumanTriaged)
 		}
 		if current.Status == status && current.TriageVerdict == verdict &&
