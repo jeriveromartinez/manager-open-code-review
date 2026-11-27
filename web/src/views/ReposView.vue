@@ -311,10 +311,17 @@ async function setTeam(repo: Repository, event: Event): Promise<void> {
   const team_id = raw === '' ? null : Number(raw)
   try {
     await api.patchRepo(repo.id, { team_id })
-    repo.team_id = team_id
   } catch {
     select.value = repo.team_id === null ? '' : String(repo.team_id)
     error.value = 'No se pudo asignar el equipo'
+    return
+  }
+  // Only the server knows the policy of the newly assigned team, so the
+  // inherited-policy warning and the review state must be refreshed.
+  try {
+    repos.value = await api.repos()
+  } catch {
+    error.value = `Se guardó el equipo de ${repo.full_name}. Vuelve a cargar para ver la configuración actual.`
   }
 }
 
