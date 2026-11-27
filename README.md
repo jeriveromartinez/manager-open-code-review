@@ -142,6 +142,32 @@ El estado del run se deriva del JSON y del manifiesto, no del código de salida:
 
 **Revisión incremental.** En un push nuevo el worker revisa solo `<head revisado anterior>..<head nuevo>` cuando el `base_sha` del último run `succeeded` coincide con el merge-base actual y el head nuevo desciende de ese head anterior (`git merge-base --is-ancestor`). Cada run persiste su `base_sha` para poder hacer la comprobación. Si no hay un run anterior, el anterior no terminó en `succeeded`, no guardó `base_sha`, cambió la base, hubo force-push o el head anterior no está en el clon shallow, vuelve a revisar el diff completo del PR. En un run incremental solo se resuelven hallazgos abiertos de archivos presentes como `completed` o `reused` en la cobertura; los hallazgos fuera del rango revisado permanecen abiertos y una cobertura vacía no resuelve ninguno.
 
+### Evidencia diferencial por prueba (#230)
+
+Los hallazgos `major`/`blocker` de un PR interno pueden recibir evidencia ejecutable: la misma prueba se ejecuta en la base y en el head y se registra qué lado pasa. La evidencia es observacional: nunca cambia un veredicto, un estado ni el check, y solo se publica en el resumen cuando el veredicto confirmado del head revisado ya autorizaba el hallazgo (#227).
+
+El opt-in es el fichero `.qa/differential-cases.json` de la **base confiable**, de modo que un PR no puede autorizar sus propios comandos:
+
+```json
+{
+  "version": "differential-cases/v1",
+  "cases": [{
+    "id": "review-identity",
+    "paths": ["internal/review/*.go"],
+    "package": "./internal/review",
+    "test": "TestReconcile"
+  }]
+}
+```
+
+Cada caso declara globs de rutas (solo cubren hallazgos de esas rutas), un paquete Go concreto (`./paquete`, nunca `...` ni rutas absolutas) y un `TestXxx` opcional. Se ejecutan como máximo 5 casos; el mismo caso se ejecuta dos veces por lado para detectar intermitencias.
+
+**Aislamiento.** Los PR externos/fork nunca ejecutan pruebas: reciben evidencia `inconclusive`. La prueba se lanza dentro de un sandbox de sistema operativo: `bubblewrap` (`--unshare-all`, root de solo lectura, worktree de solo lectura, `/proc` y `/dev` privados, sin red) o, si no está disponible, `unshare` con namespaces de usuario, montaje, PID y red. Si el worker no puede crear ninguno de los dos, la función queda deshabilitada y el caso se registra `inconclusive`; no se ejecuta nada. El entorno del proceso hijo no hereda credenciales, proxies ni la configuración git del worker, y usa `GOCACHE`/`GOMODCACHE`/`GOPATH` propios bajo el directorio temporal del caso. Las dependencias se descargan en una fase de preparación (`go mod download`) antes de ejecutar código no confiable; la prueba corre con `GOPROXY=off`. Cada lado se prepara en un worktree git aislado y se elimina al terminar.
+
+La evidencia guarda ambos SHA, caso/paquete/prueba, versión de Go, aislamiento, resultados de ambos lados y el fragmento de salida que muestra la diferencia. Los resultados posibles son `regression` (base pasa, head falla), `pre_existing` (fallan ambos), `passing` (pasan ambos), `improved` y `inconclusive` (compilación, dependencia, infraestructura, timeout, falta de equivalencia o intermitencia). El run registra en el log la proporción de hallazgos graves con evidencia ejecutable y el tiempo adicional por hallazgo.
+
+Limitaciones deliberadas: las pruebas no tienen red, por lo que módulos privados o tests que dependen de servicios externos quedan `inconclusive`; el sandbox de `unshare` no hace la raíz de solo lectura y ninguno de los dos cambia el UID, así que el código no confiable puede leer ficheros del contenedor a los que ese UID tenga acceso (por eso el worker debe ejecutarse en un contenedor sin secretos en disco); y no hay knobs por caso más allá de los límites fijos (timeout de 2 minutos por ejecución, captura de 64 KiB y fragmento guardado de 8 KiB).
+
 ### Log en vivo de la revisión
 
 Cada run escribe un log en `review_run_logs` (#124). El worker registra los hitos del ciclo de vida —reclamo, clonado, base e incremental, política, espera de slot del perfil, inicio y fin de OCR, plan de trozos y cada trozo, cobertura y estado final— y, además, cada línea que OCR imprime en stderr: las invocaciones usan `--audience human` con `--format json`, así el JSON sigue llegando por stdout y el progreso en vivo por stderr. Las líneas se ordenan por `seq`, llevan `source` (`worker` u `ocr`), `invocation` (`main` o `chunk N/M`), `level` y `phase`, y se guardan en el momento, sin esperar al final del run.

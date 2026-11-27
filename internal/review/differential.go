@@ -13,15 +13,18 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jeriveromartinez/qa-control-center/internal/store"
 )
 
 // Differential evidence runs one maintainer-approved test on the trusted base
-// and on the reviewed head, in isolated worktrees, and records what both sides
-// produced. It is observation only: the verdict that publishes a finding still
-// comes from the confirmed-verdict path (#227).
+// and on the reviewed head, in isolated worktrees and inside an OS sandbox, and
+// records what both sides produced. External contributions never execute, and a
+// host without a usable sandbox keeps the feature disabled. It is observation
+// only: the verdict that publishes a finding still comes from the
+// confirmed-verdict path (#227).
 const (
 	differentialPolicyPath     = ".qa/differential-cases.json"
 	differentialPolicyVersion  = "differential-cases/v1"
@@ -76,13 +79,14 @@ type DifferentialRunResult struct {
 // DifferentialExecutor; the real executor fills it from two git worktrees.
 type DifferentialExecution struct {
 	Environment string
+	Isolation   string
 	Base        []DifferentialRunResult
 	Head        []DifferentialRunResult
 }
 
 // DifferentialEvidence is what a run stores on the finding's verification. It
-// keeps the SHAs, the case, the environment, both side results and the output
-// slice that shows the difference.
+// keeps the SHAs, the case, the environment, the achieved isolation, both side
+// results and the output slice that shows the difference.
 type DifferentialEvidence struct {
 	Status      string    `json:"status"`
 	Reason      string    `json:"reason,omitempty"`
@@ -93,6 +97,7 @@ type DifferentialEvidence struct {
 	BaseSHA     string    `json:"base_sha"`
 	HeadSHA     string    `json:"head_sha"`
 	Environment string    `json:"environment"`
+	Isolation   string    `json:"isolation,omitempty"`
 	BasePassed  bool      `json:"base_passed"`
 	HeadPassed  bool      `json:"head_passed"`
 	BaseOutput  string    `json:"base_output,omitempty"`
@@ -307,6 +312,7 @@ func buildDifferentialEvidence(testCase DifferentialCase, baseSHA, headSHA strin
 		BaseSHA:     baseSHA,
 		HeadSHA:     headSHA,
 		Environment: execution.Environment,
+		Isolation:   execution.Isolation,
 		BaseOutput:  baseOutput,
 		HeadOutput:  headOutput,
 		Attempts:    len(execution.Base),
@@ -405,18 +411,63 @@ func joinDifferentialOutput(runs []DifferentialRunResult) string {
 	return joined[:differentialMaxEvidence]
 }
 
+func differentialDecisionIndex(out *runOutcome) map[string]int {
+	index := make(map[string]int, len(out.decisions))
+	for i, decision := range out.decisions {
+		index[decision.FindingID] = i
+	}
+	return index
+}
+
+// differentialEligibleFindings keeps the findings that have a verification
+// decision, so evidence is never attached to a human-triaged finding.
+func differentialEligibleFindings(out *runOutcome, index map[string]int) []store.Finding {
+	eligible := make([]store.Finding, 0, len(out.findings))
+	for _, finding := range out.findings {
+		if _, ok := index[finding.ID]; ok {
+			eligible = append(eligible, finding)
+		}
+	}
+	return eligible
+}
+
 // attachDifferentialEvidence attaches executable evidence to the decisions of
 // the high-impact findings. Every failure is contained: no evidence, a
 // malformed policy or a failed executor only leaves the finding without it.
-func (r *Runner) attachDifferentialEvidence(ctx context.Context, workDir, baseSHA, headSHA string, out *runOutcome, log *runLogSink) {
+// External contributions never execute: their code is untrusted and a test run
+// is arbitrary code execution (#230).
+func (r *Runner) attachDifferentialEvidence(ctx context.Context, workDir, baseSHA, headSHA string, trusted bool, out *runOutcome, log *runLogSink) {
 	if out == nil || len(out.findings) == 0 || len(out.decisions) == 0 {
 		return
 	}
 	tree := gitBaselineTree{ctx: ctx, dir: workDir, base: baseSHA, head: headSHA}
-	r.attachDifferentialEvidenceWith(ctx, tree, workDir, baseSHA, headSHA, out, log)
+	r.attachDifferentialEvidenceWith(ctx, tree, workDir, baseSHA, headSHA, trusted, out, log)
 }
 
-func (r *Runner) attachDifferentialEvidenceWith(ctx context.Context, tree baselineTree, workDir, baseSHA, headSHA string, out *runOutcome, log *runLogSink) {
+func (r *Runner) attachDifferentialEvidenceWith(ctx context.Context, tree baselineTree, workDir, baseSHA, headSHA string, trusted bool, out *runOutcome, log *runLogSink) {
+	decisionIndex := differentialDecisionIndex(out)
+	eligible := differentialEligibleFindings(out, decisionIndex)
+	if !trusted {
+		reason := "aporte externo: no se ejecutan pruebas"
+		evidence := DifferentialEvidence{
+			Status:     DifferentialInconclusive,
+			Reason:     reason,
+			Language:   "go",
+			BaseSHA:    baseSHA,
+			HeadSHA:    headSHA,
+			Isolation:  "not_executed_external",
+			MeasuredAt: time.Now().UTC(),
+		}
+		for _, finding := range severeFindings(eligible) {
+			pos := decisionIndex[finding.ID]
+			copied := evidence
+			out.decisions[pos].Verification.Differential = &copied
+		}
+		log.Log(ctx, "worker", "differential", "warn", logPhaseOCR,
+			"evidencia diferencial omitida: "+reason)
+		return
+	}
+
 	cases, policyReason := loadDifferentialPolicy(tree, baseSHA)
 	if policyReason != "" {
 		log.Log(ctx, "worker", "differential", "warn", logPhaseOCR,
@@ -427,16 +478,6 @@ func (r *Runner) attachDifferentialEvidenceWith(ctx context.Context, tree baseli
 		return
 	}
 
-	decisionIndex := make(map[string]int, len(out.decisions))
-	for i, decision := range out.decisions {
-		decisionIndex[decision.FindingID] = i
-	}
-	eligible := make([]store.Finding, 0, len(out.findings))
-	for _, finding := range out.findings {
-		if _, ok := decisionIndex[finding.ID]; ok {
-			eligible = append(eligible, finding)
-		}
-	}
 	selections := selectDifferentialCases(eligible, cases)
 	if len(selections) == 0 {
 		log.Log(ctx, "worker", "differential", "info", logPhaseOCR, fmt.Sprintf(
@@ -513,13 +554,160 @@ func differentialReasonSuffix(reason string) string {
 	return ": " + reason
 }
 
+// differentialSandbox wraps the untrusted test command in the strongest OS
+// isolation the worker can provide. The feature is disabled when neither a
+// bubblewrap nor a user-namespace unshare sandbox is available.
+type differentialSandbox interface {
+	Available() bool
+	Name() string
+	Wrap(ctx context.Context, dir, writableRoot string, command []string) (*exec.Cmd, bool)
+}
+
+var (
+	differentialSandboxOnce sync.Once
+	differentialSandboxBest differentialSandbox
+)
+
+func detectDifferentialSandbox() differentialSandbox {
+	differentialSandboxOnce.Do(func() {
+		if path, err := exec.LookPath("bwrap"); err == nil {
+			sandbox := &bubblewrapSandbox{path: path}
+			if sandbox.Available() {
+				differentialSandboxBest = sandbox
+				return
+			}
+		}
+		if path, err := exec.LookPath("unshare"); err == nil {
+			sandbox := &unshareSandbox{path: path}
+			if sandbox.Available() {
+				differentialSandboxBest = sandbox
+				return
+			}
+		}
+		differentialSandboxBest = unavailableSandbox{}
+	})
+	return differentialSandboxBest
+}
+
+type bubblewrapSandbox struct {
+	path string
+	once sync.Once
+	ok   bool
+}
+
+func (s *bubblewrapSandbox) Available() bool {
+	s.once.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, s.path,
+			"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
+			"--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--", "true")
+		s.ok = cmd.Run() == nil
+	})
+	return s.ok
+}
+
+func (s *bubblewrapSandbox) Name() string {
+	return "bubblewrap: user/mount/pid/net namespaces, read-only root"
+}
+
+func (s *bubblewrapSandbox) Wrap(ctx context.Context, dir, writableRoot string, command []string) (*exec.Cmd, bool) {
+	if !s.Available() {
+		return nil, false
+	}
+	return exec.CommandContext(ctx, s.path, s.wrapArgs(dir, writableRoot, command)...), true
+}
+
+func (s *bubblewrapSandbox) wrapArgs(dir, writableRoot string, command []string) []string {
+	args := []string{
+		"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
+		"--ro-bind", "/", "/",
+		"--tmpfs", "/tmp",
+	}
+	// Hide the worker's home only when the checkout and the writable root live
+	// elsewhere; hiding an ancestor would make the sandbox unable to chdir.
+	if !pathWithin(dir, "/home") && !pathWithin(writableRoot, "/home") {
+		args = append(args, "--tmpfs", "/home")
+	}
+	if !pathWithin(dir, "/root") && !pathWithin(writableRoot, "/root") {
+		args = append(args, "--tmpfs", "/root")
+	}
+	args = append(args,
+		"--dir", writableRoot,
+		"--bind", writableRoot, writableRoot,
+		"--dev", "/dev",
+		"--proc", "/proc",
+		"--chdir", dir,
+		"--",
+	)
+	return append(args, command...)
+}
+
+type unshareSandbox struct {
+	path string
+	once sync.Once
+	ok   bool
+}
+
+func (s *unshareSandbox) Available() bool {
+	s.once.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, s.path,
+			"--user", "--map-root-user", "--mount", "--pid", "--fork",
+			"--net", "--ipc", "--uts", "--mount-proc", "--kill-child", "--", "true")
+		s.ok = cmd.Run() == nil
+	})
+	return s.ok
+}
+
+func (s *unshareSandbox) Name() string {
+	return "unshare: user/mount/pid/net namespaces"
+}
+
+func (s *unshareSandbox) Wrap(ctx context.Context, dir, writableRoot string, command []string) (*exec.Cmd, bool) {
+	if !s.Available() {
+		return nil, false
+	}
+	return exec.CommandContext(ctx, s.path, s.wrapArgs(command)...), true
+}
+
+func (s *unshareSandbox) wrapArgs(command []string) []string {
+	args := []string{
+		"--user", "--map-root-user", "--mount", "--pid", "--fork",
+		"--net", "--ipc", "--uts", "--mount-proc", "--kill-child", "--",
+	}
+	return append(args, command...)
+}
+
+type unavailableSandbox struct{}
+
+func (unavailableSandbox) Available() bool { return false }
+func (unavailableSandbox) Name() string    { return "unavailable" }
+func (unavailableSandbox) Wrap(context.Context, string, string, []string) (*exec.Cmd, bool) {
+	return nil, false
+}
+
+func pathWithin(value, parent string) bool {
+	rel, err := filepath.Rel(parent, value)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
 // gitWorktreeDifferential is the production executor. It creates one detached
-// worktree per side, sanitizes the environment, bounds time, memory and output,
-// and removes the worktrees before returning.
+// worktree per side, prepares a per-case module cache, runs the test inside an
+// OS sandbox, bounds time, memory and output, and removes the worktrees before
+// returning.
 type gitWorktreeDifferential struct {
 	RepoDir string
 	Timeout time.Duration
 	Runs    int
+	// Sandbox overrides detection in tests. Nil uses the best sandbox the host
+	// provides; when none exists the feature stays disabled and the case is
+	// reported as inconclusive.
+	Sandbox differentialSandbox
 }
 
 func (e *gitWorktreeDifferential) Run(ctx context.Context, testCase DifferentialCase, baseSHA, headSHA string) (DifferentialExecution, error) {
@@ -529,6 +717,19 @@ func (e *gitWorktreeDifferential) Run(ctx context.Context, testCase Differential
 	if baseSHA == "" || headSHA == "" {
 		return DifferentialExecution{}, errors.New("la comparación diferencial requiere base y head")
 	}
+	sandbox := e.Sandbox
+	if sandbox == nil {
+		sandbox = detectDifferentialSandbox()
+	}
+	if !sandbox.Available() {
+		// Executable evidence must run inside an OS sandbox. Without one the
+		// feature stays disabled and the case is explicitly inconclusive.
+		return DifferentialExecution{
+			Isolation: "unavailable",
+			Base:      []DifferentialRunResult{{ExitCode: -1, Inconclusive: "isolation", Output: "no hay sandbox de sistema operativo disponible"}},
+			Head:      []DifferentialRunResult{{ExitCode: -1, Inconclusive: "isolation", Output: "no hay sandbox de sistema operativo disponible"}},
+		}, nil
+	}
 	root, err := os.MkdirTemp("", "qa-differential-")
 	if err != nil {
 		return DifferentialExecution{}, fmt.Errorf("crear entorno diferencial: %w", err)
@@ -536,6 +737,10 @@ func (e *gitWorktreeDifferential) Run(ctx context.Context, testCase Differential
 	defer os.RemoveAll(root)
 
 	env, err := differentialEnvironment(root)
+	if err != nil {
+		return DifferentialExecution{}, err
+	}
+	moduleEnv, err := differentialModuleEnvironment(root)
 	if err != nil {
 		return DifferentialExecution{}, err
 	}
@@ -548,7 +753,10 @@ func (e *gitWorktreeDifferential) Run(ctx context.Context, testCase Differential
 		timeout = differentialRunTimeout
 	}
 
-	execution := DifferentialExecution{Environment: differentialGoVersion(ctx, e.RepoDir, env)}
+	execution := DifferentialExecution{
+		Environment: differentialGoVersion(ctx, e.RepoDir, env),
+		Isolation:   sandbox.Name(),
+	}
 	sides := []struct {
 		name string
 		sha  string
@@ -561,13 +769,13 @@ func (e *gitWorktreeDifferential) Run(ctx context.Context, testCase Differential
 		if ctx.Err() != nil {
 			break
 		}
-		results := e.runSide(ctx, root, env, side.name, side.sha, testCase, runs, timeout)
+		results := e.runSide(ctx, root, env, moduleEnv, sandbox, side.name, side.sha, testCase, runs, timeout)
 		*side.dst = results
 	}
 	return execution, nil
 }
 
-func (e *gitWorktreeDifferential) runSide(ctx context.Context, root string, env []string, side, sha string, testCase DifferentialCase, runs int, timeout time.Duration) []DifferentialRunResult {
+func (e *gitWorktreeDifferential) runSide(ctx context.Context, root string, env, moduleEnv []string, sandbox differentialSandbox, side, sha string, testCase DifferentialCase, runs int, timeout time.Duration) []DifferentialRunResult {
 	if ctx.Err() != nil {
 		return []DifferentialRunResult{{ExitCode: -1, TimedOut: true, Inconclusive: "timeout"}}
 	}
@@ -585,6 +793,11 @@ func (e *gitWorktreeDifferential) runSide(ctx context.Context, root string, env 
 	if reason := prepareDifferentialSide(dir, testCase); reason != "" {
 		return []DifferentialRunResult{{ExitCode: -1, Inconclusive: "equivalence", Output: reason}}
 	}
+	// Dependencies are downloaded into the per-case cache before any untrusted
+	// code runs. The download itself never executes the repository's tests.
+	if failed := downloadDifferentialModules(ctx, dir, moduleEnv, timeout); failed != nil {
+		return []DifferentialRunResult{*failed}
+	}
 
 	results := make([]DifferentialRunResult, 0, runs)
 	for i := 0; i < runs; i++ {
@@ -592,7 +805,7 @@ func (e *gitWorktreeDifferential) runSide(ctx context.Context, root string, env 
 			results = append(results, DifferentialRunResult{ExitCode: -1, TimedOut: true, Inconclusive: "timeout"})
 			break
 		}
-		results = append(results, runDifferentialTest(ctx, dir, testCase, env, timeout))
+		results = append(results, runDifferentialTest(ctx, sandbox, dir, root, testCase, env, timeout))
 	}
 	return results
 }
@@ -644,17 +857,25 @@ func prepareDifferentialSide(dir string, testCase DifferentialCase) string {
 	return "el paquete diferencial no tiene pruebas"
 }
 
-func runDifferentialTest(parent context.Context, dir string, testCase DifferentialCase, env []string, timeout time.Duration) DifferentialRunResult {
+func runDifferentialTest(parent context.Context, sandbox differentialSandbox, dir, root string, testCase DifferentialCase, env []string, timeout time.Duration) DifferentialRunResult {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		return DifferentialRunResult{ExitCode: -1, Inconclusive: "infrastructure", Output: "el binario go no está disponible"}
+	}
 	args := []string{"test", "-count=1", "-timeout", fmt.Sprintf("%ds", int(timeout.Seconds()))}
 	if testCase.Test != "" {
 		args = append(args, "-run", "^"+testCase.Test+"$")
 	}
 	args = append(args, testCase.Package)
+	command := append([]string{goBin}, args...)
 
-	cmd := exec.CommandContext(ctx, "go", args...)
+	cmd, ok := sandbox.Wrap(ctx, dir, root, command)
+	if !ok {
+		return DifferentialRunResult{ExitCode: -1, Inconclusive: "isolation", Output: "no hay sandbox de sistema operativo disponible"}
+	}
 	cmd.Dir = dir
 	cmd.Env = env
 	cmd.WaitDelay = 5 * time.Second
@@ -665,7 +886,7 @@ func runDifferentialTest(parent context.Context, dir string, testCase Differenti
 	cmd.Stderr = &captured
 
 	started := time.Now()
-	err := cmd.Run()
+	err = cmd.Run()
 	result := DifferentialRunResult{Duration: time.Since(started), raw: captured.String()}
 	if ctx.Err() != nil {
 		result.TimedOut = true
@@ -693,6 +914,56 @@ func runDifferentialTest(parent context.Context, dir string, testCase Differenti
 	result.Inconclusive = classifyDifferentialFailure(result.ExitCode, result.raw)
 	result.Output = differentialOutputSlice(result.raw)
 	return result
+}
+
+// downloadDifferentialModules prepares the per-case module cache before any
+// untrusted test runs. It only runs the Go tool on go.mod/go.sum; the
+// repository's test code is never executed here.
+func downloadDifferentialModules(parent context.Context, dir string, env []string, timeout time.Duration) *DifferentialRunResult {
+	goBin, err := exec.LookPath("go")
+	if err != nil {
+		result := DifferentialRunResult{ExitCode: -1, Inconclusive: "infrastructure", Output: "el binario go no está disponible"}
+		return &result
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, goBin, "mod", "download")
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.WaitDelay = 5 * time.Second
+	isolateProcessGroup(cmd)
+	var captured cappedBuffer
+	captured.max = differentialMaxCaptured
+	cmd.Stdout = &captured
+	cmd.Stderr = &captured
+
+	started := time.Now()
+	err = cmd.Run()
+	if ctx.Err() != nil {
+		result := DifferentialRunResult{Duration: time.Since(started), ExitCode: -1, TimedOut: true,
+			Inconclusive: "timeout", raw: captured.String()}
+		result.Output = differentialOutputSlice(result.raw)
+		return &result
+	}
+	if err == nil {
+		return nil
+	}
+	result := DifferentialRunResult{Duration: time.Since(started), raw: captured.String(), Inconclusive: "dependency"}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		result.ExitCode = exitErr.ExitCode()
+		if reason := classifyDifferentialFailure(result.ExitCode, result.raw); reason != "" {
+			result.Inconclusive = reason
+		}
+	} else {
+		result.ExitCode = -1
+		result.Inconclusive = "infrastructure"
+		result.Output = differentialOutputSlice(err.Error())
+		return &result
+	}
+	result.Output = differentialOutputSlice(result.raw)
+	return &result
 }
 
 func classifyDifferentialFailure(exitCode int, output string) string {
@@ -781,35 +1052,25 @@ func differentialOutputSlice(output string) string {
 	return joined
 }
 
-// differentialEnvironment builds the explicit environment of a test run. Only
-// the toolchain and a writable cache are inherited; credentials and the user's
-// git configuration are not passed to the repository's tests.
-func differentialEnvironment(root string) ([]string, error) {
+// differentialCommonEnvironment builds the explicit environment shared by the
+// setup and test phases. Only PATH is inherited; credentials, proxy settings
+// and the user's git configuration are never passed.
+func differentialCommonEnvironment(root string) ([]string, error) {
 	home := filepath.Join(root, "home")
 	tmp := filepath.Join(root, "tmp")
-	if err := os.MkdirAll(home, 0o755); err != nil {
-		return nil, fmt.Errorf("crear home diferencial: %w", err)
-	}
-	if err := os.MkdirAll(tmp, 0o755); err != nil {
-		return nil, fmt.Errorf("crear tmp diferencial: %w", err)
+	gocache := filepath.Join(root, "gocache")
+	gopath := filepath.Join(root, "gopath")
+	gomodcache := filepath.Join(root, "gomodcache")
+	for _, dir := range []string{home, tmp, gocache, gopath, gomodcache} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("crear entorno diferencial %s: %w", dir, err)
+		}
 	}
 	gitConfig := filepath.Join(root, "gitconfig")
 	if err := os.WriteFile(gitConfig, nil, 0o600); err != nil {
 		return nil, fmt.Errorf("crear gitconfig diferencial: %w", err)
 	}
-	gocache := strings.TrimSpace(os.Getenv("GOCACHE"))
-	if gocache == "" {
-		gocache = filepath.Join(root, "gocache")
-	}
-	gopath := strings.TrimSpace(os.Getenv("GOPATH"))
-	if gopath == "" {
-		gopath = filepath.Join(home, "go")
-	}
-	gomodcache := strings.TrimSpace(os.Getenv("GOMODCACHE"))
-	if gomodcache == "" {
-		gomodcache = filepath.Join(gopath, "pkg", "mod")
-	}
-	env := []string{
+	return []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + home,
 		"TMPDIR=" + tmp,
@@ -818,15 +1079,34 @@ func differentialEnvironment(root string) ([]string, error) {
 		"GOPATH=" + gopath,
 		"GOFLAGS=-buildvcs=false -mod=readonly",
 		"GOTOOLCHAIN=local",
-		"GOPROXY=off",
-		"GOSUMDB=off",
 		"CGO_ENABLED=0",
 		"GOMEMLIMIT=" + differentialMemoryLimit,
 		"GIT_CONFIG_GLOBAL=" + gitConfig,
 		"GIT_CONFIG_SYSTEM=" + gitConfig,
 		"GIT_TERMINAL_PROMPT=0",
+	}, nil
+}
+
+// differentialEnvironment is the untrusted test environment. Its caches live
+// under the per-case root and it has no network: any download is a failed
+// dependency, never a side effect of the pull request.
+func differentialEnvironment(root string) ([]string, error) {
+	env, err := differentialCommonEnvironment(root)
+	if err != nil {
+		return nil, err
 	}
-	return env, nil
+	return append(env, "GOPROXY=off", "GOSUMDB=off"), nil
+}
+
+// differentialModuleEnvironment is the trusted setup environment. It may reach
+// the public Go module proxy to fill the per-case cache, but it still carries
+// no credentials and never executes the repository's tests.
+func differentialModuleEnvironment(root string) ([]string, error) {
+	env, err := differentialCommonEnvironment(root)
+	if err != nil {
+		return nil, err
+	}
+	return append(env, "GOPROXY=https://proxy.golang.org", "GOSUMDB=sum.golang.org"), nil
 }
 
 func differentialGoVersion(ctx context.Context, dir string, env []string) string {

@@ -316,8 +316,8 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 	out.decisions = Decide(out.findings, verdicts, blobs, headSHA, policy)
 	// Executable evidence is observation only and never changes a decision: it
 	// runs after the verdicts are settled and travels through the same stored
-	// verification record (#230).
-	r.attachDifferentialEvidence(ctx, workDir, baseSHA, headSHA, out, log)
+	// verification record (#230). External contributions are never executed.
+	r.attachDifferentialEvidence(ctx, workDir, baseSHA, headSHA, !cfg.PR.External(), out, log)
 }
 
 // reusedVerdict returns the stored verdict when it still refers to the same

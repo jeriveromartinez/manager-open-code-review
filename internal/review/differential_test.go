@@ -51,6 +51,16 @@ func (f *fakeDifferentialExecutor) Run(_ context.Context, testCase DifferentialC
 	return DifferentialExecution{}, nil
 }
 
+// passthroughSandbox keeps the executor tests independent from the host: the
+// OS sandbox itself is asserted by its command construction test.
+type passthroughSandbox struct{}
+
+func (passthroughSandbox) Available() bool { return true }
+func (passthroughSandbox) Name() string    { return "test passthrough" }
+func (passthroughSandbox) Wrap(ctx context.Context, _, _ string, command []string) (*exec.Cmd, bool) {
+	return exec.CommandContext(ctx, command[0], command[1:]...), true
+}
+
 func validDifferentialPolicy() []byte {
 	return []byte(`{
 		"version": "differential-cases/v1",
@@ -224,7 +234,7 @@ func TestAttachDifferentialEvidenceAttachesRegression(t *testing.T) {
 		}, nil
 	}}
 	r := &Runner{Differential: executor}
-	r.attachDifferentialEvidenceWith(context.Background(), tree, "/repo", "base-sha", "head-sha", out, nil)
+	r.attachDifferentialEvidenceWith(context.Background(), tree, "/repo", "base-sha", "head-sha", true, out, nil)
 
 	if len(executor.calls) != 1 || executor.calls[0].ID != "review-identity" {
 		t.Fatalf("calls = %+v, want the policy case exactly once", executor.calls)
@@ -265,7 +275,7 @@ func TestDifferentialEvidenceNeverPromotesAnUncertainVerdict(t *testing.T) {
 		}, nil
 	}}
 	r := &Runner{Differential: executor}
-	r.attachDifferentialEvidenceWith(context.Background(), tree, "/repo", "base-sha", "head-sha", out, nil)
+	r.attachDifferentialEvidenceWith(context.Background(), tree, "/repo", "base-sha", "head-sha", true, out, nil)
 
 	decision := out.decisions[0]
 	if decision.Verdict != VerdictUncertain || decision.Status != store.FindingOpen || decision.Apply {
@@ -287,7 +297,7 @@ func TestAttachDifferentialEvidenceWithoutPolicyRunsNothing(t *testing.T) {
 	}
 	executor := &fakeDifferentialExecutor{}
 	r := &Runner{Differential: executor}
-	r.attachDifferentialEvidenceWith(context.Background(), &differentialTree{}, "/repo", "base-sha", "head-sha", out, nil)
+	r.attachDifferentialEvidenceWith(context.Background(), &differentialTree{}, "/repo", "base-sha", "head-sha", true, out, nil)
 	if len(executor.calls) != 0 {
 		t.Fatalf("calls = %+v, want none without a trusted policy", executor.calls)
 	}
@@ -309,7 +319,7 @@ func TestAttachDifferentialEvidenceKeepsFlakyInconclusive(t *testing.T) {
 		}, nil
 	}}
 	r := &Runner{Differential: executor}
-	r.attachDifferentialEvidenceWith(context.Background(), tree, "/repo", "base-sha", "head-sha", out, nil)
+	r.attachDifferentialEvidenceWith(context.Background(), tree, "/repo", "base-sha", "head-sha", true, out, nil)
 
 	evidence := out.decisions[0].Verification.Differential
 	if evidence == nil || evidence.Status != DifferentialInconclusive {
@@ -362,7 +372,7 @@ func TestGitWorktreeDifferentialRunsBothSides(t *testing.T) {
 	runGit(t, dir, "commit", "-qm", "regression")
 	headSHA := runGit(t, dir, "rev-parse", "HEAD")
 
-	executor := &gitWorktreeDifferential{RepoDir: dir, Timeout: 90 * time.Second}
+	executor := &gitWorktreeDifferential{RepoDir: dir, Timeout: 90 * time.Second, Sandbox: passthroughSandbox{}}
 	execution, err := executor.Run(context.Background(), DifferentialCase{
 		ID: "calc-sum", Paths: []string{"calc/*.go"}, Package: "./calc", Test: "TestAdd",
 	}, baseSHA, headSHA)
@@ -383,10 +393,137 @@ func TestGitWorktreeDifferentialRunsBothSides(t *testing.T) {
 	if !strings.Contains(evidence.Environment, "go version") {
 		t.Errorf("environment = %q, want the Go toolchain", evidence.Environment)
 	}
+	if evidence.Isolation != "test passthrough" {
+		t.Errorf("isolation = %q, want the injected sandbox", evidence.Isolation)
+	}
 
 	worktrees := runGit(t, dir, "worktree", "list", "--porcelain")
 	if lines := strings.Count(worktrees, "worktree "); lines != 1 {
 		t.Errorf("worktree list has %d entries, want only the repository checkout:\n%s", lines, worktrees)
+	}
+}
+
+func TestAttachDifferentialEvidenceSkipsExternalContribution(t *testing.T) {
+	out := &runOutcome{
+		findings:  []store.Finding{{ID: "f1", Path: "internal/review/a.go", Severity: "major"}},
+		decisions: []Decision{{FindingID: "f1", Verification: Verification{Verdict: VerdictConfirm}}},
+	}
+	tree := &differentialTree{base: map[string][]byte{differentialPolicyPath: validDifferentialPolicy()}}
+	executor := &fakeDifferentialExecutor{}
+	r := &Runner{Differential: executor}
+	r.attachDifferentialEvidenceWith(context.Background(), tree, "/repo", "base-sha", "head-sha", false, out, nil)
+
+	if len(executor.calls) != 0 {
+		t.Fatalf("calls = %+v, want no execution for an external contribution", executor.calls)
+	}
+	if len(tree.reads) != 0 {
+		t.Errorf("reads = %v, want no policy read before the trust gate", tree.reads)
+	}
+	evidence := out.decisions[0].Verification.Differential
+	if evidence == nil || evidence.Status != DifferentialInconclusive {
+		t.Fatalf("evidence = %+v, want an explicit inconclusive record", evidence)
+	}
+	if !strings.Contains(evidence.Reason, "externo") || evidence.Isolation != "not_executed_external" {
+		t.Errorf("evidence = %+v, want the external skip recorded", evidence)
+	}
+}
+
+func TestDifferentialEnvironmentUsesPerRunCachesWithoutWorkerSecrets(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("QA_WORKER_KEY", "super-secret")
+	t.Setenv("DATABASE_URL", "postgres://user:pass@db")
+	t.Setenv("GOCACHE", "/shared/gocache")
+	t.Setenv("GOMODCACHE", "/shared/modcache")
+	t.Setenv("GOPATH", "/shared/gopath")
+
+	env, err := differentialEnvironment(root)
+	if err != nil {
+		t.Fatalf("differentialEnvironment() error = %v", err)
+	}
+	values := envMap(env)
+	if _, ok := values["QA_WORKER_KEY"]; ok {
+		t.Error("the test environment contains QA_WORKER_KEY")
+	}
+	if _, ok := values["DATABASE_URL"]; ok {
+		t.Error("the test environment contains DATABASE_URL")
+	}
+	for _, key := range []string{"GOCACHE", "GOMODCACHE", "GOPATH"} {
+		if !strings.HasPrefix(values[key], root) {
+			t.Errorf("%s = %q, want a per-run path under %q", key, values[key], root)
+		}
+	}
+	if values["GOPROXY"] != "off" || values["GOSUMDB"] != "off" {
+		t.Errorf("GOPROXY/GOSUMDB = %q/%q, want the untrusted test offline", values["GOPROXY"], values["GOSUMDB"])
+	}
+	for key, value := range values {
+		if strings.Contains(value, "super-secret") || strings.Contains(value, "/shared") ||
+			strings.Contains(value, "user:pass") {
+			t.Errorf("%s leaked a worker value %q", key, value)
+		}
+	}
+
+	moduleEnv, err := differentialModuleEnvironment(root)
+	if err != nil {
+		t.Fatalf("differentialModuleEnvironment() error = %v", err)
+	}
+	moduleValues := envMap(moduleEnv)
+	if moduleValues["GOPROXY"] != "https://proxy.golang.org" {
+		t.Errorf("setup GOPROXY = %q, want the public proxy", moduleValues["GOPROXY"])
+	}
+	if !strings.HasPrefix(moduleValues["GOMODCACHE"], root) {
+		t.Errorf("setup GOMODCACHE = %q, want the per-run cache", moduleValues["GOMODCACHE"])
+	}
+}
+
+func envMap(env []string) map[string]string {
+	values := make(map[string]string, len(env))
+	for _, entry := range env {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			values[key] = value
+		}
+	}
+	return values
+}
+
+func TestDifferentialSandboxCommandsUseNamespaces(t *testing.T) {
+	command := []string{"/usr/local/go/bin/go", "test", "./calc"}
+	bwrap := (&bubblewrapSandbox{path: "bwrap"}).wrapArgs("/work", "/tmp/root", command)
+	joined := strings.Join(bwrap, " ")
+	for _, want := range []string{
+		"--unshare-all", "--cap-drop ALL", "--ro-bind / /", "--proc /proc",
+		"--bind /tmp/root /tmp/root", "--chdir /work",
+		"-- /usr/local/go/bin/go test ./calc",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("bwrap args do not contain %q:\n%s", want, joined)
+		}
+	}
+
+	unshare := (&unshareSandbox{path: "unshare"}).wrapArgs(command)
+	joined = strings.Join(unshare, " ")
+	for _, want := range []string{
+		"--user", "--map-root-user", "--mount", "--pid", "--net", "--mount-proc",
+		"-- /usr/local/go/bin/go test ./calc",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("unshare args do not contain %q:\n%s", want, joined)
+		}
+	}
+}
+
+func TestGitWorktreeDifferentialWithoutSandboxSkipsExecution(t *testing.T) {
+	executor := &gitWorktreeDifferential{RepoDir: t.TempDir(), Sandbox: unavailableSandbox{}}
+	execution, err := executor.Run(context.Background(), DifferentialCase{ID: "calc", Package: "./calc"}, "base-sha", "head-sha")
+	if err != nil {
+		t.Fatalf("Run() error = %v, want a disabled case instead of a failure", err)
+	}
+	if execution.Isolation != "unavailable" {
+		t.Errorf("isolation = %q, want unavailable", execution.Isolation)
+	}
+	for side, runs := range map[string][]DifferentialRunResult{"base": execution.Base, "head": execution.Head} {
+		if len(runs) != 1 || runs[0].Inconclusive != "isolation" {
+			t.Errorf("%s runs = %+v, want one isolation-inconclusive result", side, runs)
+		}
 	}
 }
 
