@@ -487,6 +487,21 @@ func TestProfileCheckRejectsProfileOCRCannotReach(t *testing.T) {
 	}
 }
 
+// OpenCode Go is a separate provider from OpenCode Models: the closed table
+// must resolve it so the probe and OCR stop billing the pay-as-you-go endpoint.
+func TestNativeEndpointResolvesOpenCodeGo(t *testing.T) {
+	endpoint, protocol, err := nativeEndpoint(store.LLMProfile{
+		Provider: "opencode-go",
+		Model:    "deepseek-v4.1-flash",
+	})
+	if err != nil {
+		t.Fatalf("nativeEndpoint: %v", err)
+	}
+	if endpoint != "https://opencode.ai/inference/go/openai/v1" || protocol != "openai" {
+		t.Fatalf("endpoint/protocol = %q/%q, want the Go OpenAI-compatible base", endpoint, protocol)
+	}
+}
+
 // The probe uses the endpoint OCR configures, so an unknown provider with an
 // explicit base URL is healthy when that endpoint answers.
 func TestProfileCheckUsesOCREndpointForUnknownProvider(t *testing.T) {

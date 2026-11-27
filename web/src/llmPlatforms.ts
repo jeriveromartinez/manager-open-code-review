@@ -40,6 +40,17 @@ export const llmPlatforms: LLMPlatform[] = [
     ],
   },
   {
+    // OpenCode Go is a subscription with its own endpoint; OpenCode Models
+    // (the platform above) is pay-as-you-go and a Go key is not covered there.
+    id: 'opencode-go',
+    name: 'OpenCode Go',
+    models: [
+      { id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash' },
+      { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+      { id: 'kimi-k3', label: 'Kimi K3' },
+    ],
+  },
+  {
     id: 'google',
     name: 'Google Gemini',
     models: [
