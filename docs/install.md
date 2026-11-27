@@ -38,7 +38,7 @@ Revisa también estos valores de `deploy/.env`:
 docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
-El primer arranque construye la web y el binario con los targets `app` y `worker` de `deploy/Dockerfile`, aplica las migraciones y levanta ambos servicios. El `worker` incluye `git`, Node 24 y las herramientas fijadas `@alibaba-group/open-code-review@1.14.1` (`ocr`) y `opencode-ai@1.19.0` (`opencode`), y valida que estén disponibles al arrancar. Comprueba que la API responde:
+El primer arranque construye la web y el binario con los targets `app` y `worker` de `deploy/Dockerfile`, aplica las migraciones y levanta ambos servicios. El `worker` incluye `git`, Node 24, Go 1.27, `bubblewrap` y las herramientas fijadas `@alibaba-group/open-code-review@1.14.1` (`ocr`) y `opencode-ai@1.19.0` (`opencode`), y valida que estén disponibles al arrancar. El servicio `worker` de Compose usa `seccomp=unconfined` para que `bubblewrap` pueda crear namespaces de la evidencia diferencial; el contenedor sigue ejecutándose como uid 10001. Comprueba que la API responde:
 
 ```sh
 curl -s localhost:8080/healthz
