@@ -1,0 +1,316 @@
+{
+  "schema_version": "reviewbench/v1",
+  "version": "2026-11-27.1",
+  "lock": "87ce45dec5301fba4d5d209c4c151609cf85313c75eebdd3da54a5b9aaee80eb",
+  "context_radius": 3,
+  "target_reviewer": "own",
+  "thresholds": {
+    "configured": true,
+    "min_evaluated_cases": 3,
+    "min_coverage": 0.5,
+    "min_precision": 0.9,
+    "min_severe_detection": 0.9,
+    "min_citation_accuracy": 0.8,
+    "max_false_block_rate": 0.1,
+    "max_duplicate_rate": 0.2
+  },
+  "cases": [
+    {
+      "id": "go-clean",
+      "language": "go",
+      "change_type": "code",
+      "comparison": {
+        "base": "1111111111111111111111111111111111111111",
+        "head": "2222222222222222222222222222222222222222"
+      },
+      "allowed_context": [
+        "pkg/orders/order.go"
+      ],
+      "head_files": {
+        "pkg/orders/order.go": [
+          "package orders",
+          "",
+          "import \"example/pkg/billing\"",
+          "",
+          "func Total(amount int) int {",
+          "\treturn billing.WithTax(amount)",
+          "}"
+        ]
+      },
+      "expected": [],
+      "blind": true
+    },
+    {
+      "id": "go-defect-auth",
+      "language": "go",
+      "change_type": "code",
+      "comparison": {
+        "base": "3333333333333333333333333333333333333333",
+        "head": "4444444444444444444444444444444444444444"
+      },
+      "allowed_context": [
+        "auth.go"
+      ],
+      "head_files": {
+        "auth.go": [
+          "package auth",
+          "",
+          "import \"strings\"",
+          "",
+          "func CheckPassword(stored, provided string) bool {",
+          "\t// EqualFold hides case-only differences.",
+          "\treturn strings.ToLower(stored) == strings.ToLower(provided)",
+          "}",
+          "",
+          "func Normalize(value string) string {",
+          "\treturn strings.ToLower(value)",
+          "}"
+        ]
+      },
+      "expected": [
+        {
+          "path": "auth.go",
+          "category": "security",
+          "severity": "major",
+          "start_line": 7,
+          "end_line": 7,
+          "cited_code": "return strings.ToLower(stored) == strings.ToLower(provided)"
+        },
+        {
+          "path": "auth.go",
+          "category": "correctness",
+          "severity": "minor",
+          "start_line": 11,
+          "end_line": 11,
+          "cited_code": "return strings.ToLower(value)"
+        }
+      ],
+      "blind": true
+    },
+    {
+      "id": "ts-multi-push",
+      "language": "typescript",
+      "change_type": "cross_module",
+      "comparison": {
+        "base": "5555555555555555555555555555555555555555",
+        "head": "7777777777777777777777777777777777777777"
+      },
+      "allowed_context": [
+        "web/src/merge.ts"
+      ],
+      "pushes": [
+        "6666666666666666666666666666666666666666",
+        "7777777777777777777777777777777777777777"
+      ],
+      "head_files": {
+        "web/src/merge.ts": [
+          "export type Obj = Record<string, unknown>",
+          "",
+          "export function merge(a: Obj, b: Obj): Obj {",
+          "  return { ...a, ...b }",
+          "}"
+        ]
+      },
+      "expected": [
+        {
+          "path": "web/src/merge.ts",
+          "category": "correctness",
+          "severity": "blocker",
+          "start_line": 4,
+          "end_line": 4,
+          "cited_code": "return { ...a, ...b }"
+        }
+      ],
+      "blind": false
+    },
+    {
+      "id": "py-bad-citation",
+      "language": "python",
+      "change_type": "code",
+      "comparison": {
+        "base": "8888888888888888888888888888888888888888",
+        "head": "9999999999999999999999999999999999999999"
+      },
+      "allowed_context": [
+        "app/divide.py"
+      ],
+      "head_files": {
+        "app/divide.py": [
+          "def divide(a, b):",
+          "    # missing zero guard",
+          "    return a / b"
+        ]
+      },
+      "expected": [
+        {
+          "path": "app/divide.py",
+          "category": "correctness",
+          "severity": "major",
+          "start_line": 3,
+          "end_line": 3,
+          "cited_code": "return a / b"
+        }
+      ],
+      "blind": true
+    },
+    {
+      "id": "docker-clean-block",
+      "language": "dockerfile",
+      "change_type": "infra",
+      "comparison": {
+        "base": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "allowed_context": [
+        "Dockerfile"
+      ],
+      "head_files": {
+        "Dockerfile": [
+          "FROM golang:1.27 AS build",
+          "WORKDIR /src",
+          "COPY . .",
+          "RUN go build ./..."
+        ]
+      },
+      "expected": [],
+      "blind": false
+    },
+    {
+      "id": "yaml-incomplete",
+      "language": "yaml",
+      "change_type": "config",
+      "comparison": {
+        "base": "cccccccccccccccccccccccccccccccccccccccc",
+        "head": "dddddddddddddddddddddddddddddddddddddddd"
+      },
+      "allowed_context": [
+        "deploy/app.yaml",
+        "deploy/service.yaml"
+      ],
+      "head_files": {
+        "deploy/app.yaml": [
+          "apiVersion: apps/v1",
+          "kind: Deployment",
+          "metadata:",
+          "  name: app",
+          "spec:",
+          "  replicas: 1"
+        ],
+        "deploy/service.yaml": [
+          "apiVersion: v1",
+          "kind: Service",
+          "metadata:",
+          "  name: app",
+          "spec:",
+          "  ports:",
+          "  - port: 80"
+        ]
+      },
+      "expected": [
+        {
+          "path": "deploy/app.yaml",
+          "category": "config",
+          "severity": "minor",
+          "start_line": 6,
+          "end_line": 6,
+          "cited_code": "replicas: 1"
+        }
+      ],
+      "blind": true
+    },
+    {
+      "id": "sql-timeout",
+      "language": "sql",
+      "change_type": "data",
+      "comparison": {
+        "base": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "head": "ffffffffffffffffffffffffffffffffffffffff"
+      },
+      "allowed_context": [
+        "db/query.sql"
+      ],
+      "head_files": {
+        "db/query.sql": [
+          "SELECT id",
+          "FROM users",
+          "WHERE active = true;"
+        ]
+      },
+      "expected": [
+        {
+          "path": "db/query.sql",
+          "category": "correctness",
+          "severity": "major",
+          "start_line": 3,
+          "end_line": 3,
+          "cited_code": "WHERE active = true;"
+        }
+      ],
+      "blind": false
+    },
+    {
+      "id": "go-abstention",
+      "language": "go",
+      "change_type": "code",
+      "comparison": {
+        "base": "1212121212121212121212121212121212121212",
+        "head": "3434343434343434343434343434343434343434"
+      },
+      "allowed_context": [
+        "internal/cache/cache.go"
+      ],
+      "head_files": {
+        "internal/cache/cache.go": [
+          "package cache",
+          "",
+          "func Get(key string) string {",
+          "\treturn cache[key]",
+          "}"
+        ]
+      },
+      "expected": [
+        {
+          "path": "internal/cache/cache.go",
+          "category": "correctness",
+          "severity": "major",
+          "start_line": 4,
+          "end_line": 4,
+          "cited_code": "return cache[key]"
+        }
+      ],
+      "blind": false
+    },
+    {
+      "id": "go-delivery-error",
+      "language": "go",
+      "change_type": "test",
+      "comparison": {
+        "base": "5656565656565656565656565656565656565656",
+        "head": "7878787878787878787878787878787878787878"
+      },
+      "allowed_context": [
+        "internal/handler/handler.go"
+      ],
+      "head_files": {
+        "internal/handler/handler.go": [
+          "package handler",
+          "",
+          "func Handle(value *int) int {",
+          "\treturn *value",
+          "}"
+        ]
+      },
+      "expected": [
+        {
+          "path": "internal/handler/handler.go",
+          "category": "correctness",
+          "severity": "blocker",
+          "start_line": 4,
+          "end_line": 4,
+          "cited_code": "return *value"
+        }
+      ],
+      "blind": false
+    }
+  ]
+}
