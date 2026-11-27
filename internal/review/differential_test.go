@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -485,29 +486,62 @@ func envMap(env []string) map[string]string {
 	return values
 }
 
-func TestDifferentialSandboxCommandsUseNamespaces(t *testing.T) {
+func TestBubblewrapSandboxIsolatesFilesystem(t *testing.T) {
 	command := []string{"/usr/local/go/bin/go", "test", "./calc"}
 	bwrap := (&bubblewrapSandbox{path: "bwrap"}).wrapArgs("/work", "/tmp/root", command)
 	joined := strings.Join(bwrap, " ")
 	for _, want := range []string{
-		"--unshare-all", "--cap-drop ALL", "--ro-bind / /", "--proc /proc",
-		"--bind /tmp/root /tmp/root", "--chdir /work",
+		"--unshare-all", "--cap-drop ALL", "--ro-bind / /",
+		"--tmpfs /tmp", "--tmpfs /home", "--tmpfs /root",
+		"--bind /tmp/root /tmp/root", "--ro-bind /work /work",
+		"--proc /proc", "--chdir /work",
 		"-- /usr/local/go/bin/go test ./calc",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("bwrap args do not contain %q:\n%s", want, joined)
 		}
 	}
+	// The worktree must stay read-only even when it sits inside the writable root.
+	if strings.Index(joined, "--bind /tmp/root /tmp/root") > strings.Index(joined, "--ro-bind /work /work") {
+		t.Errorf("writable root bind comes after the read-only worktree bind:\n%s", joined)
+	}
+}
 
-	unshare := (&unshareSandbox{path: "unshare"}).wrapArgs(command)
-	joined = strings.Join(unshare, " ")
+func TestBubblewrapSandboxHidesWorkerHome(t *testing.T) {
+	command := []string{"/home/worker/go/bin/go", "test", "./calc"}
+	joined := strings.Join((&bubblewrapSandbox{path: "bwrap"}).wrapArgs(
+		"/home/worker/project", "/home/worker/.qa/root", command), " ")
 	for _, want := range []string{
-		"--user", "--map-root-user", "--mount", "--pid", "--net", "--mount-proc",
-		"-- /usr/local/go/bin/go test ./calc",
+		"--tmpfs /home", "--tmpfs /root",
+		"--bind /home/worker/.qa/root /home/worker/.qa/root",
+		"--ro-bind /home/worker/project /home/worker/project",
+		"--ro-bind /home/worker/go /home/worker/go",
 	} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("unshare args do not contain %q:\n%s", want, joined)
+			t.Errorf("bwrap args do not contain %q:\n%s", want, joined)
 		}
+	}
+	if strings.Contains(joined, "--ro-bind /home /home") ||
+		strings.Contains(joined, "--ro-bind /root /root") {
+		t.Errorf("the sandbox re-exposed the worker home:\n%s", joined)
+	}
+}
+
+func TestDetectDifferentialSandboxRequiresBubblewrap(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	differentialSandboxOnce = sync.Once{}
+	differentialSandboxBest = nil
+	t.Cleanup(func() {
+		differentialSandboxOnce = sync.Once{}
+		differentialSandboxBest = nil
+	})
+
+	sandbox := detectDifferentialSandbox()
+	if sandbox.Available() {
+		t.Fatal("detection reported an available sandbox without bubblewrap")
+	}
+	if _, ok := sandbox.(unavailableSandbox); !ok {
+		t.Fatalf("sandbox = %T, want the fail-closed implementation", sandbox)
 	}
 }
 

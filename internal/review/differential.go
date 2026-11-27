@@ -20,9 +20,9 @@ import (
 )
 
 // Differential evidence runs one maintainer-approved test on the trusted base
-// and on the reviewed head, in isolated worktrees and inside an OS sandbox, and
+// and on the reviewed head, in isolated worktrees and inside bubblewrap, and
 // records what both sides produced. External contributions never execute, and a
-// host without a usable sandbox keeps the feature disabled. It is observation
+// host without a usable bubblewrap keeps the feature disabled. It is observation
 // only: the verdict that publishes a finding still comes from the
 // confirmed-verdict path (#227).
 const (
@@ -555,8 +555,8 @@ func differentialReasonSuffix(reason string) string {
 }
 
 // differentialSandbox wraps the untrusted test command in the strongest OS
-// isolation the worker can provide. The feature is disabled when neither a
-// bubblewrap nor a user-namespace unshare sandbox is available.
+// isolation the worker can provide. The feature is disabled unless bubblewrap
+// is usable: a mount namespace without the mounts is not filesystem isolation.
 type differentialSandbox interface {
 	Available() bool
 	Name() string
@@ -572,13 +572,6 @@ func detectDifferentialSandbox() differentialSandbox {
 	differentialSandboxOnce.Do(func() {
 		if path, err := exec.LookPath("bwrap"); err == nil {
 			sandbox := &bubblewrapSandbox{path: path}
-			if sandbox.Available() {
-				differentialSandboxBest = sandbox
-				return
-			}
-		}
-		if path, err := exec.LookPath("unshare"); err == nil {
-			sandbox := &unshareSandbox{path: path}
 			if sandbox.Available() {
 				differentialSandboxBest = sandbox
 				return
@@ -601,14 +594,15 @@ func (s *bubblewrapSandbox) Available() bool {
 		defer cancel()
 		cmd := exec.CommandContext(ctx, s.path,
 			"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
-			"--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--", "true")
+			"--ro-bind", "/", "/", "--tmpfs", "/tmp", "--tmpfs", "/home", "--tmpfs", "/root",
+			"--proc", "/proc", "--dev", "/dev", "--", "true")
 		s.ok = cmd.Run() == nil
 	})
 	return s.ok
 }
 
 func (s *bubblewrapSandbox) Name() string {
-	return "bubblewrap: user/mount/pid/net namespaces, read-only root"
+	return "bubblewrap: user/mount/pid/net namespaces, read-only root, hidden home"
 }
 
 func (s *bubblewrapSandbox) Wrap(ctx context.Context, dir, writableRoot string, command []string) (*exec.Cmd, bool) {
@@ -622,19 +616,26 @@ func (s *bubblewrapSandbox) wrapArgs(dir, writableRoot string, command []string)
 	args := []string{
 		"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL",
 		"--ro-bind", "/", "/",
-		"--tmpfs", "/tmp",
+		"--tmpfs", "/tmp", "--tmpfs", "/home", "--tmpfs", "/root",
 	}
-	// Hide the worker's home only when the checkout and the writable root live
-	// elsewhere; hiding an ancestor would make the sandbox unable to chdir.
-	if !pathWithin(dir, "/home") && !pathWithin(writableRoot, "/home") {
-		args = append(args, "--tmpfs", "/home")
-	}
-	if !pathWithin(dir, "/root") && !pathWithin(writableRoot, "/root") {
-		args = append(args, "--tmpfs", "/root")
-	}
+	// Re-expose only what the test needs: the per-case cache root writable and
+	// the worktree read-only on top of it. Everything else under the worker's
+	// home stays hidden.
 	args = append(args,
 		"--dir", writableRoot,
 		"--bind", writableRoot, writableRoot,
+	)
+	if !pathWithin(dir, writableRoot) {
+		args = append(args, "--dir", dir)
+	}
+	args = append(args, "--ro-bind", dir, dir)
+	// A Go toolchain installed under the hidden home would otherwise disappear;
+	// bind its root back read-only.
+	if goRoot := differentialGoRoot(command[0]); goRoot != "" &&
+		(pathWithin(goRoot, "/home") || pathWithin(goRoot, "/root")) {
+		args = append(args, "--dir", goRoot, "--ro-bind", goRoot, goRoot)
+	}
+	args = append(args,
 		"--dev", "/dev",
 		"--proc", "/proc",
 		"--chdir", dir,
@@ -643,49 +644,22 @@ func (s *bubblewrapSandbox) wrapArgs(dir, writableRoot string, command []string)
 	return append(args, command...)
 }
 
-type unshareSandbox struct {
-	path string
-	once sync.Once
-	ok   bool
-}
-
-func (s *unshareSandbox) Available() bool {
-	s.once.Do(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, s.path,
-			"--user", "--map-root-user", "--mount", "--pid", "--fork",
-			"--net", "--ipc", "--uts", "--mount-proc", "--kill-child", "--", "true")
-		s.ok = cmd.Run() == nil
-	})
-	return s.ok
-}
-
-func (s *unshareSandbox) Name() string {
-	return "unshare: user/mount/pid/net namespaces"
-}
-
-func (s *unshareSandbox) Wrap(ctx context.Context, dir, writableRoot string, command []string) (*exec.Cmd, bool) {
-	if !s.Available() {
-		return nil, false
-	}
-	return exec.CommandContext(ctx, s.path, s.wrapArgs(command)...), true
-}
-
-func (s *unshareSandbox) wrapArgs(command []string) []string {
-	args := []string{
-		"--user", "--map-root-user", "--mount", "--pid", "--fork",
-		"--net", "--ipc", "--uts", "--mount-proc", "--kill-child", "--",
-	}
-	return append(args, command...)
-}
-
 type unavailableSandbox struct{}
 
 func (unavailableSandbox) Available() bool { return false }
-func (unavailableSandbox) Name() string    { return "unavailable" }
+func (unavailableSandbox) Name() string    { return "unavailable (bubblewrap required)" }
 func (unavailableSandbox) Wrap(context.Context, string, string, []string) (*exec.Cmd, bool) {
 	return nil, false
+}
+
+// differentialGoRoot returns the toolchain root of a go binary so a toolchain
+// installed under a hidden home can be bound back read-only.
+func differentialGoRoot(goBin string) string {
+	binDir := filepath.Dir(goBin)
+	if filepath.Base(binDir) == "bin" {
+		return filepath.Dir(binDir)
+	}
+	return binDir
 }
 
 func pathWithin(value, parent string) bool {
@@ -697,8 +671,8 @@ func pathWithin(value, parent string) bool {
 }
 
 // gitWorktreeDifferential is the production executor. It creates one detached
-// worktree per side, prepares a per-case module cache, runs the test inside an
-// OS sandbox, bounds time, memory and output, and removes the worktrees before
+// worktree per side, prepares a per-case module cache, runs the test inside
+// bubblewrap, bounds time, memory and output, and removes the worktrees before
 // returning.
 type gitWorktreeDifferential struct {
 	RepoDir string
@@ -722,12 +696,12 @@ func (e *gitWorktreeDifferential) Run(ctx context.Context, testCase Differential
 		sandbox = detectDifferentialSandbox()
 	}
 	if !sandbox.Available() {
-		// Executable evidence must run inside an OS sandbox. Without one the
-		// feature stays disabled and the case is explicitly inconclusive.
+		// Executable evidence must run inside an OS sandbox. Without bubblewrap
+		// the feature stays disabled and the case is explicitly inconclusive.
 		return DifferentialExecution{
 			Isolation: "unavailable",
-			Base:      []DifferentialRunResult{{ExitCode: -1, Inconclusive: "isolation", Output: "no hay sandbox de sistema operativo disponible"}},
-			Head:      []DifferentialRunResult{{ExitCode: -1, Inconclusive: "isolation", Output: "no hay sandbox de sistema operativo disponible"}},
+			Base:      []DifferentialRunResult{{ExitCode: -1, Inconclusive: "isolation", Output: "bubblewrap no está disponible"}},
+			Head:      []DifferentialRunResult{{ExitCode: -1, Inconclusive: "isolation", Output: "bubblewrap no está disponible"}},
 		}, nil
 	}
 	root, err := os.MkdirTemp("", "qa-differential-")
@@ -874,7 +848,7 @@ func runDifferentialTest(parent context.Context, sandbox differentialSandbox, di
 
 	cmd, ok := sandbox.Wrap(ctx, dir, root, command)
 	if !ok {
-		return DifferentialRunResult{ExitCode: -1, Inconclusive: "isolation", Output: "no hay sandbox de sistema operativo disponible"}
+		return DifferentialRunResult{ExitCode: -1, Inconclusive: "isolation", Output: "bubblewrap no está disponible"}
 	}
 	cmd.Dir = dir
 	cmd.Env = env
