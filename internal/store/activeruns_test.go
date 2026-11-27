@@ -15,7 +15,7 @@ func TestSetReviewRunPhaseOnlyOnRunning(t *testing.T) {
 	pr := f.openPR(inst, 21, store.StatusPending, false)
 	running := f.run(pr, store.RunRunning)
 
-	if err := f.s.SetReviewRunPhase(f.ctx, running.ID, store.RunPhaseCloning); err != nil {
+	if err := f.s.SetReviewRunPhase(f.ctx, running.ID, "", store.RunPhaseCloning); err != nil {
 		t.Fatalf("SetReviewRunPhase() error = %v", err)
 	}
 	got, err := f.s.ReviewRun(f.ctx, running.ID)
@@ -26,7 +26,7 @@ func TestSetReviewRunPhaseOnlyOnRunning(t *testing.T) {
 		t.Fatalf("run phase = %q/%v, want cloning with a start", got.Phase, got.PhaseStartedAt)
 	}
 
-	if err := f.s.RequeueReviewRun(f.ctx, running.ID, "capacity", "sin hueco"); err != nil {
+	if err := f.s.RequeueReviewRun(f.ctx, running.ID, "", "capacity", "sin hueco"); err != nil {
 		t.Fatalf("RequeueReviewRun() error = %v", err)
 	}
 	got, _ = f.s.ReviewRun(f.ctx, running.ID)
@@ -36,24 +36,24 @@ func TestSetReviewRunPhaseOnlyOnRunning(t *testing.T) {
 
 	queuedPR := f.openPR(inst, 22, store.StatusPending, false)
 	queued := f.run(queuedPR, store.RunQueued)
-	if err := f.s.SetReviewRunPhase(f.ctx, queued.ID, store.RunPhaseReviewing); !errors.Is(err, store.ErrRunNotActive) {
+	if err := f.s.SetReviewRunPhase(f.ctx, queued.ID, "", store.RunPhaseReviewing); !errors.Is(err, store.ErrRunNotActive) {
 		t.Errorf("SetReviewRunPhase(queued) error = %v, want ErrRunNotActive", err)
 	}
 
 	if _, _, err := f.s.ClaimReviewRun(f.ctx, running.ID); err != nil {
 		t.Fatalf("ClaimReviewRun() error = %v", err)
 	}
-	if err := f.s.SetReviewRunPhase(f.ctx, running.ID, store.RunPhaseFinishing); err != nil {
+	if err := f.s.SetReviewRunPhase(f.ctx, running.ID, "", store.RunPhaseFinishing); err != nil {
 		t.Fatalf("SetReviewRunPhase(finishing) error = %v", err)
 	}
-	if err := f.s.CompleteReviewRun(f.ctx, running.ID, store.RunCompletion{Status: store.RunSucceeded}); err != nil {
+	if err := f.s.CompleteReviewRun(f.ctx, running.ID, "", store.RunCompletion{Status: store.RunSucceeded}); err != nil {
 		t.Fatalf("CompleteReviewRun() error = %v", err)
 	}
 	got, _ = f.s.ReviewRun(f.ctx, running.ID)
 	if got.Phase != "" || got.PhaseStartedAt != nil {
 		t.Errorf("finished run kept its phase: %q/%v", got.Phase, got.PhaseStartedAt)
 	}
-	if err := f.s.SetReviewRunPhase(f.ctx, running.ID, store.RunPhasePreparing); !errors.Is(err, store.ErrRunNotActive) {
+	if err := f.s.SetReviewRunPhase(f.ctx, running.ID, "", store.RunPhasePreparing); !errors.Is(err, store.ErrRunNotActive) {
 		t.Errorf("SetReviewRunPhase(finished) error = %v, want ErrRunNotActive", err)
 	}
 }
@@ -76,7 +76,7 @@ func TestListActiveReviewRunsScopesAndOrders(t *testing.T) {
 	prB := f.openPR(repoB.ID, 2, store.StatusPending, false)
 	queued := f.run(prA, store.RunQueued)
 	running := f.run(prB, store.RunRunning)
-	if err := f.s.SetReviewRunPhase(f.ctx, running.ID, store.RunPhaseReviewing); err != nil {
+	if err := f.s.SetReviewRunPhase(f.ctx, running.ID, "", store.RunPhaseReviewing); err != nil {
 		t.Fatalf("SetReviewRunPhase() error = %v", err)
 	}
 
@@ -112,7 +112,7 @@ func TestListActiveReviewRunsScopesAndOrders(t *testing.T) {
 		t.Errorf("second admin run = %+v, want the queued run", runs[1])
 	}
 
-	if err := f.s.CompleteReviewRun(f.ctx, running.ID, store.RunCompletion{Status: store.RunSucceeded}); err != nil {
+	if err := f.s.CompleteReviewRun(f.ctx, running.ID, "", store.RunCompletion{Status: store.RunSucceeded}); err != nil {
 		t.Fatalf("CompleteReviewRun() error = %v", err)
 	}
 	runs, _ = f.s.ListActiveReviewRuns(f.ctx, admin)

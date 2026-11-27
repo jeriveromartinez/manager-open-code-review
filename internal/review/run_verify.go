@@ -248,7 +248,7 @@ func (r *Runner) verifyFindings(ctx context.Context, run store.ReviewRun, cfg st
 			log.Log(ctx, "worker", "", "warn", logPhaseOCR, fmt.Sprintf(
 				"verificación omitida (%s); %d hallazgo(s) conservan su estado", code, len(pending)))
 		} else {
-			r.setPhase(ctx, run.ID, store.RunPhaseVerifying, log)
+			r.setPhase(ctx, run.ID, run.LeaseOwner, store.RunPhaseVerifying, log)
 			log.Log(ctx, "worker", "verify", "info", logPhaseOCR, fmt.Sprintf(
 				"verificando %d hallazgo(s) en %d archivo(s)", len(selected), len(paths)))
 			verifyCtx, cancel := verifyContext(ctx, timeout)

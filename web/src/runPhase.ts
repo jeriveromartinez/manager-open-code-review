@@ -5,6 +5,7 @@ const phaseLabels: Record<string, string> = {
   chunking: 'Revisando por trozos',
   verifying: 'Verificando con OCR',
   finishing: 'Cerrando la revisión',
+  recovering: 'Recuperando la revisión',
 }
 
 /**

@@ -278,3 +278,51 @@ func TestReviewClientWithoutSweeper(t *testing.T) {
 		t.Errorf("Stop() error = %v", err)
 	}
 }
+
+// TestReviewRecoveryJobIsNotHiddenByTheAbandonedOne pins the delivery that
+// recovers an orphan: the job that claimed the run and died is still "running"
+// in River, so the recovery delivery needs its own uniqueness key (#228).
+func TestReviewRecoveryJobIsNotHiddenByTheAbandonedOne(t *testing.T) {
+	s := testutil.NewStore(t)
+	box, err := crypto.NewBox(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatalf("create crypto box: %v", err)
+	}
+	client, err := jobs.NewReviewClient(s.Pool, &review.Runner{Store: s, Box: box},
+		&review.ProfileChecker{Store: s, Box: box}, 1)
+	if err != nil {
+		t.Fatalf("NewReviewClient() error = %v", err)
+	}
+	ctx := context.Background()
+	args := jobs.ReviewRunArgs{RunID: 42}
+
+	abandoned, err := client.Insert(ctx, args, nil)
+	if err != nil {
+		t.Fatalf("insert abandoned job: %v", err)
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE river_job SET state = 'running', attempted_at = now() WHERE id = $1`, abandoned.Job.ID); err != nil {
+		t.Fatalf("mark abandoned job running: %v", err)
+	}
+
+	enqueuer := jobs.NewEnqueuer(client)
+	if err := enqueuer.EnqueueReviewRecovery(ctx, 42, 1); err != nil {
+		t.Fatalf("EnqueueReviewRecovery() error = %v", err)
+	}
+	recovery, err := client.Insert(ctx, jobs.ReviewRunArgs{RunID: 42, Recovery: 1}, nil)
+	if err != nil {
+		t.Fatalf("insert duplicate recovery job: %v", err)
+	}
+	if !recovery.UniqueSkippedAsDuplicate {
+		t.Error("a second live recovery job of the same generation was not deduplicated")
+	}
+
+	var count int
+	if err := s.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM river_job WHERE kind = 'review_run' AND args->>'recovery_generation' = '1'`).Scan(&count); err != nil {
+		t.Fatalf("count recovery jobs: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("recovery jobs = %d, want one next to the abandoned job", count)
+	}
+}

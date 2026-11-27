@@ -90,6 +90,15 @@ func (j *runTestJobs) EnqueueReview(_ context.Context, id uint) error {
 	return nil
 }
 
+// EnqueueReviewRecovery records the re-delivery of an orphaned run next to the
+// ordinary review jobs; the tests assert which runs the sweep selected.
+func (j *runTestJobs) EnqueueReviewRecovery(_ context.Context, id uint, _ int) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.review = append(j.review, id)
+	return nil
+}
+
 func (j *runTestJobs) EnqueuePublish(_ context.Context, id uint) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -2863,11 +2872,20 @@ func TestRunDuplicateDeliveryIsNoop(t *testing.T) {
 		t.Fatalf("first Run() error = %v", err)
 	}
 	afterFirst := f.events.orchestration()
+	callsAfterFirst := f.ocrCalls(t)
 	if err := r.Run(f.ctx, f.runID); err != nil {
 		t.Fatalf("second Run() error = %v", err)
 	}
-	if got := f.jobs.published(); len(got) != 1 {
-		t.Errorf("EnqueuePublish calls = %v, want one", got)
+	// The review already ran, so the re-delivery must not execute it again.
+	// The result is durable but its delivery is still owed until the publish
+	// worker settles it, so the re-delivery schedules that publication again;
+	// River's uniqueness and the publisher's recorded steps make it one
+	// delivery with no duplicated comment (#228).
+	if got := f.ocrCalls(t); got != callsAfterFirst {
+		t.Errorf("second delivery OCR calls = %d, want the %d of the first run", got, callsAfterFirst)
+	}
+	if got := f.jobs.published(); len(got) != 2 || got[0] != f.runID || got[1] != f.runID {
+		t.Errorf("EnqueuePublish calls = %v, want the owed publication re-scheduled", got)
 	}
 	if got := f.events.orchestration(); !reflect.DeepEqual(got, afterFirst) {
 		t.Errorf("second delivery published %+v, want the sequence unchanged %+v", got, afterFirst)
@@ -3629,5 +3647,126 @@ func TestRunRecordsPolicyResolvedAtExecutionStart(t *testing.T) {
 	}
 	if run.PolicyObservation != resolved.Observation {
 		t.Errorf("policy observation = %v, want %v", run.PolicyObservation, resolved.Observation)
+	}
+}
+
+// abandonAfterClaim reproduces a worker whose process died between claiming
+// the run and starting the pipeline: the row is running but its lease ages out
+// with no heartbeat (#228).
+func (f *runTestFixture) abandonAfterClaim(t *testing.T) store.ReviewRun {
+	t.Helper()
+
+	run, claimed, err := f.s.ClaimReviewRun(f.ctx, f.runID)
+	if err != nil || !claimed {
+		t.Fatalf("claim for the crashed worker = %v/%v", claimed, err)
+	}
+	stale := time.Now().UTC().Add(-store.RunLeaseTTL - time.Minute)
+	if err := f.s.DB.WithContext(f.ctx).Model(&store.ReviewRun{}).
+		Where("id = ?", f.runID).Update("heartbeat_at", stale).Error; err != nil {
+		t.Fatalf("age the claim lease: %v", err)
+	}
+	return run
+}
+
+// TestRunRecoversCrashAfterClaimAndReusesUnits is the #228 acceptance test for
+// the claim crash: the re-delivery recovers the orphan inside the lease window,
+// reuses the compatible units and finalizes the run exactly once.
+func TestRunRecoversCrashAfterClaimAndReusesUnits(t *testing.T) {
+	f := newChunkRunFixture(t)
+	root := t.TempDir()
+	writeRunTestFile(t, filepath.Join(root, "main.json"), nativeChunkMainOutput("too_large"))
+	phaseDir(t, root, "0",
+		nativeChunkOutput("big.go", 20, 20, "Fallo del trozo uno", "primer cuerpo", 50),
+		nativeChunkOutput("big.go", 24, 24, "Fallo del trozo dos", "segundo cuerpo", 50),
+	)
+	f.startInterruptedAttempt(t, root, 2)
+	f.abandonAfterClaim(t)
+
+	phaseDir(t, root, "1",
+		nativeChunkOutput("big.go", 24, 24, "Fallo del trozo dos", "segundo cuerpo", 50),
+	)
+	t.Setenv("RUN_FAKE_OCR_PHASE", "1")
+	t.Setenv("RUN_FAKE_OCR_COUNTER", filepath.Join(root, "counter1"))
+	t.Setenv("RUN_FAKE_OCR_HANG_CHUNK", "")
+	before := f.ocrCalls(t)
+	if err := f.chunkRunner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("recovered Run() error = %v", err)
+	}
+	if got := f.ocrCalls(t) - before; got != 1 {
+		t.Fatalf("recovered OCR calls = %d, want only the pending chunk", got)
+	}
+	run := assertRunTerminal(t, f, store.RunSucceeded, "")
+	if run.RecoveryCount != 1 {
+		t.Errorf("recovery count = %d, want 1", run.RecoveryCount)
+	}
+	if got := f.jobs.published(); len(got) != 1 || got[0] != f.runID {
+		t.Errorf("EnqueuePublish calls = %v, want exactly [%d]", got, f.runID)
+	}
+}
+
+// TestRunRedeliveryOnlyPublishesStoredResult covers a crash after the terminal
+// write: the result is already durable, so the re-delivery must resume the
+// missing publication instead of reviewing again.
+func TestRunRedeliveryOnlyPublishesStoredResult(t *testing.T) {
+	f := newRunTestFixture(t)
+	claimed, ok, err := f.s.ClaimReviewRun(f.ctx, f.runID)
+	if err != nil || !ok {
+		t.Fatalf("claim = %v/%v", ok, err)
+	}
+	if err := f.s.CompleteReviewRun(f.ctx, f.runID, claimed.LeaseOwner, store.RunCompletion{
+		Status: store.RunSucceeded,
+	}); err != nil {
+		t.Fatalf("CompleteReviewRun: %v", err)
+	}
+	before := f.ocrCalls(t)
+
+	if err := f.runner().Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("redelivery Run() error = %v", err)
+	}
+	if got := f.ocrCalls(t) - before; got != 0 {
+		t.Errorf("redelivery OCR calls = %d, want 0: the result is already stored", got)
+	}
+	if got := f.jobs.published(); len(got) != 1 || got[0] != f.runID {
+		t.Errorf("EnqueuePublish calls = %v, want the pending publication [%d]", got, f.runID)
+	}
+}
+
+// TestRunRejectSecondWorkerRecovering keeps one finalization when two workers
+// meet the same orphan: the one that owns the lease executes and publishes,
+// the other is a no-op.
+func TestRunRejectSecondWorkerRecovering(t *testing.T) {
+	f := newRunTestFixture(t)
+	t.Setenv("RUN_FAKE_OCR_SLEEP", "2")
+	f.abandonAfterClaim(t)
+
+	first := f.runner()
+	done := make(chan error, 1)
+	go func() { done <- first.Run(f.ctx, f.runID) }()
+	f.waitPhase(t, store.RunPhaseReviewing)
+
+	second := f.runner()
+	if err := second.Run(f.ctx, f.runID); err != nil {
+		t.Fatalf("second worker Run() error = %v", err)
+	}
+	if stored := f.loadRun(t); stored.Status != store.RunRunning {
+		t.Fatalf("second worker changed the run to %q while the owner was executing", stored.Status)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("owner Run() error = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("owner did not finish")
+	}
+	assertRunTerminal(t, f, store.RunSucceeded, "")
+	// The second worker neither executed the review nor enqueued a second one:
+	// only the owner's pass and its single publication remain.
+	if got := f.ocrCalls(t); got != 1 {
+		t.Errorf("OCR calls = %d, want the owner's single pass", got)
+	}
+	if got := f.jobs.published(); len(got) != 1 || got[0] != f.runID {
+		t.Errorf("EnqueuePublish calls = %v, want exactly [%d]", got, f.runID)
 	}
 }

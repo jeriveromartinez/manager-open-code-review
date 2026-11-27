@@ -130,10 +130,14 @@ type RunnerConfig struct {
 	Timeout time.Duration
 }
 
-// Enqueuer is the minimal queue interface used by the review worker. Task 8
-// reuses this exact interface for the trigger and the health checks.
+// Enqueuer schedules the review, publication and health jobs the runner owes.
 type Enqueuer interface {
 	EnqueueReview(ctx context.Context, runID uint) error
+	// EnqueueReviewRecovery schedules a re-delivery of a run whose lease
+	// expired. The generation distinguishes the recovery delivery from the
+	// abandoned job of an earlier attempt, which River would otherwise treat as
+	// a live duplicate; the claim still lets only one worker recover it.
+	EnqueueReviewRecovery(ctx context.Context, runID uint, generation int) error
 	EnqueuePublish(ctx context.Context, runID uint) error
 	EnqueueLLMHealth(ctx context.Context, profileID uint) error
 }
@@ -239,9 +243,9 @@ func (r *Runner) announce(ctx context.Context, run store.ReviewRun) {
 // terminal or superseded run rejects the write, which is expected when a phase
 // update races the completion: the review must never fail for it, so only a
 // real write error is logged.
-func (r *Runner) setPhase(ctx context.Context, runID uint, phase string, log *runLogSink) {
-	if err := r.Store.SetReviewRunPhase(ctx, runID, phase); err != nil {
-		if !errors.Is(err, store.ErrRunNotActive) {
+func (r *Runner) setPhase(ctx context.Context, runID uint, owner, phase string, log *runLogSink) {
+	if err := r.Store.SetReviewRunPhase(ctx, runID, owner, phase); err != nil {
+		if !errors.Is(err, store.ErrRunNotActive) && !errors.Is(err, store.ErrRunLeaseLost) {
 			log.Log(ctx, "worker", "", "warn", phase,
 				fmt.Sprintf("no se pudo guardar la fase: %v", err))
 		}
@@ -278,18 +282,28 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		return fmt.Errorf("claim review run %d: %w", runID, err)
 	}
 	if !claimed {
-		return nil
+		// The result may already be stored by a worker that died before
+		// enqueueing its publication, or the recovery budget may have just
+		// failed the run. Either way only the delivery is owed, and the
+		// publication path settles it idempotently (#228).
+		return r.resumePublication(ctx, run)
 	}
 	r.announce(ctx, run)
 	log := newRunLogSink(r.Store, r.Events, run.ID, 0)
-	log.Log(ctx, "worker", "", "info", logPhaseClaim, fmt.Sprintf(
-		"run %d reclamado: PR #%d, head %s, intento %d", run.ID, run.PullRequestID, run.HeadSHA, run.Attempt))
+	if run.RecoveryCount > 0 {
+		log.Log(ctx, "worker", "", "warn", logPhaseClaim, fmt.Sprintf(
+			"run %d recuperado (intento de recuperación %d): %s",
+			run.ID, run.RecoveryCount, run.ErrorMessage))
+	} else {
+		log.Log(ctx, "worker", "", "info", logPhaseClaim, fmt.Sprintf(
+			"run %d reclamado: PR #%d, head %s, intento %d", run.ID, run.PullRequestID, run.HeadSHA, run.Attempt))
+	}
 	// The shutdown can cancel the job context between the claim and the first
 	// database call. Do not start a pipeline that is already cancelled.
 	if ctx.Err() != nil {
 		return r.requeueInterrupted(ctx, run, log)
 	}
-	r.setPhase(ctx, run.ID, store.RunPhasePreparing, log)
+	r.setPhase(ctx, run.ID, run.LeaseOwner, store.RunPhasePreparing, log)
 
 	var cfg store.ReviewConfig
 	var outcome runOutcome
@@ -297,9 +311,10 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	staleToken := staleCloneToken(run.CloneTokenExpiresAt, time.Now())
 	if staleToken && run.Attempt <= maxCloneTokenWaits {
 		log.Log(ctx, "worker", "", "warn", logPhasePrepare, cloneTokenWaitMessage)
-		if err := r.Store.RequeueReviewRun(ctx, run.ID, "token_expired", cloneTokenWaitMessage); err != nil {
-			if errors.Is(err, store.ErrRunNotActive) {
-				// A new head superseded the run while it waited for a token.
+		if err := r.Store.RequeueReviewRun(ctx, run.ID, run.LeaseOwner, "token_expired", cloneTokenWaitMessage); err != nil {
+			if errors.Is(err, store.ErrRunNotActive) || errors.Is(err, store.ErrRunLeaseLost) {
+				// A new head superseded the run, or another worker recovered
+				// it, while it waited for a token.
 				return nil
 			}
 			return fmt.Errorf("requeue review run %d for token refresh: %w", runID, err)
@@ -316,11 +331,11 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 			log.Log(ctx, "worker", "", "error", logPhasePrepare,
 				fmt.Sprintf("configuración de revisión: %v", err))
 			outcome = (&runOutcome{}).failed(fmt.Errorf("configuración de revisión: %w", err), "config")
-		} else if policyErr := r.Store.SetReviewRunPolicy(ctx, run.ID, cfg.PolicyRevision, cfg.PolicyObservation); policyErr != nil {
+		} else if policyErr := r.Store.SetReviewRunPolicy(ctx, run.ID, run.LeaseOwner, cfg.PolicyRevision, cfg.PolicyObservation); policyErr != nil {
 			// The policy is re-resolved here because it can change while the run
 			// waits. Recording it before executing keeps the revision on the run
 			// describing what it actually enforced (#153).
-			if errors.Is(policyErr, store.ErrRunNotActive) {
+			if errors.Is(policyErr, store.ErrRunNotActive) || errors.Is(policyErr, store.ErrRunLeaseLost) {
 				return nil
 			}
 			log.Log(ctx, "worker", "", "error", logPhasePrepare,
@@ -345,10 +360,11 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	if retryErr != nil {
 		var capacity *ProfileCapacityError
 		if errors.As(retryErr, &capacity) && run.Attempt <= maxCapacityWaits {
-			if err := r.Store.RequeueReviewRun(persistCtx, run.ID, capacityErrorCode, capacity.Error()); err != nil {
-				if errors.Is(err, store.ErrRunNotActive) {
-					// A new head superseded the run while it waited for a slot;
-					// there is nothing left to retry.
+			if err := r.Store.RequeueReviewRun(persistCtx, run.ID, run.LeaseOwner, capacityErrorCode, capacity.Error()); err != nil {
+				if errors.Is(err, store.ErrRunNotActive) || errors.Is(err, store.ErrRunLeaseLost) {
+					// A new head superseded the run, or another worker
+					// recovered it, while it waited for a slot; there is
+					// nothing left to retry.
 					return nil
 				}
 				return fmt.Errorf("requeue review run %d: %w", runID, err)
@@ -409,7 +425,15 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 		VerifyUsage:          outcome.verifyUsage,
 		ArchitectureAnalysis: outcome.architecture,
 	}
-	if err := r.Store.CompleteReviewRun(persistCtx, runID, completion); err != nil {
+	if err := r.Store.CompleteReviewRun(persistCtx, runID, run.LeaseOwner, completion); err != nil {
+		if errors.Is(err, store.ErrRunLeaseLost) {
+			// Another execution recovered the run after this lease expired.
+			// Its state and units belong to the new owner, so this worker must
+			// not delete them nor publish its stale result (#228).
+			log.Log(persistCtx, "worker", "", "warn", logPhaseFinish,
+				"otro worker recuperó la revisión; no se guarda este resultado")
+			return nil
+		}
 		if errors.Is(err, store.ErrRunNotActive) {
 			// A new head superseded this run while it was executing. The
 			// trigger already cancelled its check; persisting or publishing
@@ -494,6 +518,29 @@ func (r *Runner) Run(ctx context.Context, runID uint) error {
 	return notifyErr
 }
 
+// resumePublication schedules the delivery of a run whose terminal result is
+// already stored. It is the only work a re-delivery owes once the claim reports
+// the run is no longer claimable. Any other state (another live owner, a queued
+// run being handled elsewhere) needs nothing from this delivery.
+func (r *Runner) resumePublication(ctx context.Context, run store.ReviewRun) error {
+	if run.ID == 0 || !run.PublishPending || !isTerminalRunStatus(run.Status) || r.Jobs == nil {
+		return nil
+	}
+	slog.Info("resuming owed publication of review run", "run_id", run.ID, "status", run.Status)
+	if err := r.Jobs.EnqueuePublish(ctx, run.ID); err != nil {
+		return fmt.Errorf("enqueue publish for review run %d: %w", run.ID, err)
+	}
+	return nil
+}
+
+func isTerminalRunStatus(status string) bool {
+	switch status {
+	case store.RunSucceeded, store.RunInconclusive, store.RunFailed, store.RunSuperseded:
+		return true
+	}
+	return false
+}
+
 // applyAutoTriage records every verifier answer and applies the decisions the
 // policy accepted. It runs after the findings are durable, so a crash here
 // loses the triage but never the review. A pull request whose head moved while
@@ -572,9 +619,10 @@ func (r *Runner) requeueInterrupted(ctx context.Context, run store.ReviewRun, lo
 	persistCtx, cancel := terminalContext(ctx)
 	defer cancel()
 	log.Log(persistCtx, "worker", "", "warn", logPhaseFinish, interruptedByShutdown)
-	if err := r.Store.RequeueReviewRun(persistCtx, run.ID, store.RunErrorInterrupted, interruptedByShutdown); err != nil {
-		if errors.Is(err, store.ErrRunNotActive) {
-			// A new head superseded the run while the worker stopped.
+	if err := r.Store.RequeueReviewRun(persistCtx, run.ID, run.LeaseOwner, store.RunErrorInterrupted, interruptedByShutdown); err != nil {
+		if errors.Is(err, store.ErrRunNotActive) || errors.Is(err, store.ErrRunLeaseLost) {
+			// A new head superseded the run, or another worker already
+			// recovered it, while this one stopped.
 			return nil
 		}
 		return fmt.Errorf("requeue interrupted review run %d: %w", run.ID, err)
@@ -690,9 +738,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	// The heartbeat reports that the worker is alive, not that the pipeline
 	// still has budget: it outlives the review deadline so a run that overran
 	// it is classified as overrun and not as a lost worker (#130).
-	stopHeartbeat := r.heartbeat(pipelineCtx, run.ID, log, cancelPipeline)
+	stopHeartbeat := r.heartbeat(pipelineCtx, run.ID, run.LeaseOwner, log, cancelPipeline)
 	defer stopHeartbeat()
-	r.setPhase(runCtx, run.ID, store.RunPhaseCloning, log)
+	r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhaseCloning, log)
 	log.Log(runCtx, "worker", "", "info", logPhaseClone,
 		fmt.Sprintf("clonando %s (%s → %s)", cfg.Repo.FullName, baseRef, headRef))
 	cloneStarted := time.Now()
@@ -756,7 +804,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		}
 	}
 
-	r.setPhase(runCtx, run.ID, store.RunPhasePreparing, log)
+	r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhasePreparing, log)
 	excludePatterns, dropped, err := policyExcludePatterns(cfg.Policy.ExcludeGlobs)
 	if err != nil {
 		log.Log(runCtx, "worker", "", "error", logPhasePolicy,
@@ -1209,7 +1257,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			}
 		}
 
-		attempt, startErr := r.Store.StartReviewAttempt(runCtx, run.ID, candidate, attemptConfigRevision(cfg, candidate))
+		attempt, startErr := r.Store.StartReviewAttempt(runCtx, run.ID, run.LeaseOwner, candidate, attemptConfigRevision(cfg, candidate))
 		if startErr != nil {
 			log.Log(runCtx, "worker", "", "error", logPhasePolicy,
 				fmt.Sprintf("no se pudo registrar el intento con el perfil %d: %v", candidate.ID, startErr))
@@ -1227,7 +1275,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			excludes, background, fromSHA, headSHA,
 			effort, ceiling, attemptBudget, timeout, log.OCRLogger(runCtx, "main"))
 
-		r.setPhase(runCtx, run.ID, store.RunPhaseReviewing, log)
+		r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhaseReviewing, log)
 		slog.Info("native OCR review started", "run_id", run.ID, "profile_id", candidate.ID,
 			"attempt", attemptSeq, "from", fromSHA)
 		log.Log(runCtx, "worker", "main", "info", logPhaseOCR,
@@ -1240,7 +1288,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 				"reanudando la sesión de OCR de un intento anterior")
 		}
 		reviewer.OnSession = func(sessionID string) {
-			r.saveSession(runCtx, run.ID, sessionID, scope.key())
+			r.saveSession(runCtx, run.ID, run.LeaseOwner, sessionID, scope.key())
 		}
 		res, mainRaw, nativeErr = r.runNativeReview(runCtx, candidate.ID, reviewer, log, "main")
 		var capacity *ProfileCapacityError
@@ -1251,14 +1299,14 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			// retry the pending main unit once without --resume.
 			log.Log(runCtx, "worker", "main", "warn", logPhaseOCR,
 				fmt.Sprintf("la sesión de OCR no se pudo reanudar; se reintenta la pasada completa: %v", nativeErr))
-			r.clearSession(runCtx, run.ID)
+			r.clearSession(runCtx, run.ID, run.LeaseOwner)
 			reviewer.ResumeSession = ""
 			sessionBefore = snapshotOCRSessions(reviewer.Home)
 			res, mainRaw, nativeErr = r.runNativeReview(runCtx, candidate.ID, reviewer, log, "main")
 		}
 		if nativeErr != nil {
 			if sessionID := newestOCRSession(reviewer.Home, sessionBefore); sessionID != "" {
-				r.saveSession(runCtx, run.ID, sessionID, scope.key())
+				r.saveSession(runCtx, run.ID, run.LeaseOwner, sessionID, scope.key())
 			}
 			log.Log(runCtx, "worker", "main", "error", logPhaseOCR, fmt.Sprintf("OCR falló: %v", nativeErr))
 			if errors.As(nativeErr, &capacity) {
@@ -1294,7 +1342,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			sessionID = newestOCRSession(reviewer.Home, sessionBefore)
 		}
 		if sessionID != "" {
-			r.saveSession(runCtx, run.ID, sessionID, scope.key())
+			r.saveSession(runCtx, run.ID, run.LeaseOwner, sessionID, scope.key())
 		}
 
 		status, code = nativeOutcome(res)
@@ -1460,7 +1508,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	// the pull request unreviewed.
 	var chunked chunkSummary
 	if paths := tooLargePaths(res); len(paths) > 0 && canChunkNativeRun(status, code) {
-		r.setPhase(runCtx, run.ID, store.RunPhaseChunking, log)
+		r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhaseChunking, log)
 		log.Log(runCtx, "worker", "", "info", logPhaseChunks, fmt.Sprintf(
 			"%d archivo(s) demasiado grandes para el run principal; se revisan por partes", len(paths)))
 		chunked = r.reviewTooLargeFiles(runCtx, run.ID, activeProfile.ID, reviewer, headSHA, paths, budget, log, resume, activeScope)
@@ -1494,7 +1542,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 		}
 		candidates := textRouteCandidates(inventory, excludePatterns, covered, attempted, res)
 		if len(candidates) > 0 {
-			r.setPhase(runCtx, run.ID, store.RunPhaseChunking, log)
+			r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhaseChunking, log)
 			log.Log(runCtx, "worker", "", "info", logPhaseChunks, fmt.Sprintf(
 				"%d archivo(s) de texto fuera del reconocimiento de OCR; se revisan por la ruta de texto", len(candidates)))
 			textRouted = r.reviewTextFiles(runCtx, run.ID, cfg.Profile.ID, reviewer, fromSHA, headSHA, candidates, budget, out.tokens, out.tokensKnown, log)
@@ -1543,7 +1591,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 	out.summary = coverageSummaryText(status, reviewed, reviewFindings)
 
 	out.coverage = coverageJSONWithFiles(reviewed, skipped, excluded, notRequired, files)
-	r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
+	r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhaseFinishing, log)
 	log.Log(runCtx, "worker", "", "info", logPhaseFinish, fmt.Sprintf(
 		"cobertura final: %d revisados, %d omitidos, %d excluidos; %d hallazgo(s) tras deduplicar",
 		reviewed, skipped, excluded, reviewFindings))
@@ -1580,7 +1628,7 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 			out = out.inconclusive(fmt.Errorf(
 				"fase verificación: el verificador OCR falló: %s", out.verificationError), "verifier_error")
 		}
-		r.setPhase(runCtx, run.ID, store.RunPhaseFinishing, log)
+		r.setPhase(runCtx, run.ID, run.LeaseOwner, store.RunPhaseFinishing, log)
 		return out, nil
 	case store.RunInconclusive:
 		message := chunkedInconclusiveMessage(res, code, reviewed, skipped)
@@ -1597,8 +1645,9 @@ func (r *Runner) execute(ctx context.Context, run store.ReviewRun, cfg store.Rev
 
 // heartbeat keeps the run marked alive while the worker executes it. When the
 // store reports the run is no longer running, the watchdog or a new head closed
-// it, so abort cancels the pipeline instead of letting it finish blind.
-func (r *Runner) heartbeat(ctx context.Context, runID uint, log *runLogSink, abort context.CancelFunc) func() {
+// it, or that another execution recovered the expired lease, so abort cancels
+// the pipeline instead of letting it finish blind.
+func (r *Runner) heartbeat(ctx context.Context, runID uint, owner string, log *runLogSink, abort context.CancelFunc) func() {
 	interval := r.heartbeatEvery
 	if interval <= 0 {
 		interval = heartbeatInterval
@@ -1617,10 +1666,15 @@ func (r *Runner) heartbeat(ctx context.Context, runID uint, log *runLogSink, abo
 				return
 			case <-ticker.C:
 				writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), heartbeatWriteTimeout)
-				err := r.Store.HeartbeatReviewRun(writeCtx, runID)
+				err := r.Store.HeartbeatReviewRun(writeCtx, runID, owner)
 				cancel()
 				switch {
 				case err == nil:
+				case errors.Is(err, store.ErrRunLeaseLost):
+					log.Log(context.WithoutCancel(ctx), "worker", "", "warn", logPhaseFinish,
+						"otro worker recuperó el run tras expirar la concesión; se cancela la revisión en curso")
+					abort()
+					return
 				case errors.Is(err, store.ErrRunNotActive):
 					log.Log(context.WithoutCancel(ctx), "worker", "", "warn", logPhaseFinish,
 						"el run ya no está activo; se cancela la revisión en curso")

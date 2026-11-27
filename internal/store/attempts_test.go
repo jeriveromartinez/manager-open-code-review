@@ -198,7 +198,7 @@ func TestReviewAttemptsAttributeExecutionProfileAndUsage(t *testing.T) {
 		t.Fatalf("ClaimReviewRun = %v/%v", ok, err)
 	}
 
-	first, err := f.s.StartReviewAttempt(f.ctx, run.ID, executed, "rev-1")
+	first, err := f.s.StartReviewAttempt(f.ctx, run.ID, "", executed, "rev-1")
 	if err != nil {
 		t.Fatalf("StartReviewAttempt(first): %v", err)
 	}
@@ -220,7 +220,7 @@ func TestReviewAttemptsAttributeExecutionProfileAndUsage(t *testing.T) {
 		t.Fatalf("FinishReviewAttempt(first): %v", err)
 	}
 
-	second, err := f.s.StartReviewAttempt(f.ctx, run.ID, executed, "rev-2")
+	second, err := f.s.StartReviewAttempt(f.ctx, run.ID, "", executed, "rev-2")
 	if err != nil {
 		t.Fatalf("StartReviewAttempt(second): %v", err)
 	}
@@ -233,7 +233,7 @@ func TestReviewAttemptsAttributeExecutionProfileAndUsage(t *testing.T) {
 		t.Fatalf("FinishReviewAttempt(second): %v", err)
 	}
 
-	if err := f.s.CompleteReviewRun(f.ctx, claimed.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, claimed.ID, "", store.RunCompletion{
 		Status: store.RunSucceeded, TokensKnown: true, Tokens: store.RunUsage{Total: 150},
 	}); err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)
@@ -272,11 +272,11 @@ func TestCompleteReviewRunClosesOpenAttempt(t *testing.T) {
 	if _, ok, err := f.s.ClaimReviewRun(f.ctx, run.ID); err != nil || !ok {
 		t.Fatalf("ClaimReviewRun = %v/%v", ok, err)
 	}
-	attempt, err := f.s.StartReviewAttempt(f.ctx, run.ID, profile, "rev")
+	attempt, err := f.s.StartReviewAttempt(f.ctx, run.ID, "", profile, "rev")
 	if err != nil {
 		t.Fatalf("StartReviewAttempt: %v", err)
 	}
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{Status: store.RunFailed}); err != nil {
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{Status: store.RunFailed}); err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)
 	}
 
@@ -305,7 +305,7 @@ func TestProfileTokenUsageKeepsRunTokensWhenAttemptsAreUnknown(t *testing.T) {
 	if _, ok, err := f.s.ClaimReviewRun(f.ctx, run.ID); err != nil || !ok {
 		t.Fatalf("ClaimReviewRun = %v/%v", ok, err)
 	}
-	attempt, err := f.s.StartReviewAttempt(f.ctx, run.ID, profile, "rev")
+	attempt, err := f.s.StartReviewAttempt(f.ctx, run.ID, "", profile, "rev")
 	if err != nil {
 		t.Fatalf("StartReviewAttempt: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestProfileTokenUsageKeepsRunTokensWhenAttemptsAreUnknown(t *testing.T) {
 		"interrupted", "", nil, false); err != nil {
 		t.Fatalf("FinishReviewAttempt: %v", err)
 	}
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{
 		Status: store.RunFailed, TokensKnown: true, Tokens: store.RunUsage{Total: 77},
 	}); err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)

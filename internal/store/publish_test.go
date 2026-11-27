@@ -17,7 +17,7 @@ func TestPublishIntentLifecycle(t *testing.T) {
 	pr := f.openPR(installID, 11, store.StatusReviewing, false)
 	run := f.run(pr, store.RunRunning)
 
-	if err := f.s.CompleteReviewRun(f.ctx, run.ID, store.RunCompletion{
+	if err := f.s.CompleteReviewRun(f.ctx, run.ID, "", store.RunCompletion{
 		Status: store.RunSucceeded,
 	}); err != nil {
 		t.Fatalf("CompleteReviewRun: %v", err)

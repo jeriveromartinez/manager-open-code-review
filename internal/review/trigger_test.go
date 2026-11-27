@@ -53,6 +53,13 @@ func (j *triggerTestJobs) EnqueueReview(_ context.Context, runID uint) error {
 	return nil
 }
 
+func (j *triggerTestJobs) EnqueueReviewRecovery(_ context.Context, runID uint, _ int) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.reviews = append(j.reviews, runID)
+	return nil
+}
+
 func (j *triggerTestJobs) EnqueuePublish(_ context.Context, runID uint) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()

@@ -288,8 +288,9 @@ func stageForPhase(phase string) string {
 	switch phase {
 	// An empty phase is a run claimed before the first phase write, or a run
 	// that predates phases (#123); it is still in preparation, so it belongs
-	// to the clone stage rather than disappearing from the report.
-	case "", RunPhasePreparing, RunPhaseCloning:
+	// to the clone stage rather than disappearing from the report. A recovering
+	// run is also still preparing the pipeline (#228).
+	case "", RunPhasePreparing, RunPhaseCloning, RunPhaseRecovering:
 		return StageClone
 	case RunPhaseReviewing, RunPhaseChunking, RunPhaseFinishing:
 		return StageReview

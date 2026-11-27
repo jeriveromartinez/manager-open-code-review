@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -29,6 +30,10 @@ var (
 	// ErrRunNotActive is returned when a run is completed after it stopped being
 	// the running run (for example because a new head superseded it).
 	ErrRunNotActive = errors.New("review run is no longer active")
+	// ErrRunLeaseLost is returned when a run is still running but owned by
+	// another execution: the previous worker recovered it after its lease
+	// expired, so this one must stop writing (#228).
+	ErrRunLeaseLost = errors.New("review run lease lost")
 	// ErrFindingResolved is returned when triaging a finding the code already
 	// fixed: confirming it would reopen it and re-block the gate.
 	ErrFindingResolved = errors.New("finding is resolved")
@@ -1244,46 +1249,265 @@ func (s *Store) CreateReviewRun(ctx context.Context, in ReviewRun) (ReviewRun, e
 	return in, nil
 }
 
-// ClaimReviewRun atomically moves a queued run to running. A false result means
-// another worker claimed it (or it is no longer queued) and is not an error.
+// RunLeaseTTL is how long a running attempt may stay without a heartbeat before
+// another execution may recover it. It matches the watchdog's heartbeat
+// tolerance, so a live worker that is merely slow is never mistaken for a lost
+// one.
+const RunLeaseTTL = 3 * time.Minute
+
+// MaxRunRecoveries bounds how many times an orphaned attempt is resumed. Once
+// spent, the run ends in a terminal state and its check is closed through the
+// publication path.
+const MaxRunRecoveries = 3
+
+// ClaimReviewRun leases a queued run or recovers a running one whose lease
+// expired, and returns the run as it stands in the same transaction. A false
+// result means another worker owns it, it is queued for something else, or it
+// is terminal; the returned run is still the consistent state the caller must
+// inspect (a terminal run with an owed publication is resumed by its caller).
+// The returned LeaseOwner is the only token that can write or complete the run.
 func (s *Store) ClaimReviewRun(ctx context.Context, id uint) (ReviewRun, bool, error) {
-	now := time.Now().UTC()
-	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
-		Where("id = ? AND status = ?", id, RunQueued).
-		Updates(map[string]any{
-			"status":     RunRunning,
-			"started_at": now,
-			// The aggregate time budget starts at the first claim and survives
-			// requeues, so retrying a run cannot reset it (#149).
-			"budget_started_at": gorm.Expr("COALESCE(budget_started_at, ?)", now),
-			"heartbeat_at":      now,
-			"updated_at":        now,
-		})
-	if res.Error != nil {
-		return ReviewRun{}, false, fmt.Errorf("claim review run %d: %w", id, res.Error)
-	}
-	if res.RowsAffected == 0 {
-		return ReviewRun{}, false, nil
-	}
-	run, err := s.ReviewRun(ctx, id)
+	owner, err := newRunLeaseOwner()
 	if err != nil {
 		return ReviewRun{}, false, err
 	}
-	return run, true, nil
+
+	var run ReviewRun
+	var claimed, wrote bool
+	err = s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// The row lock serializes the claim: two workers that see the same
+		// orphan cannot both recover it, and the state read is the state the
+		// claim acted on.
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Take(&run, id).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("load review run %d for claim: %w", id, err)
+		}
+
+		now := time.Now().UTC()
+		switch run.Status {
+		case RunQueued:
+			res := tx.Model(&ReviewRun{}).
+				Where("id = ? AND status = ?", id, RunQueued).
+				Updates(map[string]any{
+					"status":     RunRunning,
+					"started_at": now,
+					// The aggregate time budget starts at the first claim and
+					// survives requeues, so retrying a run cannot reset it (#149).
+					"budget_started_at": gorm.Expr("COALESCE(budget_started_at, ?)", now),
+					"heartbeat_at":      now,
+					"lease_owner":       owner,
+					"updated_at":        now,
+				})
+			if res.Error != nil {
+				return fmt.Errorf("claim review run %d: %w", id, res.Error)
+			}
+			claimed = res.RowsAffected > 0
+			wrote = claimed
+		case RunRunning:
+			if !runLeaseExpired(run, now) {
+				return nil
+			}
+			if run.RecoveryCount >= MaxRunRecoveries {
+				if err := failExhaustedRun(tx, run, now); err != nil {
+					return err
+				}
+				wrote = true
+				break
+			}
+			// The orphan keeps its persisted units and OCR session: they are
+			// the progress the recovering attempt must reuse (#149, #228).
+			res := tx.Model(&ReviewRun{}).
+				Where("id = ? AND status = ?", id, RunRunning).
+				Updates(map[string]any{
+					"lease_owner":      owner,
+					"heartbeat_at":     now,
+					"recovery_count":   gorm.Expr("recovery_count + 1"),
+					"phase":            RunPhaseRecovering,
+					"phase_started_at": now,
+					"error_code":       RunErrorRecovering,
+					"error_message":    recoveryReason(run, now),
+					"updated_at":       now,
+				})
+			if res.Error != nil {
+				return fmt.Errorf("recover review run %d: %w", id, res.Error)
+			}
+			claimed = res.RowsAffected > 0
+			wrote = claimed
+		}
+		if !wrote {
+			return nil
+		}
+		if err := tx.Take(&run, id).Error; err != nil {
+			return fmt.Errorf("reload review run %d after claim: %w", id, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return ReviewRun{}, false, err
+	}
+	return run, claimed, nil
 }
 
-// HeartbeatReviewRun records that the worker executing the run is alive. Only a
-// running run accepts the write: ErrRunNotActive tells the worker that the
-// watchdog or a new head already closed it, so it must stop the pipeline.
-func (s *Store) HeartbeatReviewRun(ctx context.Context, id uint) error {
-	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
-		Where("id = ? AND status = ?", id, RunRunning).
+// runLeaseExpired decides recovery eligibility. A running row without a beat
+// falls back to its start, so a claim that never beat is still protected for
+// one lease period; a row with neither has no worker to protect.
+func runLeaseExpired(run ReviewRun, now time.Time) bool {
+	last := run.HeartbeatAt
+	if last == nil {
+		last = run.StartedAt
+	}
+	if last == nil {
+		return true
+	}
+	return last.Before(now.Add(-RunLeaseTTL))
+}
+
+// recoveryReason records why the attempt is being resumed and what progress it
+// had reached, so the panel can explain the recovery instead of showing a run
+// that silently restarted.
+func recoveryReason(run ReviewRun, now time.Time) string {
+	last := run.HeartbeatAt
+	if last == nil {
+		last = run.StartedAt
+	}
+	silence := time.Duration(0)
+	if last != nil {
+		silence = now.Sub(*last).Round(time.Second)
+	}
+	progress := "sin latido previo"
+	if run.Phase != "" {
+		progress = fmt.Sprintf("último progreso en la fase %q", run.Phase)
+	}
+	return fmt.Sprintf(
+		"el worker anterior dejó de responder hace %s (%s); la revisión se está recuperando",
+		silence, progress)
+}
+
+// failExhaustedRun turns a run that spent its recovery budget into a terminal
+// failure with its publication still owed, so the existing publication path
+// closes its check. It runs under the claim's row lock.
+func failExhaustedRun(tx *gorm.DB, run ReviewRun, now time.Time) error {
+	res := tx.Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", run.ID, RunRunning).
+		Updates(map[string]any{
+			"status":           RunFailed,
+			"error_code":       RunErrorInterrupted,
+			"error_message":    fmt.Sprintf("se agotaron los %d reintentos de recuperación: ningún worker terminó la revisión", MaxRunRecoveries),
+			"clone_token_enc":  "",
+			"lease_owner":      "",
+			"phase":            "",
+			"phase_started_at": nil,
+			"finished_at":      now,
+			"publish_pending":  true,
+			"updated_at":       now,
+		})
+	if res.Error != nil {
+		return fmt.Errorf("fail exhausted review run %d: %w", run.ID, res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("fail exhausted review run %d: %w", run.ID, ErrRunNotActive)
+	}
+	// A terminal run is not resumable, so its per-unit retention ends here.
+	if err := tx.Where("run_id = ?", run.ID).Delete(&ReviewUnit{}).Error; err != nil {
+		return fmt.Errorf("delete review units of run %d: %w", run.ID, err)
+	}
+	// The worker that kept dying left its attempt open; the run is terminal, so
+	// the attempt is closed as interrupted instead of staying "running".
+	if err := tx.Model(&ReviewAttempt{}).
+		Where("run_id = ? AND status = ?", run.ID, AttemptRunning).
+		Updates(map[string]any{
+			"status":        AttemptFailed,
+			"error_code":    "interrupted",
+			"error_message": "el intento no llegó a terminar",
+			"finished_at":   now,
+			"updated_at":    now,
+		}).Error; err != nil {
+		return fmt.Errorf("close open attempts of review run %d: %w", run.ID, err)
+	}
+	return nil
+}
+
+// newRunLeaseOwner mints the ownership token of one claim. It must be
+// unpredictable only in the sense that two workers never share it.
+func newRunLeaseOwner() (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate review run lease owner: %w", err)
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+// LeaseExpiredRuns lists running runs whose lease expired and that are not yet
+// globally stale, oldest first. The watchdog re-queues them so the recovery
+// claim happens inside the lease window instead of waiting for the global
+// threshold, which fails them.
+func (s *Store) LeaseExpiredRuns(ctx context.Context, beatBefore, startedAfter time.Time, limit int) ([]ReviewRun, error) {
+	const query = `
+SELECT * FROM review_runs
+WHERE status = ?
+  AND COALESCE(heartbeat_at, started_at, created_at) < ?
+  AND COALESCE(started_at, created_at) >= ?
+ORDER BY id
+LIMIT ?`
+
+	var runs []ReviewRun
+	if err := s.DB.WithContext(ctx).Raw(query,
+		RunRunning, beatBefore.UTC(), startedAfter.UTC(), limit).Scan(&runs).Error; err != nil {
+		return nil, fmt.Errorf("list review runs with an expired lease: %w", err)
+	}
+	return runs, nil
+}
+
+// classifyRunWrite explains a write that matched no row: a run that stopped
+// being active is ErrRunNotActive, while a still-running run under another
+// owner is ErrRunLeaseLost.
+func classifyRunWrite(db *gorm.DB, id uint, owner string) error {
+	var row struct {
+		Status     string `gorm:"column:status"`
+		LeaseOwner string `gorm:"column:lease_owner"`
+	}
+	err := db.Model(&ReviewRun{}).Select("status", "lease_owner").Take(&row, id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrRunNotActive
+	}
+	if err != nil {
+		return fmt.Errorf("classify write of review run %d: %w", id, err)
+	}
+	if row.Status != RunRunning {
+		return ErrRunNotActive
+	}
+	if owner != "" && row.LeaseOwner != owner {
+		return ErrRunLeaseLost
+	}
+	return ErrRunNotActive
+}
+
+// ownedRun narrows a run mutation to its lease owner. An empty owner is a
+// system write that does not belong to a worker lease and keeps the status-only
+// contract used by direct store callers.
+func ownedRun(q *gorm.DB, owner string) *gorm.DB {
+	if owner == "" {
+		return q
+	}
+	return q.Where("lease_owner = ?", owner)
+}
+
+// HeartbeatReviewRun records that the worker owning the run is alive. Only the
+// current owner of a running run accepts the write: ErrRunNotActive tells the
+// worker that a new head or the watchdog closed it, and ErrRunLeaseLost that
+// another execution recovered it (#228). Both mean the pipeline must stop.
+func (s *Store) HeartbeatReviewRun(ctx context.Context, id uint, owner string) error {
+	res := ownedRun(s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunRunning), owner).
 		Update("heartbeat_at", time.Now().UTC())
 	if res.Error != nil {
 		return fmt.Errorf("heartbeat review run %d: %w", id, res.Error)
 	}
 	if res.RowsAffected == 0 {
-		return fmt.Errorf("heartbeat review run %d: %w", id, ErrRunNotActive)
+		return fmt.Errorf("heartbeat review run %d: %w", id, classifyRunWrite(s.DB.WithContext(ctx), id, owner))
 	}
 	return nil
 }
@@ -1292,13 +1516,14 @@ func (s *Store) HeartbeatReviewRun(ctx context.Context, id uint) error {
 // of a run and repoints the run at it. The enqueued profile stays in
 // enqueued_profile_id, so a policy change while the job waited remains visible.
 // The sequence is assigned under the run row lock; a retried run appends a new
-// attempt instead of reusing the previous one.
-func (s *Store) StartReviewAttempt(ctx context.Context, runID uint, profile LLMProfile, revision string) (ReviewAttempt, error) {
+// attempt instead of reusing the previous one. Only the lease owner may open a
+// new attempt, so a worker that lost the run cannot keep attributing work (#228).
+func (s *Store) StartReviewAttempt(ctx context.Context, runID uint, owner string, profile LLMProfile, revision string) (ReviewAttempt, error) {
 	var attempt ReviewAttempt
 	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var run ReviewRun
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Select("id", "status").Take(&run, runID).Error
+			Select("id", "status", "lease_owner").Take(&run, runID).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrRunNotActive
 		}
@@ -1307,6 +1532,9 @@ func (s *Store) StartReviewAttempt(ctx context.Context, runID uint, profile LLMP
 		}
 		if run.Status != RunRunning {
 			return ErrRunNotActive
+		}
+		if owner != "" && run.LeaseOwner != owner {
+			return ErrRunLeaseLost
 		}
 		var last int
 		if err := tx.Raw("SELECT COALESCE(MAX(seq), 0) FROM review_attempts WHERE run_id = ?", runID).
@@ -1375,11 +1603,12 @@ func (s *Store) FinishReviewAttempt(ctx context.Context, id uint, status, code, 
 
 // SetReviewRunPolicy records the effective policy revision and observation
 // flag a run is executing under. The policy can change between enqueue and
-// execution, so the worker rewrites this snapshot when it starts; ErrRunNotActive
-// means another delivery already retired the run.
-func (s *Store) SetReviewRunPolicy(ctx context.Context, id uint, revision string, observation bool) error {
-	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
-		Where("id = ? AND status = ?", id, RunRunning).
+// execution, so the worker rewrites this snapshot when it starts. Only the
+// lease owner may write it; ErrRunNotActive or ErrRunLeaseLost mean another
+// execution owns the run.
+func (s *Store) SetReviewRunPolicy(ctx context.Context, id uint, owner, revision string, observation bool) error {
+	res := ownedRun(s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunRunning), owner).
 		Updates(map[string]any{
 			"policy_revision":    revision,
 			"policy_observation": observation,
@@ -1389,7 +1618,7 @@ func (s *Store) SetReviewRunPolicy(ctx context.Context, id uint, revision string
 		return fmt.Errorf("record review policy of run %d: %w", id, res.Error)
 	}
 	if res.RowsAffected == 0 {
-		return fmt.Errorf("record review policy of run %d: %w", id, ErrRunNotActive)
+		return fmt.Errorf("record review policy of run %d: %w", id, classifyRunWrite(s.DB.WithContext(ctx), id, owner))
 	}
 	return nil
 }
@@ -1397,16 +1626,19 @@ func (s *Store) SetReviewRunPolicy(ctx context.Context, id uint, revision string
 // RequeueReviewRun returns a claimed run to the queue without finishing it, so
 // a worker that found no profile capacity can retry it later. The attempt
 // counter doubles as the number of times the run had to wait: it bounds the
-// backoff and it is what the worker compares against its budget.
-func (s *Store) RequeueReviewRun(ctx context.Context, id uint, errCode, errMsg string) error {
-	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
-		Where("id = ? AND status = ?", id, RunRunning).
+// backoff and it is what the worker compares against its budget. Only the lease
+// owner may requeue; the lease is released with the claim.
+func (s *Store) RequeueReviewRun(ctx context.Context, id uint, owner, errCode, errMsg string) error {
+	res := ownedRun(s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunRunning), owner).
 		Updates(map[string]any{
 			"status":           RunQueued,
 			"attempt":          gorm.Expr("attempt + 1"),
 			"error_code":       errCode,
 			"error_message":    errMsg,
 			"started_at":       nil,
+			"heartbeat_at":     nil,
+			"lease_owner":      "",
 			"phase":            "",
 			"phase_started_at": nil,
 			"updated_at":       time.Now().UTC(),
@@ -1415,7 +1647,7 @@ func (s *Store) RequeueReviewRun(ctx context.Context, id uint, errCode, errMsg s
 		return fmt.Errorf("requeue review run %d: %w", id, res.Error)
 	}
 	if res.RowsAffected == 0 {
-		return fmt.Errorf("requeue review run %d: %w", id, ErrRunNotActive)
+		return fmt.Errorf("requeue review run %d: %w", id, classifyRunWrite(s.DB.WithContext(ctx), id, owner))
 	}
 	return nil
 }
@@ -1523,10 +1755,10 @@ func (s *Store) DeleteReviewUnits(ctx context.Context, runID uint) error {
 }
 
 // SetReviewRunSession stores the main OCR session so the next attempt of the
-// same run can resume it. A run that is no longer active keeps no state.
-func (s *Store) SetReviewRunSession(ctx context.Context, id uint, sessionID, scope string) error {
-	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
-		Where("id = ? AND status = ?", id, RunRunning).
+// same run can resume it. Only the lease owner of an active run may write it.
+func (s *Store) SetReviewRunSession(ctx context.Context, id uint, owner, sessionID, scope string) error {
+	res := ownedRun(s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunRunning), owner).
 		Updates(map[string]any{
 			"ocr_session_id":    sessionID,
 			"ocr_session_scope": scope,
@@ -1536,7 +1768,7 @@ func (s *Store) SetReviewRunSession(ctx context.Context, id uint, sessionID, sco
 		return fmt.Errorf("set OCR session of review run %d: %w", id, res.Error)
 	}
 	if res.RowsAffected == 0 {
-		return fmt.Errorf("set OCR session of review run %d: %w", id, ErrRunNotActive)
+		return fmt.Errorf("set OCR session of review run %d: %w", id, classifyRunWrite(s.DB.WithContext(ctx), id, owner))
 	}
 	return nil
 }
@@ -1761,12 +1993,32 @@ type RunCompletion struct {
 }
 
 // CompleteReviewRun stores a run's outcome in a single transaction: the run is
-// finished only when it is still running, findings are upserted, resolved
-// findings are marked, and the clone token is discarded. Any error rolls the
-// whole set back. A run superseded while executing returns ErrRunNotActive and
-// persists nothing, so stale results can never be published.
-func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion) error {
+// finished only when it is still running under the given lease, findings are
+// upserted, resolved findings are marked, and the clone token is discarded. Any
+// error rolls the whole set back. A run superseded while executing returns
+// ErrRunNotActive; one recovered by another execution returns ErrRunLeaseLost.
+// In both cases nothing is persisted, so a stale result can never be published.
+func (s *Store) CompleteReviewRun(ctx context.Context, id uint, owner string, c RunCompletion) error {
 	return s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Lock and classify before writing. This is what makes finalization
+		// exactly once: the first worker to hold the lock writes, and a second
+		// one finds a terminal row or a foreign lease.
+		var current ReviewRun
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id", "status", "lease_owner").Take(&current, id).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("complete review run %d: %w", id, ErrRunNotActive)
+		}
+		if err != nil {
+			return fmt.Errorf("load review run %d for completion: %w", id, err)
+		}
+		if current.Status != RunRunning {
+			return fmt.Errorf("complete review run %d: %w", id, ErrRunNotActive)
+		}
+		if owner != "" && current.LeaseOwner != owner {
+			return fmt.Errorf("complete review run %d: %w", id, ErrRunLeaseLost)
+		}
+
 		coverage, usage := c.Coverage, c.Usage
 		if len(coverage) == 0 {
 			coverage = []byte(`{}`)
@@ -1814,6 +2066,7 @@ func (s *Store) CompleteReviewRun(ctx context.Context, id uint, c RunCompletion)
 			"verify_usage":          verifyUsage,
 			"architecture_analysis": architectureAnalysis,
 			"clone_token_enc":       "",
+			"lease_owner":           "",
 			// The delivery is owed from the moment the result is durable, so a
 			// crash before the worker enqueues the publish job cannot lose it.
 			"publish_pending": true,
@@ -1935,11 +2188,12 @@ RETURNING *`
 
 // SetReviewRunPhase records the current step of a running run and when it
 // began. A queued, finished or superseded run rejects the write with
-// ErrRunNotActive so a late phase cannot resurrect a terminal row.
-func (s *Store) SetReviewRunPhase(ctx context.Context, id uint, phase string) error {
+// ErrRunNotActive, and a run recovered by another worker with ErrRunLeaseLost,
+// so a late phase cannot resurrect a terminal row nor overwrite the owner's.
+func (s *Store) SetReviewRunPhase(ctx context.Context, id uint, owner, phase string) error {
 	now := time.Now().UTC()
-	res := s.DB.WithContext(ctx).Model(&ReviewRun{}).
-		Where("id = ? AND status = ?", id, RunRunning).
+	res := ownedRun(s.DB.WithContext(ctx).Model(&ReviewRun{}).
+		Where("id = ? AND status = ?", id, RunRunning), owner).
 		Updates(map[string]any{
 			"phase":            phase,
 			"phase_started_at": now,
@@ -1949,7 +2203,7 @@ func (s *Store) SetReviewRunPhase(ctx context.Context, id uint, phase string) er
 		return fmt.Errorf("set phase of review run %d: %w", id, res.Error)
 	}
 	if res.RowsAffected == 0 {
-		return fmt.Errorf("set phase of review run %d: %w", id, ErrRunNotActive)
+		return fmt.Errorf("set phase of review run %d: %w", id, classifyRunWrite(s.DB.WithContext(ctx), id, owner))
 	}
 	return nil
 }

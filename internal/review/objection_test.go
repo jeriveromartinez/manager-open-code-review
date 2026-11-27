@@ -41,9 +41,10 @@ type objectionTestJobs struct {
 	published []uint
 }
 
-func (j *objectionTestJobs) EnqueueReview(context.Context, uint) error    { return nil }
-func (j *objectionTestJobs) EnqueuePublish(context.Context, uint) error   { return nil }
-func (j *objectionTestJobs) EnqueueLLMHealth(context.Context, uint) error { return nil }
+func (j *objectionTestJobs) EnqueueReview(context.Context, uint) error              { return nil }
+func (j *objectionTestJobs) EnqueueReviewRecovery(context.Context, uint, int) error { return nil }
+func (j *objectionTestJobs) EnqueuePublish(context.Context, uint) error             { return nil }
+func (j *objectionTestJobs) EnqueueLLMHealth(context.Context, uint) error           { return nil }
 
 func (j *objectionTestJobs) EnqueueObjection(_ context.Context, id uint) error {
 	j.mu.Lock()

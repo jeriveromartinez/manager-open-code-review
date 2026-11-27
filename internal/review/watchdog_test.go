@@ -189,7 +189,7 @@ func TestHeartbeatOutlivesReviewDeadline(t *testing.T) {
 	runCtx, cancelReview := context.WithTimeout(pipelineCtx, 100*time.Millisecond)
 	defer cancelReview()
 
-	stop := runner.heartbeat(pipelineCtx, run.ID, log, cancelPipeline)
+	stop := runner.heartbeat(pipelineCtx, run.ID, "", log, cancelPipeline)
 	<-runCtx.Done()
 	deadline := time.Now().UTC()
 
@@ -233,7 +233,7 @@ func TestHeartbeatStopsWithReviewDeadlineContext(t *testing.T) {
 	runCtx, cancelReview := context.WithTimeout(pipelineCtx, 200*time.Millisecond)
 	defer cancelReview()
 
-	stop := runner.heartbeat(runCtx, run.ID, log, cancelPipeline)
+	stop := runner.heartbeat(runCtx, run.ID, "", log, cancelPipeline)
 	f.waitHeartbeatAfter(t, run, time.Time{})
 	<-runCtx.Done()
 
@@ -291,5 +291,36 @@ func TestWatchdogSweepIdempotent(t *testing.T) {
 	}
 	if got := len(f.jobs.published()); got != publishesAfterFirst {
 		t.Errorf("publish jobs after second sweep = %d, want %d", got, publishesAfterFirst)
+	}
+}
+
+// TestWatchdogSweepRecoversOrphanBeforeGlobalDeadline is the #228 window test:
+// a run whose lease expired is re-queued for recovery instead of waiting for
+// the global stale threshold that fails it.
+func TestWatchdogSweepRecoversOrphanBeforeGlobalDeadline(t *testing.T) {
+	f := newWatchdogFixture(t)
+
+	orphan := f.runningRun(t, 1, time.Now().UTC().Add(-10*time.Minute))
+	f.beat(t, orphan, time.Now().UTC().Add(-store.RunLeaseTTL-time.Minute))
+	// Globally stale: the watchdog owns it, so recovery must not race it.
+	overrun := f.runningRun(t, 2, time.Now().UTC().Add(-3*time.Hour))
+	f.beat(t, overrun, time.Now().UTC().Add(-time.Minute))
+
+	if err := f.w.Sweep(f.ctx); err != nil {
+		t.Fatalf("Sweep() error = %v", err)
+	}
+
+	if got := f.jobs.reviews(); len(got) != 1 || got[0] != orphan.ID {
+		t.Fatalf("recovery enqueues = %v, want only [%d]", got, orphan.ID)
+	}
+	stored, err := f.s.ReviewRun(f.ctx, orphan.ID)
+	if err != nil {
+		t.Fatalf("ReviewRun(orphan): %v", err)
+	}
+	if stored.Status != store.RunRunning {
+		t.Errorf("orphan status = %q, want it left running for the recovery claim", stored.Status)
+	}
+	if got := f.jobs.published(); len(got) != 1 || got[0] != overrun.ID {
+		t.Errorf("publish jobs = %v, want only the globally stale run [%d]", got, overrun.ID)
 	}
 }

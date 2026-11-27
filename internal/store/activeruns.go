@@ -24,6 +24,10 @@ type ActiveRunView struct {
 	PhaseStartedAt *time.Time `gorm:"column:phase_started_at"`
 	StartedAt      *time.Time `gorm:"column:started_at"`
 	CreatedAt      time.Time  `gorm:"column:created_at"`
+	// ErrorCode and ErrorMessage describe a live run that is being recovered
+	// after losing its worker (#228).
+	ErrorCode    string `gorm:"column:error_code"`
+	ErrorMessage string `gorm:"column:error_message"`
 }
 
 // ListActiveReviewRuns returns the queued and running runs the user may see,
@@ -39,7 +43,7 @@ func (s *Store) ListActiveReviewRuns(ctx context.Context, u User) ([]ActiveRunVi
 			r.full_name AS repo, COALESCE(t.name, '') AS team,
 			COALESCE(p.name, '') AS profile,
 			rr.trigger, rr.status, rr.attempt, rr.phase, rr.phase_started_at,
-			rr.started_at, rr.created_at`).
+			rr.started_at, rr.created_at, rr.error_code, rr.error_message`).
 		Joins("JOIN pull_requests pr ON pr.id = rr.pull_request_id").
 		Joins("JOIN repositories r ON r.id = pr.repository_id").
 		Joins("LEFT JOIN teams t ON t.id = r.team_id").
