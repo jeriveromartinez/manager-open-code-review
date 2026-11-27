@@ -2418,6 +2418,27 @@ func TestPublishGreenCIAllowsSuccess(t *testing.T) {
 	}
 }
 
+// With the gate on and a head GitHub reports without checks, there is nothing
+// to verify: the publication closes as a success instead of waiting forever.
+func TestPublishNoChecksToVerifyAllowsSuccess(t *testing.T) {
+	st := testutil.NewStore(t)
+	ctx := context.Background()
+	run, pr := seedPublishContext(t, st, store.RunSucceeded, "major")
+	enableCI(t, st, pr)
+	gh := newFakeGitHub(t)
+	w, _ := newPublishWorker(t, st, gh)
+
+	if err := w.Publish(ctx, run.ID); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if got := publishedConclusion(t, gh); got != "success" {
+		t.Errorf("check conclusion = %q, want success", got)
+	}
+	if got := storedQAStatus(t, st, pr.ID); got != store.StatusReadyForHuman {
+		t.Errorf("qa_status = %q, want %q", got, store.StatusReadyForHuman)
+	}
+}
+
 // A failed lookup is explicit: no success is published and the previous
 // counters are replaced by an unknown observation.
 func TestPublishCILookupFailureIsExplicit(t *testing.T) {
