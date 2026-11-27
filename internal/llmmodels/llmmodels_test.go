@@ -264,6 +264,25 @@ func TestPingOpenAICompatibleSendsOneMinimalRequest(t *testing.T) {
 	}
 }
 
+func TestPingOpencodeGoSendsSessionHeader(t *testing.T) {
+	var gotSession string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSession = r.Header.Get("x-opencode-session")
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"pong"}}]}`)
+	}))
+	defer server.Close()
+
+	client := &llmmodels.Client{HTTP: server.Client(), Providers: map[string]llmmodels.Provider{
+		"opencode-go": {BaseURL: server.URL, Shape: llmmodels.OpenAICompatible},
+	}}
+	if err := client.Ping(context.Background(), "opencode-go", "", "deepseek-v4.1-flash", "sk-go"); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if strings.TrimSpace(gotSession) == "" {
+		t.Fatal("x-opencode-session is empty, want a session id")
+	}
+}
+
 func TestPingUsesCompletionTokensForOpenAI(t *testing.T) {
 	var got map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -905,6 +905,11 @@ func writeNativeConfig(home string, profile store.LLMProfile, keyPath string, re
 	if nativeSupportsPromptCache(profile) {
 		custom["extra_body"] = map[string]string{"prompt_cache_key": ocrSessionKeyPlaceholder}
 	}
+	// OpenCode Go requires a session id on every chat request; OCR keeps one
+	// config per conversation, so a value fixed here stays stable for the run.
+	if profile.Provider == "opencode-go" {
+		custom["extra_headers"] = map[string]string{"x-opencode-session": llmmodels.NewSessionID()}
+	}
 	if seconds := int(requestTimeout / time.Second); seconds > 0 {
 		custom["timeout_sec"] = seconds
 	}
